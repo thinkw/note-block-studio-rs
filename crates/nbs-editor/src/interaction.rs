@@ -28,8 +28,6 @@ pub enum DragMode {
         start_tick: u32,
         start_layer: u32,
     },
-    DragLayerVolume { layer: u32, start_x: f32, start_value: u8 },
-    DragLayerStereo { layer: u32, start_x: f32, start_value: u8 },
     DragScrollbarH { grab: f32 },
     DragScrollbarV { grab: f32 },
     DragMarker,

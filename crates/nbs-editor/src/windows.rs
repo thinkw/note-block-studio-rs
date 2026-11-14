@@ -69,14 +69,25 @@ fn footer(state: &mut EditorState, ui: &mut Ui) {
 }
 
 fn song_info(state: &mut EditorState, ui: &mut Ui) {
+    let mut changed = false;
     egui::Grid::new("song_info_grid").num_columns(2).show(ui, |ui| {
         let m: &mut SongMeta = &mut state.doc.song.meta;
-        ui.label("名称"); ui.text_edit_singleline(&mut m.name); ui.end_row();
-        ui.label("作者"); ui.text_edit_singleline(&mut m.author); ui.end_row();
-        ui.label("原作者"); ui.text_edit_singleline(&mut m.original_author); ui.end_row();
-        ui.label("描述"); ui.add(egui::TextEdit::multiline(&mut m.description).desired_rows(3)); ui.end_row();
+        ui.label("名称");
+        if ui.text_edit_singleline(&mut m.name).changed() { changed = true; }
+        ui.end_row();
+        ui.label("作者");
+        if ui.text_edit_singleline(&mut m.author).changed() { changed = true; }
+        ui.end_row();
+        ui.label("原作者");
+        if ui.text_edit_singleline(&mut m.original_author).changed() { changed = true; }
+        ui.end_row();
+        ui.label("描述");
+        if ui.add(egui::TextEdit::multiline(&mut m.description).desired_rows(3)).changed() { changed = true; }
+        ui.end_row();
     });
-    state.doc.song.dirty = true;
+    if changed {
+        state.doc.song.dirty = true;
+    }
     ui.separator();
     ui.label(RichText::new("这些字段会随 .nbs 一起保存").small().weak());
     footer(state, ui);
@@ -96,12 +107,44 @@ fn properties(state: &mut EditorState, ui: &mut Ui) {
     if ui.checkbox(&mut looping, "启用循环").changed() {
         state.emit(Command::ToggleLoop);
     }
-    ui.horizontal(|ui| {
-        ui.label("循环起点 tick");
-        let mut start = state.doc.song.meta.loop_start as f64;
-        if ui.add(egui::DragValue::new(&mut start).range(0.0..=65535.0)).changed() {
-            state.doc.edit_meta("设置循环起点", |m| m.loop_start = start as u16);
-        }
+    let loop_on = state.doc.song.meta.loop_enabled;
+    ui.add_enabled_ui(loop_on, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("循环起点 tick");
+            let enda = state.doc.song.enda as f64;
+            let mut start = state.doc.song.meta.loop_start as f64;
+            if ui.add(egui::DragValue::new(&mut start).range(0.0..=enda)).changed() {
+                state.doc.edit_meta("设置循环起点", |m| m.loop_start = start as u16);
+                state.sync_loop_params();
+            }
+        });
+        let len = state.doc.song.song_length();
+        ui.horizontal(|ui| {
+            ui.label("循环终点 tick");
+            // 原版没有 loop_end 字段：循环终点就是歌曲长度，所以只能往上调，
+            // 上调的效果是延长结尾。
+            let mut end = len as f64;
+            if ui.add(egui::DragValue::new(&mut end).range(len as f64..=(len + 16) as f64)).changed() {
+                state.doc.extend_loop_end(end as u32);
+                state.sync_loop_params();
+            }
+        });
+        ui.label(
+            RichText::new("超出歌曲长度时，结尾会自动加一个 0 音量音符来延长终点")
+                .small()
+                .weak(),
+        );
+        ui.horizontal(|ui| {
+            ui.label("循环次数");
+            let mut max = state.doc.song.meta.loop_max as i32;
+            if ui.add(egui::DragValue::new(&mut max).range(0..=10)).changed() {
+                state.doc.edit_meta("设置循环次数", |m| m.loop_max = max as u8);
+                state.sync_loop_params();
+            }
+            if state.doc.song.meta.loop_max == 0 {
+                ui.label(RichText::new("（无限）").small().weak());
+            }
+        });
     });
     ui.horizontal(|ui| {
         ui.label("保存格式版本");
@@ -509,13 +552,16 @@ fn audio_settings_window(state: &mut EditorState, ui: &mut Ui) {
     if ui.add(egui::Slider::new(&mut speed, 0.25..=4.0).text("播放速度")).changed() {
         state.emit(Command::SetPlaySpeed(speed));
     }
-    if ui.checkbox(&mut state.prefs.metronome, "节拍器（每 4 tick）").changed() {
+    let mut metronome = state.prefs.metronome;
+    if ui.checkbox(&mut metronome, "节拍器（每 4 tick）").changed() {
         state.emit(Command::ToggleMetronome);
     }
-    if ui.checkbox(&mut state.prefs.mono, "强制单声道").changed() {
+    let mut mono = state.prefs.mono;
+    if ui.checkbox(&mut mono, "强制单声道").changed() {
         state.emit(Command::ToggleMono);
     }
-    if ui.checkbox(&mut state.prefs.extended_voices, "更多音频通道（1024 voices）").changed() {
+    let mut extended = state.prefs.extended_voices;
+    if ui.checkbox(&mut extended, "更多音频通道（1024 voices）").changed() {
         state.emit(Command::ToggleExtendedVoices);
     }
     ui.separator();

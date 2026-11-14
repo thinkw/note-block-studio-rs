@@ -537,6 +537,31 @@ impl Document {
         tx.commit();
     }
 
+    /// 原版「循环结束刻」：`.nbs` 里没有 loop_end 字段，循环终点就是歌曲长度，
+    /// 所以把结尾延长到 `loop_end` 靠的是在 (loop_end-1, 0) 放一个 0 音量音符
+    /// （原版 `add_block(loopend - 1, 0, instrument_list[| 0], 45, 0, 100, 0)`）。
+    /// 只延长、不缩短：缩短需要先删掉结尾音符，原版同样不允许。
+    pub fn extend_loop_end(&mut self, loop_end: u32) {
+        if loop_end == 0 || self.song.song_length() >= loop_end {
+            return;
+        }
+        let tick = loop_end - 1;
+        let mut tx = self.begin("延长循环结尾");
+        tx.watch(tick, 0);
+        tx.song().set(
+            tick,
+            0,
+            Note {
+                instrument: 0,
+                key: 45,
+                velocity: 0,
+                panning: 100,
+                pitch: 0,
+            },
+        );
+        tx.commit();
+    }
+
     // ---------------------------------------------------------------- 历史
 
     pub fn undo(&mut self) -> bool {
@@ -601,6 +626,26 @@ fn remap_layers(tx: &mut Tx<'_>, from: u32, map: impl Fn(u32) -> Option<u32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extend_loop_end_adds_one_silent_note_like_original() {
+        let mut doc = Document::new();
+        doc.place_note(3, 0, Note::new(0, 45));
+        assert_eq!(doc.song.song_length(), 4);
+        doc.extend_loop_end(10);
+        assert_eq!(doc.song.song_length(), 10);
+        assert_eq!(
+            doc.song.get(9, 0),
+            Some(Note { instrument: 0, key: 45, velocity: 0, panning: 100, pitch: 0 })
+        );
+        // 不缩短、不重复加：与原版 median(enda + 1, …) 的单向语义一致。
+        doc.extend_loop_end(6);
+        assert_eq!(doc.song.song_length(), 10);
+        doc.extend_loop_end(10);
+        assert_eq!(doc.song.total_blocks, 2);
+        assert!(doc.undo(), "延长结尾应是一条可撤销的历史");
+        assert_eq!(doc.song.song_length(), 4);
+    }
 
     #[test]
     fn floating_selection_roundtrip() {

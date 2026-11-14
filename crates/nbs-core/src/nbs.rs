@@ -359,6 +359,38 @@ mod tests {
         }
     }
 
+    /// 原版 open_song_nbs.gml:71 `if (song_nbs_version >= 4)` 才读循环三兄弟，
+    /// save_song.gml 无条件写 —— 所以 v0..v3 读回来必须是默认值，不能串位。
+    #[test]
+    fn loop_metadata_roundtrips_only_from_v4() {
+        let mut song = Song::demo();
+        song.meta.loop_enabled = true;
+        song.meta.loop_max = 3;
+        song.meta.loop_start = 7;
+        song.meta.minutes_spent = 42;
+        song.meta.left_clicks = 11;
+        song.meta.right_clicks = 5;
+        song.meta.blocks_added = 99;
+        song.meta.blocks_removed = 7;
+        song.meta.midi_file = "a.mid".into();
+        for v in 0..=5 {
+            let back = load_bytes(&save_bytes(&song, v).unwrap()).unwrap();
+            assert_eq!(back.meta.minutes_spent, 42, "v{v} 耗时");
+            assert_eq!(back.meta.left_clicks, 11, "v{v} 左键");
+            assert_eq!(back.meta.blocks_added, 99, "v{v} 添加数");
+            assert_eq!(back.meta.midi_file, "a.mid", "v{v} MIDI 文件");
+            if v >= 4 {
+                assert!(back.meta.loop_enabled, "v{v} 循环开关应保留");
+                assert_eq!(back.meta.loop_max, 3, "v{v} 循环次数");
+                assert_eq!(back.meta.loop_start, 7, "v{v} 循环起点");
+            } else {
+                assert!(!back.meta.loop_enabled, "v{v} 不该读出循环开关");
+                assert_eq!(back.meta.loop_max, 0, "v{v} 不该读出循环次数");
+                assert_eq!(back.meta.loop_start, 0, "v{v} 不该读出循环起点");
+            }
+        }
+    }
+
     /// 用原版仓库自带的真实歌曲验证互通（目录不存在时自动跳过）。
     #[test]
     fn opens_real_opennbs_songs() {

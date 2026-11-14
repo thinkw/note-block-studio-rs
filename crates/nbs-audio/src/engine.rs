@@ -288,6 +288,7 @@ impl AudioEngine for SilentEngine {
             song.meta.loop_enabled,
             song.meta.loop_start as f64,
             song.song_length().max(1) as f64,
+            song.meta.loop_max,
         );
     }
     fn start(&mut self, from_tick: f64) {

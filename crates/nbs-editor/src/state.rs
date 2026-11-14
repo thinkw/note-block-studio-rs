@@ -336,11 +336,9 @@ pub struct EditorState {
     pub editing_layer_name: Option<(u32, String)>,
     /// 图层音量/声像拖拽预览（松开时才提交一条历史，避免拖拽产生几百条）。
     pub layer_drag: Option<LayerDrag>,
-    pub numeric_input: String,
     pub macro_amount: f32,
     pub macro_index: usize,
     pub macro_pattern: String,
-    pub macro_width: f32,
     pub macro_reverse: bool,
     pub midi_options: MidiImportOptions,
     pub schematic_options: SchematicOptions,
@@ -349,7 +347,6 @@ pub struct EditorState {
     pub piano_start: u8,
     pub last_autosave: Instant,
     pub last_prefs_save: Instant,
-    pub dirty_title: bool,
     /// 已同步给音频引擎的 `Song::rev`，用于只在内容真变化时重建事件表。
     pub audio_rev: u64,
 }
@@ -418,11 +415,9 @@ impl EditorState {
             recent_files,
             editing_layer_name: None,
             layer_drag: None,
-            numeric_input: String::new(),
             macro_amount: 1.0,
             macro_index: 0,
             macro_pattern: "0|4|7|12".into(),
-            macro_width: 60.0,
             macro_reverse: false,
             midi_options: MidiImportOptions::default(),
             schematic_options: SchematicOptions::default(),
@@ -431,7 +426,6 @@ impl EditorState {
             piano_start: 33,
             last_autosave: Instant::now(),
             last_prefs_save: Instant::now(),
-            dirty_title: false,
             audio_rev: 0,
         }
     }
@@ -471,6 +465,16 @@ impl EditorState {
         let include_locked = self.prefs.include_locked_in_export;
         let clock = self.audio.clock_mut();
         clock.set_include_locked(include_locked, &self.doc.song);
+    }
+
+    /// 把循环元数据推给播放时钟：开关、起点、终点（= 歌曲长度，原版用
+    /// 结尾静音音符表达）与循环次数。改完 meta 必须显式调用一次。
+    pub fn sync_loop_params(&mut self) {
+        let s = &self.doc.song;
+        let end = s.song_length().max(1) as f64;
+        self.audio
+            .clock_mut()
+            .set_loop(s.meta.loop_enabled, s.meta.loop_start as f64, end, s.meta.loop_max);
     }
 
     /// 每帧同步独立播放时钟。真实播放时位置由音频回调的采样计数推进，

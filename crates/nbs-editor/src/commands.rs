@@ -102,7 +102,6 @@ pub enum Command {
     ReloadSamples,
     SavePreferences,
     RestoreAutosave(PathBuf),
-    Refresh,
 }
 
 /// 供右键菜单/快捷键共用的入口。
@@ -358,12 +357,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         Command::SeekEnd => state.set_marker(state.doc.song.song_length() as f64),
         Command::ToggleLoop => {
             state.doc.edit_meta("切换循环", |m| m.loop_enabled = !m.loop_enabled);
-            let s = &state.doc.song;
-            state.audio.clock_mut().set_loop(
-                s.meta.loop_enabled,
-                s.meta.loop_start as f64,
-                s.song_length().max(1) as f64,
-            );
+            state.sync_loop_params();
         }
         Command::ToggleFollow => state.marker_follow = !state.marker_follow,
         Command::ShowWindow(kind) => {
@@ -530,7 +524,10 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 DialogAction::ExportPng => {
                     let opts = state.png_options.clone();
                     match nbs_io::image_export::export_png(&state.doc.song, &path, &opts) {
-                        Ok((w, h)) => state.set_message(format!("PNG 谱面已导出：{w}×{h}")),
+                        Ok((w, h)) => {
+                            state.export_status = Some(format!("PNG 谱面已导出：{w}×{h}"));
+                            state.set_message(format!("PNG 谱面已导出：{w}×{h}"));
+                        }
                         Err(e) => state.set_message(format!("导出 PNG 失败: {e}")),
                     }
                     state.window = None;
@@ -644,7 +641,6 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.set_message("偏好设置已保存");
         }
         Command::RestoreAutosave(path) => dispatch(state, Command::OpenPath(path), ctx),
-        Command::Refresh => {}
     }
 }
 

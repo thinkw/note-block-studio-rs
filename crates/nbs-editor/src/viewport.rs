@@ -5,7 +5,6 @@
 //! 与歌曲总长度无关。
 
 use egui::{Pos2, Rect, Vec2};
-use nbs_core::model::Song;
 
 /// 原版每格 32px。
 pub const BASE_CELL: f32 = 32.0;
@@ -112,17 +111,6 @@ impl Viewport {
         x1 >= t0 as i64 && x0 <= t1 as i64 && y1 >= l0 as i64 && y0 <= l1 as i64
     }
 
-    /// 夹取滚动位置，避免滚出歌曲边界太远。
-    pub fn clamp_scroll(&mut self, song: &Song) {
-        let max_tick = song.enda.max(song.song_length().saturating_sub(1));
-        let max_start = max_tick.saturating_sub(self.columns().saturating_sub(2));
-        self.start_tick = self.start_tick.min(max_start.max(64));
-        let max_layer = song.layer_count().saturating_sub(1);
-        let max_lstart = max_layer.saturating_sub(self.rows().saturating_sub(2));
-        self.start_layer = self.start_layer.min(max_lstart.max(8));
-        self.note_offset = self.note_offset.clamp(-self.cell(), self.cell());
-    }
-
     /// 播放头滚动跟随：逐页 / 居中两种模式。
     pub fn follow_marker(&mut self, marker: f64, center: bool) {
         let cols = self.columns() as f64;
@@ -146,6 +134,7 @@ impl Viewport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nbs_core::model::Song;
 
     #[test]
     fn coordinate_roundtrip() {

@@ -360,7 +360,7 @@ impl TransportClock {
             s.lock().refresh_events(song);
         }
     }
-    pub fn set_loop(&mut self, enabled: bool, start: f64, end: f64) {
+    pub fn set_loop(&mut self, enabled: bool, start: f64, end: f64, max: u8) {
         self.loop_enabled = enabled;
         self.loop_start = start;
         self.loop_end = end;
@@ -373,6 +373,8 @@ impl TransportClock {
             if end > 0.0 {
                 st.params.loop_end = end;
             }
+            st.params.loop_max = max;
+            st.params.loop_count = max as i32;
         }
     }
     pub fn seek(&mut self, tick: f64) {
@@ -448,4 +450,82 @@ impl TransportClock {
 /// 便捷：创建一个共享状态。
 pub fn make_shared(bank: SoundBank, sample_rate: u32) -> Shared {
     Arc::new(Mutex::new(SharedState::new(Arc::new(bank), sample_rate)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nbs_core::model::Note;
+
+    fn song_ticks(ticks: u32) -> Song {
+        let mut song = Song::new();
+        for t in 0..ticks {
+            song.set(
+                t,
+                0,
+                Note { instrument: 0, key: 45, velocity: 80, panning: 100, pitch: 0 },
+            );
+        }
+        song.recalculate();
+        song
+    }
+
+    /// 逐采样推进；返回「真正回绕到循环起点的次数」和结束时是否仍在播放。
+    fn drive(st: &mut SharedState, frames: usize) -> (usize, bool) {
+        let mut wraps = 0usize;
+        let mut prev = st.position;
+        for _ in 0..frames {
+            st.render_frame();
+            if st.position < prev && st.params.playing {
+                wraps += 1;
+            }
+            prev = st.position;
+            if !st.params.playing {
+                break;
+            }
+        }
+        (wraps, st.params.playing)
+    }
+
+    fn looping_state(loop_max: u8) -> SharedState {
+        let song = song_ticks(4);
+        let mut st = SharedState::new(Arc::new(SoundBank::default()), 44100);
+        st.prepare(&song, Arc::new(SoundBank::default()));
+        // 1 tick / sample：4 tick 的歌每轮 4 个采样。
+        st.params.tempo = 44100.0;
+        st.params.loop_enabled = true;
+        st.params.playing = true;
+        st.params.loop_max = loop_max;
+        st.params.loop_count = loop_max as i32;
+        st
+    }
+
+    #[test]
+    fn loop_max_counts_extra_passes() {
+        let mut st = looping_state(1);
+        let (wraps, playing) = drive(&mut st, 200);
+        assert_eq!(wraps, 1, "循环次数 1 = 多播一轮后停止");
+        assert!(!playing, "用完循环次数必须停止播放");
+    }
+
+    #[test]
+    fn loop_max_zero_loops_forever() {
+        let mut st = looping_state(0);
+        let (wraps, playing) = drive(&mut st, 200);
+        assert!(wraps >= 10, "无限循环应不断回绕，实测 {wraps} 次");
+        assert!(playing, "无限循环不该停止");
+    }
+
+    #[test]
+    fn set_loop_pushes_loop_max_to_shared_params() {
+        let shared = make_shared(SoundBank::default(), 44100);
+        let mut clock = TransportClock::with_shared(shared.clone());
+        clock.set_loop(true, 1.0, 9.0, 3);
+        let st = shared.lock();
+        assert!(st.params.loop_enabled);
+        assert_eq!(st.params.loop_start, 1.0);
+        assert_eq!(st.params.loop_end, 9.0);
+        assert_eq!(st.params.loop_max, 3);
+        assert_eq!(st.params.loop_count, 3);
+    }
 }
