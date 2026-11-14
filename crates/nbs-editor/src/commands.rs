@@ -146,6 +146,11 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 dispatch(state, Command::SaveAs, ctx);
             }
         }
+        Command::OpenPath(path) if is_schematic_path(&path) => {
+            // 原版 `load_song.gml:27`：扩展名是 .schematic 就转 open_schematic() 并立刻返回。
+            import_schematic(state, &path);
+            state.window = None;
+        }
         Command::OpenPath(path) => match nbs_core::nbs::load(&path) {
             Ok(song) => {
                 let name = song.meta.name.clone();
@@ -696,6 +701,10 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                         Err(e) => state.set_message(format!("导入 MIDI 失败: {e}")),
                     }
                 }
+                DialogAction::ImportSchematic => {
+                    import_schematic(state, &path);
+                    state.window = None;
+                }
                 DialogAction::ImportPattern => {
                     match nbs_io::pattern::import_pattern(&path) {
                         Ok(sel) => {
@@ -761,6 +770,44 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.set_message("偏好设置已保存");
         }
         Command::RestoreAutosave(path) => dispatch(state, Command::OpenPath(path), ctx),
+    }
+}
+
+/// 原版 `filename_ext(fn) = ".schematic"`（GML 的字符串比较不分大小写）。
+fn is_schematic_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase() == "schematic")
+        .unwrap_or(false)
+}
+
+/// 原版 `open_schematic(fn)`：整个替换当前歌曲，失败弹模态框。
+/// 和 MIDI 导入一样不进最近列表（`load_song.gml` 在 `add_to_recent()` 之前就 return 了），
+/// 也不写 `song.filename`（原版把 `filename` 指到 `.schematic`，Ctrl+S 会用 NBS 覆盖图样文件）。
+fn import_schematic(state: &mut EditorState, path: &std::path::Path) {
+    match nbs_io::schematic::import_schematic(path) {
+        Ok(info) => {
+            let inputs = info.inputs;
+            let n = info.added_notes;
+            state.doc.replace_song(info.song);
+            state.prepare_audio();
+            state.viewport.start_tick = 0;
+            state.viewport.start_layer = 0;
+            state.set_marker(0.0);
+            state.set_message(format!("Schematic 导入完成：{n} 个音符，{inputs} 个输入"));
+            // 原版：`inputam > 1` 时提示几段曲子被首尾接了起来（标题不经 `condstr`，保持英文）。
+            if inputs > 1 {
+                state.modals = ModalQueue::message(
+                    "Schematic import",
+                    "The Schematic contained more than one input.\n\n\
+                     As a result, the songs of the inputs have been put after each other.",
+                );
+            }
+        }
+        // 读不到的错误在原版全是 message()（模态）；只有文件打不开才是静默 return。
+        Err(e) => match e.dialog() {
+            Some((title, text)) => state.modals = ModalQueue::message(title, text),
+            None => state.set_message(format!("导入 Schematic 失败: {e}")),
+        },
     }
 }
 

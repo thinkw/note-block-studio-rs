@@ -259,6 +259,7 @@ pub enum DialogAction {
     ExportPattern,
     ImportMidi,
     ImportPattern,
+    ImportSchematic,
 }
 
 impl DialogAction {
@@ -278,7 +279,8 @@ impl DialogAction {
             Self::ExportDatapack => "zip",
             Self::ExportMidi | Self::ImportMidi => "mid",
             Self::ExportPng => "png",
-            Self::ExportSchematic => "schematic",
+            // 原版：get_open_filename_ext("Minecraft Schematics (*.schematic)|*.schematic", …)。
+            Self::ExportSchematic | Self::ImportSchematic => "schematic",
             Self::ExportPattern | Self::ImportPattern => "nbp",
         }
     }

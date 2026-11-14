@@ -29,9 +29,11 @@ pub use prefs::{
     autosave, list_autosaves, save_song_atomic, Preferences,
 };
 pub use schematic::{
-    block_display_name, build_nbt, calc_size, calculate_stats, default_ins_block, export_check,
-    export_guard, export_schematic, inspect_bytes, inspect_schematic, instrument_block_menu,
-    misc_block_menu, namespaced_id, open_guard, schematic_height, schematic_length, schematic_width,
-    tempo_to_mode, BlockMenuSection, Built, ExportCheck, McBlock, SchematicInfo, SchematicOptions,
-    SchematicSize, SchematicStats, INSTRUMENT_BLOCKS, INS_COUNT, MAX_HEI, MAX_LEN, MAX_WID,
+    block_display_name, block_get_ins, build_nbt, calc_size, calculate_stats, default_ins_block,
+    export_check, export_guard, export_schematic, id_isblock, import_bytes, import_schematic,
+    inspect_bytes, inspect_schematic, instrument_block_menu, misc_block_menu, namespaced_id,
+    open_guard, schematic_height, schematic_length, schematic_width, tempo_to_mode,
+    BlockMenuSection, Built, ExportCheck, ImportError, McBlock, SchematicImport, SchematicInfo,
+    SchematicOptions, SchematicSize, SchematicStats, INSTRUMENT_BLOCKS, INS_COUNT, MAX_HEI,
+    MAX_LEN, MAX_WID,
 };

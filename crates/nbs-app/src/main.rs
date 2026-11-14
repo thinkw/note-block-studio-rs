@@ -103,6 +103,7 @@ fn run_cli(args: &[String]) -> Result<(), String> {
              --export-datapack <song.nbs> <out.zip|目录名>  导出 Minecraft 数据包\n\
              --export-nbp <song.nbs> <out.nbp>         导出选区片段\n\
              --import-midi <in.mid> <out.nbs>          导入 MIDI 为 NBS\n\
+             --import-schematic <in.schematic> <out.nbs>  导入 Minecraft 原理图为 NBS\n\
              --audio-info                             显示音频设备与采样加载状态"
         );
         return Ok(());
@@ -141,6 +142,17 @@ fn run_cli(args: &[String]) -> Result<(), String> {
         let song = nbs_io::midi::import_midi_path(input, &opts)?;
         nbs_core::nbs::save(output, &song, 5).map_err(|e| e.to_string())?;
         println!("已导入 {} 个音符 → {}", song.total_blocks, output.display());
+        return Ok(());
+    }
+
+    if cmd == "--import-schematic" {
+        let info = nbs_io::schematic::import_schematic(input).map_err(|e| e.to_string())?;
+        nbs_core::nbs::save(output, &info.song, 5).map_err(|e| e.to_string())?;
+        println!(
+            "图样 {}×{}×{}：{} 个输入 / {} 个音符盒 / 落子 {} → {}",
+            info.width, info.length, info.height, info.inputs, info.note_blocks,
+            info.added_notes, output.display()
+        );
         return Ok(());
     }
 

@@ -622,6 +622,74 @@ mod gui_window_tests {
         assert_eq!(state.schematic_tab, 0, "重新开窗回到设计页");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// 文件 → 导入 → 从 Schematic 导入：先在磁盘上真造一张经典图样，再走文件对话框读回来；
+    /// 顺带验 `load_song.gml` 的扩展名分流和原版的失败模态框。
+    #[test]
+    fn gui_imports_a_schematic_through_the_dialog_and_the_open_route() {
+        let ctx = egui::Context::default();
+        let dir = scratch("schematic-import");
+        let file = dir.join("demo.schematic");
+        nbs_io::schematic::export_schematic(
+            &nbs_core::Song::demo(),
+            &file,
+            &nbs_io::schematic::SchematicOptions::default(),
+        )
+        .expect("导出经典图样");
+
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        let recents = state.recent_files.len();
+        // 真点菜单：文件 → 导入 → 从 Schematic 导入…
+        click_text(&mut state, &ctx, "文件");
+        click_text(&mut state, &ctx, "导入");
+        click_text(&mut state, &ctx, "从 Schematic 导入…");
+        let d = state.file_dialog.as_ref().expect("导入要弹文件对话框");
+        assert!(!d.save, "导入用的是打开式对话框");
+        assert_eq!(d.ext, "schematic", "原版过滤器是 Minecraft Schematics (*.schematic)");
+        assert_eq!(state.window, Some(WindowKind::FileOpen));
+
+        state.doc.replace_song(nbs_core::Song::new());
+        assert_eq!(state.doc.song.total_blocks, 0);
+        dispatch(&mut state, commands::Command::DialogConfirm(file.clone()), &ctx);
+        assert!(state.file_dialog.is_none());
+        assert_eq!(state.window, None);
+        assert!(state.doc.song.total_blocks > 0, "读回来应该是有音符的谱面");
+        assert!(msg(&state).starts_with("Schematic 导入完成"), "{}", msg(&state));
+        assert_eq!(state.doc.song.filename, None, "不学原版把 filename 指向 .schematic");
+        assert_eq!(state.recent_files.len(), recents, "原版 open_schematic() 不写最近列表");
+
+        // 打开分流：.schematic 走导入，不会被当成 NBS 解析。
+        let mut s2 = EditorState::new();
+        s2.theme.apply(&ctx);
+        let recents2 = s2.recent_files.len();
+        s2.doc.replace_song(nbs_core::Song::new());
+        dispatch(&mut s2, commands::Command::OpenPath(file), &ctx);
+        assert!(s2.doc.song.total_blocks > 0);
+        assert!(msg(&s2).starts_with("Schematic 导入完成"), "{}", msg(&s2));
+        assert_eq!(s2.recent_files.len(), recents2);
+
+        // 坏文件：原版的 message()，标题不经 condstr，保持英文。
+        let bad = dir.join("bad.schematic");
+        std::fs::write(&bad, b"not a schematic at all").unwrap();
+        click_text(&mut s2, &ctx, "文件");
+        click_text(&mut s2, &ctx, "导入");
+        click_text(&mut s2, &ctx, "从 Schematic 导入…");
+        dispatch(&mut s2, commands::Command::DialogConfirm(bad), &ctx);
+        assert_eq!(s2.modals.items.len(), 1, "失败要弹模态，不只是状态栏一行字");
+        assert_eq!(s2.modals.items[0].title, "Error");
+        assert_eq!(s2.modals.items[0].yes_no, false, "原版这里是 message()，只有确定键");
+        assert!(
+            s2.modals.items[0].text.contains("ERROR: Not a Schematic file."),
+            "{}",
+            s2.modals.items[0].text
+        );
+        // 模态框要能画出来、答完就清空。
+        frame(&mut s2, &ctx);
+        click_text(&mut s2, &ctx, "确定");
+        assert!(s2.modals.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
