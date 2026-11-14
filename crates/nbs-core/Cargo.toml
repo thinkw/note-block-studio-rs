@@ -1,0 +1,13 @@
+[package]
+name = "nbs-core"
+description = "NBS 数据模型、稀疏网格、编辑事务、撤销重做与 .nbs 二进制编解码"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true, optional = true }
+
+[features]
+default = []
+serde = ["dep:serde"]

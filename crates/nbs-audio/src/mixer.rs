@@ -1,0 +1,258 @@
+//! Voice 池与混音器。实时播放与离线导出共用同一套渲染代码，
+//! 保证「听到的」和「导出的」完全一致。
+
+use nbs_core::model::{Note, PAN_CENTER};
+
+use crate::samples::{SoundBank, SAMPLE_RATE};
+
+/// 默认 voice 上限（原版 `channels = 256`，勾选更多通道后 1024）。
+pub const DEFAULT_MAX_VOICES: usize = 256;
+pub const EXTENDED_MAX_VOICES: usize = 1024;
+
+#[derive(Clone, Debug)]
+pub struct Voice {
+    pub sample_index: usize,
+    /// 采样内的浮点读头。
+    pub pos: f64,
+    /// 每个输出采样推进的源采样数（= pitch × 源率/输出率）。
+    pub ratio: f64,
+    pub gain_l: f32,
+    pub gain_r: f32,
+    pub alive: bool,
+    /// 创建序号，用于「淘汰最老」。
+    pub serial: u64,
+}
+
+impl Voice {
+    /// 原版 `play_sound.gml`：
+    /// `keyshift = key + (ins.key + pit/100 - 78)`
+    /// `pitch    = 0.5 * 2^(keyshift/12)`
+    /// 代入内置基准 45 → `0.5 * 2^((key-33+pit/100)/12)`，key=45 时为 1.0。
+    pub fn playback_ratio(note: &Note, base_key: u8, output_rate: u32) -> f64 {
+        let keyshift =
+            note.key as f64 + (base_key as f64 - 78.0) + note.pitch as f64 / 100.0;
+        let p = 0.5 * 2f64.powf(keyshift / 12.0);
+        p * (SAMPLE_RATE as f64 / output_rate.max(1) as f64)
+    }
+
+    /// 原版 `control_draw.gml:470-480` + `play_sound.gml:24`：
+    /// `vol = (layer.volume/100) * note.velocity`
+    /// `pan = layer.stereo == 100 ? note.panning : (layer.stereo + note.panning)/2`
+    /// `gain = vol/100 * mastervol`；pan 0..200，100 为中性（不衰减）。
+    pub fn gains(
+        note: &Note,
+        layer_volume: u8,
+        layer_stereo: u8,
+        master: f32,
+        mono: bool,
+    ) -> (f32, f32) {
+        let vol_eff = (layer_volume as f32 / 100.0) * note.velocity as f32;
+        let g = (vol_eff / 100.0) * master;
+        if mono {
+            return (g, g);
+        }
+        let pan_eff = if layer_stereo == PAN_CENTER {
+            note.panning
+        } else {
+            ((layer_stereo as u16 + note.panning as u16) / 2) as u8
+        };
+        let p = pan_eff as f32 / 100.0;
+        let left = (2.0 - p).min(1.0).max(0.0);
+        let right = p.min(1.0).max(0.0);
+        (g * left, g * right)
+    }
+
+    pub fn next_sample(&mut self, bank: &SoundBank, output_rate: u32) -> f32 {
+        if !self.alive {
+            return 0.0;
+        }
+        let Some(sample) = bank.get(self.sample_index) else {
+            self.alive = false;
+            return 0.0;
+        };
+        let pcm = &sample.pcm;
+        if pcm.is_empty() {
+            self.alive = false;
+            return 0.0;
+        }
+        let idx = self.pos as usize;
+        if idx + 1 >= pcm.len() {
+            self.alive = false;
+            return 0.0;
+        }
+        let frac = (self.pos - idx as f64) as f32;
+        let value = pcm[idx] + (pcm[idx + 1] - pcm[idx]) * frac;
+        // ratio 已按 output_rate 归一，这里不重复换算
+        let _ = output_rate;
+        self.pos += self.ratio;
+        value
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Mixer {
+    pub voices: Vec<Voice>,
+    pub max_voices: usize,
+    pub output_rate: u32,
+    pub mono: bool,
+    pub master: f32,
+    serial: u64,
+    /// 当前峰值（状态栏 / 导出归一化用）。
+    pub peak: f32,
+}
+
+impl Mixer {
+    pub fn new(output_rate: u32) -> Self {
+        Self {
+            voices: Vec::with_capacity(64),
+            max_voices: DEFAULT_MAX_VOICES,
+            output_rate,
+            mono: false,
+            master: 1.0,
+            serial: 0,
+            peak: 0.0,
+        }
+    }
+
+    pub fn set_max_voices(&mut self, max: usize) {
+        self.max_voices = max.clamp(16, 2048);
+        while self.voices.len() > self.max_voices {
+            self.voices.remove(0);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.voices.clear();
+        self.peak = 0.0;
+    }
+
+    pub fn active(&self) -> usize {
+        self.voices.iter().filter(|v| v.alive).count()
+    }
+
+    /// 派发一个音符。voice 池满时淘汰最老的（对齐 GM 引擎行为）。
+    pub fn spawn(
+        &mut self,
+        note: &Note,
+        layer_volume: u8,
+        layer_stereo: u8,
+        bank: &SoundBank,
+    ) {
+        let idx = note.instrument as usize;
+        let Some(sample) = bank.get(idx) else { return };
+        if sample.is_empty() {
+            return;
+        }
+        if self.voices.len() >= self.max_voices {
+            self.voices.remove(0);
+        }
+        let (gl, gr) = Voice::gains(note, layer_volume, layer_stereo, self.master, self.mono);
+        self.serial += 1;
+        self.voices.push(Voice {
+            sample_index: idx,
+            pos: 0.0,
+            ratio: Voice::playback_ratio(note, sample.base_key, self.output_rate),
+            gain_l: gl,
+            gain_r: gr,
+            alive: true,
+            serial: self.serial,
+        });
+    }
+
+    /// 渲染一个输出采样帧。
+    pub fn render_sample(&mut self, bank: &SoundBank) -> (f32, f32) {
+        let mut l = 0.0f32;
+        let mut r = 0.0f32;
+        let rate = self.output_rate;
+        for v in &mut self.voices {
+            if !v.alive {
+                continue;
+            }
+            let s = v.next_sample(bank, rate);
+            l += s * v.gain_l;
+            r += s * v.gain_r;
+        }
+        self.voices.retain(|v| v.alive);
+        self.peak = self.peak.max(l.abs()).max(r.abs());
+        // 硬限幅，与原版 GM 数字削波一致
+        (soft_limit(l), soft_limit(r))
+    }
+}
+
+fn soft_limit(x: f32) -> f32 {
+    if x > 1.0 {
+        1.0
+    } else if x < -1.0 {
+        -1.0
+    } else {
+        x
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nbs_core::model::Note;
+
+    #[test]
+    fn pitch_formula_matches_original() {
+        // key=45, pit=0 → 原速
+        let n = Note::new(0, 45);
+        assert!((Voice::playback_ratio(&n, 45, 44100) - 1.0).abs() < 1e-9);
+        // 升一个八度 → 2 倍速
+        let n = Note::new(0, 57);
+        assert!((Voice::playback_ratio(&n, 45, 44100) - 2.0).abs() < 1e-9);
+        // 降一个八度 → 0.5 倍速
+        let n = Note::new(0, 33);
+        assert!((Voice::playback_ratio(&n, 45, 44100) - 0.5).abs() < 1e-9);
+        // +100 cent = +1 半音
+        let mut n = Note::new(0, 45);
+        n.pitch = 100;
+        let expected = 2f64.powf(1.0 / 12.0);
+        assert!((Voice::playback_ratio(&n, 45, 44100) - expected).abs() < 1e-9);
+        // 输出设备 48000 时按比例缩放
+        let n = Note::new(0, 45);
+        assert!((Voice::playback_ratio(&n, 45, 48000) - 44100.0 / 48000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn gains_and_pan() {
+        let n = Note::new(0, 45);
+        let (l, r) = Voice::gains(&n, 100, 100, 1.0, false);
+        assert!((l - 1.0).abs() < 1e-6 && (r - 1.0).abs() < 1e-6);
+        let mut n = Note::new(0, 45);
+        n.panning = 0;
+        let (l, r) = Voice::gains(&n, 100, 100, 1.0, false);
+        assert!((l - 1.0).abs() < 1e-6 && r.abs() < 1e-6);
+        n.panning = 200;
+        let (l, r) = Voice::gains(&n, 100, 100, 1.0, false);
+        assert!(l.abs() < 1e-6 && (r - 1.0).abs() < 1e-6);
+        // 层音量 50 → 一半
+        let n = Note::new(0, 45);
+        let (l, _) = Voice::gains(&n, 50, 100, 1.0, false);
+        assert!((l - 0.5).abs() < 1e-6);
+        // 层声像非中性时取平均：(0 + 100)/2 = 50 → 左满、右半
+        let mut n = Note::new(0, 45);
+        n.panning = 100;
+        let (l, r) = Voice::gains(&n, 100, 0, 1.0, false);
+        assert!((l - 1.0).abs() < 1e-6 && (r - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn voice_pool_evicts_oldest() {
+        let mut bank = SoundBank::empty();
+        bank.samples.push(crate::samples::Sample {
+            pcm: vec![0.5; 44100],
+            base_key: 45,
+            name: "test".into(),
+        });
+        let mut mixer = Mixer::new(44100);
+        mixer.set_max_voices(16);
+        let n = Note::new(0, 45);
+        for _ in 0..17 {
+            mixer.spawn(&n, 100, 100, &bank);
+        }
+        assert_eq!(mixer.voices.len(), 16);
+        assert_eq!(mixer.voices[0].serial, 2, "应淘汰创建最早的 voice");
+    }
+}

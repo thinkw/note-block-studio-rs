@@ -1,0 +1,21 @@
+[package]
+name = "nbs-app"
+description = "Open Note Block Studio — Rust 重写版桌面入口"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "nbs-rust"
+path = "src/main.rs"
+
+[dependencies]
+nbs-core = { workspace = true }
+nbs-audio = { workspace = true }
+nbs-editor = { workspace = true }
+nbs-io = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+
+# 渲染后端在根 Cargo.toml 的 workspace.dependencies.eframe 里切换。
+# 网格画布只使用 egui::Painter 的形状批次，与具体渲染后端无关。

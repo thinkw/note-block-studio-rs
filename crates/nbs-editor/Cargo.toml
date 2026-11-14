@@ -1,0 +1,14 @@
+[package]
+name = "nbs-editor"
+description = "egui 实现的网格音符编辑器：视口剔除、交互状态机、面板、菜单、弹窗、主题"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+nbs-core = { workspace = true }
+nbs-audio = { workspace = true }
+nbs-io = { workspace = true }
+egui = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

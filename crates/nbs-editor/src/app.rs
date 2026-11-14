@@ -1,0 +1,77 @@
+//! 一帧的整体编排：输入 → 命令 → 状态 → 面板绘制 → 弹窗。
+//! 与 eframe 解耦，入口 crate 只负责创建窗口和调用 `show()`。
+
+use egui::Context;
+
+use crate::grid::show_grid;
+use crate::instruments_panel::show_instruments_panel;
+use crate::layers_panel::{show_layers_panel, PANEL_WIDTH};
+use crate::piano::show_piano;
+use crate::shortcuts::collect_shortcuts;
+use crate::state::EditorState;
+use crate::statusbar::show_status_bar;
+use crate::toolbar::{show_menu_bar, show_toolbar};
+use crate::viewport::{MENU_HEIGHT, PIANO_HEIGHT, STATUS_HEIGHT, TOOLBAR_HEIGHT};
+use crate::windows::show_windows;
+
+fn flush_all(state: &mut EditorState, ctx: &Context) {
+    for _ in 0..6 {
+        if state.pending.is_empty() {
+            break;
+        }
+        state.flush(ctx);
+    }
+}
+
+pub fn show(ctx: &Context, state: &mut EditorState) {
+    // 独立播放时钟（不绑 UI 帧率）+ 快捷键 + 偏好定时持久化
+    state.tick_transport(ctx);
+    state.maybe_save_prefs();
+    for cmd in collect_shortcuts(state, ctx) {
+        state.emit(cmd);
+    }
+    flush_all(state, ctx);
+
+    egui::TopBottomPanel::top("nbs_menu")
+        .exact_height(MENU_HEIGHT)
+        .show(ctx, |ui| show_menu_bar(state, ui));
+
+    egui::TopBottomPanel::top("nbs_toolbar")
+        .exact_height(TOOLBAR_HEIGHT + 16.0)
+        .show(ctx, |ui| show_toolbar(state, ui));
+
+    egui::TopBottomPanel::bottom("nbs_status")
+        .exact_height(STATUS_HEIGHT)
+        .show(ctx, |ui| show_status_bar(state, ui));
+
+    if state.flags.show_piano {
+        egui::TopBottomPanel::bottom("nbs_piano")
+            .exact_height(PIANO_HEIGHT)
+            .show(ctx, |ui| show_piano(state, ui));
+    }
+
+    if state.flags.show_layers {
+        egui::SidePanel::left("nbs_layers")
+            .exact_width(PANEL_WIDTH)
+            .show(ctx, |ui| show_layers_panel(state, ui));
+    }
+
+    if state.flags.show_instruments {
+        egui::SidePanel::right("nbs_instruments")
+            .exact_width(220.0)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| show_instruments_panel(state, ui));
+            });
+    }
+
+    egui::CentralPanel::default().show(ctx, |ui| {
+        let area = ui.available_rect_before_wrap();
+        show_grid(state, ui, area);
+    });
+
+    // 网格交互 / 面板按钮产生的命令在这里落地
+    flush_all(state, ctx);
+
+    show_windows(state, ctx);
+    flush_all(state, ctx);
+}

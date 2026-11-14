@@ -1,0 +1,13 @@
+[package]
+name = "nbs-io"
+description = "导入导出与配置：SMF MIDI、.nbp 片段、.schematic NBT、PNG 谱面、JSON 偏好、自动保存"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+nbs-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+flate2 = { workspace = true }
+image = { workspace = true }

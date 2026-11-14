@@ -1,0 +1,12 @@
+[package]
+name = "nbs-audio"
+description = "音频引擎：原版 OGG 采样、线性重采样 pitch shift、voice 池混音、cpal 实时播放、独立采样时钟调度、离线 WAV"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+nbs-core = { workspace = true }
+lewton = { workspace = true }
+cpal = { workspace = true }
+parking_lot = { workspace = true }
