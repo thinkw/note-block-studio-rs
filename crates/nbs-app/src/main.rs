@@ -27,6 +27,10 @@ impl NbsApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut state = EditorState::new();
         state.theme.apply(&cc.egui_ctx);
+        // egui 自带字体没有中文字形，不装系统字体整个界面会是一排空框。
+        if nbs_editor::fonts::install(&cc.egui_ctx).is_none() {
+            eprintln!("警告: 未找到可用的系统中文字体，界面中文会显示成空框");
+        }
 
         if let Some(arg) = std::env::args().nth(1) {
             let path = PathBuf::from(arg);

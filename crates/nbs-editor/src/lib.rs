@@ -10,12 +10,14 @@
 //! layers_panel / toolbar / timeline(grid) / piano / statusbar / instruments_panel
 //! windows      歌曲信息、属性、统计、首选项、宏、文件对话框、帮助
 //! theme        4 套主题
+//! fonts        启动时装系统中文字体（egui 自带字体没有 CJK 字形）
 //! shortcuts    全局快捷键
 //! ```
 //! 只依赖 `egui`（不依赖 eframe），渲染后端由入口 crate 决定。
 
 pub mod app;
 pub mod commands;
+pub mod fonts;
 pub mod grid;
 pub mod instruments_panel;
 pub mod interaction;
