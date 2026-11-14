@@ -9,7 +9,7 @@ use nbs_core::model::Song;
 
 /// 原版每格 32px。
 pub const BASE_CELL: f32 = 32.0;
-pub const LAYER_PANEL_WIDTH: f32 = 264.0;
+pub const LAYER_PANEL_WIDTH: f32 = 284.0;
 pub const TIMELINE_HEIGHT: f32 = 32.0;
 pub const SCROLLBAR_SIZE: f32 = 16.0;
 pub const PIANO_HEIGHT: f32 = 132.0;

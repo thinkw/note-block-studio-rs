@@ -7,8 +7,6 @@ use egui::Context;
 use nbs_audio::{export_wav, ExportOptions, EXTENDED_MAX_VOICES, DEFAULT_MAX_VOICES};
 use nbs_core::model::{LockMode, Note, Song, SongMeta, KEY_MAX, PAN_MAX, VEL_MAX, PIT_MAX};
 use nbs_core::Macro;
-use nbs_io::image_export::ImageOptions;
-use nbs_io::schematic::SchematicOptions;
 
 use crate::state::{DialogAction, EditMode, EditorState, FileDialog, Flag, WindowKind};
 use crate::theme::{Theme, ThemeKind};
@@ -32,6 +30,7 @@ pub enum Command {
     SelectAll,
     Deselect,
     InvertSelection,
+    SelectByInstrument { instrument: u8, invert: bool },
     PlaceNote { tick: u32, layer: u32 },
     RemoveNote { tick: u32, layer: u32 },
     PickNote { tick: u32, layer: u32, all: bool },
@@ -45,6 +44,7 @@ pub enum Command {
         subtract: bool,
     },
     AddLayer,
+    InsertLayer(u32),
     RemoveLayer(u32),
     MoveLayerUp(u32),
     MoveLayerDown(u32),
@@ -220,6 +220,10 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         Command::SelectAll => state.doc.select_all(),
         Command::Deselect => state.doc.deselect(),
         Command::InvertSelection => state.doc.select_invert(),
+        Command::SelectByInstrument { instrument, invert } => {
+            state.doc.select_by_instrument(instrument, invert);
+            state.set_message(format!("已选中 {} 个音符", state.doc.selection.len()));
+        }
         Command::PlaceNote { tick, layer } => {
             if state.doc.song.is_locked(layer) {
                 state.set_message("图层已锁定");
@@ -282,6 +286,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             }
         }
         Command::AddLayer => state.doc.append_layer(),
+        Command::InsertLayer(at) => state.doc.insert_layer(at),
         Command::RemoveLayer(i) => state.doc.remove_layer(i),
         Command::MoveLayerUp(i) => {
             if i > 0 {
@@ -500,6 +505,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                         tail_seconds: state.prefs.export_tail_seconds,
                         normalize: state.prefs.export_normalize,
                         master: state.prefs.master_volume,
+                        headroom_db: state.prefs.export_headroom_db,
                     };
                     let bank = state.audio.bank();
                     match export_wav(&state.doc.song, &bank, &path, &opts) {
@@ -522,10 +528,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     state.window = None;
                 }
                 DialogAction::ExportPng => {
-                    let opts = ImageOptions {
-                        dark: state.theme.kind.is_dark(),
-                        ..Default::default()
-                    };
+                    let opts = state.png_options.clone();
                     match nbs_io::image_export::export_png(&state.doc.song, &path, &opts) {
                         Ok((w, h)) => state.set_message(format!("PNG 谱面已导出：{w}×{h}")),
                         Err(e) => state.set_message(format!("导出 PNG 失败: {e}")),
@@ -533,12 +536,8 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     state.window = None;
                 }
                 DialogAction::ExportSchematic => {
-                    let opts = SchematicOptions {
-                        structure: state.schematic_structure,
-                        include_out_of_range: false,
-                        ..Default::default()
-                    };
-                    let path = if state.schematic_structure {
+                    let opts = state.schematic_options;
+                    let path = if opts.structure {
                         path.with_extension("nbt")
                     } else {
                         path

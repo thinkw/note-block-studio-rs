@@ -918,6 +918,8 @@ fn draw_context_menu(state: &mut EditorState, ui: &Ui) {
                         state.hover_cell = Some(menu.cell);
                         close = true;
                     }
+                    ui.separator();
+                    crate::toolbar::instrument_menus(state, ui);
                 }
                 ContextKind::Timeline => {
                     if item(ui, "跳到播放头") {
@@ -946,7 +948,10 @@ fn draw_context_menu(state: &mut EditorState, ui: &Ui) {
                         close = true;
                     }
                     if item(ui, "选中整层") { cmds.push(Command::SelectLayer(layer)); close = true; }
-                    if item(ui, "在上方插入图层") { cmds.push(Command::AddLayer); close = true; }
+                    if item(ui, "在上方插入图层") { cmds.push(Command::InsertLayer(layer)); close = true; }
+                    if item(ui, "在末尾添加图层") { cmds.push(Command::AddLayer); close = true; }
+                    if item(ui, "上移图层") { cmds.push(Command::MoveLayerUp(layer)); close = true; }
+                    if item(ui, "下移图层") { cmds.push(Command::MoveLayerDown(layer)); close = true; }
                     if item(ui, "删除图层") { cmds.push(Command::RemoveLayer(layer)); close = true; }
                 }
             }

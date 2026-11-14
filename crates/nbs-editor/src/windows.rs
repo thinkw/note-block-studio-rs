@@ -55,24 +55,6 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::PngExport => png_export_window(state, ui),
             WindowKind::MacroEditor => macro_editor_window(state, ui),
             WindowKind::Autosaves => autosaves_window(state, ui),
-            WindowKind::PatternImport => {
-                ui.label("选择 .nbp 片段文件");
-                if ui.button("浏览…").clicked() {
-                    state.emit(Command::OpenDialog(crate::state::DialogAction::ImportPattern));
-                }
-            }
-            WindowKind::PatternExport => {
-                ui.label("把当前选区（无选区时为全曲）导出为 .nbp");
-                if ui.button("浏览…").clicked() {
-                    state.emit(Command::OpenDialog(crate::state::DialogAction::ExportPattern));
-                }
-            }
-            WindowKind::MidiExport => {
-                ui.label("把歌曲导出为 Standard MIDI File (format 1)");
-                if ui.button("浏览…").clicked() {
-                    state.emit(Command::OpenDialog(crate::state::DialogAction::ExportMidi));
-                }
-            }
         });
     if !open {
         state.window = None;
@@ -142,12 +124,17 @@ fn properties(state: &mut EditorState, ui: &mut Ui) {
 
 fn statistics(state: &mut EditorState, ui: &mut Ui) {
     let song = &state.doc.song;
-    let mut per_ins = [0usize; 16];
+    // 自定义乐器的编号从 FIRST_CUSTOM_INDEX 起，所以直方图要覆盖到它们，
+    // 否则大工程里最常见的恰恰是被漏掉的（原版统计就包含全部乐器行）。
+    let slots = nbs_core::model::FIRST_CUSTOM_INDEX as usize
+        + song.custom_instruments.len().max(1);
+    let mut per_ins = vec![0usize; slots];
     let mut min_key = 87u8;
     let mut max_key = 0u8;
     for (_, _, n) in song.iter_notes() {
-        if n.instrument < 16 {
-            per_ins[n.instrument as usize] += 1;
+        let i = n.instrument as usize;
+        if i < per_ins.len() {
+            per_ins[i] += 1;
         }
         min_key = min_key.min(n.key);
         max_key = max_key.max(n.key);
@@ -165,10 +152,12 @@ fn statistics(state: &mut EditorState, ui: &mut Ui) {
     });
     ui.separator();
     ui.label(RichText::new("各乐器音符数").strong());
+    let total = song.total_blocks.max(1);
     egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
         for (i, c) in per_ins.iter().enumerate() {
             if *c > 0 {
-                ui.label(format!("{:>4}  {}", c, instrument_name(i as u8)));
+                let pct = *c as f32 * 100.0 / total as f32;
+                ui.label(format!("{:>6}  {:>5.1}%  {}", c, pct, instrument_name(i as u8)));
             }
         }
     });
@@ -581,7 +570,7 @@ fn schematic_export_window(state: &mut EditorState, ui: &mut Ui) {
         state.doc.song.meta.tempo,
         nbs_io::schematic::tempo_to_delay(state.doc.song.meta.tempo)
     )).small().weak());
-    ui.checkbox(&mut state.schematic_structure, "1.13+ 结构方块格式 (.nbt，palette + blocks)");
+    ui.checkbox(&mut state.schematic_options.structure, "1.13+ 结构方块格式 (.nbt，palette + blocks)");
     ui.label(RichText::new("只包含音高 33..57 的音符（Minecraft 原生音域）").small().weak());
     ui.separator();
     if ui.button("选择输出路径并导出…").clicked() {

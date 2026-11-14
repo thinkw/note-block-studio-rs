@@ -354,6 +354,12 @@ impl TransportClock {
             st.refresh_events(song);
         }
     }
+    /// 内容变化后重建事件表；保留播放头位置，也不清空正在发声的 voice。
+    pub fn refresh_events(&mut self, song: &Song) {
+        if let Some(s) = &self.shared {
+            s.lock().refresh_events(song);
+        }
+    }
     pub fn set_loop(&mut self, enabled: bool, start: f64, end: f64) {
         self.loop_enabled = enabled;
         self.loop_start = start;

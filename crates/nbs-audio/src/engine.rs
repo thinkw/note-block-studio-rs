@@ -339,6 +339,8 @@ pub struct ExportOptions {
     pub tail_seconds: f32,
     pub normalize: bool,
     pub master: f32,
+    /// 峰值上限余量（dB）。原版 nbswave 默认 3.0 dB，仅在超出时整体缩小而不是硬削顶。
+    pub headroom_db: f32,
 }
 
 impl Default for ExportOptions {
@@ -350,6 +352,7 @@ impl Default for ExportOptions {
             tail_seconds: 2.0,
             normalize: false,
             master: 1.0,
+            headroom_db: 3.0,
         }
     }
 }
@@ -425,18 +428,20 @@ pub fn render_offline(
     for &s in &out {
         peak = peak.max(s.abs());
     }
-    if opts.normalize && peak > 0.0001 {
-        let g = 0.99 / peak;
+    // 归一化目标 0.99；否则按 headroom 余量封顶。两种情况都是整体缩放，
+    // 不做逐样本削顶——原版 nbswave 也是 peak 超限时把整条轨缩小。
+    let ceiling = if opts.normalize {
+        0.99
+    } else {
+            (10f32).powf(-opts.headroom_db.abs() / 20.0)
+        }
+        .clamp(0.05, 1.0);
+    if peak > ceiling {
+        let g = ceiling / peak;
         for s in &mut out {
             *s *= g;
         }
-        peak *= g;
-    } else {
-        // 硬限幅，与实时播放一致
-        for s in &mut out {
-            *s = s.clamp(-1.0, 1.0);
-        }
-        peak = peak.min(1.0);
+        peak = ceiling;
     }
 
     (

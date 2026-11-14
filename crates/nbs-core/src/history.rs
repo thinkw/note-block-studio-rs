@@ -90,6 +90,7 @@ impl Edit {
             };
         }
         song.recalculate();
+        song.rev += 1;
     }
 }
 

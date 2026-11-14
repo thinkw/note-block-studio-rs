@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 const APP_DIR: &str = "nbs-rust";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Preferences {
     pub version: u8,
     pub theme: u8,
@@ -39,6 +40,14 @@ pub struct Preferences {
     pub export_channels: u16,
     pub export_normalize: bool,
     pub export_tail_seconds: f32,
+    /// 未开启归一化时的峰值余量（dB），对齐原版 nbswave 的 headroom=3.0。
+    pub export_headroom_db: f32,
+    /// 音频导出容器/编码：wav / mp3 / ogg / aiff / flac。
+    pub export_format: String,
+    /// mp3/ogg 这类有损编码的码率（原版固定 320k）。
+    pub export_bitrate: u32,
+    /// 0 = English，1 = 简体中文。
+    pub language: u8,
     pub auto_save_minutes: u8,
     pub recent_files: Vec<String>,
 }
@@ -75,6 +84,10 @@ impl Default for Preferences {
             export_channels: 2,
             export_normalize: false,
             export_tail_seconds: 2.0,
+            export_headroom_db: 3.0,
+            export_format: "wav".into(),
+            export_bitrate: 320,
+            language: 0,
             auto_save_minutes: 10,
             recent_files: Vec::new(),
         }

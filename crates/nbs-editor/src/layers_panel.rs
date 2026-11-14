@@ -82,7 +82,7 @@ pub fn show_layers_panel(state: &mut EditorState, ui: &mut Ui) {
         ui.painter().extend(shapes);
 
         // 名称区（点击重命名 / 右键菜单）
-        let name_w = (width - VAL_W * 2.0 - BTN * 6.0 - 10.0).max(60.0);
+        let name_w = (width - VAL_W * 2.0 - BTN * 7.0 - 10.0).max(60.0);
         let name_rect = Rect::from_min_size(
             pos2(row.min.x + 4.0, y + 2.0),
             Vec2::new(name_w, cell - 4.0),
@@ -165,15 +165,16 @@ pub fn show_layers_panel(state: &mut EditorState, ui: &mut Ui) {
             }
         }
 
-        // 6 个功能按钮
+        // 7 个功能按钮
         let bx = name_rect.max.x + val_w * 2.0 + 2.0;
-        let buttons: [(&str, Command, bool); 6] = [
+        let buttons: [(&str, Command, bool); 7] = [
             ("L", Command::SetLayerLock(idx, if layer.lock == LockMode::Locked { LockMode::Normal } else { LockMode::Locked }), layer.lock == LockMode::Locked),
             ("S", Command::SetLayerLock(idx, if layer.lock == LockMode::Solo { LockMode::Normal } else { LockMode::Solo }), layer.lock == LockMode::Solo),
             ("A", Command::SelectLayer(idx), false),
             ("+", Command::AddLayer, false),
             ("−", Command::RemoveLayer(idx), false),
             ("⇅", Command::MoveLayerUp(idx), false),
+            ("⇵", Command::MoveLayerDown(idx), false),
         ];
         for (j, (text, cmd, active)) in buttons.iter().enumerate() {
             let r = Rect::from_min_size(

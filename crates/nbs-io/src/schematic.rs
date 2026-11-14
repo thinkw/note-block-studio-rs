@@ -249,9 +249,8 @@ pub fn build_schematic_nbt(song: &Song, opts: &SchematicOptions) -> Vec<u8> {
 }
 
 /// 生成 1.13+ 结构方块 `.nbt`（palette + blocks，DataVersion 1519）。
-pub fn build_structure_nbt(song: &Song) -> Vec<u8> {
-    let opts = SchematicOptions::default();
-    let g = build_grid(song, &opts);
+pub fn build_structure_nbt(song: &Song, opts: &SchematicOptions) -> Vec<u8> {
+    let g = build_grid(song, opts);
     let mut n = Nbt::default();
     n.compound("");
     n.int("DataVersion", 1519);
@@ -351,7 +350,7 @@ fn gzip(data: &[u8]) -> Result<Vec<u8>, String> {
 
 pub fn export_schematic(song: &Song, path: &Path, opts: &SchematicOptions) -> Result<SchematicInfo, String> {
     let nbt = if opts.structure {
-        build_structure_nbt(song)
+        build_structure_nbt(song, opts)
     } else {
         build_schematic_nbt(song, opts)
     };

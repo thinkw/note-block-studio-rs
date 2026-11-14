@@ -231,6 +231,9 @@ pub struct Song {
     pub custom_instruments: Vec<CustomInstrument>,
     pub filename: Option<PathBuf>,
     pub dirty: bool,
+    /// 内容版本号：每次音符/图层/元数据变更递增。播放时据此决定要不要重建事件表，
+    /// 空闲帧零开销，边播边改又能立刻发声。
+    pub rev: u64,
 }
 
 impl Default for Song {
@@ -251,6 +254,7 @@ impl Song {
             custom_instruments: Vec::new(),
             filename: None,
             dirty: false,
+            rev: 0,
         }
     }
 

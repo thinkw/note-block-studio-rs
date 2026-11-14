@@ -73,6 +73,8 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                 if ui.button("微调…").clicked() { state.emit(Command::ShowWindow(WindowKind::SetPitch)); }
             });
             ui.separator();
+            instrument_menus(state, ui);
+            ui.separator();
             if ui.button("宏编辑器（15 种宏）…  Ctrl+M").clicked() { state.emit(Command::ShowWindow(WindowKind::MacroEditor)); ui.close_menu(); }
             ui.menu_button("快捷宏", |ui| {
                 for m in [
@@ -128,6 +130,58 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
             ui.label(egui::RichText::new(state.song_title()).weak().small());
         });
     });
+}
+
+/// 原版在 Edit 菜单和网格右键菜单里都出现的三段乐器列表：
+/// 按乐器选择 / 选择除该乐器之外的全部 / 把音符改成该乐器。
+pub fn instrument_menus(state: &mut EditorState, ui: &mut Ui) {
+    let names = instrument_rows(state);
+    ui.menu_button("按乐器选择", |ui| {
+        egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
+            for (idx, name) in &names {
+                if ui.button(format!("仅 {name}")).clicked() {
+                    state.emit(Command::SelectByInstrument { instrument: *idx, invert: false });
+                }
+            }
+        });
+    });
+    ui.menu_button("选择除乐器…", |ui| {
+        egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
+            for (idx, name) in &names {
+                if ui.button(format!("除 {name} 外")).clicked() {
+                    state.emit(Command::SelectByInstrument { instrument: *idx, invert: true });
+                }
+            }
+        });
+    });
+    ui.menu_button("更改乐器到…", |ui| {
+        egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
+            for (idx, name) in &names {
+                if ui.button(name).clicked() {
+                    state.emit(Command::SetAllInstrument(*idx));
+                }
+            }
+        });
+    });
+}
+
+/// 内置 + 当前歌曲引用的自定义乐器，索引即音符里的 instrument 值。
+fn instrument_rows(state: &EditorState) -> Vec<(u8, String)> {
+    let mut rows: Vec<(u8, String)> = nbs_core::instruments::INSTRUMENTS
+        .iter()
+        .enumerate()
+        .map(|(i, ins)| (i as u8, ins.name.to_string()))
+        .collect();
+    for (j, ci) in state.doc.song.custom_instruments.iter().enumerate() {
+        let idx = nbs_core::model::FIRST_CUSTOM_INDEX + j as u8;
+        let name = if ci.name.trim().is_empty() {
+            format!("自定义音色 {}", j + 1)
+        } else {
+            ci.name.clone()
+        };
+        rows.push((idx, name));
+    }
+    rows
 }
 
 pub fn show_toolbar(state: &mut EditorState, ui: &mut Ui) {

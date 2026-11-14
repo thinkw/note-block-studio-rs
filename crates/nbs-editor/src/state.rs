@@ -8,8 +8,10 @@ use egui::{Context, Pos2};
 use nbs_audio::{AudioEngine, CpalEngine, SoundBank, EXTENDED_MAX_VOICES, DEFAULT_MAX_VOICES};
 use nbs_core::model::Note;
 use nbs_core::{Document, Macro, TremoloFade};
+use nbs_io::image_export::ImageOptions;
 use nbs_io::midi::MidiImportOptions;
 use nbs_io::prefs::Preferences;
+use nbs_io::schematic::SchematicOptions;
 
 use crate::commands::Command;
 use crate::interaction::Interaction;
@@ -156,9 +158,6 @@ pub enum WindowKind {
     PngExport,
     MacroEditor,
     Autosaves,
-    PatternImport,
-    PatternExport,
-    MidiExport,
 }
 
 impl WindowKind {
@@ -190,9 +189,6 @@ impl WindowKind {
             Self::PngExport => "导出 PNG 谱面",
             Self::MacroEditor => "宏",
             Self::Autosaves => "自动保存 / 备份",
-            Self::PatternImport => "导入片段 (.nbp)",
-            Self::PatternExport => "导出片段 (.nbp)",
-            Self::MidiExport => "导出 MIDI",
         }
     }
 }
@@ -347,12 +343,15 @@ pub struct EditorState {
     pub macro_width: f32,
     pub macro_reverse: bool,
     pub midi_options: MidiImportOptions,
-    pub schematic_structure: bool,
+    pub schematic_options: SchematicOptions,
+    pub png_options: ImageOptions,
     pub export_status: Option<String>,
     pub piano_start: u8,
     pub last_autosave: Instant,
     pub last_prefs_save: Instant,
     pub dirty_title: bool,
+    /// 已同步给音频引擎的 `Song::rev`，用于只在内容真变化时重建事件表。
+    pub audio_rev: u64,
 }
 
 impl Default for EditorState {
@@ -396,6 +395,7 @@ impl EditorState {
         let recent_files = prefs.recent_files.iter().map(PathBuf::from).collect();
         let follow_marker = prefs.follow_marker;
         let follow_center = prefs.follow_center;
+        let png_dark = theme.kind.is_dark();
 
         Self {
             doc: Document::with_song(song),
@@ -425,12 +425,14 @@ impl EditorState {
             macro_width: 60.0,
             macro_reverse: false,
             midi_options: MidiImportOptions::default(),
-            schematic_structure: false,
+            schematic_options: SchematicOptions::default(),
+            png_options: ImageOptions { dark: png_dark, ..ImageOptions::default() },
             export_status: None,
             piano_start: 33,
             last_autosave: Instant::now(),
             last_prefs_save: Instant::now(),
             dirty_title: false,
+            audio_rev: 0,
         }
     }
 
@@ -455,6 +457,20 @@ impl EditorState {
         for cmd in cmds {
             crate::commands::dispatch(self, cmd, ctx);
         }
+        self.sync_audio_events();
+    }
+
+    /// 歌曲内容变化后把事件表同步给音频引擎。空闲帧只做一次整数比较，
+    /// 因此边播放边画音符能立即发声，而不会每帧重建上万条事件。
+    pub fn sync_audio_events(&mut self) {
+        let rev = self.doc.song.rev;
+        if rev == self.audio_rev {
+            return;
+        }
+        self.audio_rev = rev;
+        let include_locked = self.prefs.include_locked_in_export;
+        let clock = self.audio.clock_mut();
+        clock.set_include_locked(include_locked, &self.doc.song);
     }
 
     /// 每帧同步独立播放时钟。真实播放时位置由音频回调的采样计数推进，
@@ -497,6 +513,7 @@ impl EditorState {
 
     pub fn prepare_audio(&mut self) {
         self.audio.prepare(&self.doc.song);
+        self.audio_rev = self.doc.song.rev;
     }
 
     pub fn add_recent(&mut self, path: PathBuf) {
@@ -506,9 +523,13 @@ impl EditorState {
         self.prefs.add_recent(&path);
     }
 
-    /// 把偏好推给音频引擎（主音量、速度、节拍器、voice 上限、单声道）。
+    /// 把偏好推给音频引擎（主音量、速度、节拍器、voice 上限、单声道、锁定层）。
     pub fn apply_audio_prefs(&mut self) {
         apply_audio_prefs(&mut *self.audio, &self.prefs);
+        // 实时播放此前从不遵守"包含锁定层"，只有导出遵守；这里补齐。
+        let include = self.prefs.include_locked_in_export;
+        self.audio.clock_mut().set_include_locked(include, &self.doc.song);
+        self.audio_rev = self.doc.song.rev;
     }
 
     /// 把当前会话状态同步回偏好对象。

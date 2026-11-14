@@ -121,6 +121,9 @@ impl<'a> Tx<'a> {
             meta,
             selection,
         };
+        if !edit.is_empty() {
+            self.doc.song.rev += 1;
+        }
         self.doc.history.push(edit);
     }
 }
@@ -268,6 +271,31 @@ impl Document {
         let enda = self.song.enda;
         let endb = self.song.endb;
         self.select_rect(0, 0, enda, endb, false, false, true);
+    }
+
+    /// 按乐器选择全部音符。`invert = true` 对应原版的「选择除该乐器之外的全部」。
+    /// 语义与 select_rect 一致：选中即摘出为浮动选区。
+    pub fn select_by_instrument(&mut self, instrument: u8, invert: bool) {
+        let mut tx = self.begin(if invert { "选择除该乐器" } else { "按乐器选择" });
+        tx.track_selection();
+        if !tx.read_selection().is_empty() {
+            place_selection_in_tx(&mut tx);
+        }
+        let keep: Vec<(u32, u32, Note)> = tx
+            .read_song()
+            .iter_notes()
+            .filter(|(_, _, n)| (n.instrument == instrument) != invert)
+            .collect();
+        if keep.is_empty() {
+            tx.commit();
+            return;
+        }
+        tx.watch_notes(&keep);
+        for (t, l, _) in &keep {
+            tx.song().remove(*t, *l);
+        }
+        tx.selection().merge_absolute(&keep);
+        tx.commit();
     }
 
     pub fn select_invert(&mut self) {
