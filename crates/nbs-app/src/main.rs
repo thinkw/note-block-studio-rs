@@ -96,6 +96,7 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             "nbs-rust CLI\n\
              --info <song.nbs>                          打印歌曲信息\n\
              --export-wav <song.nbs> <out.wav>         离线导出 PCM WAV\n\
+             --export-audio <song.nbs> <out.mp3|aiff|flac> [--rate N] [--channels N]  经 ffmpeg 转码导出\n\
              --export-midi <song.nbs> <out.mid>        导出 SMF MIDI\n\
              --export-png <song.nbs> <out.png>         导出 PNG 谱面\n\
              --export-schematic <song.nbs> <out.schematic>  导出原理图\n\
@@ -155,6 +156,45 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             println!(
                 "已导出 {} 音符 / {:.1}s / {} 线程 / 峰值 {:.2} → {}",
                 st.notes, st.duration_seconds, st.threads, st.peak, output.display()
+            );
+        }
+        // 与原版一样：先渲染 WAV，再交给 ffmpeg 转目标格式。格式由输出扩展名决定。
+        "--export-audio" => {
+            let format = nbs_io::audio_export::AudioFormat::from_path(output)
+                .ok_or_else(|| format!("无法从 {} 判断音频格式", output.display()))?;
+            let mut opts = nbs_audio::ExportOptions::default();
+            for (i, a) in args.iter().enumerate() {
+                match a.as_str() {
+                    "--rate" => {
+                        opts.sample_rate = args[i + 1].parse().map_err(|_| "采样率不是数字")?
+                    }
+                    "--channels" => {
+                        opts.channels = args[i + 1].parse().map_err(|_| "声道数不是数字")?
+                    }
+                    _ => {}
+                }
+            }
+            if !nbs_io::audio_export::SAMPLE_RATES.contains(&opts.sample_rate) {
+                return Err(format!("采样率 {} 不在原版列表中", opts.sample_rate));
+            }
+            let tmp = output.with_extension("nbs-tmp.wav");
+            let st = nbs_audio::export_wav(&song, &nbs_audio::SoundBank::discover(), &tmp, &opts)?;
+            let enc = nbs_io::audio_export::EncodeOptions {
+                format,
+                sample_rate: opts.sample_rate,
+                channels: opts.channels,
+            };
+            let res = nbs_io::audio_export::encode_from_wav(&tmp, output, &enc);
+            let _ = std::fs::remove_file(&tmp);
+            res.map_err(|e| e.to_string())?;
+            println!(
+                "已导出 {} 音符 / {:.1}s → {}（{}，{} Hz，{} 声道）",
+                st.notes,
+                st.duration_seconds,
+                output.display(),
+                format.name(),
+                opts.sample_rate,
+                opts.channels
             );
         }
         "--export-midi" => {

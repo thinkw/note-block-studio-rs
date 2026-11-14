@@ -35,7 +35,7 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                 if ui.button("导入片段 (.nbp)…").clicked() { state.emit(Command::OpenDialog(DialogAction::ImportPattern)); ui.close_menu(); }
             });
             ui.menu_button("导出", |ui| {
-                if ui.button("音频 (WAV)…").clicked() { state.emit(Command::ShowWindow(WindowKind::AudioExport)); ui.close_menu(); }
+                if ui.button("音频轨道…").clicked() { state.emit(Command::ShowWindow(WindowKind::AudioExport)); ui.close_menu(); }
                 if ui.button("MIDI…").clicked() { state.emit(Command::OpenDialog(DialogAction::ExportMidi)); ui.close_menu(); }
                 if ui.button("PNG 谱面…").clicked() { state.emit(Command::ShowWindow(WindowKind::PngExport)); ui.close_menu(); }
                 if ui.button("Minecraft 原理图…").clicked() { state.emit(Command::ShowWindow(WindowKind::SchematicExport)); ui.close_menu(); }

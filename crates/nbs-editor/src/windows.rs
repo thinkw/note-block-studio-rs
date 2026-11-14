@@ -342,15 +342,15 @@ fn shortcuts_help(ui: &mut Ui) {
 fn file_dialog(state: &mut EditorState, ui: &mut Ui, save: bool) {
     let mut cmd: Option<Command> = None;
     let mut error: Option<String> = None;
-    let action = state
+    let (action, ext) = state
         .file_dialog
         .as_ref()
-        .map(|d| d.action)
-        .unwrap_or(crate::state::DialogAction::OpenSong);
+        .map(|d| (d.action, d.ext))
+        .unwrap_or((crate::state::DialogAction::OpenSong, "nbs"));
     ui.label(
         RichText::new(format!(
             "文件类型：*.{}   {}",
-            action.extension(),
+            ext,
             if action.is_save() { "（保存 / 导出）" } else { "（打开 / 导入）" }
         ))
         .small()
@@ -391,7 +391,7 @@ fn file_dialog(state: &mut EditorState, ui: &mut Ui, save: bool) {
             if ui.button(if save { "保存" } else { "打开" }).clicked() {
                 let path = d.selected_path();
                 let path = if path.extension().is_none() {
-                    path.with_extension(d.action.extension())
+                    path.with_extension(ext)
                 } else {
                     path
                 };
@@ -466,7 +466,7 @@ fn about(ui: &mut Ui) {
         "原版 16 个 OGG 采样，44100/48000 统一重采样",
         "pitch = 0.5·2^((key−33+pitch/100)/12)，与原版逐字节对齐",
         "voice 池 256/1024、gain/pan、cpal 实时输出、独立采样时钟",
-        "离线多线程 WAV 混音导出",
+        "离线多线程混音导出 WAV，MP3/AIFF/FLAC 经 ffmpeg 转码",
     ] {
         ui.label(RichText::new(line).small());
     }
@@ -492,39 +492,68 @@ fn about(ui: &mut Ui) {
 // ---------------------------------------------------------------- B/C/E 弹窗
 
 fn audio_export_window(state: &mut EditorState, ui: &mut Ui) {
-    ui.label("按与原版相同的 pitch/gain/pan 公式离线混音，输出 PCM s16 WAV。");
+    ui.label("与原版相同：先离线渲染 PCM s16 WAV，MP3/AIFF/FLAC 再交给 ffmpeg 转码。");
     if let Some(s) = &state.export_status {
         ui.label(RichText::new(s).small().color(egui::Color32::from_rgb(20, 130, 60)));
     }
     ui.separator();
     egui::Grid::new("audio_export_grid").num_columns(2).show(ui, |ui| {
+        // 原版四个选项：导出格式 / 采样率 / 通道 / 包括已静音的层。
+        ui.label("导出格式");
+        let mut fmt = state.prefs.export_format.clone();
+        egui::ComboBox::from_id_salt("export_format")
+            .selected_text(fmt.clone())
+            .show_ui(ui, |ui| {
+                for f in nbs_io::audio_export::AudioFormat::ALL {
+                    ui.selectable_value(&mut fmt, f.name().into(), f.name());
+                }
+            });
+        if fmt != state.prefs.export_format {
+            state.prefs.export_format = fmt;
+        }
+        ui.end_row();
         ui.label("采样率");
         let mut rate = state.prefs.export_sample_rate;
         egui::ComboBox::from_id_salt("export_rate")
-            .selected_text(format!("{} Hz", rate))
+            .selected_text(hz_label(rate))
             .show_ui(ui, |ui| {
-                for r in [22050u32, 44100, 48000, 88200, 96000] {
-                    ui.selectable_value(&mut rate, r, format!("{r} Hz"));
+                for r in nbs_io::audio_export::SAMPLE_RATES {
+                    ui.selectable_value(&mut rate, r, hz_label(r));
                 }
             });
         if rate != state.prefs.export_sample_rate {
             state.prefs.export_sample_rate = rate;
         }
         ui.end_row();
-        ui.label("声道");
-        ui.horizontal(|ui| {
-            if ui.selectable_label(state.prefs.export_channels == 1, "单声道").clicked() {
-                state.prefs.export_channels = 1;
-            }
-            if ui.selectable_label(state.prefs.export_channels == 2, "立体声").clicked() {
-                state.prefs.export_channels = 2;
-            }
-        });
+        ui.label("通道");
+        let mut ch = state.prefs.export_channels;
+        ui.radio_value(&mut ch, 1, "1（单声道）").on_hover_text("导出单声道的音频。");
+        ui.radio_value(&mut ch, 2, "2（立体声）").on_hover_text("导出立体声的音频。");
+        if ch != state.prefs.export_channels {
+            state.prefs.export_channels = ch;
+        }
         ui.end_row();
     });
-    ui.checkbox(&mut state.prefs.export_normalize, "导出时峰值归一化");
-    ui.checkbox(&mut state.prefs.include_locked_in_export, "包含锁定图层");
-    ui.add(egui::Slider::new(&mut state.prefs.export_tail_seconds, 0.0..=8.0).text("尾部留白 (秒)"));
+    let mut locked = state.prefs.include_locked_in_export;
+    if ui
+        .checkbox(&mut locked, "包括已静音的层")
+        .on_hover_text("是否在音频内包含已静音的层。")
+        .changed()
+    {
+        state.prefs.include_locked_in_export = locked;
+    }
+    let needs_encoder = nbs_io::audio_export::AudioFormat::parse(&state.prefs.export_format)
+        .map(|f| f.needs_encoder())
+        .unwrap_or(false);
+    if needs_encoder {
+        // 原版随程序附带 ffmpeg.exe；本程序按 audio_export::find_ffmpeg 的顺序找，
+        // 这里显示真实结果，找不到就明说，避免「按了导出却没产物」。
+        let line = match nbs_io::audio_export::ffmpeg_version() {
+            Some(v) => v,
+            None => "未找到 ffmpeg：把它放进程序目录、datafiles\\ 或 PATH，也可设 NBS_FFMPEG".into(),
+        };
+        ui.label(RichText::new(line).small().weak());
+    }
     ui.label(RichText::new(format!(
         "本曲 {} 音符 / {:.1} 秒 / {:.2} t/s",
         state.doc.song.total_blocks,
@@ -536,6 +565,19 @@ fn audio_export_window(state: &mut EditorState, ui: &mut Ui) {
         state.emit(Command::OpenDialog(crate::state::DialogAction::ExportAudio));
     }
     footer(state, ui);
+}
+
+/// 原版 `format_sample_rate`：44100 → "44,100 Hz"。
+fn hz_label(rate: u32) -> String {
+    let digits: Vec<char> = rate.to_string().chars().collect();
+    let mut out = String::new();
+    for (i, c) in digits.iter().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(*c);
+    }
+    out + " Hz"
 }
 
 fn audio_settings_window(state: &mut EditorState, ui: &mut Ui) {
@@ -702,4 +744,17 @@ fn autosaves_window(state: &mut EditorState, ui: &mut Ui) {
     ui.separator();
     ui.add(egui::Slider::new(&mut state.prefs.auto_save_minutes, 0..=60).text("自动保存间隔 (分钟，0=关闭)"));
     footer(state, ui);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hz_label_inserts_the_original_commas() {
+        assert_eq!(hz_label(44100), "44,100 Hz");
+        assert_eq!(hz_label(8000), "8,000 Hz");
+        assert_eq!(hz_label(384000), "384,000 Hz");
+        assert_eq!(hz_label(192000), "192,000 Hz");
+    }
 }

@@ -474,7 +474,14 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             } else {
                 None
             };
-            state.file_dialog = Some(FileDialog::for_action(action, initial.as_ref()));
+            let mut dialog = FileDialog::for_action(action, initial.as_ref());
+            if action == DialogAction::ExportAudio {
+                // 原版把保存对话框的文件类型绑在所选导出格式上（.mp3/.wav/.aiff/.flac）。
+                if let Some(f) = audio_format(state) {
+                    dialog.set_ext(f.extension());
+                }
+            }
+            state.file_dialog = Some(dialog);
             state.window = Some(if action.is_save() {
                 WindowKind::FileSave
             } else {
@@ -492,26 +499,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 DialogAction::OpenSong => dispatch(state, Command::OpenPath(path), ctx),
                 DialogAction::SaveSong => dispatch(state, Command::SavePath(path), ctx),
                 DialogAction::ExportAudio => {
-                    let opts = ExportOptions {
-                        sample_rate: state.prefs.export_sample_rate,
-                        channels: state.prefs.export_channels,
-                        include_locked: state.prefs.include_locked_in_export,
-                        tail_seconds: state.prefs.export_tail_seconds,
-                        normalize: state.prefs.export_normalize,
-                        master: state.prefs.master_volume,
-                        headroom_db: state.prefs.export_headroom_db,
-                    };
-                    let bank = state.audio.bank();
-                    match export_wav(&state.doc.song, &bank, &path, &opts) {
-                        Ok(st) => {
-                            state.export_status = Some(format!(
-                                "WAV 已导出：{} 音符 / {:.1}s / {} 线程 / 峰值 {:.2}",
-                                st.notes, st.duration_seconds, st.threads, st.peak
-                            ));
-                            state.set_message(format!("音频已导出到 {}", path.display()));
-                        }
-                        Err(e) => state.set_message(format!("导出音频失败: {e}")),
-                    }
+                    export_audio(state, &path);
                     state.window = None;
                 }
                 DialogAction::ExportMidi => {
@@ -641,6 +629,74 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.set_message("偏好设置已保存");
         }
         Command::RestoreAutosave(path) => dispatch(state, Command::OpenPath(path), ctx),
+    }
+}
+
+/// 当前选中的音频导出格式。解析失败时返回 None，让调用方报真实错误，
+/// 绝不悄悄退回 WAV（那等于给用户一个内容为 MP3、名字叫 .wav 的产物）。
+fn audio_format(state: &EditorState) -> Option<nbs_io::audio_export::AudioFormat> {
+    nbs_io::audio_export::AudioFormat::parse(&state.prefs.export_format)
+}
+
+/// 音频导出 = 离线渲染 WAV →（非 WAV 格式时）ffmpeg 转码，与原版
+/// `mp3_export()` 交给 nbswave/ffmpeg 的分工一致。中间 WAV 落在目标同目录，
+/// 转码成功或失败都会删掉。
+fn export_audio(state: &mut EditorState, path: &std::path::Path) {
+    let Some(format) = audio_format(state) else {
+        state.set_message(format!("导出音频失败：未知格式 {:?}", state.prefs.export_format));
+        return;
+    };
+    let opts = ExportOptions {
+        sample_rate: state.prefs.export_sample_rate,
+        channels: state.prefs.export_channels,
+        include_locked: state.prefs.include_locked_in_export,
+        master: state.prefs.master_volume,
+        ..Default::default()
+    };
+    let tmp_wav = if format.needs_encoder() {
+        Some(path.with_extension("nbs-export-tmp.wav"))
+    } else {
+        None
+    };
+    let wav_path = tmp_wav.as_deref().unwrap_or(path);
+    let bank = state.audio.bank();
+    let stats = match export_wav(&state.doc.song, &bank, wav_path, &opts) {
+        Ok(s) => s,
+        Err(e) => {
+            state.export_status = None;
+            state.set_message(format!("导出音频失败: {e}"));
+            return;
+        }
+    };
+    let encoded = if format.needs_encoder() {
+        let enc = nbs_io::audio_export::EncodeOptions {
+            format,
+            sample_rate: opts.sample_rate,
+            channels: opts.channels,
+        };
+        let result = nbs_io::audio_export::encode_from_wav(wav_path, path, &enc);
+        let _ = std::fs::remove_file(wav_path);
+        result.map_err(|e| e.to_string())
+    } else {
+        Ok(())
+    };
+    match encoded {
+        Ok(()) => {
+            state.export_status = Some(format!(
+                "{} 已导出：{} 音符 / {:.1}s / {} 线程 / 峰值 {:.2} → {}",
+                format.name(),
+                stats.notes,
+                stats.duration_seconds,
+                stats.threads,
+                stats.peak,
+                path.display()
+            ));
+            state.set_message(format!("音频已导出到 {}", path.display()));
+        }
+        Err(e) => {
+            state.export_status = None;
+            state.set_message(format!("导出音频失败: {e}"));
+        }
     }
 }
 

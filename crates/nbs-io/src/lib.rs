@@ -6,6 +6,7 @@
 //! - [`image_export`]  PNG 谱面导出
 //! - [`prefs`]         JSON 偏好、最近文件、原子保存、自动备份
 
+pub mod audio_export;
 pub mod image_export;
 pub mod midi;
 pub mod pattern;

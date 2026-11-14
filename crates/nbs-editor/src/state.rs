@@ -1,7 +1,7 @@
 //! 编辑器总状态。原版是 `obj_controller` 单实例的几百个实例变量；
 //! 这里收敛成结构化字段，并保留 `window / select / select_press*` 的状态机语义。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use egui::{Context, Pos2};
@@ -182,7 +182,7 @@ impl WindowKind {
             Self::FileSave => "保存歌曲",
             Self::LayerRename(_) => "重命名图层",
             Self::ConfirmNew => "新建歌曲",
-            Self::AudioExport => "导出音频 (WAV)",
+            Self::AudioExport => "音频导出",
             Self::AudioSettings => "音频设置",
             Self::MidiImport => "从 MIDI 导入",
             Self::SchematicExport => "导出 Minecraft 原理图",
@@ -231,15 +231,13 @@ impl DialogAction {
     pub fn extension(self) -> &'static str {
         match self {
             Self::OpenSong | Self::SaveSong => "nbs",
-            Self::ExportAudio => "wav",
+            // 音频导出的扩展名跟着所选格式走，`FileDialog::set_ext` 会覆盖这里。
+            Self::ExportAudio => "mp3",
             Self::ExportMidi | Self::ImportMidi => "mid",
             Self::ExportPng => "png",
             Self::ExportSchematic => "schematic",
             Self::ExportPattern | Self::ImportPattern => "nbp",
         }
-    }
-    pub fn default_name(self, base: &str) -> String {
-        format!("{}.{}", base, self.extension())
     }
 }
 
@@ -249,6 +247,8 @@ pub struct FileDialog {
     pub action: DialogAction,
     pub dir: PathBuf,
     pub name: String,
+    /// 实际生效的扩展名：文件类型过滤、补全文件名都用它，而不是 `action` 的默认值。
+    pub ext: &'static str,
     pub entries: Vec<PathBuf>,
     pub error: Option<String>,
 }
@@ -270,21 +270,37 @@ impl FileDialog {
             .and_then(|p| p.file_stem())
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "untitled".into());
+        let ext = action.extension();
         let name = if action.is_save() {
-            action.default_name(&base)
+            format!("{base}.{ext}")
         } else {
             initial
                 .and_then(|p| p.file_name())
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default()
         };
-        let mut d = Self { save: action.is_save(), action, dir, name, entries: Vec::new(), error: None };
+        let mut d = Self { save: action.is_save(), action, dir, name, ext, entries: Vec::new(), error: None };
         d.refresh();
         d
     }
 
+    /// 换用另一个扩展名（音频导出按所选格式），同时改写默认文件名并重新过滤目录。
+    pub fn set_ext(&mut self, ext: &'static str) {
+        if self.ext == ext {
+            return;
+        }
+        self.ext = ext;
+        let p = Path::new(&self.name);
+        if p.extension().is_some() {
+            if let Some(f) = p.with_extension(ext).file_name() {
+                self.name = f.to_string_lossy().into_owned();
+            }
+        }
+        self.refresh();
+    }
+
     pub fn refresh(&mut self) {
-        let ext = self.action.extension();
+        let ext = self.ext;
         self.entries = std::fs::read_dir(&self.dir)
             .ok()
             .into_iter()
@@ -641,4 +657,23 @@ fn apply_audio_prefs(audio: &mut dyn AudioEngine, p: &Preferences) {
         DEFAULT_MAX_VOICES
     });
     clock.set_mono(p.mono);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 音频导出的文件类型必须跟着所选格式走（原版 `get_save_filename_ext`）。
+    #[test]
+    fn audio_dialog_ext_follows_chosen_format() {
+        let mut d = FileDialog::for_action(DialogAction::ExportAudio, None);
+        assert_eq!(d.ext, "mp3", "原版默认 audio_exp_format = MP3");
+        assert!(d.name.ends_with(".mp3"), "{}", d.name);
+        d.set_ext("flac");
+        assert_eq!(d.ext, "flac");
+        assert!(d.name.ends_with(".flac"), "{}", d.name);
+        // 其它动作用默认扩展名，且 set_ext 只对当前对话框生效
+        let song = FileDialog::for_action(DialogAction::SaveSong, None);
+        assert_eq!(song.ext, "nbs");
+    }
 }
