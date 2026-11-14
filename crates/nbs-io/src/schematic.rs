@@ -836,7 +836,8 @@ pub fn schematic_length(stats: &SchematicStats, opts: &SchematicOptions) -> usiz
     let repeaters = stats.repeaters[opts.include_locked as usize][opts.tempo_mode as usize];
     if opts.layout < 2 {
         let mut len = 2 + ceil_div(repeaters, rows) * 3;
-        if opts.layout == 0 && ceil_div(repeaters, rows) % 2 == 1 {
+        // 原版 `len += 3*!(rows mod 2)`：GML 的 `!` 让偶数行才补这 3。
+        if opts.layout == 0 && ceil_div(repeaters, rows) % 2 == 0 {
             len += 3;
         }
         len
@@ -958,11 +959,6 @@ pub struct Built {
     chestx: i32,
     chesty: i32,
     chestz: i32,
-}
-
-fn gm_round(v: f64) -> i32 {
-    // GameMaker 的 round() 是「.5 远离零」，与 Rust 的 f64::round 一致。
-    v.round() as i32
 }
 
 /// 逐音符盒地放置，与原版 `schematic_export.gml` 的四个 note block 分支一致。
@@ -1098,8 +1094,9 @@ impl<'a> Builder<'a> {
             }
         }
 
-        // 立柱 + 梯子
-        let yy0 = gm_round(wid as f64 / 2.0);
+        // 立柱 + 梯子。过道中线：仓库 GML 写 `round(wid / 2)`（wid 恒为奇数 → 上取整），
+        // 但原版导出的 .nbt 样本里牌子、矿车与整片音符列都落在下取整那一列，按样本走。
+        let yy0 = wid / 2;
         self.cyy = yy0;
         for b in 1..hei - 2 {
             for a in 0..3 {
@@ -1844,8 +1841,8 @@ impl Built {
             n.item_double((self.size.hei - 1) as f64);
             n.item_double(3.5);
             n.list("blockPos", 3, 3);
-            // 原版对 wid-1-(cyy-1-0.5)-0.5 截断取整，这里两项都是整数。
-            n.item_int(wid - self.cyy - 1);
+            // 原版：wid - 1 - (cyy - 1 - 0.5) - 0.5 = wid - cyy，正好是 pos 去掉 0.5 的整格。
+            n.item_int(wid - self.cyy);
             n.item_int(self.size.hei as i32 - 1);
             n.item_int(3);
             n.compound("");
@@ -3267,10 +3264,16 @@ mod tests {
         assert_eq!(schematic_width(&o), 13);
         assert_eq!(schematic_length(&st, &o), 2 + 1 * 3);
         assert_eq!(schematic_height(&st, &o), 4 + 3 * 1);
-        // 环形过道（layout 0）：宽 +4，行数为奇数时 len 再 +3
+        // 环形过道（layout 0）：宽 +4
         o.layout = 0;
         assert_eq!(schematic_width(&o), 17);
-        assert_eq!(schematic_length(&st, &o), 2 + 3 + 3);
+        assert_eq!(schematic_length(&st, &o), 2 + 3);
+        // 行数为偶数才补 3（原版 `3*!(rows mod 2)`）：3 个中继器 / 每行 2 → 2 行。
+        o.notesperrow = 2;
+        assert_eq!(schematic_length(&st, &o), 2 + 2 * 3 + 3);
+        o.notesperrow = 1;
+        assert_eq!(schematic_length(&st, &o), 2 + 3 * 3);
+        o.notesperrow = 5;
         // Classic（layout 2）
         o.layout = 2;
         assert_eq!(schematic_width(&o), 13);
@@ -4210,6 +4213,209 @@ mod tests {
         assert_eq!(have, want);
         assert_eq!(got.added_notes, want.len());
         assert!(got.trace.contains("_____INPUT 1_____"));
+    }
+
+    /// 用户给的一对参照物：原版自己导出的 .nbs + 对应 .nbt。
+    /// 按截图那套选项重导一遍，逐格比对内容；样本来自比仓库 GML 更新的构建，
+    /// 三处版本差异（乐器表、牌格重复 air、牌面断句）在测试里单列并钉死。
+    #[test]
+    fn structure_export_matches_the_original_reference_file() {
+        let dir = reference_songs_dir().expect("assets/Songs 不在仓库里");
+        let stem = "祭司王约翰的黄金境1.9(导出准备";
+        let nbs_path = dir.join(format!("{stem}.nbs"));
+        let nbt_path = dir.join(format!("{stem}.nbt"));
+        let song = nbs_core::nbs::load(&nbs_path).unwrap();
+        let theirs = crate::nbt::parse(&gzip_decode(&nbt_path)).unwrap();
+
+        // 截图：环形过道 / .nbt 结构方块 / 每行 15 / 不含静音层 / 压缩 / 矿车轨道 /
+        // 矿车箱 / 循环选项 / 不用命令方块 / 10 红石刻每秒。
+        let mut o = SchematicOptions::default();
+        o.layout = 0;
+        o.structure = true;
+        o.notesperrow = 15;
+        o.include_locked = false;
+        o.compress = true;
+        o.minecart = true;
+        o.chest = true;
+        o.loop_option = true;
+        o.command_block = false;
+        o.tempo_mode = 0;
+
+        let ours = crate::nbt::parse(&build_nbt(&song, &o).unwrap()).unwrap();
+
+        // 骨架与矿车实体必须逐字段相同（blockPos 曾因过道中线取整差 1）。
+        assert_eq!(keys_of(&ours), keys_of(&theirs), "根节点的键序不同");
+        assert_eq!(ours.get("DataVersion"), theirs.get("DataVersion"));
+        assert_eq!(
+            items(ours.get("entities").unwrap()),
+            items(theirs.get("entities").unwrap()),
+            "矿车实体不同"
+        );
+
+        // 方块表：状态用 palette 文本描述，避免受 id 重编号影响。
+        // 允许的差异只有一条——原版更新后网格扫描会跳过已写过告示牌的格子，
+        // 仓库 GML 没跳，于是我们多写 2 条 air；丢掉重复格子里的 air 后必须同序同值。
+        let (our_cells, extra_air) = cells_without_duplicated_air(&ours);
+        let (their_cells, extra_theirs) = cells_without_duplicated_air(&theirs);
+        assert_eq!(extra_air, 2, "我们在牌格里多写的 air 条数变了");
+        assert_eq!(extra_theirs, 0, "原版参照里出现了预料外的重复格子");
+        assert_eq!(our_cells.len(), their_cells.len(), "方块条数不同");
+        let first_diff = our_cells
+            .iter()
+            .zip(their_cells.iter())
+            .position(|(a, b)| a != b);
+        match first_diff {
+            None => {}
+            Some(i) => panic!(
+                "第 {} 格不同：我们 {:?} / 原版 {:?}",
+                i, our_cells[i], their_cells[i]
+            ),
+        }
+
+        // palette：我们的表必须是原版表的有序子序列，多出来的只允许是
+        // 1.21 的铜块一族（4 个乐器方块 + trumpet 四种氧化态 x 25 音高 = 104 条）。
+        let our_pal = palette_names(&ours);
+        let their_pal = palette_names(&theirs);
+        let mut it = their_pal.iter();
+        assert!(
+            our_pal.iter().all(|d| it.any(|x| x == d)),
+            "我们的调色板顺序不是原版顺序的子序列"
+        );
+        let our_set: std::collections::HashSet<&str> =
+            our_pal.iter().map(|s| s.as_str()).collect();
+        let extras: Vec<&String> = their_pal
+            .iter()
+            .filter(|s| !our_set.contains(s.as_str()))
+            .collect();
+        assert_eq!(extras.len(), 104, "原版比我们多出的调色板项数变了");
+        assert!(
+            extras
+                .iter()
+                .all(|s| s.contains("waxed_") || s.contains("trumpet")),
+            "多出来的调色板项不是铜块一族：{:?}",
+            extras
+                .iter()
+                .filter(|s| !(s.contains("waxed_") || s.contains("trumpet")))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            their_pal
+                .iter()
+                .filter(|s| !our_set.contains(s.as_str()))
+                .any(|s| s.contains("instrument=trumpet,")),
+            "原版乐器表里没有 trumpet"
+        );
+
+        // 牌面文字：仓库 GML 写 "Minecraft Note"/"Block Studio"，
+        // 样本那版换了断句，其余三行一致；循环牌四行完全相同。
+        let (our_first, their_first) = (sign_texts(&ours, 0), sign_texts(&theirs, 0));
+        assert_eq!(&our_first[..2], &their_first[..2]);
+        let ours_tail: Vec<&str> = our_first[2..].iter().map(String::as_str).collect();
+        let theirs_tail: Vec<&str> = their_first[2..].iter().map(String::as_str).collect();
+        assert_eq!(
+            ours_tail,
+            ["{\"text\": \"Minecraft Note\"}", "{\"text\": \"Block Studio\"}"]
+        );
+        assert_eq!(
+            theirs_tail,
+            ["{\"text\": \"Note Block\"}", "{\"text\": \"Studio\"}"]
+        );
+        assert_eq!(sign_texts(&ours, 1), sign_texts(&theirs, 1), "循环牌不同");
+    }
+
+    /// palette 项的人读描述：`名字[属性按键排序]`。
+    fn describe_palette_entry(entry: &Value) -> String {
+        let mut s = entry
+            .get("Name")
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string();
+        if let Some(p) = entry.get("Properties") {
+            let mut kv: Vec<(&str, &str)> = p
+                .fields()
+                .unwrap_or_default()
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str().unwrap_or("?")))
+                .collect();
+            kv.sort_unstable();
+            s.push('[');
+            let parts: Vec<String> = kv
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
+            s.push_str(&parts.join(","));
+            s.push(']');
+        }
+        s
+    }
+
+    fn palette_names(root: &Value) -> Vec<String> {
+        items(root.get("palette").unwrap())
+            .iter()
+            .map(describe_palette_entry)
+            .collect()
+    }
+
+    fn block_pos(entry: &Value) -> (i32, i32, i32) {
+        let p = items(entry.get("pos").unwrap());
+        (
+            p[0].as_i32().unwrap(),
+            p[1].as_i32().unwrap(),
+            p[2].as_i32().unwrap(),
+        )
+    }
+
+    /// 返回「按写入顺序的 (格子, 方块描述)」以及被丢掉的重复 air 条数。
+    fn cells_without_duplicated_air(root: &Value) -> (Vec<((i32, i32, i32), String)>, usize) {
+        let pal = items(root.get("palette").unwrap());
+        let blocks = items(root.get("blocks").unwrap());
+        let mut per_cell: std::collections::HashMap<(i32, i32, i32), usize> =
+            std::collections::HashMap::new();
+        for b in blocks {
+            *per_cell.entry(block_pos(b)).or_insert(0) += 1;
+        }
+        let mut out = Vec::with_capacity(blocks.len());
+        let mut dropped = 0;
+        for b in blocks {
+            let cell = block_pos(b);
+            let desc = describe_palette_entry(
+                &pal[b.get("state").and_then(Value::as_i32).unwrap() as usize],
+            );
+            if per_cell[&cell] > 1 && desc == "minecraft:air" {
+                dropped += 1;
+                continue;
+            }
+            out.push((cell, desc));
+        }
+        (out, dropped)
+    }
+
+    /// 第 index 张告示牌的四行文字（按 nbt 里的 Text1..Text4）。
+    fn sign_texts(root: &Value, index: usize) -> [String; 4] {
+        let signs: Vec<&Value> = items(root.get("blocks").unwrap())
+            .iter()
+            .filter(|b| {
+                b.get("nbt")
+                    .and_then(|n| n.get("id"))
+                    .and_then(Value::as_str)
+                    == Some("minecraft:sign")
+            })
+            .collect();
+        let nbt = signs[index].get("nbt").unwrap();
+        [
+            nbt.get("Text1").and_then(Value::as_str).unwrap().to_string(),
+            nbt.get("Text2").and_then(Value::as_str).unwrap().to_string(),
+            nbt.get("Text3").and_then(Value::as_str).unwrap().to_string(),
+            nbt.get("Text4").and_then(Value::as_str).unwrap().to_string(),
+        ]
+    }
+
+    fn reference_songs_dir() -> Option<std::path::PathBuf> {
+        let m = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        ["../../assets/Songs", "../../../assets/Songs"]
+            .iter()
+            .map(|up| m.join(up))
+            .find(|p| p.is_dir())
     }
 
     fn gzip_decode(path: &std::path::Path) -> Vec<u8> {
