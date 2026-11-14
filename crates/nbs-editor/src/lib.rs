@@ -195,7 +195,7 @@ mod gui_export_tests {
 }
 
 #[cfg(test)]
-mod gui_datapack_tests {
+mod gui_window_tests {
     use commands::dispatch;
     use std::path::{Path, PathBuf};
 
@@ -224,26 +224,39 @@ mod gui_datapack_tests {
         ctx.run(input, |ctx| crate::show(ctx, state))
     }
 
-    /// 上一帧里某个文本标签的中心位置。egui 的 Checkbox/Button 把标签一起算进
-    /// 交互矩形，所以点文字就等于点控件。
-    fn text_center(shapes: &[egui::epaint::ClippedShape], want: &str) -> egui::Pos2 {
+    /// 上一帧里第一个满足条件的文本中心位置。egui 的 Checkbox/Button 把标签一起
+    /// 算进交互矩形，所以点文字就等于点控件。
+    fn text_center_if(
+        shapes: &[egui::epaint::ClippedShape],
+        want: impl Fn(&str) -> bool,
+    ) -> egui::Pos2 {
         for cs in shapes {
             if let egui::Shape::Text(t) = &cs.shape {
-                if t.galley.text() == want {
+                if want(t.galley.text()) {
                     return egui::Rect::from_min_size(t.pos, t.galley.rect.size()).center();
                 }
             }
         }
-        panic!("界面上找不到文本 {want:?}");
+        panic!(
+            "界面上找不到符合条件的文本，当前文本有：{}",
+            shapes
+                .iter()
+                .filter_map(|cs| match &cs.shape {
+                    egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
     }
 
     /// 真的用鼠标事件点一次控件：按下、抬起各占一帧。
     /// 注意 egui 0.31 要把窗口先画一帧，区域内容才会进 `FullOutput::shapes`，
     /// 所以定位文本前固定跑两帧。
-    fn click_text(state: &mut EditorState, ctx: &egui::Context, label: &str) {
+    fn click_at(state: &mut EditorState, ctx: &egui::Context, want: impl Fn(&str) -> bool) {
         frame_out(state, ctx, base_input());
         let out = frame_out(state, ctx, base_input());
-        let p = text_center(&out.shapes, label);
+        let p = text_center_if(&out.shapes, want);
         let mut press = base_input();
         press.events.push(egui::Event::PointerMoved(p));
         press.events.push(egui::Event::PointerButton {
@@ -264,6 +277,10 @@ mod gui_datapack_tests {
         frame_out(state, ctx, release);
     }
 
+    fn click_text(state: &mut EditorState, ctx: &egui::Context, label: &str) {
+        click_at(state, ctx, |t| t == label);
+    }
+
     /// 状态栏消息原始值（`active_message` 带 4 秒 TTL，测试里直接读字段）。
     fn msg(state: &EditorState) -> String {
         state
@@ -275,7 +292,7 @@ mod gui_datapack_tests {
 
     fn scratch(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!(
-            "nbs-gui-datapack-{}-{tag}",
+            "nbs-gui-{tag}-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&d);
@@ -526,6 +543,83 @@ mod gui_datapack_tests {
             "{\n\t\"pack\": {\n\t\t\"pack_format\": 48,\n\t\t\"description\": \"Rust Rewrite Demo\\nMade with Note Block Studio\"\n\t}\n}"
         );
         assert!(!dir.join("by_click.zip").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 把当前挂着的模态框逐个答完（提问答「是」，提示答「确定」）。
+    fn answer_all_modals(state: &mut EditorState, ctx: &egui::Context) {
+        for _ in 0..10 {
+            let Some(front) = state.modals.items.front().cloned() else {
+                return;
+            };
+            click_text(state, ctx, if front.yes_no { "是" } else { "确定" });
+        }
+        panic!("模态框一直没答完，流程可能卡住了");
+    }
+
+    /// 真点鼠标走完原版 Schematic 导出流程：菜单 → `calculate_size()` 的提问 →
+    /// 设计页三个单选 → 「使用默认值」的确认 → 方块页下拉 → 导出 → 磁盘上的 gzip 字节。
+    #[test]
+    fn clicking_through_the_schematic_export_window() {
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        // 原版第一次会写 settings.ini 记住「警告已看过」，测试预置成已看过，不碰用户配置。
+        state.prefs.warning_schematic = true;
+
+        click_text(&mut state, &ctx, "文件");
+        click_text(&mut state, &ctx, "导出");
+        click_text(&mut state, &ctx, "Minecraft 原理图…");
+        answer_all_modals(&mut state, &ctx);
+        assert_eq!(state.window, Some(WindowKind::SchematicExport), "提问答完才开窗");
+        assert_eq!(state.schematic_tab, 0, "开窗固定在「设计」页");
+        assert!(state.schematic_stats.totalblocks[0] > 0, "演示曲应有可导出的音符");
+
+        click_text(&mut state, &ctx, "环形过道");
+        assert_eq!(state.schematic_options.layout, 0, "布局单选没接上选项");
+        click_text(&mut state, &ctx, "1.13+");
+        assert!(state.schematic_options.structure);
+        assert!(!state.schematic_options.minecraft_old);
+        click_text(&mut state, &ctx, "使用命令方块");
+        assert!(state.schematic_options.command_block);
+
+        // 「使用默认值」先问「你确定吗？」，答否保持原样。
+        click_text(&mut state, &ctx, "使用默认值");
+        assert_eq!(state.modals.items.len(), 1, "原版这里先弹确认");
+        assert!(state.modals.items[0].yes_no);
+        click_text(&mut state, &ctx, "否");
+        assert_eq!(state.schematic_options.layout, 0, "答否不该还原");
+
+        click_text(&mut state, &ctx, "使用默认值");
+        click_text(&mut state, &ctx, "是");
+        assert_eq!(state.schematic_options.layout, 1, "答是才还原成默认");
+        assert!(!state.schematic_options.include_locked);
+        assert!(state.schematic_options.command_block, "command_block 不在原版默认值表里");
+        assert!(state.schematic_options.structure, "structure 同样不在表里");
+
+        // 方块页：第一个乐器默认是 3, 0（泥土），改成 2, 0（草方块）。
+        click_text(&mut state, &ctx, "方块");
+        assert_eq!(state.schematic_tab, 1);
+        click_at(&mut state, &ctx, |t| t == "3, 0");
+        click_at(&mut state, &ctx, |t| t.starts_with("2, 0  "));
+        assert_eq!(state.schematic_options.ins_block[0], 2, "下拉选择没写回选项");
+        assert_eq!(state.schematic_options.ins_data[0], 0);
+
+        click_text(&mut state, &ctx, "导出");
+        assert_eq!(state.window, Some(WindowKind::FileSave), "点「导出」应打开保存对话框");
+        let dir = scratch("schematic");
+        let out = dir.join("by_click.nbt");
+        dispatch(&mut state, commands::Command::DialogConfirm(out.clone()), &ctx);
+        assert!(out.is_file(), "结构方块分支应写出 {}", out.display());
+        let bytes = std::fs::read(&out).expect("导出必须写出真实文件");
+        assert_eq!(&bytes[..2], &[0x1f, 0x8b], "前两端应是 gzip 魔数");
+
+        // 原版保存成功后 `message("Schematic 已保存！")`，答完把导出窗口重新打开。
+        assert_eq!(state.modals.items.len(), 1);
+        assert_eq!(state.modals.items[0].title, "导出 Schematic");
+        click_text(&mut state, &ctx, "确定");
+        assert_eq!(state.window, Some(WindowKind::SchematicExport));
+        assert_eq!(state.schematic_tab, 0, "重新开窗回到设计页");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

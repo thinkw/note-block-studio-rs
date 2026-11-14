@@ -38,7 +38,7 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                 if ui.button("音频轨道…").clicked() { state.emit(Command::ShowWindow(WindowKind::AudioExport)); ui.close_menu(); }
                 if ui.button("MIDI…").clicked() { state.emit(Command::OpenDialog(DialogAction::ExportMidi)); ui.close_menu(); }
                 if ui.button("PNG 谱面…").clicked() { state.emit(Command::ShowWindow(WindowKind::PngExport)); ui.close_menu(); }
-                if ui.button("Minecraft 原理图…").clicked() { state.emit(Command::ShowWindow(WindowKind::SchematicExport)); ui.close_menu(); }
+                if ui.button("Minecraft 原理图…").clicked() { state.emit(Command::OpenSchematicExport); ui.close_menu(); }
                 if ui.button("Minecraft 数据包…").clicked() { state.emit(Command::ShowWindow(WindowKind::DatapackExport)); ui.close_menu(); }
                 if ui.button("片段 (.nbp)…").clicked() { state.emit(Command::OpenDialog(DialogAction::ExportPattern)); ui.close_menu(); }
             });
@@ -136,7 +136,7 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
 /// 原版在 Edit 菜单和网格右键菜单里都出现的三段乐器列表：
 /// 按乐器选择 / 选择除该乐器之外的全部 / 把音符改成该乐器。
 pub fn instrument_menus(state: &mut EditorState, ui: &mut Ui) {
-    let names = instrument_rows(state);
+    let names = state.instrument_list();
     ui.menu_button("按乐器选择", |ui| {
         egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
             for (idx, name) in &names {
@@ -164,25 +164,6 @@ pub fn instrument_menus(state: &mut EditorState, ui: &mut Ui) {
             }
         });
     });
-}
-
-/// 内置 + 当前歌曲引用的自定义乐器，索引即音符里的 instrument 值。
-fn instrument_rows(state: &EditorState) -> Vec<(u8, String)> {
-    let mut rows: Vec<(u8, String)> = nbs_core::instruments::INSTRUMENTS
-        .iter()
-        .enumerate()
-        .map(|(i, ins)| (i as u8, ins.name.to_string()))
-        .collect();
-    for (j, ci) in state.doc.song.custom_instruments.iter().enumerate() {
-        let idx = nbs_core::model::FIRST_CUSTOM_INDEX + j as u8;
-        let name = if ci.name.trim().is_empty() {
-            format!("自定义音色 {}", j + 1)
-        } else {
-            ci.name.clone()
-        };
-        rows.push((idx, name));
-    }
-    rows
 }
 
 pub fn show_toolbar(state: &mut EditorState, ui: &mut Ui) {

@@ -8,7 +8,7 @@ use nbs_audio::{export_wav, ExportOptions, EXTENDED_MAX_VOICES, DEFAULT_MAX_VOIC
 use nbs_core::model::{LockMode, Note, Song, SongMeta, KEY_MAX, PAN_MAX, VEL_MAX, PIT_MAX};
 use nbs_core::Macro;
 
-use crate::state::{DialogAction, EditMode, EditorState, FileDialog, Flag, WindowKind};
+use crate::state::{DialogAction, EditMode, EditorState, FileDialog, Flag, Modal, ModalQueue, WindowKind};
 use crate::theme::{Theme, ThemeKind};
 
 #[derive(Clone, Debug)]
@@ -90,6 +90,14 @@ pub enum Command {
     WheelOnNote { tick: u32, layer: u32, delta: i32, shift: bool },
     /// 打开通用文件对话框（打开/保存/各类导入导出）。
     OpenDialog(DialogAction),
+    /// 原版 `menu_click` 的导出 Schematic 入口：先过 `calculate_size()` 的提示与提问。
+    OpenSchematicExport,
+    /// 原版「导出」按钮：两道闸门都过才弹保存框。
+    ExportSchematicChecked,
+    /// 原版「使用默认值」= `reset_schematic_export(1)`。
+    ResetSchematicOptions,
+    /// 回答当前模态框，`false` = 「否」（丢弃整个待弹队列）。
+    AnswerModal(bool),
     /// 文件对话框确定。
     DialogConfirm(PathBuf),
     RunMacro(Macro),
@@ -361,6 +369,12 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         }
         Command::ToggleFollow => state.marker_follow = !state.marker_follow,
         Command::ShowWindow(kind) => {
+            // 原版 `anim_window_open`：`window != window_last` 时窗口重新做打开动画，
+            // 所有页签回到第一页；重复打开同一个窗口不重置。
+            if state.window.as_ref() != Some(&kind) {
+                state.datapack_tab = 0;
+                state.schematic_tab = 0;
+            }
             if matches!(kind, WindowKind::FileOpen | WindowKind::FileSave) {
                 let save = matches!(kind, WindowKind::FileSave);
                 state.file_dialog = Some(FileDialog::new(save, state.doc.song.filename.as_ref()));
@@ -382,7 +396,71 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.window = Some(kind);
             state.context_menu = None;
         }
-        Command::CloseWindow => state.window = None,
+        Command::CloseWindow => {
+            state.window = None;
+        }
+        // ------------------------------------------------------------ 导出 Schematic
+        // 原版 `menu_click`：`if (calculate_size()) window = w_schematic_export`。
+        Command::OpenSchematicExport => {
+            state.schematic_stats = nbs_io::schematic::calculate_stats(&state.doc.song);
+            state.schematic_options.tempo_mode = state.schematic_stats.tempo_mode;
+            let st = &state.schematic_stats;
+            let mut items: std::collections::VecDeque<Modal> = std::collections::VecDeque::new();
+            if !state.prefs.warning_schematic {
+                items.push_back(Modal {
+                    title: "警告",
+                    text: "导出的 schematic 目前之和 Minecraft: Java Edition 1.12 及以下兼容。\
+如想在 1.13 和以上使用，请使用结构方块格式导出。\n\n此警告将不再提示。"
+                        .into(),
+                    yes_no: false,
+                });
+                // 原版在这里 `save_settings()`，把“已看过”落盘。
+                state.prefs.warning_schematic = true;
+                let _ = state.prefs.save();
+            }
+            for q in st.compat_questions() {
+                items.push_back(Modal { title: "Minecraft 兼容性", text: q, yes_no: true });
+            }
+            if let Some(t) = st.tempo_notice() {
+                items.push_back(Modal { title: "速度", text: t.into(), yes_no: false });
+            }
+            let guard = nbs_io::schematic::open_guard(st);
+            if let Err(e) = &guard {
+                items.push_back(Modal { title: "错误", text: e.clone(), yes_no: false });
+            }
+            state.modals = ModalQueue {
+                items,
+                then: guard.ok().map(|_| Command::ShowWindow(WindowKind::SchematicExport)),
+            };
+            if state.modals.is_empty() {
+                dispatch(state, Command::ShowWindow(WindowKind::SchematicExport), ctx);
+            }
+        }
+        Command::AnswerModal(yes) => {
+            if !yes {
+                state.modals = ModalQueue::default();
+            } else {
+                state.modals.items.pop_front();
+                if state.modals.is_empty() {
+                    if let Some(cmd) = state.modals.then.take() {
+                        dispatch(state, cmd, ctx);
+                    }
+                }
+            }
+        }
+        Command::ResetSchematicOptions => {
+            state.schematic_options.reset();
+            state.set_message("导出 Schematic 的设定已还原");
+        }
+        Command::ExportSchematicChecked => {
+            let st = state.schematic_stats.clone();
+            match nbs_io::schematic::export_check(&st, &state.schematic_options).dialog() {
+                None => dispatch(state, Command::OpenDialog(DialogAction::ExportSchematic), ctx),
+                Some((title, msg)) => {
+                    state.modals = ModalQueue::message(title, msg);
+                }
+            }
+        }
         Command::SetTheme(kind) => {
             state.theme = Theme::new(kind);
             state.theme.apply(ctx);
@@ -509,6 +587,20 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     dialog.refresh();
                 }
             }
+            if action == DialogAction::ExportSchematic {
+                // 原版：经典格式 `filename + ".schematic"`，结构方块把文件名转小写、
+                // 空格换成下划线再加 ".nbt"。
+                let structure = state.schematic_options.structure;
+                dialog.set_ext(if structure { "nbt" } else { "schematic" });
+                if structure {
+                    let stem = std::path::Path::new(&dialog.name)
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    dialog.name = format!("{}.nbt", stem.to_lowercase().replace(' ', "_"));
+                    dialog.refresh();
+                }
+            }
             state.file_dialog = Some(dialog);
             state.window = Some(if action.is_save() {
                 WindowKind::FileSave
@@ -549,20 +641,27 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     state.window = None;
                 }
                 DialogAction::ExportSchematic => {
-                    let opts = state.schematic_options;
+                    let opts = state.schematic_options.clone();
                     let path = if opts.structure {
                         path.with_extension("nbt")
                     } else {
-                        path
+                        path.with_extension("schematic")
                     };
-                    match nbs_io::schematic::export_schematic(&state.doc.song, &path, &opts) {
-                        Ok(info) => state.set_message(format!(
-                            "原理图已导出：{}×{}×{}，{} 个音符盒",
-                            info.width, info.height, info.length, info.note_blocks
-                        )),
-                        Err(e) => state.set_message(format!("导出原理图失败: {e}")),
-                    }
                     state.window = None;
+                    match nbs_io::schematic::export_schematic(&state.doc.song, &path, &opts) {
+                        // 原版：保存成功后 `message("Schematic 已保存！")`，
+                        // 关掉提示再把导出窗口重新打开。
+                        Ok(info) => {
+                            state.set_message(format!(
+                                "Schematic 已保存：{}×{}×{}，{} 个音符盒",
+                                info.length, info.width, info.height, info.note_blocks
+                            ));
+                            let mut q = ModalQueue::message("导出 Schematic", "Schematic 已保存！");
+                            q.then = Some(Command::ShowWindow(WindowKind::SchematicExport));
+                            state.modals = q;
+                        }
+                        Err(e) => state.set_message(format!("导出 Schematic 失败: {e}")),
+                    }
                 }
                 DialogAction::ExportDatapack => {
                     export_datapack(state, &path);
@@ -783,4 +882,222 @@ pub fn current_note_label(state: &EditorState) -> String {
         c.panning,
         c.pitch
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nbs_core::model::Layer;
+    use std::path::Path;
+
+    /// 固定内容的歌曲：2 八度内一个、外一个、自定义音色一个、带微调一个，
+    /// 正好让 `calculate_size()` 的三段提问全部出现且顺序固定。
+    fn four_case_song(tempo: f32) -> Song {
+        let mut s = Song {
+            layers: vec![Layer::default(); 4],
+            ..Song::new()
+        };
+        s.meta.tempo = tempo;
+        s.set(0, 0, Note::new(0, 40));
+        s.set(0, 1, Note::new(0, 30));
+        s.set(1, 0, Note::new(16, 45));
+        let mut pitched = Note::new(0, 50);
+        pitched.pitch = 50;
+        s.set(2, 0, pitched);
+        s
+    }
+
+    fn state_with(song: Song) -> EditorState {
+        let mut s = EditorState::new();
+        // 原版第一次走到这里会写 settings.ini；测试预先当作「已经提示过」，不碰用户配置。
+        s.prefs.warning_schematic = true;
+        s.doc.replace_song(song);
+        s
+    }
+
+    fn titles(state: &EditorState) -> Vec<&'static str> {
+        state.modals.items.iter().map(|m| m.title).collect()
+    }
+
+    fn texts(state: &EditorState) -> Vec<String> {
+        state.modals.items.iter().map(|m| m.text.clone()).collect()
+    }
+
+    /// 打开导出窗口前，原版 `calculate_size()` 依次弹兼容性提问和速度提示，
+    /// 全部答完才轮到窗口本身。
+    #[test]
+    fn open_schematic_export_queues_the_original_dialogs_in_order() {
+        let ctx = Context::default();
+        let mut state = state_with(four_case_song(3.0));
+        dispatch(&mut state, Command::OpenSchematicExport, &ctx);
+
+        assert_eq!(state.window, None, "队列没走完不得打开导出窗口");
+        assert_eq!(
+            titles(&state),
+            vec!["Minecraft 兼容性", "Minecraft 兼容性", "Minecraft 兼容性", "速度"]
+        );
+        assert_eq!(
+            texts(&state),
+            vec![
+                "一些方块在 Minecraft 的2八度范围外。你想无视这些方块导出 Schematic 吗？",
+                "一些方块带有自定义音色。继续导出吗？",
+                "一些方块带有音符盒不支持的微分音。继续导出吗？",
+                "歌曲的速度与 Minecraft 不兼容。所以，在游戏内的播放会和软件内的有差别。",
+            ]
+        );
+        assert_eq!(
+            state.modals.items.iter().map(|m| m.yes_no).collect::<Vec<_>>(),
+            vec![true, true, true, false],
+            "只有提问会中断导出，速度提示是 message"
+        );
+        assert!(matches!(
+            state.modals.then,
+            Some(Command::ShowWindow(WindowKind::SchematicExport))
+        ));
+
+        for i in 0..3 {
+            dispatch(&mut state, Command::AnswerModal(true), &ctx);
+            assert_eq!(state.modals.items.len(), 3 - i);
+            assert_eq!(state.window, None);
+        }
+        dispatch(&mut state, Command::AnswerModal(true), &ctx);
+        assert!(state.modals.is_empty());
+        assert_eq!(state.window, Some(WindowKind::SchematicExport));
+        assert_eq!(state.schematic_options.tempo_mode, 2, "3.0 t/s 对应 2.5 红石刻档");
+    }
+
+    /// 提问只要答一个「否」，后面的提示连同窗口一起作废。
+    #[test]
+    fn answering_no_aborts_the_schematic_export() {
+        let ctx = Context::default();
+        let mut state = state_with(four_case_song(3.0));
+        dispatch(&mut state, Command::OpenSchematicExport, &ctx);
+        dispatch(&mut state, Command::AnswerModal(true), &ctx);
+        dispatch(&mut state, Command::AnswerModal(false), &ctx);
+        assert!(state.modals.is_empty(), "答否后队列必须清空");
+        assert!(state.modals.then.is_none());
+        assert_eq!(state.window, None, "答否不打开导出窗口");
+    }
+
+    /// 没有方块可导出时，原版只弹一个错误并到此为止。
+    #[test]
+    fn empty_song_shows_the_no_blocks_error_instead_of_the_window() {
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        dispatch(&mut state, Command::OpenSchematicExport, &ctx);
+        assert_eq!(titles(&state), vec!["错误"]);
+        assert_eq!(texts(&state), vec!["没有方块可以导出！"]);
+        assert!(!state.modals.items[0].yes_no);
+        assert!(state.modals.then.is_none(), "闸门没过就没有后续动作");
+        dispatch(&mut state, Command::AnswerModal(true), &ctx);
+        assert_eq!(state.window, None);
+    }
+
+    /// 「使用默认值」先问「你确定吗？」，答是才恢复，且不动原版默认值表里没有的三项。
+    #[test]
+    fn reset_defaults_asks_first_and_keeps_the_unlisted_options() {
+        let ctx = Context::default();
+        let mut state = state_with(four_case_song(10.0));
+        dispatch(&mut state, Command::OpenSchematicExport, &ctx);
+        while !state.modals.is_empty() {
+            dispatch(&mut state, Command::AnswerModal(true), &ctx);
+        }
+        assert_eq!(state.window, Some(WindowKind::SchematicExport));
+
+        state.schematic_options.layout = 0;
+        state.schematic_options.notesperrow = 100;
+        state.schematic_options.tempo_mode = 1;
+        state.schematic_options.structure = true;
+        state.schematic_options.command_block = true;
+
+        state.modals = ModalQueue::question("确定", "你确定吗？", Command::ResetSchematicOptions);
+        dispatch(&mut state, Command::AnswerModal(false), &ctx);
+        assert_eq!(state.schematic_options.layout, 0, "答否不还原");
+        assert_eq!(state.schematic_options.notesperrow, 100);
+
+        state.modals = ModalQueue::question("确定", "你确定吗？", Command::ResetSchematicOptions);
+        dispatch(&mut state, Command::AnswerModal(true), &ctx);
+        let d = nbs_io::SchematicOptions::default();
+        assert_eq!(state.schematic_options.layout, d.layout);
+        assert_eq!(state.schematic_options.notesperrow, d.notesperrow);
+        assert_eq!(state.schematic_options.tempo_mode, 1, "sch_exp_tempo 不在默认值表里");
+        assert!(state.schematic_options.structure, "structure 是全局变量，不被重置");
+        assert!(state.schematic_options.command_block, "command_block 同样不在表里");
+    }
+
+    /// 「导出」按钮的两道闸门各有一个不同标题的 message，通过后才轮到保存对话框。
+    #[test]
+    fn export_button_gates_run_before_the_save_dialog() {
+        let ctx = Context::default();
+        let mut state = state_with(four_case_song(10.0));
+        // 把 2 八度内的音符全锁在静音层里：totalblocks[不静音] = 0，但 open 闸门仍过。
+        for l in state.doc.song.layers.iter_mut() {
+            l.lock = LockMode::Locked;
+        }
+        dispatch(&mut state, Command::OpenSchematicExport, &ctx);
+        while !state.modals.is_empty() {
+            dispatch(&mut state, Command::AnswerModal(true), &ctx);
+        }
+        state.schematic_options.include_locked = false;
+        dispatch(&mut state, Command::ExportSchematicChecked, &ctx);
+        assert_eq!(
+            titles(&state),
+            vec!["导出 Schematic"],
+            "原版这里的标题是「导出 Schematic」，不是「错误」"
+        );
+        assert_eq!(texts(&state), vec!["没有方块可以导出！"]);
+        assert_eq!(
+            state.window,
+            Some(WindowKind::SchematicExport),
+            "闸门没过不开保存框"
+        );
+
+        // 原版这里是弹窗置顶：先把这条消息答掉，才能继续操作。
+        dispatch(&mut state, Command::AnswerModal(true), &ctx);
+        assert!(state.modals.is_empty());
+
+        // 勾上「包含静音图层」后同一条曲子就能导出。
+        state.schematic_options.include_locked = true;
+        dispatch(&mut state, Command::ExportSchematicChecked, &ctx);
+        assert!(state.modals.is_empty());
+        assert_eq!(state.window, Some(WindowKind::FileSave));
+    }
+
+    /// 模态框置顶时背景界面完全失效，等价于原版 `message()` 冻结游戏循环。
+    #[test]
+    fn background_commands_are_dropped_while_a_modal_is_up() {
+        let ctx = Context::default();
+        let mut state = state_with(four_case_song(10.0));
+        state.modals = ModalQueue::question("确定", "你确定吗？", Command::ResetSchematicOptions);
+        state.schematic_options.layout = 0;
+        state.pending.push(Command::CloseWindow);
+        state.pending.push(Command::ToggleFlag(Flag::Blackout));
+        state.flush(&ctx);
+        assert_eq!(state.window, None, "CloseWindow 被丢弃，不该改变任何状态");
+        assert!(!state.flags.blackout, "工具栏命令同样被丢弃");
+
+        state.pending.push(Command::AnswerModal(true));
+        state.flush(&ctx);
+        assert_eq!(state.schematic_options.layout, 1, "答「是」后队列尾部的动作照常执行");
+    }
+
+    /// 保存框的文件名跟原版一致：经典格式保留原名，结构方块转小写并加下划线。
+    #[test]
+    fn schematic_dialog_extension_follows_the_format_choice() {
+        let ctx = Context::default();
+        let mut state = state_with(four_case_song(10.0));
+        state.doc.song.filename = Some(Path::new("Megalovania Boss.nbs").to_path_buf());
+
+        state.schematic_options.structure = false;
+        dispatch(&mut state, Command::OpenDialog(DialogAction::ExportSchematic), &ctx);
+        let d = state.file_dialog.clone().unwrap();
+        assert_eq!(d.ext, "schematic");
+        assert_eq!(d.name, "Megalovania Boss.schematic");
+
+        state.schematic_options.structure = true;
+        dispatch(&mut state, Command::OpenDialog(DialogAction::ExportSchematic), &ctx);
+        let d = state.file_dialog.clone().unwrap();
+        assert_eq!(d.ext, "nbt");
+        assert_eq!(d.name, "megalovania_boss.nbt");
+    }
 }

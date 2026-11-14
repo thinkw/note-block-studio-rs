@@ -196,9 +196,46 @@ impl WindowKind {
     }
 }
 
+/// 原版的 `message()` / `question()` 模态框。`yes_no` 对应 `question()`，
+/// 答「否」会丢掉整个待弹队列（即 `calculate_size()` 返回 0，不打开导出窗口）。
+#[derive(Clone, Debug)]
+pub struct Modal {
+    pub title: &'static str,
+    pub text: String,
+    pub yes_no: bool,
+}
+
+/// 一组待弹的模态框，队列走完后执行 `then`。
+#[derive(Clone, Debug, Default)]
+pub struct ModalQueue {
+    pub items: std::collections::VecDeque<Modal>,
+    pub then: Option<Command>,
+}
+
+impl ModalQueue {
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// 单个原版 `question(正文, 标题)`：答「是」才执行 `then`。
+    pub fn question(title: &'static str, text: &str, then: Command) -> Self {
+        Self {
+            items: [Modal { title, text: text.into(), yes_no: true }].into_iter().collect(),
+            then: Some(then),
+        }
+    }
+
+    /// 单个原版 `message(正文, 标题)`。
+    pub fn message(title: &'static str, text: &str) -> Self {
+        Self {
+            items: [Modal { title, text: text.into(), yes_no: false }].into_iter().collect(),
+            then: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ContextKind {
-    Grid,
+pub enum ContextKind {    Grid,
     Timeline,
     Layer(u32),
 }
@@ -375,6 +412,14 @@ pub struct EditorState {
     pub macro_reverse: bool,
     pub midi_options: MidiImportOptions,
     pub schematic_options: SchematicOptions,
+    /// 原版 `calculate_size()` 每次打开导出窗口时重算的歌曲统计。
+    pub schematic_stats: nbs_io::schematic::SchematicStats,
+    /// 原版 `selected_tab_sch`：0 = 设计，1 = 方块。关窗时回到 0。
+    pub schematic_tab: u8,
+    /// 原版 `sch_exp_remember`。
+    pub schematic_remember: bool,
+    /// 原版 `message()` / `question()` 的待弹队列。
+    pub modals: ModalQueue,
     pub datapack_options: DatapackOptions,
     /// 原版 `selected_tab_dat`：0 = 设置，1 = 效果器。
     pub datapack_tab: u8,
@@ -429,6 +474,8 @@ impl EditorState {
         let follow_marker = prefs.follow_marker;
         let follow_center = prefs.follow_center;
         let png_dark = theme.kind.is_dark();
+        // 原版 `load_settings` 的 `[schematic_export]` 段。
+        let schematic_options = prefs.schematic.clone();
 
         Self {
             doc: Document::with_song(song),
@@ -456,7 +503,11 @@ impl EditorState {
             macro_pattern: "0|4|7|12".into(),
             macro_reverse: false,
             midi_options: MidiImportOptions::default(),
-            schematic_options: SchematicOptions::default(),
+            schematic_options,
+            schematic_stats: nbs_io::schematic::SchematicStats::default(),
+            schematic_tab: 0,
+            schematic_remember: true,
+            modals: ModalQueue::default(),
             datapack_options: DatapackOptions::default(),
             datapack_tab: 0,
             png_options: ImageOptions { dark: png_dark, ..ImageOptions::default() },
@@ -487,6 +538,13 @@ impl EditorState {
     pub fn flush(&mut self, ctx: &Context) {
         let cmds = std::mem::take(&mut self.pending);
         for cmd in cmds {
+            // 原版 `message()` / `question()` 会冻结整个游戏循环：模态队列没答完之前，
+            // 背景界面产生的命令一律丢弃，只接受「回答当前模态框」这一条。
+            if !self.modals.is_empty()
+                && !matches!(cmd, crate::commands::Command::AnswerModal(_))
+            {
+                continue;
+            }
             crate::commands::dispatch(self, cmd, ctx);
         }
         self.sync_audio_events();
@@ -558,8 +616,27 @@ impl EditorState {
         self.audio_rev = self.doc.song.rev;
     }
 
-    pub fn add_recent(&mut self, path: PathBuf) {
-        self.recent_files.retain(|p| p != &path);
+    /// 原版 `instrument_list`：16 个内置乐器 + 当前歌曲的自定义乐器，索引即音符里的
+    /// instrument 值。自定义乐器没填名字时回落到「自定义音色 N」。
+    pub fn instrument_list(&self) -> Vec<(u8, String)> {
+        let mut rows: Vec<(u8, String)> = nbs_core::instruments::INSTRUMENTS
+            .iter()
+            .enumerate()
+            .map(|(i, ins)| (i as u8, ins.name.to_string()))
+            .collect();
+        for (j, ci) in self.doc.song.custom_instruments.iter().enumerate() {
+            let idx = nbs_core::model::FIRST_CUSTOM_INDEX + j as u8;
+            let name = if ci.name.trim().is_empty() {
+                format!("自定义音色 {}", j + 1)
+            } else {
+                ci.name.clone()
+            };
+            rows.push((idx, name));
+        }
+        rows
+    }
+
+    pub fn add_recent(&mut self, path: PathBuf) {        self.recent_files.retain(|p| p != &path);
         self.recent_files.insert(0, path.clone());
         self.recent_files.truncate(11);
         self.prefs.add_recent(&path);
@@ -598,6 +675,8 @@ impl EditorState {
         self.prefs.show_grid_lines = self.flags.show_grid_lines;
         self.prefs.flats = self.flags.flats;
         self.prefs.blackout = self.flags.blackout;
+        // 原版把整份 sch_exp_* 无条件写进 settings.ini，「记住我的更改」并不门控它。
+        self.prefs.schematic = self.schematic_options.clone();
         self.prefs.recent_files = self.recent_files.iter().map(|p| p.to_string_lossy().into_owned()).collect();
     }
 

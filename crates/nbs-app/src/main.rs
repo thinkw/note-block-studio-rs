@@ -218,7 +218,7 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             )?;
             println!(
                 "已导出原理图 {}×{}×{} / {} 音符盒 → {}",
-                info.width, info.height, info.length, info.note_blocks, output.display()
+                info.length, info.width, info.height, info.note_blocks, output.display()
             );
         }
         "--export-datapack" => {

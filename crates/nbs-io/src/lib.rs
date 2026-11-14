@@ -11,6 +11,7 @@ pub mod audio_export;
 pub mod datapack;
 pub mod image_export;
 pub mod midi;
+pub mod nbt;
 pub mod pattern;
 pub mod prefs;
 pub mod schematic;
@@ -28,6 +29,9 @@ pub use prefs::{
     autosave, list_autosaves, save_song_atomic, Preferences,
 };
 pub use schematic::{
-    build_schematic_nbt, build_structure_nbt, export_schematic, inspect_schematic,
-    tempo_to_delay, SchematicInfo, SchematicOptions, INSTRUMENT_BLOCKS,
+    block_display_name, build_nbt, calc_size, calculate_stats, default_ins_block, export_check,
+    export_guard, export_schematic, inspect_bytes, inspect_schematic, instrument_block_menu,
+    misc_block_menu, namespaced_id, open_guard, schematic_height, schematic_length, schematic_width,
+    tempo_to_mode, BlockMenuSection, Built, ExportCheck, McBlock, SchematicInfo, SchematicOptions,
+    SchematicSize, SchematicStats, INSTRUMENT_BLOCKS, INS_COUNT, MAX_HEI, MAX_LEN, MAX_WID,
 };

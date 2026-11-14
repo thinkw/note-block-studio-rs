@@ -44,6 +44,10 @@ pub struct Preferences {
     /// 0 = English，1 = 简体中文。
     pub language: u8,
     pub auto_save_minutes: u8,
+    /// 原版 `[schematic_export]` 段：整份导出选项无条件持久化。
+    pub schematic: crate::schematic::SchematicOptions,
+    /// 原版 `[warnings] schematics`：经典格式只兼容 1.12 以下的一次性警告是否已看过。
+    pub warning_schematic: bool,
     pub recent_files: Vec<String>,
 }
 
@@ -80,6 +84,8 @@ impl Default for Preferences {
             export_format: "MP3".into(),
             language: 0,
             auto_save_minutes: 10,
+            schematic: crate::schematic::SchematicOptions::default(),
+            warning_schematic: false,
             recent_files: Vec::new(),
         }
     }
@@ -202,6 +208,32 @@ mod tests {
         assert_eq!(back.theme, 2);
         assert!((back.master_volume - 0.42).abs() < 1e-6);
         assert_eq!(back.recent_files.len(), 1);
+    }
+
+    /// `[schematic_export]` 段：整份选项 + 「警告已看过」都要能落盘，
+    /// 且旧文件里没有这两个键时必须退回默认值而不是报错。
+    #[test]
+    fn schematic_options_and_warning_flag_persist() {
+        let mut p = Preferences::default();
+        p.warning_schematic = true;
+        p.schematic.layout = 2;
+        p.schematic.structure = true;
+        p.schematic.command_block = true;
+        p.schematic.ins_block[0] = 99;
+        p.schematic.ins_data[0] = 7;
+        let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert!(back.warning_schematic);
+        assert_eq!(back.schematic.layout, 2);
+        assert!(back.schematic.structure);
+        assert!(back.schematic.command_block);
+        assert_eq!(back.schematic.ins_block[0], 99);
+        assert_eq!(back.schematic.ins_data[0], 7);
+
+        let old: Preferences = serde_json::from_str(r#"{"theme":2}"#).unwrap();
+        assert!(!old.warning_schematic);
+        assert_eq!(old.schematic.layout, 1, "旧文件缺 [schematic_export] 时退回原版默认");
+        assert_eq!(old.schematic.ins_block, crate::schematic::default_ins_block());
+        assert_eq!(old.theme, 2, "已有的键照常读出来");
     }
 
     #[test]

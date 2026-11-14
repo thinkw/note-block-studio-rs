@@ -24,7 +24,7 @@ pub const SOUND_SOURCES: [&str; 10] = [
 ];
 
 /// 原版 `dat_instrument`：前 16 个内置音色对应的 `minecraft:block.note_block.*` 事件。
-const NOTE_BLOCK_SOUNDS: [&str; 16] = [
+pub(crate) const NOTE_BLOCK_SOUNDS: [&str; 16] = [
     "harp",
     "bass",
     "basedrum",
@@ -264,7 +264,7 @@ fn gml_num(x: f64) -> String {
 }
 
 /// 原版 `dat_instrument`。
-fn sound_event(song: &Song, index: usize) -> String {
+pub(crate) fn instrument_sound(song: &Song, index: usize) -> String {
     if index < 16 {
         format!("minecraft:block.note_block.{}", NOTE_BLOCK_SOUNDS[index])
     } else {
@@ -446,7 +446,7 @@ pub fn generate(song: &Song, opts: &DatapackOptions, output_stem: &str) -> Plan 
                 continue;
             }
             let index = note.instrument as usize;
-            let mut soundname = sound_event(song, index);
+            let mut soundname = instrument_sound(song, index);
             if key < 33.0 {
                 soundname.push_str("_-1");
             } else if key > 57.0 {

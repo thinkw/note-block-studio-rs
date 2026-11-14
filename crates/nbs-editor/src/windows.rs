@@ -8,10 +8,11 @@ use nbs_core::Macro;
 
 use crate::commands::Command;
 use crate::shortcuts::SHORTCUT_HELP;
-use crate::state::{EditorState, Flag, WindowKind};
+use crate::state::{EditorState, Flag, ModalQueue, WindowKind};
 use crate::theme::ThemeKind;
 
 pub fn show_windows(state: &mut EditorState, ctx: &Context) {
+    show_modal(state, ctx);
     let Some(kind) = state.window.clone() else { return; };
     let mut open = true;
     let title = kind.title().to_string();
@@ -21,6 +22,8 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         WindowKind::ClipEditor => 500.0,
         // 原版数据包导出窗口 550×430，两列布局。
         WindowKind::DatapackExport => 560.0,
+        // 原版 `draw_window_schematic_export` 是 550×400。
+        WindowKind::SchematicExport => 560.0,
         _ => 360.0,
     };
     egui::Window::new(title)
@@ -61,6 +64,43 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         });
     if !open {
         state.window = None;
+    }
+}
+
+/// 原版的 `message()` / `question()`：一次一个，答完才轮到下一个，
+/// 中途答「否」丢掉整个队列。窗口右上角的叉等价于「确定」/「否」。
+fn show_modal(state: &mut EditorState, ctx: &Context) {
+    let Some(modal) = state.modals.items.front().cloned() else { return };
+    let mut answer = None;
+    let mut open = true;
+    egui::Window::new(modal.title)
+        .id(egui::Id::new("nbs_modal"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.label(&modal.text);
+            ui.separator();
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if modal.yes_no {
+                    if ui.button("否").clicked() {
+                        answer = Some(false);
+                    }
+                    if ui.button("是").clicked() {
+                        answer = Some(true);
+                    }
+                } else if ui.button("确定").clicked() {
+                    answer = Some(true);
+                }
+            });
+        });
+    if answer.is_none() && !open {
+        // 点右上角的叉：确认框算「确定」，提问框算「否」。
+        answer = Some(!modal.yes_no);
+    }
+    if let Some(yes) = answer {
+        state.emit(Command::AnswerModal(yes));
     }
 }
 
@@ -654,20 +694,247 @@ fn midi_import_window(state: &mut EditorState, ui: &mut Ui) {
     footer(state, ui);
 }
 
+/// 原版 `draw_window_schematic_export`：设计 / 方块两页 + 记住我的更改 + 三个底部按钮。
 fn schematic_export_window(state: &mut EditorState, ui: &mut Ui) {
-    ui.label("生成 Minecraft 原理图：音符盒 + 下方乐器方块 + 红石线/中继器。");
-    ui.label(RichText::new(format!(
-        "中继器延迟由 tempo 自动映射：{:.2} t/s → {} 档",
-        state.doc.song.meta.tempo,
-        nbs_io::schematic::tempo_to_delay(state.doc.song.meta.tempo)
-    )).small().weak());
-    ui.checkbox(&mut state.schematic_options.structure, "1.13+ 结构方块格式 (.nbt，palette + blocks)");
-    ui.label(RichText::new("只包含音高 33..57 的音符（Minecraft 原生音域）").small().weak());
+    let mut tab = state.schematic_tab;
+    ui.horizontal(|ui| {
+        for (i, name) in ["设计", "方块"].iter().enumerate() {
+            if ui.selectable_label(tab == i as u8, *name).clicked() {
+                tab = i as u8;
+            }
+        }
+    });
+    state.schematic_tab = tab;
     ui.separator();
-    if ui.button("选择输出路径并导出…").clicked() {
-        state.emit(Command::OpenDialog(crate::state::DialogAction::ExportSchematic));
+
+    let stats = state.schematic_stats.clone();
+    let names = state.instrument_list();
+    let opts = &mut state.schematic_options;
+    if tab == 0 {
+        design_tab(opts, &stats, ui);
+    } else {
+        blocks_tab(opts, &names, ui);
     }
-    footer(state, ui);
+
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut state.schematic_remember, "记住我的更改")
+            .on_hover_text("下次导出 Schematic 时是否使用同样的设定。");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("使用默认值").clicked() {
+                state.modals = ModalQueue::question("确定", "你确定吗？", Command::ResetSchematicOptions);
+            }
+            if ui.button("取消").clicked() {
+                state.emit(Command::CloseWindow);
+            }
+            if ui.button("导出").clicked() {
+                state.emit(Command::ExportSchematicChecked);
+            }
+        });
+    });
+}
+
+/// 原版的方块候选菜单：分组标题 + 「id, data — 名称」，当前项高亮。
+fn block_menu(
+    ui: &mut Ui,
+    id: &str,
+    current: nbs_io::schematic::McBlock,
+    sections: &[nbs_io::schematic::BlockMenuSection],
+    label: String,
+) -> Option<nbs_io::schematic::McBlock> {
+    let mut out = None;
+    egui::ComboBox::from_id_salt(id)
+        .width(240.0)
+        .selected_text(label)
+        .show_ui(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
+                for sec in sections {
+                    if let Some(t) = sec.title {
+                        ui.label(RichText::new(t.to_string()).small().strong());
+                    }
+                    for m in &sec.items {
+                        let text =
+                            format!("{}, {}  {}", m.id, m.data, nbs_io::schematic::block_display_name(m.id, m.data));
+                        if ui.selectable_label(*m == current, text).clicked() {
+                            out = Some(*m);
+                            ui.memory_mut(|m| m.close_popup());
+                        }
+                    }
+                }
+            });
+        });
+    out
+}
+
+fn design_tab(o: &mut nbs_io::schematic::SchematicOptions, st: &nbs_io::schematic::SchematicStats, ui: &mut Ui) {
+    use nbs_io::schematic::{calc_size, export_guard};
+    ui.horizontal_top(|ui| {
+        ui.vertical(|ui| {
+            ui.label("分布:");
+            if ui.radio(o.layout == 1, "普通过道").on_hover_text("生成过道延伸到歌曲末尾。").clicked() {
+                o.layout = 1;
+            }
+            if ui.radio(o.layout == 0, "环形过道").on_hover_text("生成让玩家来回走的过道。").clicked() {
+                o.layout = 0;
+            }
+            ui.label("导出为 Minecraft 版本:");
+            if ui.radio(o.structure, "1.13+").on_hover_text("创建一个兼容 1.13+ 的结构方块文件。").clicked() {
+                o.structure = true;
+            }
+            if ui
+                .radio(!o.structure && !o.minecraft_old, "1.11-1.12")
+                .on_hover_text("创建一个兼容 1.11 和 1.12 的 Schematic 文件。")
+                .clicked()
+            {
+                o.minecraft_old = false;
+                o.structure = false;
+            }
+            if ui
+                .radio(!o.structure && o.minecraft_old, "pre 1.11")
+                .on_hover_text("创建一个只兼容 1.11 之前旧版本的 Schematic 文件。")
+                .clicked()
+            {
+                o.minecraft_old = true;
+                o.structure = false;
+            }
+        });
+        ui.add_space(12.0);
+        ui.vertical(|ui| {
+            let mut n = o.notesperrow as f64;
+            ui.horizontal(|ui| {
+                ui.label("每行中继器个数:");
+                if ui.add(egui::DragValue::new(&mut n).speed(1.0).range(5.0..=100.0)).changed() {
+                    o.set_notesperrow(n as usize);
+                }
+            });
+            ui.checkbox(&mut o.include_locked, "包括已静音的层")
+                .on_hover_text("是否在 Schematic 内包括已静音的层。");
+            ui.checkbox(&mut o.compress, "压缩每层").on_hover_text("压缩每层以节省竖向空间。");
+            if o.layout < 2 {
+                ui.checkbox(&mut o.minecart, "包括矿车轨道")
+                    .on_hover_text("包括一个跟随歌曲进度的矿车轨道。");
+                ui.indent("sch_chest", |ui| {
+                    ui.add_enabled_ui(o.minecart, |ui| {
+                        ui.checkbox(&mut o.chest, "添加矿车箱")
+                            .on_hover_text("是否在歌曲开始处添加一个装满矿车的箱子。");
+                    });
+                });
+                if o.layout == 0 {
+                    ui.checkbox(&mut o.loop_option, "包括循环选项")
+                        .on_hover_text("是否添加开关循环功能的拉杆。");
+                }
+                if o.structure {
+                    ui.checkbox(&mut o.command_block, "使用命令方块")
+                        .on_hover_text("是否使用命令方块代替音符盒以获得更广音域。\n（需要更多音符资源包）");
+                }
+            } else {
+                // 原版这里连中文界面都没翻译，照抄。
+                ui.checkbox(&mut o.glass, "Create glass floor")
+                    .on_hover_text("Whether a glass floor should make all the note blocks visible.");
+            }
+        });
+        ui.add_space(12.0);
+        ui.vertical(|ui| {
+            let size = calc_size(st, o);
+            let incl = o.include_locked as usize;
+            egui::Grid::new("sch_stats").num_columns(2).show(ui, |ui| {
+                ui.label("音符盒:");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(st.totalblocks[incl].to_string());
+                });
+                ui.end_row();
+                ui.label("中继器:");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(format!("{}x{}", st.repeaters[incl][o.tempo_mode as usize], size.layers));
+                });
+                ui.end_row();
+                ui.label("大小:");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(format!("{}x{}x{}", size.len, size.wid, size.hei));
+                });
+                ui.end_row();
+            });
+            ui.label("速度:");
+            for (i, name) in ["10 红石刻 / 秒", "5 红石刻 / 秒", "2.5 红石刻 / 秒"].iter().enumerate() {
+                if ui.radio(o.tempo_mode == i as u8, *name).on_hover_text("生成对应速度的歌曲").clicked() {
+                    o.tempo_mode = i as u8;
+                }
+            }
+            // 超限的红字提示与原版的报错同源。
+            if let Err(e) = export_guard(st, o) {
+                ui.label(RichText::new(e.replace('\n', " ")).small().color(egui::Color32::from_rgb(200, 90, 90)));
+            }
+        });
+    });
+}
+
+fn blocks_tab(
+    o: &mut nbs_io::schematic::SchematicOptions,
+    names: &[(u8, String)],
+    ui: &mut Ui,
+) {
+    use nbs_io::schematic::{block_display_name, instrument_block_menu, misc_block_menu, McBlock, INS_COUNT};
+    let rows = names.len().min(INS_COUNT);
+    let mut pick_ins: Option<(usize, McBlock)> = None;
+    egui::Grid::new("sch_ins_table").num_columns(3).striped(true).show(ui, |ui| {
+        ui.strong("音色");
+        ui.strong("方块");
+        ui.strong("方块名称");
+        ui.end_row();
+        for b in 0..rows {
+            ui.label(&names[b].1);
+            let cur = McBlock {
+                id: o.ins_block.get(b).copied().unwrap_or(1),
+                data: o.ins_data.get(b).copied().unwrap_or(0),
+            };
+            let menu = instrument_block_menu(b);
+            if let Some(m) = block_menu(
+                ui,
+                &format!("schexport_insblock_{b}"),
+                cur,
+                &menu,
+                format!("{}, {}", cur.id, cur.data),
+            ) {
+                pick_ins = Some((b, m));
+            }
+            ui.label(block_display_name(cur.id, cur.data));
+            ui.end_row();
+        }
+    });
+    if let Some((b, m)) = pick_ins {
+        // 原版 `menu_click` 的 `schexport_insblock` 分支。
+        if b < o.ins_block.len() {
+            o.ins_block[b] = m.id;
+        }
+        if b < o.ins_data.len() {
+            o.ins_data[b] = m.data;
+        }
+    }
+
+    ui.separator();
+    let slots = [
+        ("过道所用方块:", &mut o.walkway, 0u8, "用于过道和除电路和地面的方块。"),
+        ("电路所用方块:", &mut o.circuit, 1, "为电路用的方块。"),
+        ("地面所用方块:", &mut o.ground, 2, "为地面用的方块。选草方块会刷一堆生物。"),
+    ];
+    for (label, slot, which, tip) in slots {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            let cur = *slot;
+            let menu = misc_block_menu(which);
+            if let Some(m) = block_menu(
+                ui,
+                &format!("schexport_block_{which}"),
+                cur,
+                &menu,
+                block_display_name(cur.id, cur.data),
+            ) {
+                *slot = m;
+            }
+            ui.label(RichText::new(format!("{}, {}", cur.id, cur.data)).small().weak());
+        });
+        ui.label(RichText::new(tip).small().weak());
+    }
 }
 
 /// 原版 `draw_window_datapack_export` 里 10 个声音类型的中文标签与悬停说明。
