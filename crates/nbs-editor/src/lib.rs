@@ -195,6 +195,342 @@ mod gui_export_tests {
 }
 
 #[cfg(test)]
+mod gui_datapack_tests {
+    use commands::dispatch;
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+
+    fn frame(state: &mut EditorState, ctx: &egui::Context) {
+        let out = frame_out(state, ctx, base_input());
+        assert!(!out.shapes.is_empty(), "窗口应当真的画出内容");
+    }
+
+    fn base_input() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1440.0, 900.0),
+            )),
+            ..Default::default()
+        }
+    }
+
+    fn frame_out(
+        state: &mut EditorState,
+        ctx: &egui::Context,
+        input: egui::RawInput,
+    ) -> egui::FullOutput {
+        ctx.run(input, |ctx| crate::show(ctx, state))
+    }
+
+    /// 上一帧里某个文本标签的中心位置。egui 的 Checkbox/Button 把标签一起算进
+    /// 交互矩形，所以点文字就等于点控件。
+    fn text_center(shapes: &[egui::epaint::ClippedShape], want: &str) -> egui::Pos2 {
+        for cs in shapes {
+            if let egui::Shape::Text(t) = &cs.shape {
+                if t.galley.text() == want {
+                    return egui::Rect::from_min_size(t.pos, t.galley.rect.size()).center();
+                }
+            }
+        }
+        panic!("界面上找不到文本 {want:?}");
+    }
+
+    /// 真的用鼠标事件点一次控件：按下、抬起各占一帧。
+    /// 注意 egui 0.31 要把窗口先画一帧，区域内容才会进 `FullOutput::shapes`，
+    /// 所以定位文本前固定跑两帧。
+    fn click_text(state: &mut EditorState, ctx: &egui::Context, label: &str) {
+        frame_out(state, ctx, base_input());
+        let out = frame_out(state, ctx, base_input());
+        let p = text_center(&out.shapes, label);
+        let mut press = base_input();
+        press.events.push(egui::Event::PointerMoved(p));
+        press.events.push(egui::Event::PointerButton {
+            pos: p,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Default::default(),
+        });
+        frame_out(state, ctx, press);
+        let mut release = base_input();
+        release.events.push(egui::Event::PointerMoved(p));
+        release.events.push(egui::Event::PointerButton {
+            pos: p,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Default::default(),
+        });
+        frame_out(state, ctx, release);
+    }
+
+    /// 状态栏消息原始值（`active_message` 带 4 秒 TTL，测试里直接读字段）。
+    fn msg(state: &EditorState) -> String {
+        state
+            .message
+            .as_ref()
+            .map(|(s, _)| s.clone())
+            .unwrap_or_default()
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "nbs-gui-datapack-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("临时目录可建");
+        d
+    }
+
+    fn collect(dir: &Path, base: &Path, out: &mut Vec<(String, String)>) {
+        for e in std::fs::read_dir(dir).expect("目录可读") {
+            let p = e.expect("目录项").path();
+            if p.is_dir() {
+                collect(&p, base, out);
+            } else {
+                let rel = p
+                    .strip_prefix(base)
+                    .expect("相对路径")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.push((rel, std::fs::read_to_string(&p).expect("文本文件")));
+            }
+        }
+    }
+
+    /// 打开窗口 → 填选项 → 文件对话框 → dispatch 导出，全程走真实命令总线。
+    /// 断言的是磁盘上的字节：目录分支逐文件和 `generate()` 对比，ZIP 分支查结构。
+    #[test]
+    fn datapack_window_dialog_and_folder_output_are_real() {
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+
+        // ShowWindow 会像原版首帧那样把 dat_name 预填成歌曲名。
+        dispatch(
+            &mut state,
+            commands::Command::ShowWindow(WindowKind::DatapackExport),
+            &ctx,
+        );
+        assert_eq!(state.window, Some(WindowKind::DatapackExport));
+        assert_eq!(state.datapack_options.name, "Rust Rewrite Demo");
+        // 两个页签都要能画出来。
+        frame(&mut state, &ctx);
+        state.datapack_tab = 1;
+        frame(&mut state, &ctx);
+        state.datapack_tab = 0;
+
+        state.datapack_options.namespace = "My Pack".into();
+        state.datapack_options.path = "songs//Jazz".into();
+        state.datapack_options.source = "music".into();
+        state.datapack_options.mc_version = 1;
+        state.datapack_options.enable_radius = true;
+        state.datapack_options.radius = 40;
+        state.datapack_options.visualizer = true;
+        state.datapack_options.vis_type = nbs_io::datapack::VisType::Fountain;
+        state.datapack_options.glow = true;
+        state.doc.song.meta.loop_start = 1;
+        state.datapack_options.enable_looping = true;
+
+        dispatch(
+            &mut state,
+            commands::Command::OpenDialog(state::DialogAction::ExportDatapack),
+            &ctx,
+        );
+        let dialog = state.file_dialog.as_ref().expect("对话框已打开");
+        assert_eq!(dialog.ext, "zip", "默认 ZIP 分支就是 *.zip");
+        assert_eq!(dialog.name, "Rust Rewrite Demo.zip", "默认名跟 dat_name 走");
+        assert_eq!(state.window, Some(WindowKind::FileSave));
+
+        let dir = scratch("folder");
+        // 关掉 ZIP：对话框换成无扩展名的目录目标，导出结果必须是目录。
+        state.datapack_options.use_zip = false;
+        dispatch(
+            &mut state,
+            commands::Command::OpenDialog(state::DialogAction::ExportDatapack),
+            &ctx,
+        );
+        let dialog = state.file_dialog.as_ref().expect("对话框已打开");
+        assert_eq!(dialog.ext, "", "非 ZIP 分支不过滤扩展名");
+        assert_eq!(dialog.name, "Rust Rewrite Demo");
+
+        let pack = dir.join("pack_folder");
+        dispatch(&mut state, commands::Command::DialogConfirm(pack.clone()), &ctx);
+        assert_eq!(state.window, Some(WindowKind::DatapackExport), "原版导出后回到本窗口");
+
+        let mut files = Vec::new();
+        collect(&pack, &pack, &mut files);
+        let plan = nbs_io::datapack::generate(
+            &state.doc.song,
+            &state.datapack_options,
+            "pack_folder",
+        );
+        assert_eq!(files.len(), plan.files.len(), "落盘文件数与计划不一致");
+        let got: std::collections::BTreeMap<&str, String> = files
+            .iter()
+            .map(|(p, c)| (p.as_str(), c.clone()))
+            .collect();
+        for f in &plan.files {
+            assert_eq!(
+                got.get(f.path.as_str()).map(|s| s.as_str()),
+                Some(f.content.as_str()),
+                "{} 内容与生成计划不一致",
+                f.path
+            );
+        }
+        // 窗口里填的三项要真的决定包内结构（消毒后：命名空间 my_pack，路径 songs/jazz）。
+        assert!(got.contains_key("data/my_pack/function/songs/jazz/rust_rewrite_demo/play.mcfunction"));
+        assert!(got.contains_key("data/minecraft/tags/function/load.json"));
+        // 目录分支的卸载命令不带 `file/` 前缀（原版按 dat_usezip 分两支），
+        // 包名取对话框里选中的文件名。
+        assert!(got["data/my_pack/function/songs/jazz/rust_rewrite_demo/uninstall.mcfunction"]
+            .contains("datapack disable \"pack_folder\""));
+        let status = state.export_status.clone().unwrap_or_default();
+        assert!(status.contains("/function my_pack:songs/jazz/rust_rewrite_demo/play"), "{status}");
+
+        // ZIP 分支：文件名没写 .zip 时原版会补上，产物必须是真 ZIP。
+        let zip_in = dir.join("pack_zip");
+        dispatch(
+            &mut state,
+            commands::Command::OpenDialog(state::DialogAction::ExportDatapack),
+            &ctx,
+        );
+        state.datapack_options.use_zip = true;
+        dispatch(&mut state, commands::Command::DialogConfirm(zip_in.clone()), &ctx);
+        let bytes = std::fs::read(dir.join("pack_zip.zip")).expect("补扩展名后写出 ZIP");
+        assert_eq!(&bytes[..4], b"PK\x03\x04", "本地文件头魔数");
+        assert!(bytes
+            .windows(4)
+            .rev()
+            .take(32.min(bytes.len()))
+            .any(|w| w == b"PK\x05\x06"));
+        let names: Vec<String> = plan
+            .files
+            .iter()
+            .map(|f| f.path.clone())
+            .filter(|p| p.ends_with("play.mcfunction") || p.ends_with("pack.mcmeta"))
+            .collect();
+        assert_eq!(names.len(), 2);
+        for n in &names {
+            assert!(
+                bytes.windows(n.len()).any(|w| w == n.as_bytes()),
+                "中央目录里应能看到 {n}"
+            );
+        }
+        // 选中的名字已经是 .zip 时不能变成 .zip.zip。
+        assert!(!dir.join("pack_zip.zip.zip").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 空名称必须像原版一样报错，并且不留半成品。
+    #[test]
+    fn datapack_export_refuses_an_empty_name() {
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        state.datapack_options.name = "  !! ".into();
+        let dir = scratch("bad-name");
+        let out = dir.join("nope.zip");
+        dispatch(
+            &mut state,
+            commands::Command::OpenDialog(state::DialogAction::ExportDatapack),
+            &ctx,
+        );
+        dispatch(&mut state, commands::Command::DialogConfirm(out.clone()), &ctx);
+        assert!(state.export_status.is_none(), "失败却写了成功状态");
+        assert!(!out.exists(), "报错时不应留下产物");
+        assert!(
+            msg(&state).contains("数据包需要一个有效的唯一名称"),
+            "{:?}",
+            msg(&state)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 路径套太多层要按原版规则拒绝（`string_count("/", dat_getpath(dat_path)) >= 5`）。
+    #[test]
+    fn datapack_export_refuses_too_many_subfolders() {
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        dispatch(
+            &mut state,
+            commands::Command::ShowWindow(WindowKind::DatapackExport),
+            &ctx,
+        );
+        state.datapack_options.namespace = "ns".into();
+        // 4 个斜杠（= 5 个子文件夹）是原版允许的上限，5 个才开始报错。
+        state.datapack_options.path = "a/b/c/d/e".into();
+        let dir = scratch("deep-path");
+        let ok = dir.join("ok.zip");
+        dispatch(
+            &mut state,
+            commands::Command::OpenDialog(state::DialogAction::ExportDatapack),
+            &ctx,
+        );
+        dispatch(&mut state, commands::Command::DialogConfirm(ok.clone()), &ctx);
+        assert!(ok.is_file(), "五个子文件夹应通过原版的闸门");
+
+        state.datapack_options.path = "a/b/c/d/e/f".into();
+        let out = dir.join("deep.zip");
+        dispatch(
+            &mut state,
+            commands::Command::OpenDialog(state::DialogAction::ExportDatapack),
+            &ctx,
+        );
+        dispatch(&mut state, commands::Command::DialogConfirm(out.clone()), &ctx);
+        assert!(!out.exists());
+        assert!(msg(&state).contains("路径最多只能套 5 个子文件夹"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 真点一次鼠标：切页签、关掉「导出为 ZIP」、点「导出」。
+    /// 证明界面上的控件写的就是导出器读的那份状态，而不只是「画出了几个控件」。
+    #[test]
+    fn clicking_window_controls_drives_the_export() {
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        dispatch(
+            &mut state,
+            commands::Command::ShowWindow(WindowKind::DatapackExport),
+            &ctx,
+        );
+        assert!(state.datapack_options.use_zip, "原版默认开 ZIP");
+
+        click_text(&mut state, &ctx, "导出为 ZIP");
+        assert!(!state.datapack_options.use_zip, "点复选框没有改掉选项");
+
+        click_text(&mut state, &ctx, "效果");
+        assert_eq!(state.datapack_tab, 1, "点页签没有切过去");
+        let glow_before = state.datapack_options.glow;
+        click_text(&mut state, &ctx, "发光效果");
+        assert_ne!(state.datapack_options.glow, glow_before, "效果器页的复选框没接上");
+
+        click_text(&mut state, &ctx, "设置");
+        assert_eq!(state.datapack_tab, 0);
+        click_text(&mut state, &ctx, "导出");
+        // emit 的命令在下一帧开头落地（app::show 先 flush 再画）。
+        frame(&mut state, &ctx);
+        let dialog = state.file_dialog.as_ref().expect("点导出应打开保存对话框");
+        assert_eq!(dialog.ext, "", "关掉 ZIP 后不再要求 .zip");
+        assert_eq!(state.window, Some(WindowKind::FileSave));
+
+        let dir = scratch("clicked");
+        let pack = dir.join("by_click");
+        dispatch(&mut state, commands::Command::DialogConfirm(pack.clone()), &ctx);
+        assert!(pack.is_dir(), "非 ZIP 分支要写出目录");
+        assert_eq!(
+            std::fs::read_to_string(pack.join("pack.mcmeta")).expect("pack.mcmeta"),
+            "{\n\t\"pack\": {\n\t\t\"pack_format\": 48,\n\t\t\"description\": \"Rust Rewrite Demo\\nMade with Note Block Studio\"\n\t}\n}"
+        );
+        assert!(!dir.join("by_click.zip").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
 mod gui_encoder_tests {
     use commands::dispatch;
 
@@ -234,3 +570,4 @@ mod gui_encoder_tests {
         let _ = std::fs::remove_file(&out);
     }
 }
+

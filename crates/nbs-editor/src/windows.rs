@@ -19,6 +19,8 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         WindowKind::Preferences | WindowKind::Shortcuts => 460.0,
         WindowKind::FileOpen | WindowKind::FileSave => 520.0,
         WindowKind::ClipEditor => 500.0,
+        // 原版数据包导出窗口 550×430，两列布局。
+        WindowKind::DatapackExport => 560.0,
         _ => 360.0,
     };
     egui::Window::new(title)
@@ -52,6 +54,7 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::AudioSettings => audio_settings_window(state, ui),
             WindowKind::MidiImport => midi_import_window(state, ui),
             WindowKind::SchematicExport => schematic_export_window(state, ui),
+            WindowKind::DatapackExport => datapack_export_window(state, ui),
             WindowKind::PngExport => png_export_window(state, ui),
             WindowKind::MacroEditor => macro_editor_window(state, ui),
             WindowKind::Autosaves => autosaves_window(state, ui),
@@ -665,6 +668,202 @@ fn schematic_export_window(state: &mut EditorState, ui: &mut Ui) {
         state.emit(Command::OpenDialog(crate::state::DialogAction::ExportSchematic));
     }
     footer(state, ui);
+}
+
+/// 原版 `draw_window_datapack_export` 里 10 个声音类型的中文标签与悬停说明。
+/// 元组第三项写进命令的必须是英文内部值，中文只是界面标签。
+const SOUND_SOURCES_ZH: [(&str, &str, &str); 10] = [
+    ("ambient", "环境", "由环境音量控制"),
+    ("block", "方块", "由方块音量控制"),
+    ("hostile", "敌对", "由敌对生物音量控制"),
+    ("master", "主源", "由主音量控制"),
+    ("music", "音乐", "由音乐音量控制"),
+    ("neutral", "中立", "由友好生物音量控制"),
+    ("player", "玩家", "由玩家音量控制"),
+    ("record", "唱片", "由唱片机/音符盒音量控制"),
+    ("voice", "语音", "由语音音量控制"),
+    ("weather", "天气", "由天气音量控制"),
+];
+
+/// 与 `VisType::ALL` 同序的中文标签。
+const VIS_TYPES_ZH: [(&str, &str); 7] = [
+    ("弧形", "使用弧形效果器。"),
+    ("下落", "使用下落效果器。"),
+    ("上升", "使用上升效果器。"),
+    ("弹跳", "使用弹跳效果器。"),
+    ("钢琴", "使用钢琴式效果器。"),
+    ("喷泉", "使用喷泉效果器。"),
+    ("立体", "使用立体音效效果器。"),
+];
+
+fn datapack_export_window(state: &mut EditorState, ui: &mut Ui) {
+    ui.horizontal(|ui| {
+        for (i, tab) in ["设置", "效果"].iter().enumerate() {
+            if ui.selectable_label(state.datapack_tab == i as u8, *tab).clicked() {
+                state.datapack_tab = i as u8;
+            }
+        }
+    });
+    ui.separator();
+
+    let tab = state.datapack_tab;
+    let enda = state.doc.song.enda as f32;
+    // 循环起点属于歌曲自身（原版的拖动条直接改 loopstart），先取到局部再写回。
+    let mut loop_start = state.doc.song.meta.loop_start as f32;
+    let o = &mut state.datapack_options;
+    if tab == 0 {
+        egui::Grid::new("datapack_grid").num_columns(2).show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.label("唯一名称:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut o.name)
+                        .desired_width(145.0)
+                        .hint_text("<enter name>"),
+                )
+                .on_hover_text("该名称会作为在游戏里播放使用的命令名称。");
+                ui.label("命名空间:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut o.namespace)
+                        .desired_width(145.0)
+                        .hint_text("(可选)"),
+                )
+                .on_hover_text("（可选）将命令名称更改到自定义命名空间下。如为空，命名空间会设为歌曲名称。");
+                ui.label("路径:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut o.path)
+                        .desired_width(145.0)
+                        .hint_text("(可选)"),
+                )
+                .on_hover_text("（可选）从“functions”文件夹到歌曲的路径。用“/”来套文件夹。");
+                ui.label("命令预览:");
+                let preview = nbs_io::datapack::command_preview(&o.name, &o.namespace, &o.path);
+                ui.add(
+                    egui::Label::new(RichText::new(preview).monospace().strong())
+                        .selectable(true)
+                        .wrap_mode(egui::TextWrapMode::Truncate),
+                );
+                ui.label("声音类型");
+                for (id, zh, tip) in &SOUND_SOURCES_ZH[..5] {
+                    if ui.radio(o.source == *id, *zh).on_hover_text(*tip).clicked() {
+                        o.source = (*id).to_string();
+                    }
+                }
+                ui.label("Minecraft 版本");
+                if ui
+                    .radio(o.mc_version == 0, "1.13-1.20")
+                    .on_hover_text("导出至 Minecraft: Java 版\n版本 1.13 至 1.20.6。")
+                    .clicked()
+                {
+                    o.mc_version = 0;
+                }
+                if ui
+                    .radio(o.mc_version == 1, "1.21+")
+                    .on_hover_text("导出至 Minecraft: Java 版\n版本 1.21 及以上。")
+                    .clicked()
+                {
+                    o.mc_version = 1;
+                }
+                ui.checkbox(&mut o.use_zip, "导出为 ZIP")
+                    .on_hover_text("是否导出为 ZIP 格式的文件。如关闭，将导出为文件夹。");
+            });
+            ui.vertical(|ui| {
+                ui.label(" ");
+                ui.label(" ");
+                ui.label(" ");
+                ui.checkbox(&mut o.include_locked, "包括已静音的层")
+                    .on_hover_text("是否在数据包内包括已静音的层。");
+                ui.checkbox(&mut o.include_out_of_range, "包括超范围音符")
+                    .on_hover_text("是否包括超过 Minecraft 的 2 八度限制的音符。此选项需要安装额外的数据包。");
+                ui.checkbox(&mut o.enable_radius, "共享音乐")
+                    .on_hover_text("是否共享音乐给一定范围内的玩家。");
+                ui.horizontal(|ui| {
+                    ui.label("范围（方块）:");
+                    let mut r = o.radius as f32;
+                    ui.add_enabled_ui(o.enable_radius, |ui| {
+                        if ui
+                            .add(egui::DragValue::new(&mut r).range(16.0..=100000.0).speed(2.0))
+                            .changed()
+                        {
+                            o.radius = (r as i64).clamp(16, 100_000) as u32;
+                        }
+                    });
+                });
+                ui.label(RichText::new(format!("实际音量半径 = {:.2}", o.radius_value()))
+                    .small()
+                    .weak());
+                ui.checkbox(&mut o.enable_looping, "启用循环")
+                    .on_hover_text("如果开启，歌曲播放到最后将会循环。");
+                ui.horizontal(|ui| {
+                    ui.label("循环开始:");
+                    ui.add_enabled_ui(o.enable_looping, |ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut loop_start)
+                                .range(0.0..=enda)
+                                .speed(0.5),
+                        )
+                        .on_hover_text("播放完循环时回到的时刻。");
+                    });
+                });
+            });
+            ui.end_row();
+        });
+    } else {
+        ui.checkbox(&mut o.visualizer, "启用效果器")
+            .on_hover_text("注意：请使用一个虚空地图不然方块就会堆起来！");
+        ui.label("效果类型");
+        for (vis, (zh, tip)) in nbs_io::datapack::VisType::ALL.iter().zip(VIS_TYPES_ZH) {
+            if ui.radio(o.vis_type == *vis, zh).on_hover_text(tip).clicked() {
+                o.vis_type = *vis;
+            }
+        }
+        ui.checkbox(&mut o.glow, "发光效果")
+            .on_hover_text("是否为每个音符盒添加发光效果。");
+        ui.label("生成高度:");
+        ui.add(egui::DragValue::new(&mut o.y_val).range(0.0..=255.0).speed(0.5));
+        ui.label("地图中位置:");
+        ui.horizontal(|ui| {
+            ui.label("X值:");
+            ui.add(egui::DragValue::new(&mut o.x_val).speed(0.5));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Z值:");
+            ui.add(egui::DragValue::new(&mut o.z_val).speed(0.5));
+        });
+        if o.visualizer {
+            ui.label(RichText::new(format!(
+                "效果器类型：{}，音符盒生成在 y = {}",
+                o.vis_type.gml_name(),
+                o.y_val
+            ))
+            .small()
+            .weak());
+        }
+    }
+
+    if loop_start != state.doc.song.meta.loop_start as f32 {
+        state.doc.edit_meta("设置循环起点", |m| m.loop_start = loop_start as u16);
+        state.sync_loop_params();
+    }
+
+    if let Some(s) = &state.export_status {
+        ui.separator();
+        ui.label(RichText::new(s).small());
+    }
+    ui.separator();
+    ui.horizontal(|ui| {
+        if ui.button("导出").clicked() {
+            state.emit(Command::OpenDialog(crate::state::DialogAction::ExportDatapack));
+        }
+        if ui.button("使用默认值").clicked() {
+            // 原版是 dat_reset(1) + 一个确认框；这里直接重置并给出提示。
+            state.datapack_options = nbs_io::datapack::DatapackOptions::default();
+            state.export_status = None;
+            state.set_message("已恢复数据包导出默认设置");
+        }
+        if ui.button("关闭").clicked() {
+            state.emit(Command::CloseWindow);
+        }
+    });
 }
 
 fn png_export_window(state: &mut EditorState, ui: &mut Ui) {

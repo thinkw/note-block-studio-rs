@@ -8,6 +8,7 @@ use egui::{Context, Pos2};
 use nbs_audio::{AudioEngine, CpalEngine, SoundBank, EXTENDED_MAX_VOICES, DEFAULT_MAX_VOICES};
 use nbs_core::model::Note;
 use nbs_core::{Document, Macro, TremoloFade};
+use nbs_io::datapack::DatapackOptions;
 use nbs_io::image_export::ImageOptions;
 use nbs_io::midi::MidiImportOptions;
 use nbs_io::prefs::Preferences;
@@ -153,6 +154,7 @@ pub enum WindowKind {
     ConfirmNew,
     AudioExport,
     AudioSettings,
+    DatapackExport,
     MidiImport,
     SchematicExport,
     PngExport,
@@ -184,6 +186,7 @@ impl WindowKind {
             Self::ConfirmNew => "新建歌曲",
             Self::AudioExport => "音频导出",
             Self::AudioSettings => "音频设置",
+            Self::DatapackExport => "导出为数据包",
             Self::MidiImport => "从 MIDI 导入",
             Self::SchematicExport => "导出 Minecraft 原理图",
             Self::PngExport => "导出 PNG 谱面",
@@ -212,6 +215,7 @@ pub enum DialogAction {
     OpenSong,
     SaveSong,
     ExportAudio,
+    ExportDatapack,
     ExportMidi,
     ExportPng,
     ExportSchematic,
@@ -224,8 +228,8 @@ impl DialogAction {
     pub fn is_save(self) -> bool {
         matches!(
             self,
-            Self::SaveSong | Self::ExportAudio | Self::ExportMidi | Self::ExportPng
-                | Self::ExportSchematic | Self::ExportPattern
+            Self::SaveSong | Self::ExportAudio | Self::ExportDatapack | Self::ExportMidi
+                | Self::ExportPng | Self::ExportSchematic | Self::ExportPattern
         )
     }
     pub fn extension(self) -> &'static str {
@@ -233,6 +237,8 @@ impl DialogAction {
             Self::OpenSong | Self::SaveSong => "nbs",
             // 音频导出的扩展名跟着所选格式走，`FileDialog::set_ext` 会覆盖这里。
             Self::ExportAudio => "mp3",
+            // 原版 dat_usezip 默认开，对话框就是 *.zip；关掉时改成选目录（见 set_ext("")）。
+            Self::ExportDatapack => "zip",
             Self::ExportMidi | Self::ImportMidi => "mid",
             Self::ExportPng => "png",
             Self::ExportSchematic => "schematic",
@@ -272,7 +278,11 @@ impl FileDialog {
             .unwrap_or_else(|| "untitled".into());
         let ext = action.extension();
         let name = if action.is_save() {
-            format!("{base}.{ext}")
+            if ext.is_empty() {
+                base
+            } else {
+                format!("{base}.{ext}")
+            }
         } else {
             initial
                 .and_then(|p| p.file_name())
@@ -284,7 +294,8 @@ impl FileDialog {
         d
     }
 
-    /// 换用另一个扩展名（音频导出按所选格式），同时改写默认文件名并重新过滤目录。
+    /// 换用另一个扩展名（音频导出按所选格式；数据包关掉 ZIP 时按原版空过滤器处理，
+    /// 传 `""` 表示目标是文件夹）。同时改写默认文件名并重新过滤目录。
     pub fn set_ext(&mut self, ext: &'static str) {
         if self.ext == ext {
             return;
@@ -292,8 +303,13 @@ impl FileDialog {
         self.ext = ext;
         let p = Path::new(&self.name);
         if p.extension().is_some() {
-            if let Some(f) = p.with_extension(ext).file_name() {
-                self.name = f.to_string_lossy().into_owned();
+            let renamed = if ext.is_empty() {
+                p.file_stem().map(|s| s.to_string_lossy().into_owned())
+            } else {
+                p.with_extension(ext).file_name().map(|s| s.to_string_lossy().into_owned())
+            };
+            if let Some(f) = renamed {
+                self.name = f;
             }
         }
         self.refresh();
@@ -308,7 +324,8 @@ impl FileDialog {
             .filter_map(|e| e.ok())
             .filter(|e| {
                 let p = e.path();
-                p.is_dir() || p.extension().and_then(|s| s.to_str()) == Some(ext)
+                // 空扩展名 = 原版导出目录时的空过滤器：什么都列出来，名字当作目录。
+                ext.is_empty() || p.is_dir() || p.extension().and_then(|s| s.to_str()) == Some(ext)
             })
             .map(|e| e.path())
             .collect();
@@ -358,6 +375,9 @@ pub struct EditorState {
     pub macro_reverse: bool,
     pub midi_options: MidiImportOptions,
     pub schematic_options: SchematicOptions,
+    pub datapack_options: DatapackOptions,
+    /// 原版 `selected_tab_dat`：0 = 设置，1 = 效果器。
+    pub datapack_tab: u8,
     pub png_options: ImageOptions,
     pub export_status: Option<String>,
     pub piano_start: u8,
@@ -437,6 +457,8 @@ impl EditorState {
             macro_reverse: false,
             midi_options: MidiImportOptions::default(),
             schematic_options: SchematicOptions::default(),
+            datapack_options: DatapackOptions::default(),
+            datapack_tab: 0,
             png_options: ImageOptions { dark: png_dark, ..ImageOptions::default() },
             export_status: None,
             piano_start: 33,

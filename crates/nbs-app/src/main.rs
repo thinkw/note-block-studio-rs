@@ -100,6 +100,7 @@ fn run_cli(args: &[String]) -> Result<(), String> {
              --export-midi <song.nbs> <out.mid>        导出 SMF MIDI\n\
              --export-png <song.nbs> <out.png>         导出 PNG 谱面\n\
              --export-schematic <song.nbs> <out.schematic>  导出原理图\n\
+             --export-datapack <song.nbs> <out.zip|目录名>  导出 Minecraft 数据包\n\
              --export-nbp <song.nbs> <out.nbp>         导出选区片段\n\
              --import-midi <in.mid> <out.nbs>          导入 MIDI 为 NBS\n\
              --audio-info                             显示音频设备与采样加载状态"
@@ -218,6 +219,29 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             println!(
                 "已导出原理图 {}×{}×{} / {} 音符盒 → {}",
                 info.width, info.height, info.length, info.note_blocks, output.display()
+            );
+        }
+        "--export-datapack" => {
+            let mut opts = nbs_io::datapack::DatapackOptions::default();
+            // GUI 打开窗口时把 dat_name 预填成歌曲名，CLI 保持一致；没有名字就退回输出文件名。
+            let stem = output
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "untitled".into());
+            opts.name = song.meta.name.trim().to_string();
+            if opts.name.is_empty() {
+                opts.name = stem;
+            }
+            // 原版用 dat_usezip 同时决定容器和 uninstall.mcfunction 里的引用形式；
+            // CLI 没有这个开关，就以输出名 itself 为准，两者不许各说各话。
+            opts.use_zip = output.extension().and_then(|e| e.to_str()) == Some("zip");
+            let info = nbs_io::datapack::export(&song, &opts, output)?;
+            println!(
+                "已导出数据包 {} 个文件（{}）→ {}\n播放命令：/function {}play",
+                info.files,
+                if info.zip { "ZIP" } else { "目录" },
+                output.display(),
+                info.functionpath
             );
         }
         "--export-nbp" => {

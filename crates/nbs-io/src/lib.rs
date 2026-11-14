@@ -3,10 +3,12 @@
 //! - [`midi`]          SMF MIDI 导入/导出（量化公式对齐原版 `import_midi.gml`）
 //! - [`pattern`]       `.nbp` 选区片段（含 zlib+base64 剪贴板兼容）
 //! - [`schematic`]     `.schematic` / 结构方块 `.nbt`（大端 NBT + gzip）
+//! - [`datapack`]      Minecraft 数据包（mcfunction + 二分 tick 查找树）
 //! - [`image_export`]  PNG 谱面导出
 //! - [`prefs`]         JSON 偏好、最近文件、原子保存、自动备份
 
 pub mod audio_export;
+pub mod datapack;
 pub mod image_export;
 pub mod midi;
 pub mod pattern;

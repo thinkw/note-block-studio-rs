@@ -365,6 +365,20 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 let save = matches!(kind, WindowKind::FileSave);
                 state.file_dialog = Some(FileDialog::new(save, state.doc.song.filename.as_ref()));
             }
+            if matches!(kind, WindowKind::DatapackExport) && state.datapack_options.name.is_empty()
+            {
+                // 原版在窗口第一次绘制时把 dat_name 填成歌曲名，其次是文件名去掉扩展名。
+                let meta = state.doc.song.meta.name.trim().to_string();
+                let from_file = state
+                    .doc
+                    .song
+                    .filename
+                    .as_ref()
+                    .and_then(|p| p.file_stem())
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                state.datapack_options.name = if meta.is_empty() { from_file } else { meta };
+            }
             state.window = Some(kind);
             state.context_menu = None;
         }
@@ -481,6 +495,20 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     dialog.set_ext(f.extension());
                 }
             }
+            if action == DialogAction::ExportDatapack {
+                // 原版：开 ZIP 时对话框是 `ZIP archive (*.zip)`、默认名 `dat_name + ".zip"`；
+                // 关掉 ZIP 时过滤器是空的“数据包目录”，默认名就是 `dat_name`（没有扩展名）。
+                let zip = state.datapack_options.use_zip;
+                dialog.set_ext(if zip { "zip" } else { "" });
+                if !state.datapack_options.name.is_empty() {
+                    dialog.name = if zip {
+                        format!("{}.zip", state.datapack_options.name)
+                    } else {
+                        state.datapack_options.name.clone()
+                    };
+                    dialog.refresh();
+                }
+            }
             state.file_dialog = Some(dialog);
             state.window = Some(if action.is_save() {
                 WindowKind::FileSave
@@ -535,6 +563,11 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                         Err(e) => state.set_message(format!("导出原理图失败: {e}")),
                     }
                     state.window = None;
+                }
+                DialogAction::ExportDatapack => {
+                    export_datapack(state, &path);
+                    // 原版导出完把窗口重新打开（`window = w_datapack_export`）。
+                    state.window = Some(WindowKind::DatapackExport);
                 }
                 DialogAction::ExportPattern => {
                     let sel = if state.doc.selection.is_empty() {
@@ -696,6 +729,45 @@ fn export_audio(state: &mut EditorState, path: &std::path::Path) {
         Err(e) => {
             state.export_status = None;
             state.set_message(format!("导出音频失败: {e}"));
+        }
+    }
+}
+
+/// 数据包导出。原版把 ZIP/目录两分支的扩展名规则写在 `datapack_export()` 里：
+/// 开 ZIP 时若选中的文件名不是 `.zip` 就补上，关掉 ZIP 时目标是一个没有 `.zip`
+/// 后缀的目录名。这里同样先把路径掰成与选项一致，再交给 `nbs_io::datapack::export`。
+fn export_datapack(state: &mut EditorState, path: &std::path::Path) {
+    let opts = state.datapack_options.clone();
+    let is_zip_ext = path.extension().and_then(|e| e.to_str()) == Some("zip");
+    let dest = if opts.use_zip {
+        if is_zip_ext {
+            path.to_path_buf()
+        } else {
+            path.with_extension("zip")
+        }
+    } else if is_zip_ext {
+        path.with_extension("")
+    } else {
+        path.to_path_buf()
+    };
+    match nbs_io::datapack::export(&state.doc.song, &opts, &dest) {
+        Ok(info) => {
+            let fp = &info.functionpath;
+            state.export_status = Some(format!(
+                "数据包已保存到 {}（{} 个文件，{}）\n\n如想在游戏内播放，使用命令：\n/function {}play\n/function {}pause\n/function {}stop\n\n如果你想从你的世界中卸载它，使用命令：\n/function {}uninstall\n\n然后从“datapacks”文件夹取出就行了。",
+                dest.display(),
+                info.files,
+                if info.zip { "ZIP" } else { "目录" },
+                fp,
+                fp,
+                fp,
+                fp
+            ));
+            state.set_message(format!("数据包已导出：{} 个文件", info.files));
+        }
+        Err(e) => {
+            state.export_status = None;
+            state.set_message(format!("导出数据包失败: {e}"));
         }
     }
 }

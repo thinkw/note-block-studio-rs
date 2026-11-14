@@ -320,7 +320,7 @@ pub fn build_structure_nbt(song: &Song, opts: &SchematicOptions) -> Vec<u8> {
     n.buf
 }
 
-fn legacy_block_name(id: u8) -> &'static str {
+pub(crate) fn legacy_block_name(id: u8) -> &'static str {
     match id {
         3 => "dirt",
         5 => "oak_planks",

@@ -39,6 +39,7 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                 if ui.button("MIDI…").clicked() { state.emit(Command::OpenDialog(DialogAction::ExportMidi)); ui.close_menu(); }
                 if ui.button("PNG 谱面…").clicked() { state.emit(Command::ShowWindow(WindowKind::PngExport)); ui.close_menu(); }
                 if ui.button("Minecraft 原理图…").clicked() { state.emit(Command::ShowWindow(WindowKind::SchematicExport)); ui.close_menu(); }
+                if ui.button("Minecraft 数据包…").clicked() { state.emit(Command::ShowWindow(WindowKind::DatapackExport)); ui.close_menu(); }
                 if ui.button("片段 (.nbp)…").clicked() { state.emit(Command::OpenDialog(DialogAction::ExportPattern)); ui.close_menu(); }
             });
             if ui.button("自动保存 / 备份…").clicked() { state.emit(Command::ShowWindow(WindowKind::Autosaves)); ui.close_menu(); }
