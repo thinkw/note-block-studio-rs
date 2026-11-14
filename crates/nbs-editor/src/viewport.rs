@@ -8,13 +8,24 @@ use egui::{Pos2, Rect, Vec2};
 
 /// 原版每格 32px。
 pub const BASE_CELL: f32 = 32.0;
-pub const LAYER_PANEL_WIDTH: f32 = 284.0;
+/// 原版图层栏：x1 = 4，`spr_layerbox` 宽 256 → 列宽 264。
+pub const LAYER_PANEL_WIDTH: f32 = 264.0;
+/// 原版时间轴带：y1+2 .. y1+34。
 pub const TIMELINE_HEIGHT: f32 = 32.0;
-pub const SCROLLBAR_SIZE: f32 = 16.0;
-pub const PIANO_HEIGHT: f32 = 132.0;
-pub const STATUS_HEIGHT: f32 = 26.0;
-pub const MENU_HEIGHT: f32 = 26.0;
-pub const TOOLBAR_HEIGHT: f32 = 38.0;
+/// 原版滚动条厚度 32。
+pub const SCROLLBAR_SIZE: f32 = 32.0;
+/// 原版白键高 128，上方留 2px。
+pub const PIANO_HEIGHT: f32 = 130.0;
+/// 原版状态栏分隔线在 `rh - 24`。
+pub const STATUS_HEIGHT: f32 = 24.0;
+/// 原版菜单标签 y = 1，高 18 → 整条 20。
+pub const MENU_HEIGHT: f32 = 20.0;
+/// 原版图标条 y = 20..49（`spr_iconbar` 高 30），下方 4px 是窗口底色空带：
+/// 网格带顶在 `y1 + 2 = 52`，图层面板头部带顶在 `54`。
+/// 整条取 34 是为了让面板高度之和 = 54，时间轴带和第一行正好落在原版像素上。
+pub const TOOLBAR_HEIGHT: f32 = 34.0;
+/// 原版图标条自身的可见高度。
+pub const TOOLBAR_STRIP_HEIGHT: f32 = 30.0;
 
 #[derive(Clone, Debug)]
 pub struct Viewport {

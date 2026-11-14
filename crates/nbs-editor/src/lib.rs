@@ -7,7 +7,7 @@
 //! interaction  DragMode 状态机 + 一帧输入快照
 //! commands     统一命令总线与 dispatch
 //! document(*)  所有编辑命令的 diff 事务（在 nbs-core）
-//! layers_panel / toolbar / timeline(grid) / piano / statusbar / instruments_panel
+//! layers_panel / toolbar / timeline(grid) / piano / statusbar
 //! windows      歌曲信息、属性、统计、首选项、宏、文件对话框、帮助
 //! theme        4 套主题
 //! fonts        启动时装系统中文字体（egui 自带字体没有 CJK 字形）
@@ -19,7 +19,7 @@ pub mod app;
 pub mod commands;
 pub mod fonts;
 pub mod grid;
-pub mod instruments_panel;
+pub mod icons;
 pub mod interaction;
 pub mod layers_panel;
 pub mod piano;
@@ -226,18 +226,25 @@ mod gui_window_tests {
         ctx.run(input, |ctx| crate::show(ctx, state))
     }
 
-    /// 上一帧里第一个满足条件的文本中心位置。egui 的 Checkbox/Button 把标签一起
+    /// 一帧里**最后**一个满足条件的文本中心位置。egui 的 Checkbox/Button 把标签一起
     /// 算进交互矩形，所以点文字就等于点控件。
+    /// 取最后一个而不是第一个：绘制顺序就是叠放顺序，面板先画、窗口后画，
+    /// 所以同名文字以窗口里的那份才真的收得到点击（例如菜单栏的「设置」页签和
+    /// 数据包导出窗口里的「设置」页签重名）。
     fn text_center_if(
         shapes: &[egui::epaint::ClippedShape],
         want: impl Fn(&str) -> bool,
     ) -> egui::Pos2 {
+        let mut found = None;
         for cs in shapes {
             if let egui::Shape::Text(t) = &cs.shape {
                 if want(t.galley.text()) {
-                    return egui::Rect::from_min_size(t.pos, t.galley.rect.size()).center();
+                    found = Some(egui::Rect::from_min_size(t.pos, t.galley.rect.size()).center());
                 }
             }
+        }
+        if let Some(p) = found {
+            return p;
         }
         panic!(
             "界面上找不到符合条件的文本，当前文本有：{}",

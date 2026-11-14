@@ -1305,6 +1305,7 @@ name = "nbs-editor"
 version = "0.1.0"
 dependencies = [
  "egui",
+ "image",
  "nbs-audio",
  "nbs-core",
  "nbs-io",

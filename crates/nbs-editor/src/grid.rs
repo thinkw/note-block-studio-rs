@@ -30,9 +30,13 @@ fn alpha(c: Color32, a: u8) -> Color32 {
 }
 
 /// 切分布局：时间轴 / 网格 / 水平滚动条 / 垂直滚动条。
-fn split(area: Rect) -> (Rect, Rect, Rect, Rect) {
+///
+/// 行区只取整行（原版 `totalrows = floor((rh - rhval) / 32)`），水平滚动条紧贴行区底
+/// （原版 `y1 + totalrows * 32 + 34`），而不是贴着窗口底边——这样图层栏的宏条
+/// （`y1 + 32`）和网格最后一行才会落在同一条线上。
+fn split(area: Rect, cell: f32) -> (Rect, Rect, Rect, Rect) {
     let w = (area.width() - SCROLLBAR_SIZE).max(64.0);
-    let h = (area.height() - TIMELINE_HEIGHT - SCROLLBAR_SIZE).max(64.0);
+    let h = (((area.height() - TIMELINE_HEIGHT - SCROLLBAR_SIZE) / cell).floor().max(1.0)) * cell;
     let timeline = Rect::from_min_size(area.min, Vec2::new(w, TIMELINE_HEIGHT));
     let grid = Rect::from_min_size(
         pos2(area.min.x, area.min.y + TIMELINE_HEIGHT),
@@ -50,7 +54,8 @@ fn split(area: Rect) -> (Rect, Rect, Rect, Rect) {
 }
 
 pub fn show_grid(state: &mut EditorState, ui: &mut Ui, area: Rect) {
-    let (timeline_rect, grid_rect, hbar_rect, vbar_rect) = split(area);
+    let cell = state.viewport.cell();
+    let (timeline_rect, grid_rect, hbar_rect, vbar_rect) = split(area, cell);
 
     state.viewport.origin = grid_rect.min;
     state.viewport.size = grid_rect.size();
@@ -71,6 +76,8 @@ pub fn show_grid(state: &mut EditorState, ui: &mut Ui, area: Rect) {
     draw_timeline(state, ui, timeline_rect);
     draw_grid(state, ui, grid_rect);
     draw_scrollbars(state, ui, hbar_rect, vbar_rect);
+    let idle = state.window.is_none() && state.context_menu.is_none();
+    crate::layers_panel::macro_bar_over_grid(state, ui, area, idle);
     draw_context_menu(state, ui);
 
     ui.output_mut(|o| o.cursor_icon = state.interaction.cursor);
@@ -896,7 +903,7 @@ fn draw_context_menu(state: &mut EditorState, ui: &Ui) {
         .fixed_pos(menu.pos)
         .order(egui::Order::Foreground)
         .interactable(true);
-    area.show(ui.ctx(), |ui| {
+    let area_response = area.show(ui.ctx(), |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
             ui.set_min_width(190.0);
             let item = |ui: &mut Ui, label: &str| -> bool { ui.button(label).clicked() };
@@ -954,6 +961,28 @@ fn draw_context_menu(state: &mut EditorState, ui: &Ui) {
                     if item(ui, "下移图层") { cmds.push(Command::MoveLayerDown(layer)); close = true; }
                     if item(ui, "删除图层") { cmds.push(Command::RemoveLayer(layer)); close = true; }
                 }
+                ContextKind::Tempo => {
+                    let bpm_on = state.prefs.use_bpm;
+                    if ui.selectable_label(!bpm_on, "红石刻/秒 (t/s)").clicked() {
+                        state.prefs.use_bpm = false;
+                        cmds.push(Command::SavePreferences);
+                        close = true;
+                    }
+                    if ui.selectable_label(bpm_on, "拍数/分钟 (BPM)").clicked() {
+                        state.prefs.use_bpm = true;
+                        cmds.push(Command::SavePreferences);
+                        close = true;
+                    }
+                    ui.separator();
+                    // 原版末尾还有一项「速度测量器」，我们没有打点测速功能，就不画它。
+                    for t in [10.0_f32, 12.0, 14.0, 16.0, 18.0, 20.0, 30.0, 60.0] {
+                        let label = if bpm_on { format!("{:.0} BPM", t * 15.0) } else { format!("{t:.0} t/s") };
+                        if item(ui, &label) {
+                            cmds.push(Command::SetTempo(t));
+                            close = true;
+                        }
+                    }
+                }
             }
             ui.separator();
             if item(ui, "关闭菜单") { close = true; }
@@ -963,7 +992,8 @@ fn draw_context_menu(state: &mut EditorState, ui: &Ui) {
     for c in cmds {
         state.emit(c);
     }
-    let menu_rect = Rect::from_min_size(menu.pos, egui::vec2(210.0, 360.0));
+    // 判定「点到菜单外」要用菜单自己的实际尺寸：各分支菜单高度不同。
+    let menu_rect = area_response.response.rect;
     let clicked_outside = ui.input(|i| {
         i.pointer.primary_pressed()
             && i.pointer

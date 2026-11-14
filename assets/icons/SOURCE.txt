@@ -1,0 +1,4 @@
+帧顺序取自原版 GameMaker 工程 sprites/<name>/<name>.yy 里 "frames" 数组的书写顺序，
+文件名 <序号>.png 即 draw_sprite(sprite, <序号>, ...) 的 subimg。
+来源仓库：OpenNBS/OpenNoteBlockStudio（GPL-3.0-or-later）。
+iconbar/ 只用到 00-02（原版 draw_sprite(spr_iconbar, 0/1/2) 的左端帽、可拉伸中段、右端帽），每帧 2x30；03-08 是原版工程里存在但从未被引用的帧，一并导出以保持序号一致。

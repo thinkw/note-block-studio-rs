@@ -262,7 +262,7 @@ fn preferences(state: &mut EditorState, ui: &mut Ui) {
     ui.separator();
     ui.label(RichText::new("显示选项").strong());
     for flag in [
-        Flag::ShowLayers, Flag::ShowPiano, Flag::ShowInstruments,
+        Flag::ShowLayers, Flag::ShowPiano,
         Flag::UseColors, Flag::UseShapes, Flag::UseIcons,
         Flag::ShowNumbers, Flag::ShowOctaves, Flag::ShowKeyNames,
         Flag::ShowIncompatible, Flag::ShowGridLines, Flag::Flats, Flag::Blackout,
@@ -272,6 +272,24 @@ fn preferences(state: &mut EditorState, ui: &mut Ui) {
             state.emit(Command::ToggleFlag(flag));
         }
     }
+    ui.separator();
+    // 原版 `draw_window_preferences.gml` 549-552「进度条」组。原版有三种跟随模式
+    // （按页 / 按刻 / 按帧），后两种都居中，只差亚刻偏移；我们的 `follow_center`
+    // 就是「居中 + 亚刻偏移」，所以这里给两格：按页 与 居中逐帧。
+    ui.label(RichText::new("进度条").strong());
+    if ui.checkbox(&mut state.marker_follow, "播放时跟随进度条").changed() {
+        state.emit(Command::SavePreferences);
+    }
+    ui.add_enabled_ui(state.marker_follow, |ui| {
+        if ui.radio(!state.follow_center, "按页").clicked() {
+            state.follow_center = false;
+            state.emit(Command::SavePreferences);
+        }
+        if ui.radio(state.follow_center, "居中逐帧").clicked() {
+            state.follow_center = true;
+            state.emit(Command::SavePreferences);
+        }
+    });
     ui.separator();
     ui.horizontal(|ui| {
         ui.label("撤销栈容量");
@@ -641,13 +659,33 @@ fn audio_settings_window(state: &mut EditorState, ui: &mut Ui) {
     if ui.checkbox(&mut metronome, "节拍器（每 4 tick）").changed() {
         state.emit(Command::ToggleMetronome);
     }
+    // 以下四格对应原版 `draw_window_preferences.gml` 558-562「播放」组里的四个开关。
     let mut mono = state.prefs.mono;
-    if ui.checkbox(&mut mono, "强制单声道").changed() {
+    if ui.checkbox(&mut mono, "关闭立体声").changed() {
         state.emit(Command::ToggleMono);
     }
+    let mut layer_vol = state.prefs.show_layer_volumes;
+    if ui.checkbox(&mut layer_vol, "显示每层音量").changed() {
+        state.prefs.show_layer_volumes = layer_vol;
+        state.emit(Command::SavePreferences);
+    }
+    let mut soundcount = state.prefs.show_sound_count;
+    if ui.checkbox(&mut soundcount, "显示正在播放的声音数").changed() {
+        state.prefs.show_sound_count = soundcount;
+        state.emit(Command::SavePreferences);
+    }
     let mut extended = state.prefs.extended_voices;
-    if ui.checkbox(&mut extended, "更多音频通道（1024 voices）").changed() {
+    if ui.checkbox(&mut extended, "提升声音限制（1024 voices）").changed() {
         state.emit(Command::ToggleExtendedVoices);
+    }
+    ui.separator();
+    ui.label(RichText::new("速度单位").strong());
+    let mut bpm = state.prefs.use_bpm;
+    ui.radio_value(&mut bpm, false, "红石刻 / 秒 (t/s)");
+    ui.radio_value(&mut bpm, true, "拍数 / 分钟 (BPM)");
+    if bpm != state.prefs.use_bpm {
+        state.prefs.use_bpm = bpm;
+        state.emit(Command::SavePreferences);
     }
     ui.separator();
     ui.label("内置采样目录（留空 = 自动搜索）");

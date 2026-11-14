@@ -319,7 +319,24 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.doc.set_layer(i, |l| l.stereo = v.min(PAN_MAX));
         }
         Command::SelectLayer(i) => {
-            state.doc.select_rect(0, i, state.doc.song.enda, i, false, false, false);
+            // 原版按 `selected_layers` 判定这一层是否已经在选区里；我们没有那个列表，
+            // 用「选区出现的层恰好只有这一层」等价判断：是 → 整行从选区减掉，
+            // 否 → 把整行并进现有选区（原版 `selection_add` 本来就是累加）。
+            let only_this = !state.doc.selection.is_empty()
+                && state
+                    .doc
+                    .selection
+                    .notes
+                    .iter()
+                    .all(|n| state.doc.selection.y + n.dy as i64 == i as i64);
+            if only_this {
+                let enda = state.doc.song.enda;
+                state.doc.selection_remove_rect(0, i, enda, i);
+            } else {
+                let additive = !state.doc.selection.is_empty();
+                let enda = state.doc.song.enda;
+                state.doc.select_rect(0, i, enda, i, false, additive, false);
+            }
         }
         Command::SetInstrument(i) => state.current.instrument = i,
         Command::SetEditMode(m) => state.tool = m,
@@ -476,7 +493,6 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             match flag {
                 Flag::ShowLayers => f.show_layers = !f.show_layers,
                 Flag::ShowPiano => f.show_piano = !f.show_piano,
-                Flag::ShowInstruments => f.show_instruments = !f.show_instruments,
                 Flag::UseColors => f.use_colors = !f.use_colors,
                 Flag::UseShapes => f.use_shapes = !f.use_shapes,
                 Flag::UseIcons => f.use_icons = !f.use_icons,

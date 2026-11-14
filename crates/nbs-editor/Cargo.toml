@@ -10,5 +10,6 @@ nbs-core = { workspace = true }
 nbs-audio = { workspace = true }
 nbs-io = { workspace = true }
 egui = { workspace = true }
+image = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

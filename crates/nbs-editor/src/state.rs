@@ -44,7 +44,6 @@ impl EditMode {
 pub enum Flag {
     ShowLayers,
     ShowPiano,
-    ShowInstruments,
     UseColors,
     UseShapes,
     UseIcons,
@@ -62,7 +61,6 @@ impl Flag {
         match self {
             Self::ShowLayers => "显示图层栏",
             Self::ShowPiano => "显示钢琴键盘",
-            Self::ShowInstruments => "显示音色面板",
             Self::UseColors => "彩色方块",
             Self::UseShapes => "乐器形状",
             Self::UseIcons => "乐器图标",
@@ -79,7 +77,6 @@ impl Flag {
         match self {
             Self::ShowLayers => f.show_layers,
             Self::ShowPiano => f.show_piano,
-            Self::ShowInstruments => f.show_instruments,
             Self::UseColors => f.use_colors,
             Self::UseShapes => f.use_shapes,
             Self::UseIcons => f.use_icons,
@@ -98,7 +95,6 @@ impl Flag {
 pub struct UiFlags {
     pub show_layers: bool,
     pub show_piano: bool,
-    pub show_instruments: bool,
     pub use_colors: bool,
     pub use_shapes: bool,
     pub use_icons: bool,
@@ -116,7 +112,6 @@ impl Default for UiFlags {
         Self {
             show_layers: true,
             show_piano: true,
-            show_instruments: false,
             use_colors: true,
             use_shapes: true,
             use_icons: true,
@@ -238,6 +233,8 @@ impl ModalQueue {
 pub enum ContextKind {    Grid,
     Timeline,
     Layer(u32),
+    /// 图层栏顶部的速度框（原版右键：单位切换 + 8 个预设速度）。
+    Tempo,
 }
 
 #[derive(Clone, Debug)]
@@ -381,7 +378,11 @@ pub struct LayerDrag {
     pub index: u32,
     /// false = 音量, true = 声像
     pub stereo: bool,
+    /// 量化后显示 / 提交用的值（原版不带 Shift 时按 10 取整）。
     pub value: u8,
+    /// 未量化的累加值，对应原版 `dragvol` / `dragstereo`：
+    /// 慢慢拖也能越过 10 的台阶，量化只影响落到模型上的那一份。
+    pub raw: f32,
 }
 
 pub struct EditorState {
@@ -432,6 +433,19 @@ pub struct EditorState {
     pub last_prefs_save: Instant,
     /// 已同步给音频引擎的 `Song::rev`，用于只在内容真变化时重建事件表。
     pub audio_rev: u64,
+    /// 原版精灵图（工具栏 / 图层栏 / 宏条的图标按钮）。
+    pub icons: crate::icons::Icons,
+    /// 原版 `showinsbox`：工具栏音色框是否展开成整窗网格。
+    pub insbox_open: bool,
+    /// 原版 `insbox_start`：收起状态下这一行从第几个音色开始画。
+    pub insbox_start: usize,
+    /// 原版 `forward`：按住快退 / 快进时的滚动方向（-1 / 0 / +1）。
+    pub scrub: i8,
+    /// 原版 `tempodrag`：拖速度框时的未量化累加值。
+    pub tempo_drag: Option<f32>,
+    /// 兼容性指示（原版 `compatible`），随 `song.rev` 重算。
+    pub compat_rev: u64,
+    pub compat: u8,
 }
 
 impl Default for EditorState {
@@ -458,7 +472,6 @@ impl EditorState {
         let mut flags = UiFlags::default();
         flags.show_layers = prefs.show_layers;
         flags.show_piano = prefs.show_piano;
-        flags.show_instruments = prefs.show_instruments;
         flags.use_colors = prefs.use_colors;
         flags.use_shapes = prefs.use_shapes;
         flags.use_icons = prefs.use_icons;
@@ -518,6 +531,13 @@ impl EditorState {
             last_autosave: Instant::now(),
             last_prefs_save: Instant::now(),
             audio_rev: 0,
+            icons: crate::icons::Icons::default(),
+            insbox_open: false,
+            insbox_start: 0,
+            scrub: 0,
+            tempo_drag: None,
+            compat_rev: u64::MAX,
+            compat: 1,
         }
     }
 
@@ -588,6 +608,16 @@ impl EditorState {
         if playing {
             ctx.request_repaint();
         }
+        // 原版快退 / 快进：按住时按歌曲速度滚动；播放中倒退是双倍速
+        // （`forward - (forward < 0 && playing = 1)`）。
+        if self.scrub != 0 {
+            let dt = ctx.input(|i| i.stable_dt).clamp(0.0, 0.1) as f64;
+            let factor = if self.scrub < 0 && playing { 2.0 } else { 1.0 };
+            let delta = self.audio.clock().tempo() as f64 * dt * factor * self.scrub as f64;
+            let pos = (self.audio.clock().position() + delta).max(0.0);
+            self.audio.clock_mut().seek(pos);
+            ctx.request_repaint();
+        }
         // 定时自动保存（只写备份，不改动当前文件名与脏标记）
         let mins = self.prefs.auto_save_minutes as u64;
         if mins > 0
@@ -603,6 +633,34 @@ impl EditorState {
 
     pub fn marker(&self) -> f64 {
         self.audio.clock().position()
+    }
+
+    /// 原版 `compatible`（0 = 仅资源包，1 = 完全兼容，2 = 仅数据包）。
+    /// 判定条件与原版逐字一致：有选择时不刷新，保留上一次的值。
+    pub fn compatibility(&mut self) -> u8 {
+        if !self.doc.selection.notes.is_empty() || self.doc.song.rev == self.compat_rev {
+            return self.compat;
+        }
+        self.compat_rev = self.doc.song.rev;
+        use nbs_core::model::{MC_KEY_MAX, MC_KEY_MIN};
+        let (mut outside, mut custom, mut pitched) = (false, false, false);
+        for (_, _, n) in self.doc.song.iter_notes() {
+            outside |= n.key < MC_KEY_MIN || n.key > MC_KEY_MAX;
+            custom |= n.instrument >= nbs_core::model::FIRST_CUSTOM_INDEX;
+            pitched |= n.pitch != 0;
+        }
+        self.compat = if outside || custom {
+            0
+        } else {
+            let t = self.doc.song.meta.tempo;
+            let ok = [10.0_f32, 5.0, 2.5].iter().any(|v| (t - v).abs() < 1e-3);
+            if ok && !pitched {
+                1
+            } else {
+                2
+            }
+        };
+        self.compat
     }
 
     pub fn set_marker(&mut self, tick: f64) {
@@ -666,7 +724,6 @@ impl EditorState {
         self.prefs.follow_center = self.follow_center;
         self.prefs.show_layers = self.flags.show_layers;
         self.prefs.show_piano = self.flags.show_piano;
-        self.prefs.show_instruments = self.flags.show_instruments;
         self.prefs.use_colors = self.flags.use_colors;
         self.prefs.use_shapes = self.flags.use_shapes;
         self.prefs.use_icons = self.flags.use_icons;
