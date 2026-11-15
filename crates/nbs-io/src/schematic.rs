@@ -75,10 +75,11 @@ const REPEATER_POWERED: u8 = 94;
 
 /// 原版硬编码的三组 id（`schematic_export.gml` 开头）。
 ///
-/// 前 16 项逐字抄自原版 `ins[0..15]`；后 4 项是 v6 的铜块一族，用装机版自带
-/// `instrumenttextures.zip → assets/minecraft/sounds.json` 里的音符盒声音事件名
-/// （`block.note_block.trumpet*`）。自定义乐器在原版里统一写 `"harp"`
-/// （`schematic_export.gml:41-43`），所以下面取值越界时也退回 harp。
+/// 前 16 项逐字抄自原版 `ins[0..15]`；后 4 项是 v6 的铜块一族，取值顺序与装机版
+/// 自己导出的 .nbt 参照文件里 `instrument=` 属性逐字一致
+/// （`harp … pling, trumpet, trumpet_exposed, trumpet_weathered, trumpet_oxidized`）。
+/// 自定义乐器在原版里统一写 `"harp"`（`schematic_export.gml:41-43`），
+/// 所以取值越界时也退回 harp。
 const INS_NAMES: [&str; 20] = [
     "harp",
     "bass",
@@ -101,6 +102,24 @@ const INS_NAMES: [&str; 20] = [
     "trumpet_weathered",
     "trumpet_oxidized",
 ];
+
+/// 装机版结构导出给 16..19 号铜块一族写的「乐器底下的方块」。
+///
+/// 这 4 个方块是 1.17+ 的，1.12 数字 id 表里没有，所以 `INSTRUMENT_BLOCKS`
+/// 那套数字表（`.schematic` 路径用）填不进去；.nbt 路径直接按名字写。
+/// 取值逐字来自装机版自己导出的参照文件 palette[19..23]。
+const COPPER_INS_BLOCKS: [&str; 4] = [
+    "waxed_copper_block",
+    "waxed_exposed_copper",
+    "waxed_weathered_copper",
+    "waxed_oxidized_copper",
+];
+
+/// 牌面第 3、4 行的断句。仓库 GML 两处（.schematic 与 .nbt）都写
+/// `Minecraft Note` / `Block Studio`；装机版只改了 .nbt 那一处，
+/// .schematic 那处没有新版样本可查，仍按仓库 GML。
+const SIGN_TAIL_GML: [&str; 2] = ["Minecraft Note", "Block Studio"];
+const SIGN_TAIL_INSTALLED: [&str; 2] = ["Note Block", "Studio"];
 
 /// 原版导出按钮的大小上限：`len >= 2000 || wid >= 2000 || hei >= 256` 拒绝。
 pub const MAX_LEN: usize = 2000;
@@ -1554,7 +1573,7 @@ pub fn build_with_stats(song: &Song, opts: &SchematicOptions, stats: &SchematicS
         size,
         opts: opts.clone(),
         repeaters: stats.repeaters[opts.include_locked as usize][opts.tempo_mode as usize],
-        insnum: 16 + song.custom_instruments.len(),
+        insnum: nbs_core::model::FIRST_CUSTOM_INDEX as usize + song.custom_instruments.len(),
         sch_loop,
         minecart,
         chest_on,
@@ -1615,14 +1634,14 @@ impl Built {
         n.int("x", wid - 1 - self.signy);
         n.int("y", self.signz);
         n.int("z", self.signx);
-        self.write_sign_text(&mut n, old, false);
+        self.write_sign_text(&mut n, old, false, SIGN_TAIL_GML);
         n.end();
         if self.sch_loop {
             n.string("id", if old { "Sign" } else { "minecraft:sign" });
             n.int("x", wid - 1 - self.signy);
             n.int("y", self.signz - 1);
             n.int("z", self.signx);
-            self.write_sign_text(&mut n, old, true);
+            self.write_sign_text(&mut n, old, true, SIGN_TAIL_GML);
             n.end();
         }
         for t in &self.notes {
@@ -1671,30 +1690,22 @@ impl Built {
         self.size.wid as f64 - 1.0 - (self.cyy as f64 - 1.0 - 0.5)
     }
 
-    fn write_sign_text(&self, n: &mut Nbt, old: bool, loop_sign: bool) {
-        let texts: [&str; 4] = if loop_sign {
-            if old {
-                ["Looping ON", "", "", "Looping OFF"]
-            } else {
-                [
-                    "{\"text\": \"Looping ON\"}",
-                    "{\"text\": \"\"}",
-                    "{\"text\": \"\"}",
-                    "{\"text\": \"Looping OFF\"}",
-                ]
-            }
-        } else if old {
-            ["Song generated", "by the", "Minecraft Note", "Block Studio"]
+    /// `schematic_export.gml` 里两处牌面文字（626-634 的 .schematic 与
+    /// 921-924 的结构方块）。`json` 对应原版的 1.13+ 分支：每行包成
+    /// `{"text": "…"}`；`tail` 是第 3、4 行的断句，见 `SIGN_TAIL_*`。
+    fn write_sign_text(&self, n: &mut Nbt, old: bool, loop_sign: bool, tail: [&str; 2]) {
+        let lines: [&str; 4] = if loop_sign {
+            ["Looping ON", "", "", "Looping OFF"]
         } else {
-            [
-                "{\"text\": \"Song generated\"}",
-                "{\"text\": \"by the\"}",
-                "{\"text\": \"Minecraft Note\"}",
-                "{\"text\": \"Block Studio\"}",
-            ]
+            ["Song generated", "by the", tail[0], tail[1]]
         };
-        for (i, t) in texts.iter().enumerate() {
-            n.string(&format!("Text{}", i + 1), t);
+        for (i, t) in lines.iter().enumerate() {
+            let text = if old {
+                t.to_string()
+            } else {
+                format!("{{\"text\": \"{t}\"}}")
+            };
+            n.string(&format!("Text{}", i + 1), &text);
         }
     }
 
@@ -1717,8 +1728,19 @@ impl Built {
             n.end();
         }
         for a in 0..insnum {
-            let blk = self.opts.ins(a);
-            n.string("Name", &format!("minecraft:{}", namespaced_id(blk.id, blk.data)));
+            // 16..19 的铜块一族没有 1.12 数字 id，装机版在 .nbt 里直接写方块名；
+            // 其余行仍按可配置的 digital id 走（`.schematic` 那条路径不变）。
+            let copper = a
+                .checked_sub(INSTRUMENT_BLOCKS.len())
+                .and_then(|k| COPPER_INS_BLOCKS.get(k));
+            let name = match copper {
+                Some(c) => format!("minecraft:{c}"),
+                None => {
+                    let blk = self.opts.ins(a);
+                    format!("minecraft:{}", namespaced_id(blk.id, blk.data))
+                }
+            };
+            n.string("Name", &name);
             // 原版只给索引 9（木琴）加了 axis 属性，因为默认方块是竖放的骨块。
             if a == 9 {
                 n.compound("Properties");
@@ -1879,11 +1901,15 @@ impl Built {
             n.end();
         }
 
-        n.list("blocks", (self.size.hei * self.size.len * self.size.wid + 1 + self.sch_loop as usize) as i32, 10);
+        // 原版按网格体积声明条数：牌子/音符/箱子这些"特殊"格子由前面的显式条目
+        // 负责，网格扫描会跳过它们占的格子，所以总数正好是 hei*len*wid。
+        let cells = self.size.hei * self.size.len * self.size.wid;
+        n.list("blocks", cells as i32, 10);
+        let mut written = 0usize;
         n.compound("nbt");
         n.string("Color", "black");
         n.string("id", "minecraft:sign");
-        self.write_sign_text(&mut n, false, false);
+        self.write_sign_text(&mut n, false, false, SIGN_TAIL_INSTALLED);
         n.end();
         n.list("pos", 3, 3);
         n.item_int(wid - 1 - self.signy);
@@ -1891,11 +1917,12 @@ impl Built {
         n.item_int(self.signx);
         n.int("state", (insnum * 26 + 19) as i32);
         n.end();
+        written += 1;
         if self.sch_loop {
             n.compound("nbt");
             n.string("Color", "black");
             n.string("id", "minecraft:sign");
-            self.write_sign_text(&mut n, false, true);
+            self.write_sign_text(&mut n, false, true, SIGN_TAIL_INSTALLED);
             n.end();
             n.list("pos", 3, 3);
             n.item_int(wid - 1 - self.signy);
@@ -1903,6 +1930,7 @@ impl Built {
             n.item_int(self.signx);
             n.int("state", (insnum * 26 + 19) as i32);
             n.end();
+            written += 1;
         }
         for t in &self.notes {
             if self.opts.command_block {
@@ -1939,6 +1967,7 @@ impl Built {
             };
             n.int("state", state);
             n.end();
+            written += 1;
         }
         if self.chest_on {
             n.compound("nbt");
@@ -1957,6 +1986,7 @@ impl Built {
             n.item_int(self.chestx);
             n.int("state", (insnum * 26 + 21) as i32);
             n.end();
+            written += 1;
         }
         for c in 0..self.size.hei {
             for a in 0..self.size.len {
@@ -1965,15 +1995,26 @@ impl Built {
                     if id == NOTE_BLOCK || id == CHEST {
                         continue;
                     }
+                    // 牌子占的那格（循环牌再往前一格）上面已经写过显式条目，
+                    // 扫描要跳过：装机版参照文件里没有任何重复格子，
+                    // blocks 条数正好等于网格体积。
+                    let same_sign_column = a as i32 == self.signx && bb as i32 == self.signy;
+                    if same_sign_column && (c as i32 == self.signz
+                        || (self.sch_loop && c as i32 == self.signz - 1))
+                    {
+                        continue;
+                    }
                     n.list("pos", 3, 3);
                     n.item_int(wid - bb as i32 - 1);
                     n.item_int(c as i32);
                     n.item_int(a as i32);
                     n.int("state", self.state_of(id, data));
                     n.end();
+                    written += 1;
                 }
             }
         }
+        debug_assert_eq!(written, cells, "blocks 声明 {cells} 条，实际写出 {written} 条");
         n.end();
         n.buf
     }
@@ -3527,7 +3568,9 @@ mod tests {
         assert_eq!(size[2].as_i32(), Some(5));
         let (ty, pal) = root.get("palette").unwrap().as_list().unwrap();
         assert_eq!(ty, 10);
-        assert_eq!(pal.len(), 29 + 16 * 26);
+        // 20 个内置乐器（v6 铜块一族）：palette 条数 = 29 + insnum * 26，
+        // 与装机版自己导出的参照文件一致。
+        assert_eq!(pal.len(), 29 + 20 * 26);
         assert_eq!(
             keys_of(&pal[0]),
             ["Name"]
@@ -3538,8 +3581,21 @@ mod tests {
         let axis = pal[3 + 9].get("Properties").unwrap();
         assert_eq!(axis.get("axis").and_then(Value::as_str), Some("y"));
         assert!(pal[3 + 8].get("Properties").is_none());
+        // 铜块一族的 4 行方块名逐字取自参照文件 palette[19..23]。
+        assert_eq!(
+            pal[3 + 16..3 + 20]
+                .iter()
+                .map(|p| p.get("Name").and_then(Value::as_str).unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "minecraft:waxed_copper_block",
+                "minecraft:waxed_exposed_copper",
+                "minecraft:waxed_weathered_copper",
+                "minecraft:waxed_oxidized_copper"
+            ]
+        );
         // 音符盒调色板从 3+insnum 开始，第一项是 harp/note 0。
-        let nb = &pal[3 + 16];
+        let nb = &pal[3 + 20];
         assert_eq!(nb.get("Name").and_then(Value::as_str), Some("minecraft:note_block"));
         let props = nb.get("Properties").unwrap();
         assert_eq!(
@@ -3566,11 +3622,11 @@ mod tests {
         let nbt = built.structure_nbt(&s);
         let root = crate::nbt::parse(&nbt).unwrap();
         let blocks = items(root.get("blocks").unwrap());
-        // 声明数量 = hei*len*wid + 1 + sch_loop，实际写入应与之相等。
+        // 装机版：网格扫描跳过已写过牌子的格子，所以条数正好等于网格体积。
         let size = items(root.get("size").unwrap());
         let s2 = size.len();
         assert_eq!(s2, 3);
-        assert_eq!(blocks.len(), built.size.hei * built.size.len * built.size.wid + 1 + built.sch_loop as usize);
+        assert_eq!(blocks.len(), built.size.hei * built.size.len * built.size.wid);
         // 第一个条目是签名方块：nbt -> pos -> state。
         assert_eq!(keys_of(&blocks[0]), ["nbt", "pos", "state"]);
         assert_eq!(
@@ -3578,20 +3634,56 @@ mod tests {
             Some("minecraft:sign")
         );
         // 音符盒条目不带 nbt，state = 3 + insnum + ins*25 + note。
-        let note = blocks
-            .iter()
-            .find(|b| b.get("nbt").is_none() && keys_of(b) == ["pos", "state"])
-            .unwrap();
-        let _ = note;
         let states: Vec<i32> = blocks
             .iter()
             .filter_map(|b| b.get("state").and_then(Value::as_i32))
             .collect();
-        assert!(states.contains(&(3 + 16 + (0 * 25 + (45 - 33)))), "{states:?}");
+        assert!(states.contains(&(3 + 20 + (0 * 25 + (45 - 33)))), "{states:?}");
+        // 每个格子只出现一次：牌格不再被网格扫描重复写成 air。
+        let cells: std::collections::HashSet<Vec<i32>> = blocks
+            .iter()
+            .map(|b| items(b.get("pos").unwrap()).iter().filter_map(Value::as_i32).collect())
+            .collect();
+        assert_eq!(cells.len(), blocks.len(), "有格子被写了两次");
         // 矿车实体：pos -> blockPos -> 无名 compound。
         let ents = items(root.get("entities").unwrap());
         assert_eq!(ents.len(), 1);
         assert_eq!(keys_of(&ents[0]), ["pos", "blockPos", ""]);
+    }
+
+    /// 铜块一族（16..19）的音符必须落在自己那 25 行 trumpet 上；`insnum`
+    /// 还写死 16 的时候，这两条会串到 palette 尾部的通用方块上去。
+    /// 行名与参照文件 palette[23 + ins*25] 的 `instrument=` 逐字一致。
+    #[test]
+    fn copper_notes_land_on_their_own_trumpet_rows() {
+        let s = song_with(&[(0, 0, 16, 45), (1, 0, 19, 57)]);
+        let mut o = SchematicOptions::default();
+        o.structure = true;
+        let built = build(&s, &o);
+        let root = crate::nbt::parse(&built.structure_nbt(&s)).unwrap();
+        let pal = items(root.get("palette").unwrap());
+        let instrument_of = |state: usize| -> String {
+            pal[state]
+                .get("Properties")
+                .and_then(|p| p.get("instrument"))
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string()
+        };
+        // note = key - 33：45 → 12，57 → 24。
+        let want = [
+            (3 + 20 + 16 * 25 + 12, "trumpet"),
+            (3 + 20 + 19 * 25 + 24, "trumpet_oxidized"),
+        ];
+        let states: Vec<i32> = items(root.get("blocks").unwrap())
+            .iter()
+            .filter(|b| b.get("nbt").is_none())
+            .filter_map(|b| b.get("state").and_then(Value::as_i32))
+            .collect();
+        for (state, name) in want {
+            assert_eq!(instrument_of(state as usize), name, "palette 第 {state} 行");
+            assert!(states.contains(&state), "音符没写到 {state}：{states:?}");
+        }
     }
 
     #[test]
@@ -3607,14 +3699,14 @@ mod tests {
         o.structure = true;
         o.command_block = true;
         let built = build(&s, &o);
-        // 一个自定义音色让 insnum 变成 17，palette 也随之增长。
-        assert_eq!(built.insnum, 17);
+        // 20 个内置 + 一个自定义音色让 insnum 变成 21，palette 也随之增长。
+        assert_eq!(built.insnum, 21);
         let nbt = built.structure_nbt(&s);
         let root = crate::nbt::parse(&nbt).unwrap();
         let pal = items(root.get("palette").unwrap());
-        assert_eq!(pal.len(), 29 + 17 * 26);
-        // 命令方块调色板区（3+17 起）全叫 command_block，朝向向上。
-        let cb = &pal[3 + 17];
+        assert_eq!(pal.len(), 29 + 21 * 26);
+        // 命令方块调色板区（3+21 起）全叫 command_block，朝向向上。
+        let cb = &pal[3 + 21];
         assert_eq!(cb.get("Name").and_then(Value::as_str), Some("minecraft:command_block"));
         assert_eq!(cb.get("Properties").unwrap().get("facing").and_then(Value::as_str), Some("up"));
         let blocks = items(root.get("blocks").unwrap());
@@ -3628,7 +3720,7 @@ mod tests {
             "playsound minecraft:block.note_block.harp block @a ~ ~ ~ 3 1.000000"
         );
         assert_eq!(keys_of(cmd.get("nbt").unwrap()), ["Command", "TrackOutput", "powered", "auto", "conditionMet", "UpdateLastExecution"]);
-        assert_eq!(cmd.get("state").and_then(Value::as_i32), Some(3 + 17));
+        assert_eq!(cmd.get("state").and_then(Value::as_i32), Some(3 + 21));
     }
 
     #[test]
@@ -3865,11 +3957,9 @@ mod tests {
                     assert_eq!(keys_of(&root), ["DataVersion", "size", "palette", "entities", "blocks"]);
                     // 声明的 blocks 数量必须和真正写出来的一致。
                     let blocks = items(root.get("blocks").unwrap());
-                    // 声明数量 = hei*len*wid + 1 个签名格 + 循环签名格。
-                    assert_eq!(
-                        blocks.len(),
-                        info.height * info.length * info.width + 1 + (layout == 0) as usize
-                    );
+                    // 声明数量 = 网格体积：牌子/音符/箱子都由前面的显式条目写，
+                    // 网格扫描把它们占的格子跳过。
+                    assert_eq!(blocks.len(), info.height * info.length * info.width);
                 } else {
                     assert_eq!(keys_of(&root)[0], "Height");
                     let blocks = root.get("Blocks").and_then(Value::as_bytes).unwrap();
@@ -4229,9 +4319,8 @@ mod tests {
         assert!(got.trace.contains("_____INPUT 1_____"));
     }
 
-    /// 用户给的一对参照物：原版自己导出的 .nbs + 对应 .nbt。
-    /// 按截图那套选项重导一遍，逐格比对内容；样本来自比仓库 GML 更新的构建，
-    /// 三处版本差异（乐器表、牌格重复 air、牌面断句）在测试里单列并钉死。
+    /// 用户给的一对参照物：装机版原版自己导出的 .nbs + 对应 .nbt。
+    /// 按截图那套选项重导一遍，size / palette / 方块表 / 牌面文字逐条比对。
     #[test]
     fn structure_export_matches_the_original_reference_file() {
         let dir = reference_songs_dir().expect("assets/Songs 不在仓库里");
@@ -4261,18 +4350,24 @@ mod tests {
         assert_eq!(keys_of(&ours), keys_of(&theirs), "根节点的键序不同");
         assert_eq!(ours.get("DataVersion"), theirs.get("DataVersion"));
         assert_eq!(
+            items(ours.get("size").unwrap()),
+            items(theirs.get("size").unwrap()),
+            "size 三元组不同"
+        );
+        assert_eq!(
             items(ours.get("entities").unwrap()),
             items(theirs.get("entities").unwrap()),
             "矿车实体不同"
         );
 
-        // 方块表：状态用 palette 文本描述，避免受 id 重编号影响。
-        // 允许的差异只有一条——原版更新后网格扫描会跳过已写过告示牌的格子，
-        // 仓库 GML 没跳，于是我们多写 2 条 air；丢掉重复格子里的 air 后必须同序同值。
-        let (our_cells, extra_air) = cells_without_duplicated_air(&ours);
-        let (their_cells, extra_theirs) = cells_without_duplicated_air(&theirs);
-        assert_eq!(extra_air, 2, "我们在牌格里多写的 air 条数变了");
-        assert_eq!(extra_theirs, 0, "原版参照里出现了预料外的重复格子");
+        // palette 整表相同：29 + 20 个乐器的方块行与音符行（含铜块一族的
+        // waxed 铜块和 trumpet_* 属性名）+ 尾部 26 项，顺序也必须一致。
+        assert_eq!(palette_names(&ours), palette_names(&theirs), "调色板与原版不同");
+
+        // 方块表：逐条同序同值。原版网格扫描会跳过已经写过牌子的格子，
+        // 所以牌格里只有牌子那一条，任何格子都不该出现两次。
+        let our_cells = cells_in_order(&ours);
+        let their_cells = cells_in_order(&theirs);
         assert_eq!(our_cells.len(), their_cells.len(), "方块条数不同");
         let first_diff = our_cells
             .iter()
@@ -4285,55 +4380,12 @@ mod tests {
                 i, our_cells[i], their_cells[i]
             ),
         }
+        let unique: std::collections::HashSet<((i32, i32, i32), String)> =
+            our_cells.iter().cloned().collect();
+        assert_eq!(unique.len(), our_cells.len(), "我们把同一个格子写了两次");
 
-        // palette：我们的表必须是原版表的有序子序列，多出来的只允许是
-        // 1.21 的铜块一族（4 个乐器方块 + trumpet 四种氧化态 x 25 音高 = 104 条）。
-        let our_pal = palette_names(&ours);
-        let their_pal = palette_names(&theirs);
-        let mut it = their_pal.iter();
-        assert!(
-            our_pal.iter().all(|d| it.any(|x| x == d)),
-            "我们的调色板顺序不是原版顺序的子序列"
-        );
-        let our_set: std::collections::HashSet<&str> =
-            our_pal.iter().map(|s| s.as_str()).collect();
-        let extras: Vec<&String> = their_pal
-            .iter()
-            .filter(|s| !our_set.contains(s.as_str()))
-            .collect();
-        assert_eq!(extras.len(), 104, "原版比我们多出的调色板项数变了");
-        assert!(
-            extras
-                .iter()
-                .all(|s| s.contains("waxed_") || s.contains("trumpet")),
-            "多出来的调色板项不是铜块一族：{:?}",
-            extras
-                .iter()
-                .filter(|s| !(s.contains("waxed_") || s.contains("trumpet")))
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            their_pal
-                .iter()
-                .filter(|s| !our_set.contains(s.as_str()))
-                .any(|s| s.contains("instrument=trumpet,")),
-            "原版乐器表里没有 trumpet"
-        );
-
-        // 牌面文字：仓库 GML 写 "Minecraft Note"/"Block Studio"，
-        // 样本那版换了断句，其余三行一致；循环牌四行完全相同。
-        let (our_first, their_first) = (sign_texts(&ours, 0), sign_texts(&theirs, 0));
-        assert_eq!(&our_first[..2], &their_first[..2]);
-        let ours_tail: Vec<&str> = our_first[2..].iter().map(String::as_str).collect();
-        let theirs_tail: Vec<&str> = their_first[2..].iter().map(String::as_str).collect();
-        assert_eq!(
-            ours_tail,
-            ["{\"text\": \"Minecraft Note\"}", "{\"text\": \"Block Studio\"}"]
-        );
-        assert_eq!(
-            theirs_tail,
-            ["{\"text\": \"Note Block\"}", "{\"text\": \"Studio\"}"]
-        );
+        // 牌面四行逐字相同：署名牌是装机版的新断句，循环牌两处一致。
+        assert_eq!(sign_texts(&ours, 0), sign_texts(&theirs, 0), "署名牌不同");
         assert_eq!(sign_texts(&ours, 1), sign_texts(&theirs, 1), "循环牌不同");
     }
 
@@ -4379,29 +4431,17 @@ mod tests {
         )
     }
 
-    /// 返回「按写入顺序的 (格子, 方块描述)」以及被丢掉的重复 air 条数。
-    fn cells_without_duplicated_air(root: &Value) -> (Vec<((i32, i32, i32), String)>, usize) {
+    /// 按写入顺序的「(格子, 方块描述)」；方块用 palette 文本描述，
+    /// 这样不受 palette 下标重编号的影响，能直接看出差在哪一格。
+    fn cells_in_order(root: &Value) -> Vec<((i32, i32, i32), String)> {
         let pal = items(root.get("palette").unwrap());
-        let blocks = items(root.get("blocks").unwrap());
-        let mut per_cell: std::collections::HashMap<(i32, i32, i32), usize> =
-            std::collections::HashMap::new();
-        for b in blocks {
-            *per_cell.entry(block_pos(b)).or_insert(0) += 1;
-        }
-        let mut out = Vec::with_capacity(blocks.len());
-        let mut dropped = 0;
-        for b in blocks {
-            let cell = block_pos(b);
-            let desc = describe_palette_entry(
-                &pal[b.get("state").and_then(Value::as_i32).unwrap() as usize],
-            );
-            if per_cell[&cell] > 1 && desc == "minecraft:air" {
-                dropped += 1;
-                continue;
-            }
-            out.push((cell, desc));
-        }
-        (out, dropped)
+        items(root.get("blocks").unwrap())
+            .iter()
+            .map(|b| {
+                let state = b.get("state").and_then(Value::as_i32).unwrap() as usize;
+                (block_pos(b), describe_palette_entry(&pal[state]))
+            })
+            .collect()
     }
 
     /// 第 index 张告示牌的四行文字（按 nbt 里的 Text1..Text4）。
