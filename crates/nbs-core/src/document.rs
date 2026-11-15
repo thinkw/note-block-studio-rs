@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 
 use crate::history::{CellDelta, Edit, History, LayerDelta, MetaDelta};
-use crate::model::{Layer, Note, Song, SongMeta};
+use crate::model::{Layer, Note, Song, SongMeta, FIRST_CUSTOM_INDEX, MC_KEY_MAX, MC_KEY_MIN};
 use crate::selection::{collect_rect, Selection, SelectionNote, SelectionSnapshot};
 
 pub struct Document {
@@ -276,16 +276,35 @@ impl Document {
     /// 按乐器选择全部音符。`invert = true` 对应原版的「选择除该乐器之外的全部」。
     /// 语义与 select_rect 一致：选中即摘出为浮动选区。
     pub fn select_by_instrument(&mut self, instrument: u8, invert: bool) {
-        let mut tx = self.begin(if invert { "选择除该乐器" } else { "按乐器选择" });
+        self.select_where(if invert { "选择除该乐器" } else { "按乐器选择" }, |n| {
+            (n.instrument == instrument) != invert
+        });
+    }
+
+    /// 原版 `select_outside(lower, higher)`：把 Minecraft 两个八度之外
+    /// （`key < 33` 算过低、`key > 57` 算过高）的音符摘成浮动选区。
+    /// 兼容性窗口「选择过低的音符 / 选择过高的音符」两个按钮走的就是它。
+    pub fn select_outside(&mut self, lower: bool, higher: bool) {
+        self.select_where("选择范围外的音符", |n| {
+            (lower && n.key < MC_KEY_MIN) || (higher && n.key > MC_KEY_MAX)
+        });
+    }
+
+    /// 原版 `select_custom()`：把用了自定义音色的音符摘成浮动选区。
+    pub fn select_custom(&mut self) {
+        self.select_where("选择自定义音色的音符", |n| n.instrument >= FIRST_CUSTOM_INDEX);
+    }
+
+    /// 原版 `select_by_instrument` / `select_outside` / `select_custom` 的共同骨架：
+    /// 先把旧选区落回歌曲，再把整首歌里满足条件的那批音符摘出来。
+    fn select_where(&mut self, label: &str, keep_if: impl Fn(&Note) -> bool) {
+        let mut tx = self.begin(label);
         tx.track_selection();
         if !tx.read_selection().is_empty() {
             place_selection_in_tx(&mut tx);
         }
-        let keep: Vec<(u32, u32, Note)> = tx
-            .read_song()
-            .iter_notes()
-            .filter(|(_, _, n)| (n.instrument == instrument) != invert)
-            .collect();
+        let keep: Vec<(u32, u32, Note)> =
+            tx.read_song().iter_notes().filter(|(_, _, n)| keep_if(n)).collect();
         if keep.is_empty() {
             tx.commit();
             return;
@@ -296,6 +315,34 @@ impl Document {
         }
         tx.selection().merge_absolute(&keep);
         tx.commit();
+    }
+
+    /// 原版 `selection_transpose()`：把浮动选区里超出两个八度的音符按 ±12 折回
+    /// `33..57`，返回改了多少个（原版把这个数字报在「notes were edited.」里）。
+    /// 选区为空时原版 `if (selected = 0) return 0` 直接退出、连提示都不弹，这里用
+    /// `None` 表示同一件事。调用方负责前面的 `select_all` 和后面的落回，
+    /// 历史记录才和原版一样分成「选择」+「更改选择」两步。
+    pub fn fold_keys_to_minecraft(&mut self) -> Option<usize> {
+        if self.selection.is_empty() {
+            return None;
+        }
+        let mut changed = 0usize;
+        let mut tx = self.begin("转换音符");
+        tx.track_selection();
+        tx.selection().change_all(|n| {
+            let out_of_range = n.key < MC_KEY_MIN || n.key > MC_KEY_MAX;
+            while n.key < MC_KEY_MIN {
+                n.key += 12;
+            }
+            while n.key > MC_KEY_MAX {
+                n.key -= 12;
+            }
+            if out_of_range {
+                changed += 1;
+            }
+        });
+        tx.commit();
+        Some(changed)
     }
 
     pub fn select_invert(&mut self) {
@@ -703,5 +750,46 @@ mod tests {
         doc.batch_change("升八度", |n| n.key += 12);
         assert_eq!(doc.history.len(), before + 1);
         assert_eq!(doc.song.get(0, 0).unwrap().key, 57);
+    }
+
+    /// 兼容性窗口那三个按钮的后半截：`select_outside` / `select_custom` 摘音符，
+    /// `selection_transpose` 折音高并报数。判据全部来自原版 GML。
+    #[test]
+    fn compat_select_and_transpose_follow_original() {
+        let mut doc = Document::new();
+        doc.place_note(0, 0, Note::new(0, 21)); // 低了一个八度
+        doc.place_note(1, 0, Note::new(0, 45)); // 范围内
+        doc.place_note(2, 0, Note::new(0, 70)); // 高出一个八度多
+
+        assert_eq!(doc.fold_keys_to_minecraft(), None, "空选区时原版直接 return，连提示都不弹");
+
+        // select_outside(true, false)：只摘 key < 33。
+        doc.select_outside(true, false);
+        assert_eq!(doc.selection.len(), 1);
+        assert_eq!(doc.song.get(0, 0), None);
+        assert_eq!(doc.song.total_blocks, 2);
+        doc.place_selection();
+        assert_eq!(doc.song.get(0, 0).unwrap().key, 21);
+
+        // select_outside(false, true)：只摘 key > 57。
+        doc.select_outside(false, true);
+        assert_eq!(doc.selection.len(), 1);
+        assert_eq!(doc.song.get(2, 0), None);
+        doc.place_selection();
+
+        // select_custom()：判据是 ins.user，也就是 instrument >= 20。
+        doc.place_note(3, 0, Note::new(FIRST_CUSTOM_INDEX, 45));
+        doc.select_custom();
+        assert_eq!(doc.selection.len(), 1);
+        assert_eq!(doc.song.total_blocks, 3);
+        doc.place_selection();
+
+        // selection_transpose()：±12 折回 33..57，21 → 33、70 → 58 → 46，报 2 个。
+        doc.select_all();
+        assert_eq!(doc.fold_keys_to_minecraft(), Some(2));
+        doc.place_selection();
+        assert_eq!(doc.song.get(0, 0).unwrap().key, 33);
+        assert_eq!(doc.song.get(1, 0).unwrap().key, 45);
+        assert_eq!(doc.song.get(2, 0).unwrap().key, 46);
     }
 }

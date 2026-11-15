@@ -174,10 +174,17 @@ fn main() -> Result<(), String> {
             "midi-import" => WindowKind::MidiImport,
             "datapack" => WindowKind::DatapackExport,
             "schematic" => WindowKind::SchematicExport,
+            "minecraft-compat" => WindowKind::MinecraftCompat,
             other => return Err(format!("未知窗口 {other}")),
         };
+        // 冒号后面的页签序号要落到对应窗口的那个字段上。
+        match &k {
+            WindowKind::MinecraftCompat => state.mc_tab = tab,
+            WindowKind::DatapackExport => state.datapack_tab = tab,
+            WindowKind::SchematicExport => state.schematic_tab = tab,
+            _ => state.prefs_tab = tab,
+        }
         state.window = Some(k);
-        state.prefs_tab = tab;
     }
 
     let ctx = egui::Context::default();

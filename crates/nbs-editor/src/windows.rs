@@ -29,6 +29,8 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         WindowKind::DatapackExport => 560.0,
         // 原版 `draw_window_schematic_export` 是 550×400。
         WindowKind::SchematicExport => 560.0,
+        // 原版 `draw_window(x1, y1, x1 + 490, y1 + 450)`。
+        WindowKind::MinecraftCompat => 490.0,
         _ => 360.0,
     };
     egui::Window::new(title)
@@ -66,6 +68,7 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::PngExport => png_export_window(state, ui),
             WindowKind::MacroEditor => macro_editor_window(state, ui),
             WindowKind::Autosaves => autosaves_window(state, ui),
+            WindowKind::MinecraftCompat => minecraft_compat_window(state, ui),
         });
     if !open {
         state.window = None;
@@ -2076,6 +2079,7 @@ fn datapack_export_window(state: &mut EditorState, ui: &mut Ui) {
     // 循环起点属于歌曲自身（原版的拖动条直接改 loopstart），先取到局部再写回。
     let mut loop_start = state.doc.song.meta.loop_start as f32;
     let o = &mut state.datapack_options;
+    let mut save_pack = false;
     if tab == 0 {
         egui::Grid::new("datapack_grid").num_columns(2).show(ui, |ui| {
             ui.vertical(|ui| {
@@ -2169,6 +2173,15 @@ fn datapack_export_window(state: &mut EditorState, ui: &mut Ui) {
                         .on_hover_text("播放完循环时回到的时刻。");
                     });
                 });
+                // 原版 `draw_button2(x1 + 380, y1 + 362, 152, "保存更多音符资源包", !dat_includeoutofrange, 1)`：
+                // 只有勾了「包括超范围音符」才解锁，点了就是 `datapack_getextranotes()`。
+                if ui
+                    .add_enabled(o.include_out_of_range, egui::Button::new("保存更多音符资源包"))
+                    .on_hover_text("保存数据包用的额外音符资源包（超出两个八度的那些音高）。")
+                    .clicked()
+                {
+                    save_pack = true;
+                }
             });
             ui.end_row();
         });
@@ -2208,6 +2221,9 @@ fn datapack_export_window(state: &mut EditorState, ui: &mut Ui) {
     if loop_start != state.doc.song.meta.loop_start as f32 {
         state.doc.edit_meta("设置循环起点", |m| m.loop_start = loop_start as u16);
         state.sync_loop_params();
+    }
+    if save_pack {
+        state.emit(Command::SaveExtraNotesPack);
     }
 
     if let Some(s) = &state.export_status {
@@ -2308,6 +2324,241 @@ fn autosaves_window(state: &mut EditorState, ui: &mut Ui) {
     ui.separator();
     ui.add(egui::Slider::new(&mut state.prefs.auto_save_minutes, 0..=60).text("自动保存间隔 (分钟，0=关闭)"));
     footer(state, ui);
+}
+
+/// 原版每行开头的 `spr_yesno`：画在 `(x1 + 25, yy + 8)`，精灵原点在中心。
+/// 0 = 红叉，1 = 绿勾，2 = 橙勾。精灵资源缺失时退化成同一位置的 ✓ / ✗ / !，
+/// 位置和判据都不变，只是不拿贴图冒充。
+fn mc_status_icon(pg: &Page, bank: Option<&crate::icons::Bank>, n: f32, state: usize) {
+    let center = pg.row(25.0, n + 8.0);
+    let p = pg.ui.painter();
+    let Some(bank) = bank else {
+        let (ch, color) = match state {
+            0 => ("✗", Color32::from_rgb(255, 0, 0)),
+            1 => ("✓", Color32::from_rgb(0, 176, 0)),
+            _ => ("!", Color32::from_rgb(255, 140, 0)),
+        };
+        pg.text(center - Vec2::splat(5.0), ch, PREFS_FONT_MED, color);
+        return;
+    };
+    bank.yesno(&p, center, state, pg.th);
+}
+
+/// 原版 `draw_window_minecraft`：右上角兼容性徽章点开的检查窗口，490×450，两页
+/// （Schematic / 数据包）。坐标全部照抄原版的 `x1 + …` / `yy + …`：页签在 `y1 + 78`，
+/// 三行检查分别在 `y1 + 115 / 205 / 295`，确定在 `(x1 + 240 - 36, y1 + 413)`。
+fn minecraft_compat_window(state: &mut EditorState, ui: &mut Ui) {
+    let th = state.theme.clone();
+    let fluent = th.kind == ThemeKind::Fluent;
+    let margin = ui.spacing().window_margin;
+    let (ml, mr) = (margin.left as f32, margin.right as f32);
+    // 和首选项窗口同一套换算：原版 `draw_window` 的 (x1, y1) 对应这里的行坐标 0。
+    let body = ui.allocate_exact_size(egui::vec2(490.0 - ml - mr, 450.0 - 38.0), Sense::hover());
+    let o = body.0.min - egui::vec2(ml, 0.0);
+    let ry = if fluent { -8.0 } else { -26.0 };
+
+    let tempo = state.doc.song.meta.tempo;
+    let (outside, custom) = state.mc_stats();
+    let bank = state.icons.bank();
+
+    // 原版 `selected_tab_mc += keyboard_check_pressed(vk_right) - (vk_left)`，出界绕另一头。
+    let (left, right) = ui.input(|i| {
+        (
+            i.key_pressed(egui::Key::ArrowLeft),
+            i.key_pressed(egui::Key::ArrowRight),
+        )
+    });
+    if left || right {
+        let step = right as i32 - left as i32;
+        state.mc_tab = (state.mc_tab as i32 + step).rem_euclid(2) as u8;
+    }
+    let tab = state.mc_tab.min(1);
+    let font = if fluent { PREFS_FONT_MED } else { PREFS_FONT };
+    // 原版三档文字颜色：通过 = c_green（主题 2 和 Fluent 深色换成 c_lime）、
+    // 不通过 = c_red、能用但不理想 = c_orange。
+    let ink = th.text;
+    let green = if th.kind == ThemeKind::Dark || (fluent && th.fdark) {
+        Color32::from_rgb(0, 255, 0)
+    } else {
+        Color32::from_rgb(0, 176, 0)
+    };
+    let red = Color32::from_rgb(255, 0, 0);
+    let orange = Color32::from_rgb(255, 140, 0);
+
+    let mut pg = Page { ui: &mut *ui, o, ry, th: &th, fluent };
+
+    // 原版 Fluent 只有一块盖住标题区的灰卡（`draw_roundrect(x1+1, y1+1, x1+488, y1+98, 0)`），
+    // 内容区不再画面板框；其余主题反过来：灰卡不画，`yy + 46 .. yy + 350` 那一块画白底 +
+    // (137,140,149) 描边（主题 2 铺 c_dark）。这块必须在文字之前画——原版就是先画卡再画标题。
+    if fluent {
+        let card = Rect::from_min_max(pg.at(1.0, 0.0), pg.row(488.0, 98.0));
+        let fill = if th.fdark { ggray(51) } else { ggray(204) };
+        pg.ui.painter().rect_filled(card, 0.0, fill);
+    } else {
+        let panel = Rect::from_min_max(pg.row(6.0, 96.0), pg.row(484.0, 400.0));
+        let fill = if th.kind == ThemeKind::Dark { th.window_bg } else { Color32::WHITE };
+        let p = pg.ui.painter();
+        p.rect_filled(panel, 0.0, fill);
+        p.rect_stroke(panel, 0.0, Stroke::new(1.0_f32, Color32::from_rgb(137, 140, 149)), StrokeKind::Inside);
+    }
+
+    // 原版在窗口标题下面还有一行说明（`draw_text_dynamic(x1 + 16, y1 + 32, …)`）。
+    pg.text(
+        pg.row(16.0, 32.0),
+        "由于音符盒的种种限制，歌曲需要满足特定条件才能导入进 Minecraft。",
+        font,
+        ink,
+    );
+
+    // —— 页签：原版 `str[0] = "Schematic"` / `str[1] = "数据包"`，从 x1 + 8 起排。——
+    let labels = ["Schematic", "数据包"];
+    let mut b = 8.0_f32;
+    let mut nsel = tab;
+    let mut stab = (0.0_f32, 0.0_f32);
+    for (i, name) in labels.iter().enumerate() {
+        let tw = pg.measure(name, font);
+        let sel = i as u8 == tab;
+        if sel {
+            stab = (b - 2.0, tw + 15.0);
+        } else {
+            pg.text(pg.row(b + 6.0, 80.0), name, font, ink);
+        }
+        let rect = Rect::from_min_size(pg.row(b, 78.0), Vec2::new(tw + 12.0, 18.0));
+        if pg.ui.interact(rect, Id::new(("mc-tab", i)), Sense::click()).clicked() {
+            nsel = i as u8;
+        }
+        b += tw + 12.0;
+    }
+    state.mc_tab = nsel;
+    // 选中页签压在面板线上（原版先填一块和面板同色的框，再擦掉那 1 像素的描边）。
+    let (stabx, stabw) = stab;
+    let sel_rect = if fluent {
+        Rect::from_min_max(pg.row(stabx, 76.0), pg.row(stabx + stabw, 101.0))
+    } else {
+        Rect::from_min_size(pg.row(stabx, 76.0), Vec2::new(stabw, 20.0))
+    };
+    let sel_fill = if fluent {
+        if th.fdark { ggray(32) } else { ggray(243) }
+    } else if th.kind == ThemeKind::Dark {
+        th.window_bg
+    } else {
+        Color32::WHITE
+    };
+    let p = pg.ui.painter();
+    p.rect_filled(sel_rect, 0.0, sel_fill);
+    if !fluent {
+        p.rect_stroke(sel_rect, 0.0, Stroke::new(1.0_f32, Color32::from_rgb(137, 140, 149)), StrokeKind::Inside);
+        p.rect_filled(
+            Rect::from_min_max(pg.row(stabx + 1.0, 96.0), pg.row(stabx + stabw - 1.0, 97.0)),
+            0.0,
+            sel_fill,
+        );
+    }
+    pg.text(pg.row(stabx + 8.0, 78.0), labels[tab as usize], font, ink);
+
+    if nsel == 0 {
+        // —— Schematic 页 ——
+        let tempo_ok = crate::state::tempo_schematic_ok(tempo);
+        mc_status_icon(&pg, bank.as_deref(), 115.0, usize::from(tempo_ok));
+        pg.text(pg.row(45.0, 115.0), "速度必须为每秒 2.5、5 或 10 红石刻。", font, ink);
+        let cur = format!("目前速度为每秒 {tempo} 红石刻。");
+        pg.text(pg.row(45.0, 131.0), &cur, font, if tempo_ok { green } else { red });
+        if !tempo_ok && pg.button(45.0, 149.0, 140.0, "针对 Schematic 调整速度", false) {
+            state.emit(Command::FixTempoSchematic);
+        }
+
+        mc_status_icon(&pg, bank.as_deref(), 205.0, usize::from(outside == 0));
+        pg.text(pg.row(45.0, 205.0), "所有方块必须在 Minecraft 的 2 八度范围内。", font, ink);
+        if outside > 0 {
+            let n = format!("有 {outside} 个方块在 2 八度范围外。");
+            pg.text(pg.row(45.0, 221.0), &n, font, red);
+            if pg.button(45.0, 239.0, 120.0, "选择过低的音符", false) {
+                state.emit(Command::SelectOutside { lower: true, higher: false });
+            }
+            if pg.button(175.0, 239.0, 120.0, "选择过高的音符", false) {
+                state.emit(Command::SelectOutside { lower: false, higher: true });
+            }
+            if pg.button(305.0, 239.0, 100.0, "转换音符", false) {
+                state.emit(Command::TransposeToMinecraft);
+            }
+        } else {
+            pg.text(pg.row(45.0, 221.0), "没有方块超出2八度限制。", font, green);
+        }
+
+        mc_status_icon(&pg, bank.as_deref(), 295.0, usize::from(custom == 0));
+        pg.text(pg.row(45.0, 295.0), "不可使用任何自定义音色。", font, ink);
+        if custom > 0 {
+            let n = format!("有 {custom} 个方块使用自定义音色。");
+            pg.text(pg.row(45.0, 311.0), &n, font, red);
+            if pg.button(45.0, 329.0, 160.0, "选择所指音符", false) {
+                state.emit(Command::SelectCustom);
+            }
+        } else {
+            pg.text(pg.row(45.0, 311.0), "没有方块使用自定义音色。", font, green);
+        }
+    } else {
+        // —— 数据包页 ——
+        let good = crate::state::tempo_datapack_good(tempo);
+        mc_status_icon(&pg, bank.as_deref(), 115.0, if good { 1 } else { 2 });
+        pg.text(pg.row(45.0, 115.0), "导出数据包时可使用任意速度。", font, ink);
+        pg.text(
+            pg.row(45.0, 131.0),
+            "但是，使用每秒 0.25、0.5、1、1.25、2、2.5、4、5、10 或 20 红石刻的速度更佳。",
+            font,
+            ink,
+        );
+        let cur = format!("目前速度为每秒 {tempo} 红石刻。");
+        pg.text(pg.row(45.0, 147.0), &cur, font, if good { green } else { orange });
+        if !good && pg.button(45.0, 165.0, 180.0, "针对数据包调整速度", false) {
+            state.emit(Command::FixTempoDatapack);
+        }
+
+        pg.text(pg.row(45.0, 205.0), "使用数据包，即可将支持范围扩展到 6 个八度。", font, ink);
+        pg.text(pg.row(45.0, 221.0), "如果不想用，所有方块必须在 Minecraft 的 2 八度限制内。", font, ink);
+        if outside > 0 {
+            mc_status_icon(&pg, bank.as_deref(), 205.0, 2);
+            let n = if outside == 1 {
+                "有 1 个方块在 2 八度范围外。".to_string()
+            } else {
+                format!("有 {outside} 个方块在 2 八度范围外。")
+            };
+            pg.text(pg.row(45.0, 237.0), &n, font, orange);
+            if pg.button(45.0, 255.0, 80.0, "选择过低音符", false) {
+                state.emit(Command::SelectOutside { lower: true, higher: false });
+            }
+            if pg.button(135.0, 255.0, 80.0, "选择过高音符", false) {
+                state.emit(Command::SelectOutside { lower: false, higher: true });
+            }
+            if pg.button(225.0, 255.0, 100.0, "转换音符", false) {
+                state.emit(Command::TransposeToMinecraft);
+            }
+            if pg.button(335.0, 255.0, 120.0, "保存资源包", false) {
+                state.emit(Command::SaveExtraNotesPack);
+            }
+        } else {
+            mc_status_icon(&pg, bank.as_deref(), 205.0, 1);
+            pg.text(pg.row(45.0, 237.0), "没有方块超出 2 八度限制。", font, green);
+        }
+
+        pg.text(pg.row(45.0, 295.0), "使用数据包，即可在 Minecraft 中使用自定义音色。", font, ink);
+        pg.text(pg.row(45.0, 311.0), "如果不想用，就不能用任何自定义音色。", font, ink);
+        if custom > 0 {
+            mc_status_icon(&pg, bank.as_deref(), 295.0, 2);
+            let n = format!("有 {custom} 个方块使用自定义音色。");
+            pg.text(pg.row(45.0, 327.0), &n, font, orange);
+            if pg.button(45.0, 345.0, 160.0, "选择所指音符", false) {
+                state.emit(Command::SelectCustom);
+            }
+        } else {
+            mc_status_icon(&pg, bank.as_deref(), 295.0, 1);
+            pg.text(pg.row(45.0, 327.0), "没有方块使用自定义音色。", font, green);
+        }
+    }
+
+    // 原版 `draw_button2(x1 + 240 - 36, y1 + 413, 72, "确定")`。
+    if pg.button(204.0, 413.0, 72.0, "确定", false) {
+        state.emit(Command::CloseWindow);
+    }
 }
 
 #[cfg(test)]

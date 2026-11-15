@@ -835,6 +835,26 @@ pub fn export(song: &Song, opts: &DatapackOptions, dest: &Path) -> Result<Datapa
     })
 }
 
+/// 原版 `datapack_getextranotes()` 复制的那份资源包：装机包里的 `Data/extranotes.zip`。
+/// 字节直接取自装机版 `D:\software\NBS\Data\extranotes.zip`（462095 字节，
+/// md5 `152915fa5ddf5d53610b2b6f4e686e6e`），不是我们生成的——原版那条按钮
+/// 就是 `file_copy(data_directory + "extranotes.zip", fn)` 原样复制。
+pub const EXTRA_NOTES_ZIP: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/extranotes.zip"));
+
+/// 原版 `datapack_getextranotes()`：把上面那份资源包写到用户选的路径。
+/// 原版只在复制成功时报「资源包保存成功！」，源文件不在时什么都不做；
+/// 我们的源文件是内嵌的，因此只剩写盘失败这一条错误路径。
+pub fn save_extra_notes_pack(dest: &Path) -> Result<(), String> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("创建 {} 失败: {e}", parent.display()))?;
+    }
+    std::fs::write(dest, EXTRA_NOTES_ZIP)
+        .map_err(|e| format!("写入 {} 失败: {e}", dest.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1548,5 +1568,23 @@ mod tests {
             off += 46 + nlen + elen + clen;
         }
         out
+    }
+
+    /// 原版「保存资源包」复制的是装机包自带的现成文件，内容不是我们生成的：
+    /// 这里核对内嵌的确实是那份 ZIP，并且能原样落盘。
+    #[test]
+    fn extra_notes_pack_is_the_shipped_resource_pack() {
+        let path = std::env::temp_dir().join("nbs_rust_extranotes.zip");
+        save_extra_notes_pack(&path).unwrap();
+        let entries = read_zip(&path);
+        assert_eq!(EXTRA_NOTES_ZIP.len(), 462095, "装机版 Data/extranotes.zip 的字节数");
+        assert_eq!(&EXTRA_NOTES_ZIP[..4], b"PK\x03\x04", "内嵌的必须是一份 ZIP");
+        assert!(entries.iter().any(|(n, _)| n == "pack.mcmeta"), "资源包描述文件");
+        assert!(
+            entries.iter().any(|(n, _)| n.ends_with("sounds.json")),
+            "音符盒声音表"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), EXTRA_NOTES_ZIP, "复制必须逐字节");
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -185,6 +185,8 @@ pub enum WindowKind {
     PngExport,
     MacroEditor,
     Autosaves,
+    /// 原版 `w_minecraft`（`macros.gml:69`）：右上角兼容性图标点开的窗口。
+    MinecraftCompat,
 }
 
 impl WindowKind {
@@ -217,6 +219,8 @@ impl WindowKind {
             Self::PngExport => "导出 PNG 谱面",
             Self::MacroEditor => "宏",
             Self::Autosaves => "自动保存 / 备份",
+            // 原版 `draw_window_minecraft.gml:24` 的标题文字。
+            Self::MinecraftCompat => "Minecraft 兼容性",
         }
     }
 }
@@ -331,6 +335,8 @@ pub enum DialogAction {
     ImportMidi,
     ImportPattern,
     ImportSchematic,
+    /// 原版 `datapack_getextranotes()`：保存随程序那份「更多音符盒」资源包。
+    SaveExtraNotes,
     /// 原版「修改」按钮：`get_save_filename_ext("", "选择歌曲文件夹", songfolder, "歌曲文件夹")`。
     /// 原版取的是那个假文件名所在的目录，所以这里确定后认的是当前目录本身。
     PickFolder(PrefsFolder),
@@ -342,6 +348,7 @@ impl DialogAction {
             self,
             Self::SaveSong | Self::ExportAudio | Self::ExportDatapack | Self::ExportMidi
                 | Self::ExportPng | Self::ExportSchematic | Self::ExportPattern
+                | Self::SaveExtraNotes
                 // 原版选文件夹走的是 `get_save_filename_ext`（见 `picker_spec` 里那条），
                 // 不是目录选择器，所以这里也算「保存」式对话框。
                 | Self::PickFolder(_)
@@ -359,6 +366,8 @@ impl DialogAction {
             // 原版：get_open_filename_ext("Minecraft Schematics (*.schematic)|*.schematic", …)。
             Self::ExportSchematic | Self::ImportSchematic => "schematic",
             Self::ExportPattern | Self::ImportPattern => "nbp",
+            // 原版：get_save_filename_ext("Resource pack (*.zip)|*.zip", "更多音符盒", "", …)。
+            Self::SaveExtraNotes => "zip",
             // 原版这两个对话框的过滤器是空字符串：不做过滤，选的是目录。
             Self::PickFolder(_) => "",
         }
@@ -522,6 +531,10 @@ impl FileDialog {
             DialogAction::ImportSchematic => ("从 Schematic 导入", vec![
                 filter("Minecraft Schematics (*.schematic)", "*.schematic"),
             ]),
+            // 原版 `datapack_getextranotes.gml:6`：过滤器名和标题都是照抄的这一句。
+            DialogAction::SaveExtraNotes => ("为数据包保存音符盒资源包", vec![
+                filter("Resource pack (*.zip)", "*.zip"),
+            ]),
             // 原版 `draw_window_preferences.gml:278/294` 是 `get_save_filename_ext("", …)`：
             // 过滤器整串为空，文件名栏塞的是占位串，按下保存后取的是它所在的目录
             // （换算回来见 `EditorState::run_pending_dialog`）。不是目录选择器。
@@ -594,6 +607,9 @@ pub struct EditorState {
     /// 关窗条件是 `prevwindow == window`：开窗那一帧按键事件仍然有效，不加这道闸
     /// 就会被「Ctrl+P 开」和「Ctrl+P 关」在同一帧里连着执行，窗口一闪就没。
     pub window_prev: Option<WindowKind>,
+    /// 自绘选框顶掉的那个窗口。原版的系统对话框是叠在原窗口上的，选完原窗口还在；
+    /// 我们同时只开一个窗口，兜底路径得记住被顶掉的是哪个（走原生组件时不会被顶掉，这里就是 None）。
+    pub dialog_return: Option<WindowKind>,
     /// 原版的全屏开关（F11）。
     pub fullscreen: bool,
     pub context_menu: Option<ContextMenu>,
@@ -633,6 +649,8 @@ pub struct EditorState {
     pub datapack_options: DatapackOptions,
     /// 原版 `selected_tab_dat`：0 = 设置，1 = 效果器。
     pub datapack_tab: u8,
+    /// 原版 `selected_tab_mc`：兼容性窗口的两页，0 = Schematic，1 = 数据包。
+    pub mc_tab: u8,
     /// 原版 `selected_tab`：首选项的五页，0 通用 / 1 界面 / 2 外观 / 3 访问 / 4 播放。
     /// 原版是全局变量（窗口间共享），我们只在这里用，关窗不清零也不影响别的窗口。
     pub prefs_tab: u8,
@@ -677,12 +695,30 @@ pub struct EditorState {
     /// 兼容性指示（原版 `compatible`），随 `song.rev` 重算。
     pub compat_rev: u64,
     pub compat: u8,
+    /// 原版 `block_outside` / `block_custom`：兼容性窗口那两条计数，
+    /// 和 `compat` 同一次遍历算出、同一个 `compat_rev` 缓存。
+    pub compat_outside: usize,
+    pub compat_custom: usize,
 }
 
 impl Default for EditorState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 原版 Schematic 只认这三档速度（`compatible = 1` 的前半个条件，也是兼容性窗口
+/// Schematic 页第一行的判据——那一行不看音符微调）。
+pub fn tempo_schematic_ok(tempo: f32) -> bool {
+    [10.0_f32, 5.0, 2.5].iter().any(|v| (tempo - v).abs() < 1e-3)
+}
+
+/// 原版数据包页第一行说「更佳」的那十档。数据包本身任意速度都能导，
+/// 所以差档只给橙色图标，不给红叉。
+pub fn tempo_datapack_good(tempo: f32) -> bool {
+    [20.0_f32, 10.0, 5.0, 4.0, 2.5, 2.0, 1.25, 1.0, 0.5, 0.25]
+        .iter()
+        .any(|v| (tempo - v).abs() < 1e-3)
 }
 
 impl EditorState {
@@ -740,6 +776,7 @@ impl EditorState {
             fullscreen: false,
             window: None,
             window_prev: None,
+            dialog_return: None,
             context_menu: None,
             message: None,
             audio,
@@ -766,6 +803,7 @@ impl EditorState {
             modals: ModalQueue::default(),
             datapack_options: DatapackOptions::default(),
             datapack_tab: 0,
+            mc_tab: 0,
             prefs_tab: 0,
             prefs_theme_menu: false,
             prefs_rate_menu: false,
@@ -789,6 +827,8 @@ impl EditorState {
             tempo_drag: None,
             compat_rev: u64::MAX,
             compat: 1,
+            compat_outside: 0,
+            compat_custom: 0,
         }
     }
 
@@ -800,10 +840,12 @@ impl EditorState {
     /// 期间主窗口不重绘）；没装则打开自绘的 `WindowKind::FileOpen` / `FileSave`。
     /// 两条路都会把 `file_dialog` 留下，因为 `Command::DialogConfirm` 靠它认操作类型。
     pub fn request_file_dialog(&mut self, dialog: FileDialog) {
+        self.dialog_return = None;
         if self.picker.is_some() {
             self.pending_dialog = Some(dialog.clone());
         } else {
             let save = dialog.save;
+            self.dialog_return = self.window.clone();
             self.window = Some(if save { WindowKind::FileSave } else { WindowKind::FileOpen });
         }
         self.file_dialog = Some(dialog);
@@ -836,6 +878,8 @@ impl EditorState {
                 self.file_dialog = None;
             }
             PickResult::Unavailable => {
+                // 自绘兜底框会把原窗口顶掉，记住顶掉的是哪个，选完放回去。
+                self.dialog_return = self.window.clone();
                 self.window = Some(if dialog.save { WindowKind::FileSave } else { WindowKind::FileOpen });
                 self.file_dialog = Some(dialog);
             }
@@ -977,29 +1021,49 @@ impl EditorState {
     /// 原版 `compatible`（0 = 仅资源包，1 = 完全兼容，2 = 仅数据包）。
     /// 判定条件与原版逐字一致：有选择时不刷新，保留上一次的值。
     pub fn compatibility(&mut self) -> u8 {
+        self.refresh_compat();
+        self.compat
+    }
+
+    /// 原版兼容性窗口那两条「有 N 个方块…」用的 `block_outside` / `block_custom`。
+    /// 原版这两个数是 `add_block*` 一路累加、`calculate_size` 归零重算的，
+    /// 这里和 `compatibility` 共用同一份缓存，刷新条件也一致。
+    pub fn mc_stats(&mut self) -> (usize, usize) {
+        self.refresh_compat();
+        (self.compat_outside, self.compat_custom)
+    }
+
+    fn refresh_compat(&mut self) {
         if !self.doc.selection.notes.is_empty() || self.doc.song.rev == self.compat_rev {
-            return self.compat;
+            return;
         }
         self.compat_rev = self.doc.song.rev;
         use nbs_core::model::{MC_KEY_MAX, MC_KEY_MIN};
         let (mut outside, mut custom, mut pitched) = (false, false, false);
+        let (mut n_outside, mut n_custom) = (0usize, 0usize);
         for (_, _, n) in self.doc.song.iter_notes() {
-            outside |= n.key < MC_KEY_MIN || n.key > MC_KEY_MAX;
-            custom |= n.instrument >= nbs_core::model::FIRST_CUSTOM_INDEX;
+            if n.key < MC_KEY_MIN || n.key > MC_KEY_MAX {
+                outside = true;
+                n_outside += 1;
+            }
+            if n.instrument >= nbs_core::model::FIRST_CUSTOM_INDEX {
+                custom = true;
+                n_custom += 1;
+            }
             pitched |= n.pitch != 0;
         }
+        self.compat_outside = n_outside;
+        self.compat_custom = n_custom;
         self.compat = if outside || custom {
             0
         } else {
             let t = self.doc.song.meta.tempo;
-            let ok = [10.0_f32, 5.0, 2.5].iter().any(|v| (t - v).abs() < 1e-3);
-            if ok && !pitched {
+            if tempo_schematic_ok(t) && !pitched {
                 1
             } else {
                 2
             }
         };
-        self.compat
     }
 
     pub fn set_marker(&mut self, tick: f64) {
@@ -1227,6 +1291,33 @@ mod tests {
         assert!(spec.filters.is_empty(), "原版第 1 个参数是空串");
         assert!(dlg.save, "原版走的是 get_save_filename_ext");
         assert_eq!(dlg.name, "选择歌曲文件夹");
+
+        // 兼容性窗口的「保存资源包」：`datapack_getextranotes.gml:6`。
+        let pack = FileDialog::for_action(DialogAction::SaveExtraNotes, None, None);
+        let spec = pack.picker_spec();
+        assert_eq!(spec.title, "为数据包保存音符盒资源包");
+        assert_eq!(spec.filters[0].name, "Resource pack (*.zip)");
+        assert_eq!(spec.filters[0].patterns, "*.zip");
+        assert!(pack.save, "原版是 get_save_filename_ext");
+        assert!(!pack.start_dir, "原版第 3 个参数是空串，起始目录交给系统记");
+    }
+
+    /// 兼容性窗口那两行的判据：档位表必须和原版一模一样，
+    /// 否则「调整速度」按钮该出现的时候不出现、绿灯该亮的时候不亮。
+    #[test]
+    fn compat_tempo_sets_are_exactly_the_originals() {
+        for t in [10.0_f32, 5.0, 2.5] {
+            assert!(tempo_schematic_ok(t), "{t} 应能导 Schematic");
+            assert!(tempo_datapack_good(t), "{t} 应是数据包的好速度");
+        }
+        for t in [20.0_f32, 4.0, 2.0, 1.25, 1.0, 0.5, 0.25] {
+            assert!(!tempo_schematic_ok(t), "数据包的好速度不等于能导 Schematic: {t}");
+            assert!(tempo_datapack_good(t), "{t} 应是数据包的好速度");
+        }
+        for t in [23.45_f32, 9.0, 3.0, 1.5, 0.3] {
+            assert!(!tempo_schematic_ok(t), "{t} 不该被判成能导 Schematic");
+            assert!(!tempo_datapack_good(t), "{t} 不该被判成好速度");
+        }
     }
 
     /// 假选择器：按预设结果回话，顺便记下它收到了哪一次请求。

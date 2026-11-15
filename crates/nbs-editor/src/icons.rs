@@ -216,6 +216,8 @@ pub struct Bank {
     numbers: Strip,
     minecraft: Strip,
     minecraft_fluent: Strip,
+    yesno: Strip,
+    yesno_fluent: Strip,
     volume: Strip,
     volume_fluent: Strip,
     stereo: Strip,
@@ -312,6 +314,8 @@ impl Bank {
             numbers: strip("numbers", 3, 5)?,
             minecraft: strip("minecraft", 20, 20)?,
             minecraft_fluent: strip("minecraft_fluent", 20, 20)?,
+            yesno: strip("yesno", 32, 32)?,
+            yesno_fluent: strip("yesno_f", 32, 32)?,
             volume: strip("volume", 12, 10)?,
             volume_fluent: strip("volume_fluent", 12, 10)?,
             stereo: strip("stereo", 12, 10)?,
@@ -615,10 +619,25 @@ impl Bank {
     /// 原版右上角的兼容性图标：0 = 通过，1 = 仅数据包，2 = 不通过。
     pub fn compat_icon(&self, p: &egui::Painter, at: Pos2, state: usize, th: &Theme) {
         if th.kind == ThemeKind::Fluent {
-            self.minecraft_fluent.draw(p, at, state, Color32::WHITE);
+            // 原版：底图 `fdark * 3 + 状态`，再叠一层 `6 + 状态` 的白色蒙版染上强调色。
+            self.minecraft_fluent.draw(p, at, state + 3 * th.fdark as usize, Color32::WHITE);
             self.minecraft_fluent.draw(p, at, state + 6, th.accent);
         } else {
             self.minecraft.draw(p, at, state, Color32::WHITE);
+        }
+    }
+
+    /// 原版 `draw_sprite(spr_yesno, 状态, cx, cy)`：兼容性窗口每一条检查前面的图标。
+    /// 0 = 红叉（不通过）、1 = 绿勾（通过）、2 = 橙勾（能用但不理想）。
+    /// 这两套精灵的原点在中心（`xorigin/yorigin = 16`），所以传的是图标中心而不是左上角，
+    /// 和 `compat_icon`（原点在左上角）不一样。
+    pub fn yesno(&self, p: &egui::Painter, center: Pos2, state: usize, th: &Theme) {
+        let at = center - Vec2::splat(16.0);
+        if th.kind == ThemeKind::Fluent {
+            self.yesno_fluent.draw(p, at, state + 3 * th.fdark as usize, Color32::WHITE);
+            self.yesno_fluent.draw(p, at, state + 6, th.accent);
+        } else {
+            self.yesno.draw(p, at, state, Color32::WHITE);
         }
     }
 

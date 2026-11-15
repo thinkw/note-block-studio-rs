@@ -94,6 +94,22 @@ pub enum Command {
     SetTimeSignature(u8),
     SetSaveVersion(u8),
     ClearSong,
+    /// 原版右上角兼容性徽章被点（`control_draw.gml:2029-2038`）：停播放、关录制、
+    /// 落回浮动选区，再打开 `w_minecraft`。
+    ShowCompat,
+    /// 兼容性窗口的两条速度阶梯，Schematic 页和数据包页各一条（`draw_window_minecraft.gml`）。
+    FixTempoSchematic,
+    FixTempoDatapack,
+    /// 原版 `select_outside(lower, higher)`，按钮点完跟着 `windowclose = 1`。
+    SelectOutside { lower: bool, higher: bool },
+    /// 原版 `select_custom()`，同样跟着 `windowclose = 1`。
+    SelectCustom,
+    /// 兼容性窗口「转换音符」：先 `question()`，答「是」才走下一条。
+    TransposeToMinecraft,
+    /// 上面那问的「是」分支：全选 → 折回两个八度 → 落回 → 按原版那句英文报数。
+    TransposeToMinecraftApply,
+    /// 「保存资源包」= 原版 `datapack_getextranotes()`，兼容性窗口和数据包导出窗口都有。
+    SaveExtraNotesPack,
     /// 鼠标悬停在音符上滚轮调整其属性（对应原版 `changepitch`）。
     WheelOnNote { tick: u32, layer: u32, delta: i32, shift: bool },
     /// 原版 `mousewheel = 1`：滚轮在音色表上前后挪一格，力度/声像/微调复位并试听。
@@ -525,6 +541,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 state.datapack_tab = 0;
                 state.schematic_tab = 0;
                 state.prefs_tab = 0;
+                state.mc_tab = 0;
             }
             if matches!(kind, WindowKind::DatapackExport) && state.datapack_options.name.is_empty()
             {
@@ -698,6 +715,105 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.doc.clear_all_notes();
             state.prepare_audio();
         }
+        Command::ShowCompat => {
+            // 原版这一段（`control_draw.gml:2032-2036`）：playing = 0、record = 0、
+            // selection_place(0)，然后 window = w_minecraft。
+            state.audio.clock_mut().pause();
+            state.record = false;
+            state.record_armed = false;
+            state.doc.deselect();
+            dispatch(state, Command::ShowWindow(WindowKind::MinecraftCompat), ctx);
+        }
+        Command::FixTempoSchematic => {
+            // 原版 `draw_window_minecraft.gml` 的连续 `if`：后面的覆盖前面的，顺序照抄。
+            let o = state.doc.song.meta.tempo;
+            let mut t = o;
+            if o > 10.0 {
+                t = 10.0;
+            }
+            if o < 10.0 {
+                t = 10.0;
+            }
+            if o < 7.5 {
+                t = 5.0;
+            }
+            if o < 3.75 {
+                t = 2.5;
+            }
+            if t != o {
+                dispatch(state, Command::SetTempo(t), ctx);
+            }
+        }
+        Command::FixTempoDatapack => {
+            // 同上，数据包页那一串更细的阶梯；条件一律看改动前的原速度。
+            let o = state.doc.song.meta.tempo;
+            let mut t = o;
+            if o >= 15.0 {
+                t = 20.0;
+            }
+            if o < 15.0 {
+                t = 10.0;
+            }
+            if o < 7.5 {
+                t = 5.0;
+            }
+            if o < 4.5 {
+                t = 4.0;
+            }
+            if o < 3.25 {
+                t = 2.5;
+            }
+            if o < 2.25 {
+                t = 2.0;
+            }
+            if o < 1.625 {
+                t = 1.25;
+            }
+            if o < 1.125 {
+                t = 1.0;
+            }
+            if o < 0.75 {
+                t = 0.5;
+            }
+            if o < 0.375 {
+                t = 0.25;
+            }
+            if t != o {
+                dispatch(state, Command::SetTempo(t), ctx);
+            }
+        }
+        Command::SelectOutside { lower, higher } => {
+            state.doc.select_outside(lower, higher);
+            state.set_message(format!("已选中 {} 个音符", state.doc.selection.len()));
+            state.window = None;
+        }
+        Command::SelectCustom => {
+            state.doc.select_custom();
+            state.set_message(format!("已选中 {} 个音符", state.doc.selection.len()));
+            state.window = None;
+        }
+        Command::TransposeToMinecraft => {
+            state.modals = ModalQueue::question(
+                "转换音符",
+                "转换音符使其在 Minecraft 的 2 八度限制内吗？",
+                Command::TransposeToMinecraftApply,
+            );
+        }
+        Command::TransposeToMinecraftApply => {
+            // 原版这一段：select_all(-1, 0) → selection_transpose() → selection_place(0)。
+            state.doc.select_all();
+            let edited = state.doc.fold_keys_to_minecraft();
+            state.doc.deselect();
+            // 原版 `selection_transpose` 的报数是写死的英文串，语言开关影响不到它；
+            // 空选区时它直接 return，连这句都不弹。
+            if let Some(edited) = edited {
+                state.modals =
+                    ModalQueue::message("Transpose notes", &format!("{edited} notes were edited."));
+            }
+        }
+        Command::SaveExtraNotesPack => {
+            dispatch(state, Command::OpenDialog(DialogAction::SaveExtraNotes), ctx);
+        }
         Command::WheelOnNote { tick, layer, delta, shift } => {
             if let Some(mut n) = state.doc.song.get(tick, layer) {
                 match state.tool {
@@ -810,6 +926,12 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     dialog.name = format!("{}.nbt", stem.to_lowercase().replace(' ', "_"));
                     dialog.refresh();
                 }
+            }
+            if action == DialogAction::SaveExtraNotes {
+                // 原版 `datapack_getextranotes.gml:6`：默认名写死「更多音符盒」，
+                // 跟当前歌曲完全无关；扩展名交给对话框的 *.zip 过滤器补。
+                dialog.name = "更多音符盒".to_string();
+                dialog.refresh();
             }
             state.request_file_dialog(dialog);
         }
@@ -942,6 +1064,20 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                             state.set_message(format!("片段已导入：{n} 个音符（浮动选区）"));
                         }
                         Err(e) => state.set_message(format!("导入片段失败: {e}")),
+                    }
+                }
+                DialogAction::SaveExtraNotes => {
+                    // 原版 `datapack_getextranotes()`：复制完 `message("资源包保存成功！", "保存")`，
+                    // 调用它的那个窗口原样留着（原生组件只是叠在上面）。走自绘兜底框时
+                    // 那个窗口被顶掉过，用 `dialog_return` 放回去。
+                    match nbs_io::datapack::save_extra_notes_pack(&path) {
+                        Ok(()) => {
+                            if let Some(w) = state.dialog_return.take() {
+                                state.window = Some(w);
+                            }
+                            state.modals = ModalQueue::message("保存", "资源包保存成功！");
+                        }
+                        Err(e) => state.set_message(format!("保存资源包失败: {e}")),
                     }
                 }
             }
@@ -1631,5 +1767,93 @@ mod tests {
         let old = icon_command(&ctx, &mut state).expect("勾上旧图标后要换成 Data\\icon.ico");
         assert_eq!((old.width, old.height), (256, 256));
         assert_ne!(old.rgba, new.rgba, "旧图标和新图标必须是两张不同的图");
+    }
+
+    /// 原版徽章命中那一段（`control_draw.gml:2032-2036`）：停播放、关录制、
+    /// 浮动选区落回，再 `window = w_minecraft`。
+    #[test]
+    fn compat_badge_stops_everything_and_opens_the_window() {
+        let ctx = Context::default();
+        let mut state = state_with(four_case_song(3.0));
+        state.record = true;
+        state.record_armed = true;
+        state.doc.select_all();
+        assert!(!state.doc.selection.is_empty());
+
+        dispatch(&mut state, Command::ShowCompat, &ctx);
+        assert_eq!(state.window, Some(WindowKind::MinecraftCompat));
+        assert!(!state.is_playing(), "原版 playing = 0");
+        assert!(!state.record && !state.record_armed, "原版 record = 0");
+        assert!(state.doc.selection.is_empty(), "原版 selection_place(0)：选区要落回歌曲");
+        assert_eq!(state.doc.song.total_blocks, 4);
+        assert_eq!(state.mc_tab, 0, "原版开窗就从 Schematic 页开始");
+    }
+
+    /// 两条速度阶梯都是原版那一串连续 `if`：后面的覆盖前面的，条件一律看改动前的速度。
+    #[test]
+    fn tempo_fix_buttons_walk_the_original_ladders() {
+        let ctx = Context::default();
+        let schematic = [
+            (23.45_f32, 10.0_f32),
+            (12.0, 10.0),
+            (8.0, 10.0),
+            (6.0, 5.0),
+            (4.0, 5.0),
+            (3.0, 2.5),
+            (1.0, 2.5),
+        ];
+        for (from, to) in schematic {
+            let mut state = state_with(Song::demo());
+            state.doc.edit_meta("改速度", |m| m.tempo = from);
+            dispatch(&mut state, Command::FixTempoSchematic, &ctx);
+            assert_eq!(state.doc.song.meta.tempo, to, "Schematic 页 {from} t/s");
+        }
+        let datapack = [
+            (23.45_f32, 20.0_f32),
+            (14.0, 10.0),
+            (6.0, 5.0),
+            (4.2, 4.0),
+            (3.0, 2.5),
+            (2.2, 2.0),
+            (1.5, 1.25),
+            (1.1, 1.0),
+            (0.7, 0.5),
+            (0.1, 0.25),
+        ];
+        for (from, to) in datapack {
+            let mut state = state_with(Song::demo());
+            state.doc.edit_meta("改速度", |m| m.tempo = from);
+            dispatch(&mut state, Command::FixTempoDatapack, &ctx);
+            assert_eq!(state.doc.song.meta.tempo, to, "数据包页 {from} t/s");
+        }
+    }
+
+    /// 原版 `datapack_getextranotes()`：把 `Data\extranotes.zip` 原样复制过去，
+    /// 弹「资源包保存成功！」，调用它的那个窗口不受影响。
+    #[test]
+    fn save_extra_notes_pack_copies_the_shipped_zip_and_keeps_the_window() {
+        let ctx = Context::default();
+        let mut state = state_with(four_case_song(3.0));
+        dispatch(&mut state, Command::ShowCompat, &ctx);
+        dispatch(&mut state, Command::SaveExtraNotesPack, &ctx);
+
+        // 没装原生组件时走自绘兜底框：兼容性窗口被顶掉，但记在了 dialog_return 里。
+        assert_eq!(state.window, Some(WindowKind::FileSave));
+        assert_eq!(state.dialog_return, Some(WindowKind::MinecraftCompat));
+        assert_eq!(state.file_dialog.as_ref().unwrap().name, "更多音符盒");
+
+        let dir = std::env::temp_dir().join("nbs-rust-compat-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let dst = dir.join("更多音符盒.zip");
+        let _ = std::fs::remove_file(&dst);
+        dispatch(&mut state, Command::DialogConfirm(dst.clone()), &ctx);
+
+        let bytes = std::fs::read(&dst).expect("资源包应已写到所选路径");
+        assert_eq!(&bytes[..2], b"PK", "复制的必须是那个 zip，不是别的文件");
+        assert_eq!(bytes.len(), nbs_io::datapack::EXTRA_NOTES_ZIP.len());
+        assert_eq!(state.window, Some(WindowKind::MinecraftCompat), "选完放回原窗口");
+        assert_eq!(titles(&state), vec!["保存"]);
+        assert_eq!(texts(&state), vec!["资源包保存成功！"]);
+        let _ = std::fs::remove_file(&dst);
     }
 }

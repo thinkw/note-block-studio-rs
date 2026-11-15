@@ -227,7 +227,7 @@ pub fn show_toolbar(state: &mut EditorState, ui: &mut Ui) {
     if let Some(v) = master_bar(state, ui, &mut bar, area) {
         state.emit(Command::SetMasterVolume(v));
     }
-    compat_cluster(ui, &bar, compat, area);
+    compat_cluster(state, ui, &bar, compat, area);
 }
 
 /// 原版 `draw_icon` 序列。`state` / `ui` / `bar` 分开传，避免闭包借用打架。
@@ -543,14 +543,16 @@ fn master_bar(state: &EditorState, ui: &mut Ui, bar: &mut Bar, area: Rect) -> Op
 }
 
 /// 原版右上角：分隔线 + 两枚 `spr_minecraft` + 右对齐文字；可点区域宽 160。
-fn compat_cluster(ui: &mut Ui, bar: &Bar, compat: u8, area: Rect) {
+fn compat_cluster(state: &mut EditorState, ui: &mut Ui, bar: &Bar, compat: u8, area: Rect) {
     let rw = area.max.x;
     let p = ui.painter();
     Bank::separator(p, pos2(rw - 35.0, area.min.y + 6.0), &bar.th);
+    // 原版三档：c_green / c_orange / c_red，其中绿色在深色底（主题 2、Fluent fdark）换成 c_lime。
+    let lime = bar.th.kind == ThemeKind::Dark || (bar.th.kind == ThemeKind::Fluent && bar.th.fdark);
     let (left, right, text, color) = match compat {
-        1 => (0, 0, "完全兼容", Color32::from_rgb(0, 176, 0)),
+        1 => (0, 0, "完全兼容", if lime { Color32::from_rgb(0, 255, 0) } else { Color32::from_rgb(0, 176, 0) }),
         2 => (1, 0, "仅限数据包", Color32::from_rgb(255, 140, 0)),
-        _ => (1, 2, "仅限资源包", Color32::from_rgb(208, 32, 32)),
+        _ => (1, 2, "仅限资源包", Color32::from_rgb(255, 0, 0)),
     };
     bar.bank.compat_icon(p, pos2(rw - 59.0, area.min.y + 5.0), left, &bar.th);
     bar.bank.compat_icon(p, pos2(rw - 30.0, area.min.y + 5.0), right, &bar.th);
@@ -562,12 +564,21 @@ fn compat_cluster(ui: &mut Ui, bar: &Bar, compat: u8, area: Rect) {
         color,
     );
     let hot = Rect::from_min_size(pos2(rw - 160.0, area.min.y + 4.0), Vec2::new(160.0, 25.0));
+    // 原版 `popup_set` 三句中文文案（control_draw.gml:1976/2000/2024），第二行就是提示可点。
     let tip = match compat {
-        1 => "此歌曲兼容 schematic 和数据包。",
-        2 => "此歌曲仅兼容数据包：速度不是 2.5 / 5 / 10 tick/s，或音符带微调。",
-        _ => "此歌曲仅兼容带资源包的数据包：有音符超出两个八度，或用了自定义音色。",
+        1 => "此歌曲兼容 schematic 和数据包。\n（点击查看更多）",
+        2 => "此歌曲仅兼容数据包。\n（点击查看更多）",
+        _ => "此歌曲仅兼容带资源包的数据包。\n（点击查看更多）",
     };
-    ui.interact(hot, Id::new("compat_badge"), Sense::hover()).on_hover_text(tip);
+    // 原版 `if (a && window = 0)`：已经有窗口开着时这颗不响应，光标也不变手型。
+    let clickable = state.window.is_none();
+    let resp = ui.interact(hot, Id::new("compat_badge"), if clickable { Sense::click() } else { Sense::hover() })
+        .on_hover_text(tip);
+    // 原版命中时 `curs = cr_handpoint`。
+    let resp = if clickable { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
+    if clickable && resp.clicked() {
+        state.emit(Command::ShowCompat);
+    }
 }
 
 /// 精灵图缺失时的兜底：顺序和功能完全一样，只是画成文字按钮。

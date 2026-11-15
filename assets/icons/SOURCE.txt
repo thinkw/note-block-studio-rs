@@ -7,3 +7,6 @@ button_arrow/ = spr_button_arrow，15 帧，序号 = m + 3 * theme + 3 * (fdark 
 window/ 不是精灵图，是首选项「界面 → 图标 → 旧图标」换的两个窗口图标（control_create.gml:59-60、control_draw.gml:27-31），两者都是 256x256 8bit RGBA：
   new.png = 程序自带的立方体音符盒。取自装机版 Minecraft Note Block Studio.exe 内嵌的 RT_ICON #2（256x256 PNG，33866 字节），与仓库 options/windows/icons/icon.ico 里那一条逐字节相同，两边对得上。
   old.png = 圆角方块的老图标。取自装机版 Data\icon.ico（256x256 PNG，52478 字节）。仓库 datafiles/Data/icon.ico 是同一条目的旧版（37236 字节，格纹更浅），装机版 3.12 已经换深了，这里以装机版为准。
+yesno/ = spr_yesno，3 帧 32x32，原点 (16,16)（精灵画在中心）：0 红叉、1 绿勾、2 橙勾 + 警告三角。原版兼容性窗口每条检查前面的图标，draw_window_minecraft.gml 里 `draw_sprite(spr_yesno, 状态, x1 + 25, yy + 8)`。
+yesno_f/ = spr_yesno_f，9 帧 32x32，原点 (16,16)：0-2 浅色底图、3-5 深色（fdark）底图、6-8 白色蒙版。Fluent 主题先画 `状态 + 3 * fdark`，再叠 `状态 + 6` 并染 accent[6 - 2 * !fdark]，所以勾/叉/三角本身是强调色，底图只有深灰描边。
+../extranotes.zip = 装机版 D:\software\NBS\Data\extranotes.zip 原样拷贝（462095 字节，md5 152915fa5ddf5d53610b2b6f4e686e6e），不是我们生成的。原版 datapack_getextranotes.gml 就是 `file_copy(data_directory + "extranotes.zip", fn)`，nbs-io 用 include_bytes! 内嵌同一份字节。
