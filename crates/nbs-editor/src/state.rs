@@ -690,7 +690,7 @@ impl EditorState {
         self.audio_rev = self.doc.song.rev;
     }
 
-    /// 原版 `instrument_list`：16 个内置乐器 + 当前歌曲的自定义乐器，索引即音符里的
+    /// 原版 `instrument_list`：内置乐器（v6 起 20 个）+ 当前歌曲的自定义乐器，索引即音符里的
     /// instrument 值。自定义乐器没填名字时回落到「自定义音色 N」。
     pub fn instrument_list(&self) -> Vec<(u8, String)> {
         let mut rows: Vec<(u8, String)> = nbs_core::instruments::INSTRUMENTS

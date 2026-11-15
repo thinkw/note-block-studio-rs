@@ -26,6 +26,10 @@ use nbs_core::model::Song;
 use crate::datapack::{dat_pitch, instrument_sound};
 
 /// 16 种内置乐器对应的「音符盒下方方块」数值 id（原版 `reset_schematic_export.gml`）。
+///
+/// 铜块一族（16..19）没有这一代的数值 id——这套表是 1.12 之前的 `id + data`，
+/// 铜方块只存在于 1.17 之后的命名 id 里。所以这 4 格沿用「取不到就退回石头」的
+/// 既有分支（[`SchematicOptions::ins`]），不编造 id。
 pub const INSTRUMENT_BLOCKS: [u8; 16] = [
     3,   // Harp            dirt
     5,   // Double Bass     wooden plank
@@ -45,8 +49,9 @@ pub const INSTRUMENT_BLOCKS: [u8; 16] = [
     89,  // Pling           glowstone
 ];
 
-/// 原版 `sch_exp_ins_block` 数组长度：内置 16 个 + 自定义上限 240 个。
-pub const INS_COUNT: usize = 16 + 240;
+/// 原版 `sch_exp_ins_block` 数组长度：内置 20 个（v6 起）+ 自定义上限 236 个。
+/// 总数仍是 256，因为乐器索引是 u8；v6 只是把自定义的名额让出 4 格给铜块一族。
+pub const INS_COUNT: usize = 20 + 236;
 
 // ------------------------------------------------------------ 原版方块数值 id
 const AIR: u8 = 0;
@@ -69,7 +74,12 @@ const REPEATER: u8 = 93;
 const REPEATER_POWERED: u8 = 94;
 
 /// 原版硬编码的三组 id（`schematic_export.gml` 开头）。
-const INS_NAMES: [&str; 16] = [
+///
+/// 前 16 项逐字抄自原版 `ins[0..15]`；后 4 项是 v6 的铜块一族，用装机版自带
+/// `instrumenttextures.zip → assets/minecraft/sounds.json` 里的音符盒声音事件名
+/// （`block.note_block.trumpet*`）。自定义乐器在原版里统一写 `"harp"`
+/// （`schematic_export.gml:41-43`），所以下面取值越界时也退回 harp。
+const INS_NAMES: [&str; 20] = [
     "harp",
     "bass",
     "basedrum",
@@ -86,6 +96,10 @@ const INS_NAMES: [&str; 16] = [
     "bit",
     "banjo",
     "pling",
+    "trumpet",
+    "trumpet_exposed",
+    "trumpet_weathered",
+    "trumpet_oxidized",
 ];
 
 /// 原版导出按钮的大小上限：`len >= 2000 || wid >= 2000 || hei >= 256` 拒绝。
@@ -643,9 +657,9 @@ impl SchematicOptions {
         }
     }
 
-    /// 原界面里 16 个内置乐器 + 自定义乐器的方块设置行数。
+    /// 原界面里 20 个内置乐器 + 自定义乐器的方块设置行数。
     pub fn instrument_rows(&self, custom: usize) -> usize {
-        (16 + custom).min(INS_COUNT)
+        (nbs_core::model::FIRST_CUSTOM_INDEX as usize + custom).min(INS_COUNT)
     }
 }
 
@@ -1723,7 +1737,7 @@ impl Built {
                 } else {
                     n.string("Name", "minecraft:note_block");
                     n.compound("Properties");
-                    n.string("instrument", if a < 16 { INS_NAMES[a] } else { "harp" });
+                    n.string("instrument", INS_NAMES.get(a).copied().unwrap_or("harp"));
                     n.string("note", &b.to_string());
                     n.string("powered", "false");
                     n.end();

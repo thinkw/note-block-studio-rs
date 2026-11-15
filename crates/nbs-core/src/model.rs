@@ -12,8 +12,12 @@ pub const MC_KEY_MIN: u8 = 33;
 pub const MC_KEY_MAX: u8 = 57;
 pub const DEFAULT_KEY: u8 = 39;
 
-/// 内置乐器数量；>= 此索引的均为自定义乐器。
-pub const FIRST_CUSTOM_INDEX: u8 = 16;
+/// 内置乐器数量，也是「>= 此索引均为自定义乐器」的分界线。
+///
+/// 原版装机版（NBS 3.12）`first_custom_index = ds_list_size(instrument_list) = 20`：
+/// 0..15 经典乐器，16..19 是 MC 26.1 的铜块一族。旧版（仓库源码那份）是 16，
+/// 所以 .nbs 文件里存的这个数可能是 16，读进来要按差值把自定义索引整体上移。
+pub const FIRST_CUSTOM_INDEX: u8 = 20;
 
 /// 力度 / 声像 / 微调的取值上限（对应原版 median 夹取）。
 pub const VEL_MAX: u8 = 100;
@@ -24,7 +28,7 @@ pub const PIT_MAX: i16 = 1200;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Note {
-    /// 乐器索引（0..15 内置，>=16 自定义）。
+    /// 乐器索引（0..19 内置，>= 20 自定义）。
     pub instrument: u8,
     /// 音高 0..=87。
     pub key: u8,
@@ -168,7 +172,8 @@ pub struct SongMeta {
     pub midi_file: String,
     pub auto_save: bool,
     pub auto_save_mins: u8,
-    /// 保存时使用的 NBS 版本号（0..=5）。
+    /// 保存时使用的 NBS 版本号（0..=6）。原版新建曲用程序自身的版本（装机版是 6），
+    /// 打开旧曲则沿用文件的版本，除非用户在「保存选项」里改。
     pub save_version: u8,
 }
 
@@ -192,7 +197,7 @@ impl Default for SongMeta {
             midi_file: String::new(),
             auto_save: true,
             auto_save_mins: 10,
-            save_version: 5,
+            save_version: crate::nbs::NBS_VERSION,
         }
     }
 }

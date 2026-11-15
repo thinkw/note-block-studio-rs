@@ -7,6 +7,11 @@ use crate::commands::Command;
 use crate::state::{EditMode, Flag, WindowKind};
 use crate::state::EditorState;
 
+/// 原版 `control_draw.gml:822-843` 的数字快捷键只覆盖前 16 个乐器：
+/// Ctrl+1..9 → 0..8，Ctrl+Shift+1..7 → 9..15。v6 新增的铜块一族（16..19）
+/// 在原版里没有按键，所以这里不绑，`instruments_window` 也不给它们印提示。
+pub const INSTRUMENT_HOTKEYS: usize = 16;
+
 pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
     // 有文本输入焦点时，把键盘让给输入框。
     let typing = ctx.memory(|m| m.focused().is_some());
@@ -88,7 +93,7 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
             for (idx, k) in digits.iter().enumerate() {
                 if p(*k) {
                     let ins = if shift { 9 + idx } else { idx };
-                    if ins < 16 {
+                    if ins < INSTRUMENT_HOTKEYS {
                         out.push(Command::SetInstrument(ins as u8));
                     }
                 }

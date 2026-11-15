@@ -13,7 +13,7 @@ use std::path::Path;
 
 use flate2::write::DeflateEncoder;
 use flate2::Compression;
-use nbs_core::model::Song;
+use nbs_core::model::{Song, FIRST_CUSTOM_INDEX};
 
 use crate::schematic::{legacy_block_name, INSTRUMENT_BLOCKS};
 
@@ -23,8 +23,10 @@ pub const SOUND_SOURCES: [&str; 10] = [
     "weather",
 ];
 
-/// 原版 `dat_instrument`：前 16 个内置音色对应的 `minecraft:block.note_block.*` 事件。
-pub(crate) const NOTE_BLOCK_SOUNDS: [&str; 16] = [
+/// 原版 `dat_instrument`：内置音色对应的 `minecraft:block.note_block.*` 事件。
+/// 16..19 是装机版新增的铜块一族，事件名取自装机版自带的
+/// `Data/instrumenttextures.zip → assets/minecraft/sounds.json`。
+pub(crate) const NOTE_BLOCK_SOUNDS: [&str; 20] = [
     "harp",
     "bass",
     "basedrum",
@@ -41,6 +43,10 @@ pub(crate) const NOTE_BLOCK_SOUNDS: [&str; 16] = [
     "bit",
     "banjo",
     "pling",
+    "trumpet",
+    "trumpet_exposed",
+    "trumpet_weathered",
+    "trumpet_oxidized",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -265,12 +271,13 @@ fn gml_num(x: f64) -> String {
 
 /// 原版 `dat_instrument`。
 pub(crate) fn instrument_sound(song: &Song, index: usize) -> String {
-    if index < 16 {
+    let first_custom = FIRST_CUSTOM_INDEX as usize;
+    if index < first_custom {
         format!("minecraft:block.note_block.{}", NOTE_BLOCK_SOUNDS[index])
     } else {
         let name = song
             .custom_instruments
-            .get(index - 16)
+            .get(index - first_custom)
             .map(|c| c.name.clone())
             .unwrap_or_default();
         format!("minecraft:{name}")
@@ -278,6 +285,9 @@ pub(crate) fn instrument_sound(song: &Song, index: usize) -> String {
 }
 
 /// 原版 `block_get_namespaced_id(sch_exp_ins_block[i])`（不含 `minecraft:` 前缀）。
+///
+/// 注意：`INSTRUMENT_BLOCKS` 是「拍平前」的数值 id 表，铜块一族（16..19）在那套 id 里
+/// 根本不存在，所以和自定义乐器一样落到默认的石块。
 fn visual_block(index: usize) -> &'static str {
     legacy_block_name(INSTRUMENT_BLOCKS.get(index).copied().unwrap_or(1))
 }
@@ -1269,13 +1279,41 @@ mod tests {
                 key: 45,
                 press: true,
             });
-        song.set(0, 0, Note::new(16, 45));
-        song.set(1, 0, Note::new(16, 45));
+        // 索引必须取「第一个自定义乐器」：v6 起 16..19 是内置的铜块一族，
+        // 用 16 测不到自定义音色这条分支。
+        song.set(0, 0, Note::new(FIRST_CUSTOM_INDEX, 45));
+        song.set(1, 0, Note::new(FIRST_CUSTOM_INDEX, 45));
         let plan = generate(&song, &opts("cus"), "cus");
         assert_eq!(
             line0(&plan, "data/cus/function/notes/0.mcfunction"),
             "playsound minecraft:piano record @s ^0 ^ ^ 1 1.000000 1"
         );
+    }
+
+    /// v6 新增的铜块一族：走内置声音事件，不落到自定义分支。
+    #[test]
+    fn copper_instruments_use_their_note_block_events() {
+        let mut song = Song::new();
+        for (tick, ins) in [16u8, 17, 18, 19].iter().enumerate() {
+            song.set(tick as u32, 0, Note::new(*ins, 45));
+        }
+        let plan = generate(&song, &opts("cop"), "cop");
+        for (tick, ev) in [
+            "trumpet",
+            "trumpet_exposed",
+            "trumpet_weathered",
+            "trumpet_oxidized",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(
+                line0(&plan, &format!("data/cop/function/notes/{tick}.mcfunction")),
+                format!("playsound minecraft:block.note_block.{ev} record @s ^0 ^ ^ 1 1.000000 1"),
+                "乐器 {}",
+                16 + tick
+            );
+        }
     }
 
     #[test]

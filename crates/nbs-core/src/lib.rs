@@ -6,7 +6,7 @@
 //! - [`selection`]  浮动选区与 OpenNBS 兼容的 RLE 编码（D）
 //! - [`history`]    紧凑 diff 撤销/重做栈（D）
 //! - [`document`]   所有编辑命令的事务封装（D）
-//! - [`instruments`] 16 种内置乐器与方块配色（D）
+//! - [`instruments`] 20 种内置乐器与方块配色（D）
 //!
 //! 设计要点：渲染只读 [`model::Song::notes_in_view`]，它基于 `BTreeMap::range`
 //! 只遍历视口内的列，绝不扫描全曲 —— 这是长曲子不掉帧的硬性保证。

@@ -11,7 +11,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use nbs_core::model::{Note, Song};
 
 use crate::mixer::Voice;
-use crate::samples::{SoundBank, SAMPLE_RATE};
+use crate::samples::{SoundBank, BUILTIN_FILES, SAMPLE_RATE};
 use crate::scheduler::{
     build_event_table, make_shared, NoteEvent, Shared, TransportClock,
 };
@@ -249,8 +249,9 @@ impl AudioEngine for CpalEngine {
     fn sample_status(&self) -> String {
         if self.bank.is_ready() {
             format!(
-                "已加载 {}/16 个内置采样{}",
+                "已加载 {}/{} 个内置采样{}",
                 self.bank.loaded_count(),
+                BUILTIN_FILES.len(),
                 if self.bank.missing.is_empty() { "" } else { "（部分缺失）" }
             )
         } else {
@@ -579,6 +580,29 @@ mod tests {
         assert_eq!(stats.notes, song.total_blocks);
         assert!(pcm.iter().any(|&s| s.abs() > 0.001), "应有实际声音");
         assert!(pcm.iter().all(|&s| s.abs() <= 1.0 + 1e-6), "必须限幅");
+    }
+
+    /// 20 种内置乐器都得真的出声：逐个渲染单音符歌曲，检查峰值不为零。
+    /// 铜块一族（16..19）是 v6 新增的，光「采样文件在」不算实现，要能响。
+    #[test]
+    fn every_builtin_instrument_renders_audio() {
+        let bank = SoundBank::discover();
+        if !bank.is_ready() {
+            return;
+        }
+        for ins in 0..BUILTIN_FILES.len() as u8 {
+            let mut song = Song::new();
+            song.set(0, 0, nbs_core::model::Note::new(ins, 45));
+            song.recalculate();
+            let events = build_event_table(&song, false);
+            let (pcm, stats) = render_offline(&song, &bank, &events, &Default::default());
+            assert_eq!(stats.notes, 1, "乐器 {ins} 没进事件表");
+            assert!(
+                pcm.iter().any(|&s| s.abs() > 0.01),
+                "乐器 {ins}（{}）渲染出来是静音",
+                BUILTIN_FILES[ins as usize]
+            );
+        }
     }
 
     #[test]

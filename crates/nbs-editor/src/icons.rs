@@ -45,7 +45,12 @@ pub mod frame {
     pub const INSBOX_COLLAPSE: usize = 59;
     /// 自定义音色的角标底。
     pub const CUSTOM_INS_OVERLAY: usize = 27;
+    /// 原版给「没有专属图标的乐器」用的通用音色图标（`icons.INS_1 + first_custom_index`）。
+    pub const CUSTOM_INS_BASE: usize = 26;
     pub const INS_1: usize = 10;
+    /// 本仓库贴图表里内置乐器图标的个数：`spr_icons` 帧 10..25。装机版 3.12 的表已经有
+    /// 20 帧（10..29 是铜块一族），我们没有那 4 帧，所以只能退回通用图标。
+    pub const BUILTIN_ICON_FRAMES: usize = 16;
     // 原版 28/30/32/34/36/38 是同一批图标的灰态；`icon(..., locked = true)` 会减 1 取到它们。
     pub const UNDO: usize = 29;
     pub const REDO: usize = 31;
@@ -241,6 +246,14 @@ fn glyph_tint(th: &Theme, alpha: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(r, g, b, (a as f32 * alpha) as u8)
 }
 
+/// 乐器格子用哪一帧图标：原版 `icons.INS_1 + min(i, first_custom_index)`，
+/// 即「内置乐器按序号、自定义乐器一律用通用图标」。我们的贴图表只有 16 帧内置图标
+/// （装机版 3.12 有 20 帧，多出的 4 帧是铜块一族），所以再夹一次到 `BUILTIN_ICON_FRAMES`，
+/// 让 16..19 和自定义乐器一样用通用图标，而不是画到无关的 UI 帧上。
+fn instrument_frame(list_index: usize, first_custom: usize) -> usize {
+    frame::INS_1 + list_index.min(first_custom).min(frame::BUILTIN_ICON_FRAMES)
+}
+
 impl Bank {
     fn load(ctx: &Context, root: &Path) -> Option<Bank> {
         let strip = |dir: &str, w: u32, h: u32| Strip::load(ctx, &root.join(dir), w, h);
@@ -322,7 +335,10 @@ impl Bank {
         let state = pointer_state(resp.hovered(), holding);
         let p = ui.painter();
         self.frame1.blit(p, at, Self::base(th.kind) + if pressed { 2 } else { state }, Vec2::new(25.0, 25.0), Color32::WHITE);
-        let sprite = frame::INS_1 + list_index.min(first_custom as usize);
+        // 原版 `sprite = icons.INS_1 + min(i, first_custom_index)`：没有专属图标的乐器
+        // 一律退回通用音色图标。本仓库的贴图表只画到 16 个内置乐器，铜块一族（16..19）
+        // 没有帧，所以同样退回通用图标，而不是拿 UNDO/COPY 那类无关的 UI 帧凑数。
+        let sprite = instrument_frame(list_index, first_custom as usize);
         let fluent = th.kind == ThemeKind::Fluent;
         if fluent {
             let scale = if state == 2 { 0.8 } else { 1.0 };
@@ -576,4 +592,31 @@ fn asset_root() -> Option<PathBuf> {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     candidates.push(manifest.join("../../assets/icons"));
     candidates.into_iter().find(|p| p.join("icons_classic").is_dir())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 图标帧只能指到「16 帧内置乐器图标 + 通用图标」，不能滑到 26..29 那些无关的 UI 帧。
+    #[test]
+    fn instrument_frames_never_point_at_unrelated_icons() {
+        for i in 0..16 {
+            assert_eq!(instrument_frame(i, 20), frame::INS_1 + i, "内置乐器 {i}");
+        }
+        // 铜块一族和自定义乐器一样：通用图标帧，不借用 UNDO/COPY 的帧。
+        for i in 16..40 {
+            assert_eq!(instrument_frame(i, 20), frame::INS_1 + frame::BUILTIN_ICON_FRAMES, "索引 {i}");
+        }
+        assert_eq!(
+            instrument_frame(16, 16),
+            frame::INS_1 + 16,
+            "旧格式（first_custom = 16）仍然是通用图标"
+        );
+        // 用到的帧必须真的在贴图表里（00..59）。
+        for i in 0..=255u8 {
+            let f = instrument_frame(i as usize, 20);
+            assert!(f <= frame::INSBOX_COLLAPSE, "索引 {i} 取到不存在的帧 {f}");
+        }
+    }
 }

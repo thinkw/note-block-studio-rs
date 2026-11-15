@@ -1,8 +1,8 @@
-//! `.nbs` 二进制编解码（v0..v5）。
+//! `.nbs` 二进制编解码（v0..v6）。
 //!
-//! 虽然本轮以「D. UI + 网格编辑器」为起点，但编辑器必须能真正打开/保存文件，
-//! 因此这里先落地一个与 OpenNBS 3.11.0 (`nbs_version = 5`) 完全互通的最小 A 模块。
 //! 文件结构：header + tick/layer 双 RLE 音符区 + 图层属性 + 自定义乐器。
+//! v6（装机版 NBS 3.12）相对 v5 没有增删任何字段，只是内置乐器 16 → 20，
+//! 官方格式说明：<https://noteblock.studio/nbs>。
 
 use std::fmt;
 use std::path::Path;
@@ -10,6 +10,11 @@ use std::path::Path;
 use crate::model::{
     CustomInstrument, Layer, LockMode, Note, Song, SongMeta, FIRST_CUSTOM_INDEX, KEY_MAX,
 };
+
+/// 本程序自身的 NBS 版本（原版 `nbs_version`）：新建曲默认写到这个版本。
+pub const NBS_VERSION: u8 = 6;
+/// 能读取的最高版本。
+pub const MAX_NBS_VERSION: u8 = 6;
 
 #[derive(Debug)]
 pub enum NbsError {
@@ -23,7 +28,9 @@ impl fmt::Display for NbsError {
         match self {
             Self::Io(e) => write!(f, "IO 错误: {e}"),
             Self::UnexpectedEof(what) => write!(f, "文件意外结束（读取 {what} 时）"),
-            Self::UnsupportedVersion(v) => write!(f, "不支持的 NBS 版本: {v}（最高支持 5）"),
+            Self::UnsupportedVersion(v) => {
+                write!(f, "不支持的 NBS 版本: {v}（最高支持 {MAX_NBS_VERSION}）")
+            }
         }
     }
 }
@@ -118,7 +125,7 @@ pub fn load_bytes(bytes: &[u8]) -> Result<Song, NbsError> {
     let first_custom: u8;
     if first == 0 {
         version = r.u8("NBS 版本")?;
-        if version > 5 {
+        if version > MAX_NBS_VERSION {
             return Err(NbsError::UnsupportedVersion(version));
         }
         first_custom = r.u8("首个自定义乐器索引")?;
@@ -181,10 +188,13 @@ pub fn load_bytes(bytes: &[u8]) -> Result<Song, NbsError> {
                 (100, 100, 0)
             };
             // 文件里的自定义乐器索引基于文件自身的 first_custom_index，
-            // 运行时统一按 16 偏移，做一次重映射。
+            // 运行时统一按 FIRST_CUSTOM_INDEX（v6 起是 20）偏移，做一次重映射。
             // v0 老格式没有该字段（只有内置乐器），不能重映射。
+            // 旧文件最多可带 240 个自定义乐器，索引 16 起算会越过 u8 的上限，
+            // 所以整体换算到 usize 再夹回 255，不能让算术溢出。
             if version > 0 && ins >= first_custom && first_custom < FIRST_CUSTOM_INDEX {
-                ins = FIRST_CUSTOM_INDEX + (ins - first_custom);
+                let shifted = FIRST_CUSTOM_INDEX as usize + (ins - first_custom) as usize;
+                ins = shifted.min(u8::MAX as usize) as u8;
             }
             if tick >= 0 && layer >= 0 {
                 song.set(
@@ -242,7 +252,11 @@ pub fn load(path: &Path) -> Result<Song, NbsError> {
 
 /// 序列化为 NBS 字节流。
 pub fn save_bytes(song: &Song, version: u8) -> Result<Vec<u8>, NbsError> {
-    let version = version.min(5);
+    let version = version.min(MAX_NBS_VERSION);
+    // 自定义上限只由「写出去的首个自定义索引」决定：索引是 u8，从 FIRST_CUSTOM_INDEX
+    // 起算就只剩 256-20 格（v6 只是把内置乐器从 16 扩到 20，没有新增字段）。
+    // 原版 `save_song.gml:33,108` 也是直接写全局 first_custom_index 和 user_instruments。
+    let max_custom = 256 - FIRST_CUSTOM_INDEX as usize;
     let mut w = Writer::new();
     let m = &song.meta;
 
@@ -318,8 +332,8 @@ pub fn save_bytes(song: &Song, version: u8) -> Result<Vec<u8>, NbsError> {
         }
     }
 
-    w.u8(song.custom_instruments.len().min(255) as u8);
-    for ins in song.custom_instruments.iter().take(255) {
+    w.u8(song.custom_instruments.len().min(max_custom) as u8);
+    for ins in song.custom_instruments.iter().take(max_custom) {
         w.string(&ins.name);
         w.string(&ins.filename);
         w.u8(ins.key);
@@ -354,9 +368,40 @@ mod tests {
 
     #[test]
     fn roundtrip_all_versions() {
-        for v in 0..=5 {
+        for v in 0..=MAX_NBS_VERSION {
             roundtrip(v);
         }
+    }
+
+    /// v6 只改了「内置乐器 16 → 20」这一件事：字段布局和 v5 完全一致，
+    /// 所以同一个歌曲存成 v5/v6 读回来必须一模一样，且首个自定义索引写的是 20。
+    #[test]
+    fn v6_only_moves_the_custom_instrument_boundary() {
+        let song = Song::demo();
+        for v in [5, 6] {
+            let bytes = save_bytes(&song, v).unwrap();
+            assert_eq!(bytes[2], v, "版本字节");
+            assert_eq!(bytes[3], FIRST_CUSTOM_INDEX, "首个自定义乐器索引");
+            let back = load_bytes(&bytes).unwrap();
+            assert_eq!(back.total_blocks, song.total_blocks, "v{v} 音符数");
+            assert_eq!(back.get(63, 2), song.get(63, 2), "v{v} 音符内容");
+            assert_eq!(back.meta.save_version, v, "v{v} 记住来源版本");
+        }
+    }
+
+    /// 旧的 v1..v5 文件把自定义乐器排在 16 之后，读进来要整体平移到 20 之后；
+    /// 原版 `open_song_nbs.gml:99` 用的是同一个 `custom_index_diff` 加法。
+    /// 索引越过 u8 时夹在 255，不能让加法 panic。
+    #[test]
+    fn pre_v6_custom_indices_are_shifted_by_four() {
+        let mut song = Song::new();
+        song.set(0, 0, Note::new(16, 45)); // 旧文件里的第 1 个自定义乐器
+        song.set(1, 0, Note::new(255, 45)); // 越界索引
+        let mut bytes = save_bytes(&song, 5).unwrap();
+        bytes[3] = 16; // 伪装成 v5 时代的 first_custom_index
+        let back = load_bytes(&bytes).unwrap();
+        assert_eq!(back.get(0, 0).unwrap().instrument, 20, "旧自定义 0 号 → 20");
+        assert_eq!(back.get(1, 0).unwrap().instrument, 255, "越界索引夹在 255");
     }
 
     /// 原版 open_song_nbs.gml:71 `if (song_nbs_version >= 4)` 才读循环三兄弟，
@@ -373,7 +418,7 @@ mod tests {
         song.meta.blocks_added = 99;
         song.meta.blocks_removed = 7;
         song.meta.midi_file = "a.mid".into();
-        for v in 0..=5 {
+        for v in 0..=MAX_NBS_VERSION {
             let back = load_bytes(&save_bytes(&song, v).unwrap()).unwrap();
             assert_eq!(back.meta.minutes_spent, 42, "v{v} 耗时");
             assert_eq!(back.meta.left_clicks, 11, "v{v} 左键");

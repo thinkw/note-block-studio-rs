@@ -1,5 +1,10 @@
-//! 内置乐器表（对应原版 `first_custom_index = 16`）。
+//! 内置乐器表（对应原版 `first_custom_index = instrument_list` 的长度）。
+//! 原版装机版（NBS 3.12，支持 MC 26.1）有 20 种：0..15 是经典十六种，
+//! 16..19 是铜块一族（`Data/Sounds/trumpet*.ogg`，音效事件 `block.note_block.trumpet*`，
+//! 依据 https://noteblock.studio/nbs 的 v6 乐器表）。
 //! 方块颜色/形状索引在这里定义，与渲染层解耦，方便后续换成原版精灵贴图。
+
+use crate::model::FIRST_CUSTOM_INDEX;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Instrument {
@@ -11,7 +16,7 @@ pub struct Instrument {
     pub short: &'static str,
 }
 
-pub const INSTRUMENTS: [Instrument; 16] = [
+pub const INSTRUMENTS: [Instrument; 20] = [
     Instrument { name: "Harp",             color: ( 96, 190, 130), shape: 0, short: "Hp" },
     Instrument { name: "Double Bass",      color: ( 92, 140, 190), shape: 1, short: "DB" },
     Instrument { name: "Bass Drum",        color: (190,  96,  96), shape: 1, short: "BD" },
@@ -28,6 +33,13 @@ pub const INSTRUMENTS: [Instrument; 16] = [
     Instrument { name: "Bit",              color: (120, 170, 220), shape: 3, short: "Bt" },
     Instrument { name: "Banjo",            color: (216, 146,  96), shape: 0, short: "Bj" },
     Instrument { name: "Pling",            color: (176, 196, 116), shape: 2, short: "Pl" },
+    // 铜块一族的配色是装机版自带 `instrumenttextures.zip` 里对应方块贴图
+    // （copper_block / exposed_copper / weathered_copper / oxidized_copper，16×16 RGB）
+    // 的逐像素平均值，形状按「整块立方体」取 0，与铁块/骨块一族一致。
+    Instrument { name: "Trumpet",           color: (160, 101,  95), shape: 0, short: "Tr" },
+    Instrument { name: "Exposed Trumpet",   color: (147, 110, 107), shape: 0, short: "Ex" },
+    Instrument { name: "Weathered Trumpet", color: (107, 132, 114), shape: 0, short: "We" },
+    Instrument { name: "Oxidized Trumpet",  color: ( 96, 127, 123), shape: 0, short: "Ox" },
 ];
 
 pub fn instrument(index: u8) -> Option<&'static Instrument> {
@@ -37,7 +49,7 @@ pub fn instrument(index: u8) -> Option<&'static Instrument> {
 pub fn instrument_name(index: u8) -> String {
     match instrument(index) {
         Some(i) => i.name.to_string(),
-        None => format!("自定义音色 {}", index - 16 + 1),
+        None => format!("自定义音色 {}", index - FIRST_CUSTOM_INDEX + 1),
     }
 }
 
@@ -54,7 +66,7 @@ pub fn instrument_color(index: u8) -> (u8, u8, u8) {
                 (200, 130, 130),
                 (140, 160, 210),
             ];
-            palette[(index as usize - 16) % palette.len()]
+            palette[(index as usize - FIRST_CUSTOM_INDEX as usize) % palette.len()]
         }
     }
 }

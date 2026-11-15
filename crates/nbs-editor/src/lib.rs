@@ -699,6 +699,56 @@ mod gui_window_tests {
         assert!(s2.modals.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// 音色窗口：v6 起列出 20 种内置乐器，但快捷键只印原版真绑了的那 16 个
+    /// （`control_draw.gml:822-843`：Ctrl+1..9 → 0..8，Ctrl+Shift+1..7 → 9..15）。
+    /// 铜块一族按了没反应，就不许在界面上给它们编一个组合键。
+    #[test]
+    fn instruments_window_lists_twenty_and_advertises_only_real_bindings() {
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        dispatch(&mut state, commands::Command::ShowWindow(WindowKind::Instruments), &ctx);
+        assert_eq!(state.window, Some(WindowKind::Instruments));
+        // 刚 dispatch 完的第一帧只登记窗口，正文要第二帧才画出来。
+        frame(&mut state, &ctx);
+        let out = frame_out(&mut state, &ctx, base_input());
+        let texts: Vec<String> = out
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        for name in [
+            "Trumpet",
+            "Exposed Trumpet",
+            "Weathered Trumpet",
+            "Oxidized Trumpet",
+        ] {
+            assert!(
+                texts.iter().any(|t| t == name),
+                "窗口里缺少内置乐器 {name}，当前文本：{}",
+                texts.join(" | ")
+            );
+        }
+        assert_eq!(
+            texts.iter().filter(|t| t.starts_with("Ctrl+Shift+")).count(),
+            7,
+            "Ctrl+Shift+数字应当只有 7 个"
+        );
+        assert_eq!(
+            texts.iter().filter(|t| t.starts_with("Ctrl+") && !t.contains("Shift")).count(),
+            9,
+            "Ctrl+数字应当只有 9 个"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("20 种内置乐器") && t.contains("索引 >= 20")),
+            "底部说明要跟着 v6 的边界走"
+        );
+    }
 }
 
 #[cfg(test)]

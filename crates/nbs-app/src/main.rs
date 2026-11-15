@@ -144,14 +144,14 @@ fn run_cli(args: &[String]) -> Result<(), String> {
         // precision=0 → deltapertick = PPQ/4 = 120，与本程序导出的 MIDI 1:1 对应
         let opts = nbs_io::midi::MidiImportOptions { precision: 0, ..Default::default() };
         let song = nbs_io::midi::import_midi_path(input, &opts)?;
-        nbs_core::nbs::save(output, &song, 5).map_err(|e| e.to_string())?;
+        nbs_core::nbs::save(output, &song, nbs_core::nbs::NBS_VERSION).map_err(|e| e.to_string())?;
         println!("已导入 {} 个音符 → {}", song.total_blocks, output.display());
         return Ok(());
     }
 
     if cmd == "--import-schematic" {
         let info = nbs_io::schematic::import_schematic(input).map_err(|e| e.to_string())?;
-        nbs_core::nbs::save(output, &info.song, 5).map_err(|e| e.to_string())?;
+        nbs_core::nbs::save(output, &info.song, nbs_core::nbs::NBS_VERSION).map_err(|e| e.to_string())?;
         println!(
             "图样 {}×{}×{}：{} 个输入 / {} 个音符盒 / 落子 {} → {}",
             info.width, info.length, info.height, info.inputs, info.note_blocks,

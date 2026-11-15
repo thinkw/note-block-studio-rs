@@ -340,7 +340,15 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 state.doc.select_rect(0, i, enda, i, false, additive, false);
             }
         }
-        Command::SetInstrument(i) => state.current.instrument = i,
+        // 原版每个选乐器的入口（数字快捷键 `control_draw.gml:822-843`、音色格子
+        // `draw_icon_insbox` 的 `instrument = ins` 分支）都顺带把力度/声像/微调复位并发一声。
+        Command::SetInstrument(i) => {
+            state.current.instrument = i;
+            state.current.velocity = 100;
+            state.current.panning = 100;
+            state.current.pitch = 0;
+            state.audio.preview_note(&state.current);
+        }
         Command::SetEditMode(m) => state.tool = m,
         Command::SetKey(d) => {
             state.current.key = (state.current.key as i32 + d).clamp(0, KEY_MAX as i32) as u8;
@@ -552,7 +560,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.doc.edit_meta("修改拍号", |m| m.time_signature = ts.clamp(2, 8));
         }
         Command::SetSaveVersion(v) => {
-            state.doc.edit_meta("修改保存版本", |m: &mut SongMeta| m.save_version = v.min(5));
+            state.doc.edit_meta("修改保存版本", |m: &mut SongMeta| m.save_version = v.min(nbs_core::nbs::MAX_NBS_VERSION));
         }
         Command::ClearSong => {
             state.doc.clear_all_notes();
@@ -973,7 +981,9 @@ mod tests {
         s.meta.tempo = tempo;
         s.set(0, 0, Note::new(0, 40));
         s.set(0, 1, Note::new(0, 30));
-        s.set(1, 0, Note::new(16, 45));
+        // 用「第一个自定义索引」而不是写死 16：v6 起 16..19 是内置的铜块一族，
+        // 拿它们当自定义音色就问不出「自定义音色」那一段提问了。
+        s.set(1, 0, Note::new(nbs_core::model::FIRST_CUSTOM_INDEX, 45));
         let mut pitched = Note::new(0, 50);
         pitched.pitch = 50;
         s.set(2, 0, pitched);
@@ -1037,6 +1047,24 @@ mod tests {
         assert!(state.modals.is_empty());
         assert_eq!(state.window, Some(WindowKind::SchematicExport));
         assert_eq!(state.schematic_options.tempo_mode, 2, "3.0 t/s 对应 2.5 红石刻档");
+    }
+
+    /// 选乐器顺带复位力度/声像/微调并发一声——原版每个入口都这么做
+    /// （`control_draw.gml:826-830` 数字键、`1841-1848` 音色格子）。
+    #[test]
+    fn selecting_an_instrument_resets_and_previews() {
+        let ctx = Context::default();
+        let mut state = state_with(Song::demo());
+        state.current.velocity = 33;
+        state.current.panning = 7;
+        state.current.pitch = -250;
+        for ins in [0u8, 15, 16, 19] {
+            dispatch(&mut state, Command::SetInstrument(ins), &ctx);
+            assert_eq!(state.current.instrument, ins, "乐器 {ins}");
+            assert_eq!(state.current.velocity, 100, "乐器 {ins} 的力度");
+            assert_eq!(state.current.panning, 100, "乐器 {ins} 的声像");
+            assert_eq!(state.current.pitch, 0, "乐器 {ins} 的微调");
+        }
     }
 
     /// 提问只要答一个「否」，后面的提示连同窗口一起作废。

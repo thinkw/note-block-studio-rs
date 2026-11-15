@@ -195,7 +195,7 @@ fn properties(state: &mut EditorState, ui: &mut Ui) {
         egui::ComboBox::from_id_salt("save_version")
             .selected_text(format!("NBS v{v}"))
             .show_ui(ui, |ui| {
-                for n in 0..=5u8 {
+                for n in 0..=nbs_core::nbs::MAX_NBS_VERSION {
                     ui.selectable_value(&mut v, n, format!("NBS v{n}"));
                 }
             });
@@ -204,7 +204,12 @@ fn properties(state: &mut EditorState, ui: &mut Ui) {
         }
     });
     ui.separator();
-    ui.label(RichText::new("v0..v5 全部可读可写；v4/v5 才会保存力度/声像/微调与图层锁定").small().weak());
+    ui.label(RichText::new(format!(
+        "v0..v{} 全部可读可写；v4/v5 才会保存力度/声像/微调与图层锁定，v6 只是把内置乐器从 16 种扩到 20 种（格式与 v5 相同）",
+        nbs_core::nbs::MAX_NBS_VERSION
+    ))
+    .small()
+    .weak());
     footer(state, ui);
 }
 
@@ -325,12 +330,25 @@ fn instruments_window(state: &mut EditorState, ui: &mut Ui) {
             if ui.selectable_label(state.current.instrument == i as u8, ins.name).clicked() {
                 state.emit(Command::SetInstrument(i as u8));
             }
-            ui.label(RichText::new(format!("Ctrl+{}", if i < 9 { (i + 1).to_string() } else { format!("Shift+{}", i - 8) })).small().weak());
+            // 原版只给前 16 个乐器绑了数字键（`control_draw.gml:822-843`），
+            // 铜块一族没有按键就留空，不能印一个按了没反应的组合键。
+            let hint = if i < crate::shortcuts::INSTRUMENT_HOTKEYS {
+                if i < 9 { format!("Ctrl+{}", i + 1) } else { format!("Ctrl+Shift+{}", i - 8) }
+            } else {
+                String::new()
+            };
+            ui.label(RichText::new(hint).small().weak());
             ui.end_row();
         }
     });
     ui.separator();
-    ui.label(RichText::new("16 种内置乐器；自定义乐器索引 >= 16，随 .nbs 文件读写").small().weak());
+    ui.label(RichText::new(format!(
+        "{} 种内置乐器；自定义乐器索引 >= {}，随 .nbs 文件读写",
+        INSTRUMENTS.len(),
+        nbs_core::model::FIRST_CUSTOM_INDEX
+    ))
+    .small()
+    .weak());
     footer(state, ui);
 }
 

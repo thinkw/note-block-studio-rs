@@ -1,8 +1,9 @@
-//! 采样库：加载 OpenNBS 自带的 16 个 OGG Vorbis 采样。
+//! 采样库：加载 OpenNBS 自带的 20 个 OGG Vorbis 内置采样。
 //!
-//! 关键坑（来自原版 `instrument_load.gml`）：16 个采样里 6 个是 44100Hz、
-//! 10 个是 48000Hz，而 GML 侧硬编码 44100。必须先按文件头实际采样率解码，
-//! 再线性重采样到统一 44100，否则会整体降调约 11.9%。
+//! 关键坑（来自原版 `instrument_load.gml`）：`assets/Sounds` 里 6 个采样是
+//! 44100Hz、14 个是 48000Hz（含 4 个铜块一族），而 GML 侧硬编码 44100。
+//! 必须先按文件头实际采样率解码，再线性重采样到统一 44100，
+//! 否则会整体降调约 11.9%。
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -14,8 +15,9 @@ pub const SAMPLE_RATE: u32 = 44100;
 /// 内置采样基准音高（`new_instrument` 默认 45，对应 pitch=1.0）。
 pub const BASE_KEY: u8 = 45;
 
-/// 16 个内置乐器 → OGG 文件名（原版 `control_create.gml:439-457`）。
-pub const BUILTIN_FILES: [&str; 16] = [
+/// 内置乐器 → OGG 文件名（原版 `control_create.gml` 的 `instrument_list`；
+/// 16..19 是装机版新增的铜块一族，采样来自 `Data/Sounds/trumpet*.ogg`）。
+pub const BUILTIN_FILES: [&str; 20] = [
     "harp.ogg",
     "dbass.ogg",
     "bdrum.ogg",
@@ -32,6 +34,10 @@ pub const BUILTIN_FILES: [&str; 16] = [
     "bit.ogg",
     "banjo.ogg",
     "pling.ogg",
+    "trumpet.ogg",
+    "trumpet_exposed.ogg",
+    "trumpet_weathered.ogg",
+    "trumpet_oxidized.ogg",
 ];
 
 #[derive(Clone, Debug)]
@@ -58,7 +64,7 @@ impl Sample {
 
 #[derive(Clone, Debug, Default)]
 pub struct SoundBank {
-    /// 索引 0..15 内置，>=16 自定义乐器。
+    /// 索引 0..19 内置，>= 20 自定义乐器。
     pub samples: Vec<Sample>,
     pub missing: Vec<String>,
     pub source: Option<PathBuf>,
@@ -124,7 +130,7 @@ impl SoundBank {
     /// 为歌曲引用的自定义乐器追加采样（NBS 文件第 5 段）。
     /// 采样基准 key 来自 `CustomInstrument.key`，音色对齐原版。
     pub fn extend_for_song(&mut self, song: &Song) {
-        self.samples.truncate(16);
+        self.samples.truncate(BUILTIN_FILES.len());
         let dir = self.source.clone();
         for ins in &song.custom_instruments {
             let path = dir
@@ -273,7 +279,7 @@ mod tests {
     fn builtin_sounds_are_loadable() {
         let bank = SoundBank::discover();
         assert!(bank.is_ready(), "应能找到内置采样目录: {:?}", bank.source);
-        assert_eq!(bank.samples.len(), 16);
+        assert_eq!(bank.samples.len(), BUILTIN_FILES.len());
         // 原版混合采样率，全部必须被统一到 44100
         assert!(bank.samples[0].len() > 1000, "harp 采样不能为空");
         assert_eq!(bank.missing.len(), 0, "缺失: {:?}", bank.missing);
