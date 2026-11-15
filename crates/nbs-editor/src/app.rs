@@ -81,4 +81,6 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
 
     show_windows(state, ctx);
     flush_all(state, ctx);
+    // 对应原版每步结尾的 `prevwindow = window`：窗口自己的 Ctrl+P 关窗要等下一帧才生效。
+    state.window_prev = state.window.clone();
 }

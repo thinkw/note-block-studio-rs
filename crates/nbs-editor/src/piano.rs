@@ -315,7 +315,7 @@ fn collect_keybind_presses(state: &mut EditorState, ui: &mut Ui) {
         ui.input(|i| {
             let mut held = NO_KEYS;
             let mut pressed = NO_KEYS;
-            if !(i.modifiers.ctrl || i.modifiers.command) {
+            if !crate::shortcuts::ctrl_chord(i) {
                 for (idx, c) in KEYBINDS.iter().enumerate() {
                     if let Some(k) = keybind_key(*c) {
                         let key = MC_KEY_MIN as usize + idx;

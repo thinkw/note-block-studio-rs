@@ -457,6 +457,10 @@ pub struct EditorState {
     pub flags: UiFlags,
     pub theme: Theme,
     pub window: Option<WindowKind>,
+    /// 上一帧在最上层的窗口，对应原版全局变量 `prevwindow`。原版首选项的 Ctrl+P
+    /// 关窗条件是 `prevwindow == window`：开窗那一帧按键事件仍然有效，不加这道闸
+    /// 就会被「Ctrl+P 开」和「Ctrl+P 关」在同一帧里连着执行，窗口一闪就没。
+    pub window_prev: Option<WindowKind>,
     /// 原版的全屏开关（F11）。
     pub fullscreen: bool,
     pub context_menu: Option<ContextMenu>,
@@ -596,6 +600,7 @@ impl EditorState {
             theme,
             fullscreen: false,
             window: None,
+            window_prev: None,
             context_menu: None,
             message: None,
             audio,

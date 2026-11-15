@@ -336,10 +336,17 @@ fn preferences(state: &mut EditorState, ui: &mut Ui) {
         if pg.button(420.0, 478.0, 72.0, "确定", false) {
             state.emit(Command::CloseWindow);
         }
-        let ctrl_p = pg.ui.input(|i| {
-            (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::P)
+        // Escape 取「松开」沿（原版 `keyboard_check_released(vk_escape)`）；Ctrl+P 的 Ctrl 位
+        // 要从按下事件上读，见 `shortcuts::ctrl_chord`。
+        // Ctrl+P 还多一道原版才有的闸 `prevwindow == window`（596 行）：用 Ctrl+P 开窗的那一帧
+        // 按键事件依然为真，不挡一下就是同帧「开 → 关」，窗口一闪即消失。
+        let (ctrl_p, esc) = pg.ui.input(|i| {
+            (
+                crate::shortcuts::ctrl_chord(i) && i.key_pressed(egui::Key::P),
+                i.key_released(egui::Key::Escape),
+            )
         });
-        if ctrl_p {
+        if esc || (ctrl_p && state.window_prev == state.window) {
             state.emit(Command::CloseWindow);
         }
     }

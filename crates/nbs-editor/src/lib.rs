@@ -226,6 +226,40 @@ mod gui_window_tests {
         ctx.run(input, |ctx| crate::show(ctx, state))
     }
 
+    /// Ctrl+P 开窗：原版 596 行用 `prevwindow == window` 挡住同一帧的「开 → 关」，
+    /// 这里同样要求窗口先活过一帧才接受 Ctrl+P 关窗，否则窗口一闪即消失。
+    #[test]
+    fn ctrl_p_opens_preferences_and_stays_open() {
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        let ctrl = egui::Modifiers { ctrl: true, ..Default::default() };
+        let tap = |events: Vec<egui::Event>| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1440.0, 900.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        // 按下和抬起挤在同一帧：正是 SendInput / 人手快按送进来的样子。
+        let key = |pressed: bool| egui::Event::Key {
+            key: egui::Key::P,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: ctrl,
+        };
+        frame_out(&mut state, &ctx, tap(vec![key(true), key(false)]));
+        assert_eq!(
+            state.window,
+            Some(WindowKind::Preferences),
+            "Ctrl+P 开的窗口被同帧的关窗判断收掉了"
+        );
+        frame_out(&mut state, &ctx, tap(vec![]));
+        frame_out(&mut state, &ctx, tap(vec![key(true), key(false)]));
+        assert_eq!(state.window, None, "窗口已开，第二次 Ctrl+P 应当关窗");
+    }
+
     /// 一帧里**最后**一个满足条件的文本中心位置。egui 的 Checkbox/Button 把标签一起
     /// 算进交互矩形，所以点文字就等于点控件。
     /// 取最后一个而不是第一个：绘制顺序就是叠放顺序，面板先画、窗口后画，
