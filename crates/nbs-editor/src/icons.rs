@@ -797,7 +797,9 @@ fn asset_root() -> Option<PathBuf> {
 
 /// `assets/icons/window/<name>.png` 读成窗口图标。这两张是 256x256 的 RGBA PNG，
 /// 也就是原版那两个 `.ico` 里唯一的一条图元（`icon.ico` 只有 256 一档）。
-fn load_window_icon(name: &str) -> Option<egui::IconData> {
+/// `pub` 是给入口 crate 用的：eframe 只在启动那一次会把图标同时发给标题栏和任务栏，
+/// 所以 `NativeOptions` 里要按当前设置先选一张。
+pub fn load_window_icon(name: &str) -> Option<egui::IconData> {
     let root = asset_root()?;
     let img = image::open(root.join("window").join(format!("{name}.png"))).ok()?;
     let (width, height) = (img.width(), img.height());

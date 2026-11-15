@@ -1277,10 +1277,12 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "egui",
+ "image",
  "nbs-audio",
  "nbs-core",
  "nbs-editor",
  "nbs-io",
+ "winapi",
 ]
 
 [[package]]

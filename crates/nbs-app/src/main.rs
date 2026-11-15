@@ -18,9 +18,18 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 use nbs_editor::EditorState;
 
+#[cfg(windows)]
+mod window_icon;
+
 struct NbsApp {
     state: EditorState,
     last_title: String,
+    /// Windows 上「旧图标」真正落到任务栏的那两枚句柄，见 `window_icon` 模块。
+    #[cfg(windows)]
+    icon_handles: [Option<usize>; 2],
+    /// 已经交给窗口的图标档位；`None` = 还没成功过，下一帧重试。
+    #[cfg(windows)]
+    icon_applied: Option<bool>,
 }
 
 impl NbsApp {
@@ -46,7 +55,14 @@ impl NbsApp {
                 }
             }
         }
-        Self { state, last_title: String::new() }
+        Self {
+            state,
+            last_title: String::new(),
+            #[cfg(windows)]
+            icon_handles: [None, None],
+            #[cfg(windows)]
+            icon_applied: None,
+        }
     }
 }
 
@@ -71,6 +87,23 @@ impl eframe::App for NbsApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 「旧图标」开关切换的那一帧，`EditorState` 才把 egui 的图标命令发出去，而这条命令要等
+        // 帧末才冲刷给平台层；winit 收到后只写 ICON_SMALL，还是没缩放的 256x256。所以这里以
+        // `applied_window_icon`（= 上一帧确实发过命令）为准，晚一帧再写 WM_SETICON，
+        // 这样大小图标都是我们按系统度量缩放过的版本。
+        #[cfg(windows)]
+        {
+            if let Some(want) = self.state.applied_window_icon {
+                if self.icon_applied != Some(want) {
+                    if let Some(icon) = self.state.icons.window_icon(want) {
+                        if window_icon::apply(&icon, &mut self.icon_handles) {
+                            self.icon_applied = Some(want);
+                        }
+                    }
+                }
+            }
+        }
+
         let title = self.state.song_title();
         if title != self.last_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
@@ -90,13 +123,19 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([960.0, 620.0])
-            .with_title("nbs-rust"),
-        ..Default::default()
-    };
+    // 原版启动时的窗口图标就是 exe 内嵌的那张（勾了「旧图标」才换成 Data\icon.ico），
+    // 我们这个 exe 没有内嵌资源，不显式指定的话 eframe 会塞它自己的 egui 标志。
+    // 启动走 `NativeOptions`（eframe 自己会同时设大小图标），运行中切换走帧首的
+    // `window_icon::apply` + `EditorState` 发的 egui 窗口命令，两条路都要按当前设置选图。
+    let prefs = nbs_io::prefs::Preferences::load();
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1440.0, 900.0])
+        .with_min_inner_size([960.0, 620.0])
+        .with_title("nbs-rust");
+    if let Some(icon) = nbs_editor::icons::load_window_icon(if prefs.window_icon { "old" } else { "new" }) {
+        viewport = viewport.with_icon(icon);
+    }
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native(
         "nbs-rust",
         options,

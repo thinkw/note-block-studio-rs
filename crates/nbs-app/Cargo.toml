@@ -19,3 +19,9 @@ egui = { workspace = true }
 
 # 渲染后端在根 Cargo.toml 的 workspace.dependencies.eframe 里切换。
 # 网格画布只使用 egui::Painter 的形状批次，与具体渲染后端无关。
+
+# 换窗口图标时要按系统度量缩放并编码成 PNG（见 src/window_icon.rs）。
+image = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+winapi = { workspace = true }
