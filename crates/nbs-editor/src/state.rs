@@ -297,6 +297,25 @@ impl PrefsFolder {
             Self::Pattern => "选择导出和导入片段的文件夹",
         }
     }
+
+    /// 原版系统对话框的标题（`draw_window_preferences.gml:278/294` 的第 4 个参数）。
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Song => "歌曲文件夹",
+            Self::Pattern => "片段文件夹",
+        }
+    }
+
+    /// 原版传给 `get_save_filename_ext` 的默认文件名（第 2 个参数）。
+    /// 原版并不真去创建这个文件：它只要用户按下「保存」那一刻对话框所在的目录
+    /// （`songfolder = filename_dir(a)`），所以这个名字纯粹是占位 ——
+    /// 但它确实显示在文件名栏里，照抄。
+    pub fn placeholder(self) -> &'static str {
+        match self {
+            Self::Song => "选择歌曲文件夹",
+            Self::Pattern => "选择片段文件夹",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -323,6 +342,9 @@ impl DialogAction {
             self,
             Self::SaveSong | Self::ExportAudio | Self::ExportDatapack | Self::ExportMidi
                 | Self::ExportPng | Self::ExportSchematic | Self::ExportPattern
+                // 原版选文件夹走的是 `get_save_filename_ext`（见 `picker_spec` 里那条），
+                // 不是目录选择器，所以这里也算「保存」式对话框。
+                | Self::PickFolder(_)
         )
     }
     pub fn extension(self) -> &'static str {
@@ -348,6 +370,9 @@ pub struct FileDialog {
     pub save: bool,
     pub action: DialogAction,
     pub dir: PathBuf,
+    /// 原版调用处有没有显式给起始目录。给了才让系统组件跳过去；
+    /// 原版传 `""` 的那些（MIDI/Schematic 导入导出、数据包导出）本来就交给系统自己记。
+    pub start_dir: bool,
     pub name: String,
     /// 实际生效的扩展名：文件类型过滤、补全文件名都用它，而不是 `action` 的默认值。
     pub ext: &'static str,
@@ -356,14 +381,6 @@ pub struct FileDialog {
 }
 
 impl FileDialog {
-    pub fn new(save: bool, initial: Option<&PathBuf>) -> Self {
-        Self::for_action(
-            if save { DialogAction::SaveSong } else { DialogAction::OpenSong },
-            initial,
-            None,
-        )
-    }
-
     /// `start` = 原版调用处写死的起始目录（歌曲用 `songfolder`、片段用 `patternfolder`）；
     /// 给了就不看当前文件所在的目录，这一点和原版一致。
     pub fn for_action(
@@ -382,7 +399,9 @@ impl FileDialog {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "untitled".into());
         let ext = action.extension();
-        let name = if action.is_save() {
+        let name = if let DialogAction::PickFolder(f) = action {
+            f.placeholder().to_string()
+        } else if action.is_save() {
             if ext.is_empty() {
                 base
             } else {
@@ -394,7 +413,16 @@ impl FileDialog {
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default()
         };
-        let mut d = Self { save: action.is_save(), action, dir, name, ext, entries: Vec::new(), error: None };
+        let mut d = Self {
+            save: action.is_save(),
+            action,
+            dir,
+            start_dir: start.is_some(),
+            name,
+            ext,
+            entries: Vec::new(),
+            error: None,
+        };
         d.refresh();
         d
     }
@@ -440,6 +468,104 @@ impl FileDialog {
     pub fn selected_path(&self) -> PathBuf {
         self.dir.join(&self.name)
     }
+
+    /// 原生选择器要用的标题与文件类型。
+    pub fn picker_spec(&self) -> PickerSpec {
+        let ext = self.ext;
+        let (title, filters) = match self.action {
+            // 原版 `load_song.gml:12` 的过滤器还有 `Zipped Files (*.zip)` 和
+            // `MIDI Sequences (*.mid)`；这两条路我们还没接通（带自定义音色的 .nbs 压缩包
+            // 读不了，.mid 要先开 MIDI 导入窗口），列出来只会让人选了以后报错，所以先不列。
+            DialogAction::OpenSong => ("打开歌曲", vec![
+                filter("Note Block Songs (*.nbs)", "*.nbs"),
+                filter("Minecraft Schematics (*.schematic)", "*.schematic"),
+            ]),
+            DialogAction::SaveSong => ("保存歌曲", vec![
+                filter("Note Block Songs (*.nbs)", "*.nbs"),
+            ]),
+            // 原版 `audio_export.gml:24`：`audio_exp_format + " files (*" + output_ext + ")"`。
+            DialogAction::ExportAudio => ("导出音频文件", vec![
+                filter(&format!("{} files (*.{ext})", ext.to_uppercase()), &format!("*.{ext}")),
+            ]),
+            DialogAction::ExportDatapack => {
+                if ext.is_empty() {
+                    // 原版 `datapack_export.gml:12` 的过滤器串只有一个词、没有 `|通配符`，
+                    // 传进系统组件就是一个空白模式；导出的目录名来自文件名栏，不是选中的目录。
+                    ("导出数据包", vec![filter("数据包目录", "")])
+                } else {
+                    ("导出数据包", vec![filter("ZIP archive (*.zip)", "*.zip")])
+                }
+            }
+            DialogAction::ExportMidi => ("导出 MIDI", vec![
+                filter("MIDI Sequences (*.mid)", "*.mid"),
+            ]),
+            DialogAction::ExportPng => ("导出图片", vec![
+                filter("PNG image (*.png)", "*.png"),
+            ]),
+            DialogAction::ExportSchematic => {
+                // 原版 `schematic_export.gml:5-6`：结构方块存的是 .nbt，过滤器名也不同。
+                if ext == "nbt" {
+                    ("导出 Schematic", vec![filter("Minecraft Structures (*.nbt)", "*.nbt")])
+                } else {
+                    ("导出 Schematic", vec![filter("Minecraft Schematics (*.schematic)", "*.schematic")])
+                }
+            }
+            DialogAction::ExportPattern => ("保存分段", vec![
+                filter("Note Block Pattern (*.nbp)", "*.nbp"),
+            ]),
+            DialogAction::ImportMidi => ("从 MIDI 导入", vec![
+                filter("MIDI Sequences (*.mid)", "*.midi;*.mid"),
+            ]),
+            DialogAction::ImportPattern => ("打开分段", vec![
+                filter("Note Block Pattern (*.nbp)", "*.nbp"),
+            ]),
+            DialogAction::ImportSchematic => ("从 Schematic 导入", vec![
+                filter("Minecraft Schematics (*.schematic)", "*.schematic"),
+            ]),
+            // 原版 `draw_window_preferences.gml:278/294` 是 `get_save_filename_ext("", …)`：
+            // 过滤器整串为空，文件名栏塞的是占位串，按下保存后取的是它所在的目录
+            // （换算回来见 `EditorState::run_pending_dialog`）。不是目录选择器。
+            DialogAction::PickFolder(f) => (f.title(), Vec::new()),
+        };
+        PickerSpec { title: title.to_string(), filters }
+    }
+}
+
+/// 宿主注入的原生文件选择器的返回结果。
+#[derive(Clone, Debug)]
+pub enum PickResult {
+    /// 用户选定了一个路径。
+    Picked(PathBuf),
+    /// 用户取消了。
+    Cancelled,
+    /// 这台机器上没有可用的原生对话框（COM 起不来等），调用方回落到自绘选框。
+    Unavailable,
+}
+
+/// 操作系统的文件选择对话框。编辑器自己不碰 Win32，由 `nbs-app` 在启动时装进来；
+/// 没装（非 Windows、或单测）就继续用自绘的那套。
+pub trait FilePicker: Send + Sync {
+    fn pick(&self, dlg: &FileDialog) -> PickResult;
+}
+
+/// 原生下拉框里的一个文件类型。`patterns` 是分号分隔的通配符，和原版过滤器串的后半段一致。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FilterSpec {
+    pub name: String,
+    pub patterns: String,
+}
+
+/// 原生对话框需要的文案：标题 + 文件类型。
+/// 全部照抄原版各调用点传给 `get_save_filename_ext` / `get_open_filename_ext` 的参数
+/// （中文分支，即 `language == 1`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PickerSpec {
+    pub title: String,
+    pub filters: Vec<FilterSpec>,
+}
+
+fn filter(name: &str, patterns: &str) -> FilterSpec {
+    FilterSpec { name: name.to_string(), patterns: patterns.to_string() }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -481,6 +607,11 @@ pub struct EditorState {
     pub hover_cell: Option<(u32, u32)>,
     pub pending: Vec<Command>,
     pub file_dialog: Option<FileDialog>,
+    /// 宿主装进来的原生选择器（Windows 上是 `IFileOpenDialog` / `IFileSaveDialog`）。
+    pub picker: Option<std::sync::Arc<dyn FilePicker>>,
+    /// 等着被原生选择器处理的请求。在帧外（`raw_input_hook`）取走，避免在 egui 帧内
+    /// 起一个会泵消息的模态框。
+    pub pending_dialog: Option<FileDialog>,
     pub recent_files: Vec<PathBuf>,
     pub editing_layer_name: Option<(u32, String)>,
     /// 图层音量/声像拖拽预览（松开时才提交一条历史，避免拖拽产生几百条）。
@@ -618,6 +749,8 @@ impl EditorState {
             hover_cell: None,
             pending: Vec::new(),
             file_dialog: None,
+            picker: None,
+            pending_dialog: None,
             recent_files,
             editing_layer_name: None,
             layer_drag: None,
@@ -661,6 +794,53 @@ impl EditorState {
 
     pub fn emit(&mut self, cmd: Command) {
         self.pending.push(cmd);
+    }
+
+    /// 要一个文件路径。装了原生选择器时把请求挂到帧外去执行（原版的选框就是系统模态的，
+    /// 期间主窗口不重绘）；没装则打开自绘的 `WindowKind::FileOpen` / `FileSave`。
+    /// 两条路都会把 `file_dialog` 留下，因为 `Command::DialogConfirm` 靠它认操作类型。
+    pub fn request_file_dialog(&mut self, dialog: FileDialog) {
+        if self.picker.is_some() {
+            self.pending_dialog = Some(dialog.clone());
+        } else {
+            let save = dialog.save;
+            self.window = Some(if save { WindowKind::FileSave } else { WindowKind::FileOpen });
+        }
+        self.file_dialog = Some(dialog);
+        self.context_menu = None;
+    }
+
+    /// 执行挂起的原生选择请求。宿主在帧外（`raw_input_hook`）调，不要在 `update` 里调：
+    /// 原生对话框会泵自己的消息循环，塞在 egui 帧中间不安全。
+    /// 返回 true 表示真的处理了一个请求（调用方据此催一次重绘）。
+    /// COM 起不来时回落到自绘选框，功能不断。
+    pub fn run_pending_dialog(&mut self) -> bool {
+        let Some(dialog) = self.pending_dialog.take() else { return false };
+        let Some(picker) = self.picker.clone() else { return false };
+        match picker.pick(&dialog) {
+            PickResult::Picked(path) => {
+                // 原版选文件夹取的是 `filename_dir(a)`（`draw_window_preferences.gml:279`）：
+                // 对话框里那个占位名不算数，要的只是它所在的目录。系统组件交回来的是完整
+                // 路径，这里先换算成同一个目录，`DialogConfirm` 两条路看到的形状才一致。
+                let path = match dialog.action {
+                    DialogAction::PickFolder(_) => {
+                        path.parent().map(|p| p.to_path_buf()).unwrap_or(path)
+                    }
+                    _ => path,
+                };
+                // `Command::DialogConfirm` 靠 `file_dialog.action` 认是哪一种导出。
+                self.file_dialog = Some(dialog);
+                self.emit(Command::DialogConfirm(path));
+            }
+            PickResult::Cancelled => {
+                self.file_dialog = None;
+            }
+            PickResult::Unavailable => {
+                self.window = Some(if dialog.save { WindowKind::FileSave } else { WindowKind::FileOpen });
+                self.file_dialog = Some(dialog);
+            }
+        }
+        true
     }
 
     pub fn set_message(&mut self, text: impl Into<String>) {
@@ -999,5 +1179,140 @@ mod tests {
         // 其它动作用默认扩展名，且 set_ext 只对当前对话框生效
         let song = FileDialog::for_action(DialogAction::SaveSong, None, None);
         assert_eq!(song.ext, "nbs");
+    }
+
+    /// 原生选择器的文案必须和原版传给 `get_*_filename_ext` 的参数一致。
+    #[test]
+    fn picker_spec_carries_the_original_titles_and_filters() {
+        let open = FileDialog::for_action(DialogAction::OpenSong, None, None).picker_spec();
+        assert_eq!(open.title, "打开歌曲");
+        assert_eq!(
+            open.filters
+                .iter()
+                .map(|f| (f.name.as_str(), f.patterns.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Note Block Songs (*.nbs)", "*.nbs"),
+                ("Minecraft Schematics (*.schematic)", "*.schematic"),
+            ],
+        );
+
+        // 原版 `audio_export.gml:21-24`：显示名用的就是 `audio_exp_format` 本身。
+        let mut audio = FileDialog::for_action(DialogAction::ExportAudio, None, None);
+        audio.set_ext("flac");
+        let spec = audio.picker_spec();
+        assert_eq!(spec.title, "导出音频文件");
+        assert_eq!(spec.filters[0].name, "FLAC files (*.flac)");
+        assert_eq!(spec.filters[0].patterns, "*.flac");
+
+        // 数据包关掉 ZIP 时原版给的是 `get_save_filename_ext("数据包目录", …)`：
+        // 过滤器只有一个词、没有通配符（`datapack_export.gml:12`），不是目录选择器。
+        let mut dat = FileDialog::for_action(DialogAction::ExportDatapack, None, None);
+        assert_eq!(dat.picker_spec().filters[0].name, "ZIP archive (*.zip)");
+        dat.set_ext("");
+        let spec = dat.picker_spec();
+        assert_eq!(spec.filters[0].name, "数据包目录");
+        assert_eq!(spec.filters[0].patterns, "");
+
+        // 结构方块导出的不是 schematic 而是 .nbt（`schematic_export.gml:6`）。
+        let mut sch = FileDialog::for_action(DialogAction::ExportSchematic, None, None);
+        sch.set_ext("nbt");
+        assert_eq!(sch.picker_spec().filters[0].name, "Minecraft Structures (*.nbt)");
+
+        // 首选项里的「修改」：原版是过滤器为空串的保存框，文件名栏塞占位串
+        // （`draw_window_preferences.gml:278`），选完由调用处取它所在的目录。
+        let dlg = FileDialog::for_action(DialogAction::PickFolder(PrefsFolder::Song), None, None);
+        let spec = dlg.picker_spec();
+        assert_eq!(spec.title, "歌曲文件夹");
+        assert!(spec.filters.is_empty(), "原版第 1 个参数是空串");
+        assert!(dlg.save, "原版走的是 get_save_filename_ext");
+        assert_eq!(dlg.name, "选择歌曲文件夹");
+    }
+
+    /// 假选择器：按预设结果回话，顺便记下它收到了哪一次请求。
+    struct FakePicker {
+        answer: PickResult,
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+    impl FilePicker for FakePicker {
+        fn pick(&self, dlg: &FileDialog) -> PickResult {
+            self.seen.lock().unwrap().push(dlg.picker_spec().title);
+            self.answer.clone()
+        }
+    }
+
+    fn state_with(answer: PickResult) -> (EditorState, std::sync::Arc<FakePicker>) {
+        let picker = std::sync::Arc::new(FakePicker { answer, seen: std::sync::Mutex::new(Vec::new()) });
+        let mut st = EditorState::new();
+        st.picker = Some(picker.clone());
+        (st, picker)
+    }
+
+    /// 装了原生选择器：请求挂到帧外，回来后直接走 `DialogConfirm`，全程不开自绘窗口。
+    #[test]
+    fn native_picker_answers_without_the_in_app_dialog() {
+        let dir = std::env::temp_dir().join("nbs-rust-pick-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let out = dir.join("picked.nbs");
+        let _ = std::fs::remove_file(&out);
+
+        let (mut st, picker) = state_with(PickResult::Picked(out.clone()));
+        let ctx = egui::Context::default();
+        st.request_file_dialog(FileDialog::for_action(DialogAction::SaveSong, None, None));
+        assert!(st.pending_dialog.is_some(), "请求要留给宿主在帧外执行");
+        assert!(st.window.is_none(), "装了原生选择器就不该开自绘选框");
+
+        st.run_pending_dialog();
+        assert!(st.pending_dialog.is_none());
+        assert_eq!(picker.seen.lock().unwrap().as_slice(), &["保存歌曲".to_string()]);
+        // DialogConfirm(SaveSong) → SavePath：真的把歌曲写到选定的路径上。
+        st.flush(&ctx);
+        assert!(out.is_file(), "选完路径必须真的保存，实测 {:?}", out);
+        assert!(st.window.is_none());
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn cancelled_native_picker_leaves_nothing_behind() {
+        let (mut st, _picker) = state_with(PickResult::Cancelled);
+        let ctx = egui::Context::default();
+        st.request_file_dialog(FileDialog::for_action(DialogAction::OpenSong, None, None));
+        st.run_pending_dialog();
+        assert!(st.pending_dialog.is_none());
+        assert!(st.file_dialog.is_none(), "取消后不该留着上一次请求");
+        assert!(st.window.is_none());
+        st.flush(&ctx);
+        assert!(st.doc.song.filename.is_none(), "取消不该改动文档");
+    }
+
+    /// COM 起不来（非 Windows、或系统组件出错）时回落自绘选框，功能不断。
+    #[test]
+    fn unavailable_native_picker_falls_back_to_the_drawn_one() {
+        let (mut st, _picker) = state_with(PickResult::Unavailable);
+        st.request_file_dialog(FileDialog::for_action(DialogAction::OpenSong, None, None));
+        assert!(st.pending_dialog.is_some());
+        st.run_pending_dialog();
+        assert_eq!(st.window, Some(WindowKind::FileOpen));
+        assert!(st.file_dialog.is_some(), "自绘选框要靠它显示当前目录");
+    }
+
+    /// 首选项「修改」：系统组件交回来的是「<目录>\\选择歌曲文件夹」这一整串，
+    /// 原版记的却是 `filename_dir(a)` —— 也就是那个目录本身，占位名不许漏进设置里。
+    #[test]
+    fn folder_request_stores_the_directory_not_the_placeholder_name() {
+        let dir = std::env::temp_dir().join("nbs-rust-pick-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let picked = dir.join(PrefsFolder::Song.placeholder());
+        let (mut st, _picker) = state_with(PickResult::Picked(picked.clone()));
+        let ctx = egui::Context::default();
+        st.request_file_dialog(FileDialog::for_action(
+            DialogAction::PickFolder(PrefsFolder::Song),
+            None,
+            Some(&dir),
+        ));
+        st.run_pending_dialog();
+        st.flush(&ctx);
+        assert_eq!(st.prefs.song_folder.as_deref(), Some(dir.to_str().unwrap()), "实测 {picked:?}");
+        assert_eq!(st.window, Some(WindowKind::Preferences));
     }
 }

@@ -24,4 +24,8 @@ egui = { workspace = true }
 image = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-winapi = { workspace = true }
+# 换图标只要 winuser；原生文件对话框要 COM + 外壳接口（见 src/native_dialog.rs）。
+winapi = { workspace = true, features = [
+    "minwindef", "windef", "winerror", "wtypesbase", "combaseapi", "objbase", "shtypes",
+    "shobjidl", "shobjidl_core",
+] }

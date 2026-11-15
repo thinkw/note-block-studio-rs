@@ -20,6 +20,8 @@ use nbs_editor::EditorState;
 
 #[cfg(windows)]
 mod window_icon;
+#[cfg(windows)]
+mod native_dialog;
 
 struct NbsApp {
     state: EditorState,
@@ -35,6 +37,11 @@ struct NbsApp {
 impl NbsApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut state = EditorState::new();
+        // 文件选择交给系统组件（原版的选框就是 Win32 的），编辑器只提请求。
+        #[cfg(windows)]
+        {
+            state.picker = Some(std::sync::Arc::new(native_dialog::WinFileDialogPicker));
+        }
         state.theme.apply(&cc.egui_ctx);
         // egui 自带字体没有中文字形，不装系统字体整个界面会是一排空框。
         if nbs_editor::fonts::install(&cc.egui_ctx).is_none() {
@@ -74,6 +81,17 @@ impl Drop for NbsApp {
 }
 
 impl eframe::App for NbsApp {
+    /// 原生选框在自己的调用里泵 Win32 消息循环，绝不能开在 egui 帧中间；
+    /// eframe 在 `ctx.run` 之前调这条钩子，正好用来把上一帧攒下的选框请求变成系统对话框。
+    /// 对话框是模态的，函数返回时用户已经选完或取消，下一条命令进 `state.pending`。
+    fn raw_input_hook(&mut self, ctx: &egui::Context, _raw_input: &mut egui::RawInput) {
+        // 对话框在 `Show` 里自己把输入吃掉了，egui 这边看不到任何事件，
+        // 选完之后不会自然来一帧 —— 主动催一次，`DialogConfirm` 才有人处理。
+        if self.state.run_pending_dialog() {
+            ctx.request_repaint();
+        }
+    }
+
     /// 原版 `control_draw.gml:153` 的 `draw_clear(window_background)`。
     /// eframe 默认清成透明，glow 后端下就是一整片黑，凡是自己没重绘的面板都露黑底。
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {

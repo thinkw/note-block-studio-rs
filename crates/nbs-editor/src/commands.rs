@@ -180,12 +180,12 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.set_message("已新建歌曲");
         }
         Command::Open => {
-            state.file_dialog = Some(FileDialog::new(false, state.doc.song.filename.as_ref()));
-            state.window = Some(WindowKind::FileOpen);
+            // 原版 `load_song.gml:11-12`：起始目录只看 `songfolder`，默认名是空串。
+            dispatch(state, Command::OpenDialog(DialogAction::OpenSong), ctx);
         }
         Command::SaveAs => {
-            state.file_dialog = Some(FileDialog::new(true, state.doc.song.filename.as_ref()));
-            state.window = Some(WindowKind::FileSave);
+            // 原版 `save_song.gml:13-14`：目录同样是 `songfolder`，默认名是 `fsave + ".nbs"`。
+            dispatch(state, Command::OpenDialog(DialogAction::SaveSong), ctx);
         }
         Command::Save => {
             if let Some(path) = state.doc.song.filename.clone() {
@@ -526,10 +526,6 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 state.schematic_tab = 0;
                 state.prefs_tab = 0;
             }
-            if matches!(kind, WindowKind::FileOpen | WindowKind::FileSave) {
-                let save = matches!(kind, WindowKind::FileSave);
-                state.file_dialog = Some(FileDialog::new(save, state.doc.song.filename.as_ref()));
-            }
             if matches!(kind, WindowKind::DatapackExport) && state.datapack_options.name.is_empty()
             {
                 // 原版在窗口第一次绘制时把 dat_name 填成歌曲名，其次是文件名去掉扩展名。
@@ -544,7 +540,17 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     .unwrap_or_default();
                 state.datapack_options.name = if meta.is_empty() { from_file } else { meta };
             }
-            state.window = Some(kind);
+            // 文件选择不是自绘窗口：走和工具栏同一套对话框请求，起始目录和默认名
+            // 都按原版 `load_song.gml` / `save_song.gml` 的写法来。
+            match kind {
+                WindowKind::FileOpen => {
+                    dispatch(state, Command::OpenDialog(DialogAction::OpenSong), ctx)
+                }
+                WindowKind::FileSave => {
+                    dispatch(state, Command::OpenDialog(DialogAction::SaveSong), ctx)
+                }
+                _ => state.window = Some(kind),
+            }
             state.context_menu = None;
         }
         Command::CloseWindow => {
@@ -805,13 +811,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     dialog.refresh();
                 }
             }
-            state.file_dialog = Some(dialog);
-            state.window = Some(if action.is_save() {
-                WindowKind::FileSave
-            } else {
-                WindowKind::FileOpen
-            });
-            state.context_menu = None;
+            state.request_file_dialog(dialog);
         }
         Command::DialogConfirm(path) => {
             let action = state
@@ -1485,8 +1485,9 @@ mod tests {
         dispatch(&mut state, Command::AnswerModal(true), &ctx);
         let d = state.file_dialog.clone().unwrap();
         assert_eq!(d.action, DialogAction::PickFolder(PrefsFolder::Pattern));
-        assert_eq!(d.ext, "", "目录选择框不带扩展名过滤器");
-        assert_eq!(d.name, "", "目录选择框不填文件名");
+        assert_eq!(d.ext, "", "原版第 1 个参数是空过滤器串");
+        assert_eq!(d.name, "选择片段文件夹", "原版把占位串塞进文件名栏（`draw_window_preferences.gml:294`）");
+        assert!(d.save, "原版这条走的是 get_save_filename_ext，不是目录选择器");
 
         // 确定：认的是对话框当时显示的目录，随后把首选项窗口放回去。
         dispatch(&mut state, Command::DialogConfirm(tmp.clone()), &ctx);
