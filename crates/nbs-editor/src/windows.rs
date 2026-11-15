@@ -428,7 +428,7 @@ fn folder_row(state: &mut EditorState, pg: &mut Page, which: PrefsFolder, text_n
     }
 }
 
-/// 原版页 1「界面」：主题下拉 + 暗色 / 全黑两个开关 + 帧率限制 + 窗口缩放。
+/// 原版页 1「界面」：主题下拉 + 暗色 / 全黑两个开关 + 帧率限制 + 窗口缩放 + 旧图标。
 /// 同页的取色器（`w_setaccent`）、「为高分辨率优化」（要 `*_hires` 那套纹理）、
 /// 语言（还没做多语言）都没有对应实现，整行不画。
 fn prefs_interface(state: &mut EditorState, pg: &mut Page, menu_at: &mut Pos2, rate_at: &mut Pos2) {
@@ -498,6 +498,23 @@ fn prefs_interface(state: &mut EditorState, pg: &mut Page, menu_at: &mut Pos2, r
     // 原版 `draw_button2(x1 + 394, y1 + 161, 72, "重置", window_scale == get_default_window_scale())`。
     if pg.button(394.0, 161.0, 72.0, "重置", state.prefs.scale_is_default(native)) {
         state.prefs.window_scale = None;
+        state.emit(Command::SavePreferences);
+    }
+
+    // 原版 `draw_areaheader(x1 + 258, y1 + 239, 220, 65, "图标")` +
+    // `draw_checkbox(x1 + 276, y1 + 239 + 16 + 5 + 4, window_icon, "旧图标", …, false, true)`。
+    // 开关本身只改设置，真正换图标由 `EditorState::apply_window_icon` 在下一帧发给窗口。
+    pg.header(258.0, 239.0, 220.0, 65.0, "图标");
+    if pg.check(
+        276.0,
+        264.0,
+        state.prefs.window_icon,
+        "旧图标",
+        "使用旧图标替换新图标。",
+        true,
+        false,
+    ) {
+        state.prefs.window_icon = !state.prefs.window_icon;
         state.emit(Command::SavePreferences);
     }
 }

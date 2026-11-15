@@ -4,3 +4,6 @@
 iconbar/ 只用到 00-02（原版 draw_sprite(spr_iconbar, 0/1/2) 的左端帽、可拉伸中段、右端帽），每帧 2x30；03-08 是原版工程里存在但从未被引用的帧，一并导出以保持序号一致。
 back/ = spr_back，4 帧，序号 = fdark + 2 * 按下（draw_window_preferences.gml:58 的首选项返回按钮），每帧 16x16，原版画在 x1+14, y1+42。
 button_arrow/ = spr_button_arrow，15 帧，序号 = m + 3 * theme + 3 * (fdark && theme = 3)，其中 m = 0 未悬停 / 1 悬停 / 2 悬停且按下（draw_abutton.gml:6-9），每帧 17x18。
+window/ 不是精灵图，是首选项「界面 → 图标 → 旧图标」换的两个窗口图标（control_create.gml:59-60、control_draw.gml:27-31），两者都是 256x256 8bit RGBA：
+  new.png = 程序自带的立方体音符盒。取自装机版 Minecraft Note Block Studio.exe 内嵌的 RT_ICON #2（256x256 PNG，33866 字节），与仓库 options/windows/icons/icon.ico 里那一条逐字节相同，两边对得上。
+  old.png = 圆角方块的老图标。取自装机版 Data\icon.ico（256x256 PNG，52478 字节）。仓库 datafiles/Data/icon.ico 是同一条目的旧版（37236 字节，格纹更浅），装机版 3.12 已经换深了，这里以装机版为准。

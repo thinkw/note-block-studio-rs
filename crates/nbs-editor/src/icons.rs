@@ -730,6 +730,9 @@ pub struct Icons {
     bank: Option<Arc<Bank>>,
     /// 已经找过一遍但资源缺失：不再每帧重新读盘。
     missing: bool,
+    /// 首选项「旧图标」要换的两个窗口图标，下标就是原版的 `window_icon`。
+    /// `None` = 还没试过；试过后每个槽位各自记录有没有读到。
+    window: Option<[Option<Arc<egui::IconData>>; 2]>,
 }
 
 impl Icons {
@@ -758,6 +761,18 @@ impl Icons {
     pub fn unavailable(&self) -> bool {
         self.bank.is_none() && self.missing
     }
+
+    /// 原版 `control_create.gml:59-60` + `control_draw.gml:27-31`：`window_icon` 为真时把窗口
+    /// 图标换成 `Data\icon.ico`，为假时还原成程序自带的那份。读不到文件就返回 `None`，
+    /// 调用方保持系统默认图标 —— 不换，而不是换一张假的。
+    pub fn window_icon(&mut self, old: bool) -> Option<Arc<egui::IconData>> {
+        if self.window.is_none() {
+            self.window = Some(
+                ["new", "old"].map(|n| load_window_icon(n).map(Arc::new)),
+            );
+        }
+        self.window.as_ref()?[old as usize].clone()
+    }
 }
 
 /// 与 `nbs-audio` 找采样同样的搜索顺序：可执行文件旁 → 工作目录 → cargo 清单目录。
@@ -778,6 +793,15 @@ fn asset_root() -> Option<PathBuf> {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     candidates.push(manifest.join("../../assets/icons"));
     candidates.into_iter().find(|p| p.join("icons_classic").is_dir())
+}
+
+/// `assets/icons/window/<name>.png` 读成窗口图标。这两张是 256x256 的 RGBA PNG，
+/// 也就是原版那两个 `.ico` 里唯一的一条图元（`icon.ico` 只有 256 一档）。
+fn load_window_icon(name: &str) -> Option<egui::IconData> {
+    let root = asset_root()?;
+    let img = image::open(root.join("window").join(format!("{name}.png"))).ok()?;
+    let (width, height) = (img.width(), img.height());
+    Some(egui::IconData { rgba: img.into_rgba8().into_raw(), width, height })
 }
 
 #[cfg(test)]

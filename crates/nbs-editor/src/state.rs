@@ -513,6 +513,9 @@ pub struct EditorState {
     pub last_prefs_save: Instant,
     /// 已同步给音频引擎的 `Song::rev`，用于只在内容真变化时重建事件表。
     pub audio_rev: u64,
+    /// 已经交给窗口管理器的图标档位（原版 `window_icon`）。`None` = 还没发过，
+    /// 对应原版 `icon_display` 初值为 1：第一帧必发一次。
+    pub applied_window_icon: Option<bool>,
     /// 原版精灵图（工具栏 / 图层栏 / 宏条的图标按钮）。
     pub icons: crate::icons::Icons,
     /// 原版 `showinsbox`：工具栏音色框是否展开成整窗网格。
@@ -629,6 +632,7 @@ impl EditorState {
             last_autosave: Instant::now(),
             last_prefs_save: Instant::now(),
             audio_rev: 0,
+            applied_window_icon: None,
             icons: crate::icons::Icons::default(),
             insbox_open: false,
             insbox_start: 0,
@@ -708,11 +712,26 @@ impl EditorState {
         }
     }
 
+    /// 原版 `control_draw.gml:27-31` + `control_step.gml:21-29`：`window_icon` 一变就重设窗口图标。
+    /// 原版为此留了 1 秒的重发窗口（`icon_display`），因为 GM 的 `window_set_icon_raw`
+    /// 不保证第一次就生效；egui 的窗口命令是排队给平台层的，一次就够，所以只在档位变化时发。
+    /// 图标文件读不到时不发命令，窗口保持系统默认 —— 而不是换一张凑数。
+    fn apply_window_icon(&mut self, ctx: &Context) {
+        let want = self.prefs.window_icon;
+        if self.applied_window_icon == Some(want) {
+            return;
+        }
+        let Some(icon) = self.icons.window_icon(want) else { return };
+        ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(icon)));
+        self.applied_window_icon = Some(want);
+    }
+
     /// 每帧同步独立播放时钟。真实播放时位置由音频回调的采样计数推进，
     /// UI 只读；无音频设备时才由内部 `Instant` 时钟代理。
     /// **绝不在这里写 tempo/loop** —— 否则会覆盖 Tempo Changer 的运行时变速。
     pub fn tick_transport(&mut self, ctx: &Context) {
         self.apply_ui_scale(ctx);
+        self.apply_window_icon(ctx);
         let _crossed = self.audio.clock_mut().update();
         let playing = self.audio.clock().is_playing();
         // 原版 `if (playing = 0) record = 0`：播放一停，录音自动退出。

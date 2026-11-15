@@ -64,6 +64,8 @@ pub struct Preferences {
     /// 原版 `window_scale`：界面缩放倍率。`None` = 跟随系统 DPI，
     /// 也就是原版的出厂值 `display_get_dpi_x() / 96`（`get_default_window_scale.gml`）。
     pub window_scale: Option<f32>,
+    /// 原版 `window_icon`（出厂 0，`control_create.gml:59`）：真 = 用老图标换掉程序自带的图标。
+    pub window_icon: bool,
     pub sounds_dir: Option<String>,
     /// 原版 `show_oldwarning`（出厂为 1）：打开旧版本存的文件时弹不弹警告。
     pub show_old_warning: bool,
@@ -128,6 +130,8 @@ impl Default for Preferences {
             // 原版 `control_create.gml:130`：refreshrate = 0，即 30 帧。
             refresh_rate: 0,
             window_scale: None,
+            // 原版 `control_create.gml:59`：window_icon = 0，即用程序自带的图标。
+            window_icon: false,
             sounds_dir: None,
             // 原版 `control_create.gml:126`：show_oldwarning = 1。
             show_old_warning: true,
@@ -332,6 +336,7 @@ mod tests {
         p.theme = 2;
         p.refresh_rate = 3;
         p.window_scale = Some(1.25);
+        p.window_icon = true;
         p.recent_files.push("C:/songs/demo.nbs".into());
         let s = serde_json::to_string(&p).unwrap();
         let back: Preferences = serde_json::from_str(&s).unwrap();
@@ -340,11 +345,13 @@ mod tests {
         assert_eq!(back.recent_files.len(), 1);
         assert_eq!(back.refresh_rate, 3);
         assert_eq!(back.window_scale, Some(1.25));
-        // 旧配置文件里没有这两项时必须退回默认值，不能整个文件读不出来。
+        assert!(back.window_icon, "旧图标开关要落盘（原版 save_settings.gml:73）");
+        // 旧配置文件里没有这几项时必须退回默认值，不能整个文件读不出来。
         let old = r#"{"version":1,"theme":3}"#;
         let back: Preferences = serde_json::from_str(old).unwrap();
         assert_eq!(back.refresh_rate, 0, "出厂就是 30 帧");
         assert_eq!(back.window_scale, None, "出厂跟随系统 DPI");
+        assert!(!back.window_icon, "出厂用程序自带的图标");
     }
 
     /// `[schematic_export]` 段：整份选项 + 「警告已看过」都要能落盘，

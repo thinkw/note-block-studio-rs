@@ -1587,4 +1587,47 @@ mod tests {
             );
         }
     }
+
+    /// 跑一帧，取这一帧交给平台层的窗口图标命令。
+    fn icon_command(ctx: &Context, state: &mut EditorState) -> Option<egui::IconData> {
+        let out = ctx.run(raw_input(), |c| state.tick_transport(c));
+        root_commands(&out).iter().find_map(|cmd| match cmd {
+            egui::ViewportCommand::Icon(Some(icon)) => Some((**icon).clone()),
+            _ => None,
+        })
+    }
+
+    /// 0.31 的窗口命令挂在 `viewport_output` 每个视口的 `commands` 里，不在 FullOutput 顶层。
+    fn root_commands(out: &egui::FullOutput) -> Vec<egui::ViewportCommand> {
+        out.viewport_output
+            .iter()
+            .find(|(id, _)| **id == egui::ViewportId::ROOT)
+            .map(|(_, v)| v.commands.clone())
+            .unwrap_or_default()
+    }
+
+    /// 原版 `control_draw.gml:27-31`：`window_icon` 决定窗口图标是 `Data\icon.ico`
+    /// 还是程序自带的那份；`control_step.gml:21-24` 只在它变化时才重新发一次。
+    #[test]
+    fn window_icon_pref_swaps_the_window_icon() {
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        state.prefs.window_icon = false;
+        state.applied_window_icon = None;
+        let new = icon_command(&ctx, &mut state).expect("出厂就该把自带的图标发给窗口");
+        assert_eq!((new.width, new.height), (256, 256), "原版那两个 .ico 只有 256 一档");
+        assert_eq!(new.rgba.len(), 256 * 256 * 4);
+        // 同一档位不该每帧重发：原版只在值变化时打开重发窗口。
+        let out = ctx.run(raw_input(), |c| state.tick_transport(c));
+        assert!(
+            !root_commands(&out)
+                .iter()
+                .any(|c| matches!(c, egui::ViewportCommand::Icon(_))),
+            "没变化就不该再发图标命令"
+        );
+        state.prefs.window_icon = true;
+        let old = icon_command(&ctx, &mut state).expect("勾上旧图标后要换成 Data\\icon.ico");
+        assert_eq!((old.width, old.height), (256, 256));
+        assert_ne!(old.rgba, new.rgba, "旧图标和新图标必须是两张不同的图");
+    }
 }
