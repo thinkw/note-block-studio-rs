@@ -40,8 +40,17 @@ pub use viewport::Viewport;
 mod tests {
     use super::*;
 
+    /// 这条断言检查的是出厂值，不能读到人手上那份 `prefs.json`：
+    /// 调试界实时改过缩放 / 音量，单测就会莫名其妙变红。指向一个空的配置目录。
+    fn isolate_prefs() {
+        let dir = std::env::temp_dir().join("nbs-rust-test-prefs");
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("NBS_RUST_CONFIG_DIR", &dir);
+    }
+
     #[test]
     fn editor_state_defaults() {
+        isolate_prefs();
         let s = EditorState::new();
         assert!(s.doc.song.total_blocks > 0);
         assert_eq!(s.viewport.zoom, 1.0);

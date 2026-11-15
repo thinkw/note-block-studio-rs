@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use parking_lot::Mutex;
 
-use nbs_core::model::{Note, Song};
+use nbs_core::model::{Note, Song, FIRST_CUSTOM_INDEX};
 
 use crate::mixer::{Mixer, DEFAULT_MAX_VOICES};
 use crate::samples::SoundBank;
@@ -83,10 +83,14 @@ pub fn build_event_table(song: &Song, include_locked: bool) -> Vec<NoteEvent> {
                 .get(layer as usize)
                 .map(|l| (l.volume, l.stereo))
                 .unwrap_or((100, 100));
-            // Tempo Changer：自定义乐器名匹配，pitch 字段存 BPM
-            let tempo_change_bpm = song
-                .custom_instruments
-                .get(note.instrument.saturating_sub(16) as usize)
+            // Tempo Changer：只有自定义乐器（索引 >= 20）才可能是它，
+            // 原版 `control_draw.gml:505` 是拿乐器对象比名字。这里必须用 checked_sub：
+            // saturating_sub 会把内置的 0..19 全夹成 0 号自定义，于是每个普通音符都来变速，
+            // pitch=0 时 tempo 直接被钉死在 0.25 t/s（整首歌慢到听不出来）。
+            let tempo_change_bpm = note
+                .instrument
+                .checked_sub(FIRST_CUSTOM_INDEX)
+                .and_then(|i| song.custom_instruments.get(i as usize))
                 .filter(|ci| ci.name.eq_ignore_ascii_case("Tempo Changer"))
                 .map(|_| note.pitch as f32);
             NoteEvent { tick, layer, note, layer_volume, layer_stereo, tempo_change_bpm }
@@ -527,5 +531,58 @@ mod tests {
         assert_eq!(st.params.loop_end, 9.0);
         assert_eq!(st.params.loop_max, 3);
         assert_eq!(st.params.loop_count, 3);
+    }
+
+    /// 带一个「Tempo Changer」自定义乐器的歌：内置那 20 个音符绝不能被当成它。
+    /// 原版 `control_draw.gml:505` 是先按索引取乐器对象再比名字，索引 16..19 是内置的铜块一族。
+    fn song_with_tempo_changer() -> Song {
+        let mut song = Song::new();
+        song.meta.tempo = 41.33;
+        song.custom_instruments.push(nbs_core::model::CustomInstrument {
+            name: "Tempo Changer".into(),
+            filename: String::new(),
+            key: 45,
+            press: false,
+        });
+        for (t, ins) in [(0u32, 0u8), (1, 6), (2, 16), (3, 17), (4, 19), (5, 20)] {
+            song.set(
+                t,
+                0,
+                Note { instrument: ins, key: 45, velocity: 80, panning: 100, pitch: if ins == 20 { 600 } else { 0 } },
+            );
+        }
+        song.recalculate();
+        song
+    }
+
+    #[test]
+    fn only_real_tempo_changer_notes_carry_a_tempo_change() {
+        let events = build_event_table(&song_with_tempo_changer(), false);
+        let tc: Vec<u32> = events
+            .iter()
+            .filter(|e| e.tempo_change_bpm.is_some())
+            .map(|e| e.tick)
+            .collect();
+        assert_eq!(tc, vec![5], "只有索引 20 起的自定义 0 号才是 Tempo Changer，实测 {tc:?}");
+        assert_eq!(events.iter().find(|e| e.tick == 5).unwrap().tempo_change_bpm, Some(600.0));
+    }
+
+    /// 回归：这行曾经把内置音符的 pitch=0 当 BPM 用，tempo 被钉在 0.25 t/s，
+    /// 「约 41 t/s 的歌放起来极慢」就是这么来的。
+    #[test]
+    fn builtin_notes_do_not_collapse_the_playback_tempo() {
+        let song = song_with_tempo_changer();
+        let mut st = SharedState::new(Arc::new(SoundBank::default()), 44100);
+        st.prepare(&song, Arc::new(SoundBank::default()));
+        st.params.playing = true;
+        st.params.song_length = 100_000.0;
+        // 一秒音频 = 44100 个采样，播放头应走到约 41.33 tick。
+        drive(&mut st, 44100);
+        assert!(st.position > 40.0, "一秒该走 ~41 tick，实测 {:.2}", st.position);
+        assert!(
+            (st.params.tempo - 40.0).abs() < 1e-3,
+            "只允许 tick 5 那枚真正的 Tempo Changer 把 tempo 从 41.33 改成 600/15=40，实测 {:.2}",
+            st.params.tempo
+        );
     }
 }
