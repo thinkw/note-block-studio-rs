@@ -87,6 +87,14 @@ pub struct Preferences {
     pub auto_save_minutes: u8,
     /// 原版 `[schematic_export]` 段：整份导出选项无条件持久化。
     pub schematic: crate::schematic::SchematicOptions,
+    /// 原版 `[midi_import]` 段：勾了「记住我的更改」后，导入窗口里改的通道/鼓映射
+    /// 会写进 GM 表并持久化到这里。`None` = 没改过，用出厂表。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub midi_gm: Option<crate::midi_gm::MidiGmPersist>,
+    /// 原版 `[midi_import]` 段的 14 个 `w_midi_*` 标量：原版每次 `save_settings()`
+    /// 都无条件写，因此导入过的用户下次看到的就是上次留下的勾。`None` = 出厂值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub midi_import: Option<crate::midi::MidiImportPrefs>,
     /// 原版 `[warnings] schematics`：经典格式只兼容 1.12 以下的一次性警告是否已看过。
     pub warning_schematic: bool,
     pub recent_files: Vec<String>,
@@ -148,6 +156,8 @@ impl Default for Preferences {
             language: 0,
             auto_save_minutes: 10,
             schematic: crate::schematic::SchematicOptions::default(),
+            midi_gm: None,
+            midi_import: None,
             warning_schematic: false,
             recent_files: Vec::new(),
         }

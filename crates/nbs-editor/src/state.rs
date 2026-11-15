@@ -214,7 +214,8 @@ impl WindowKind {
             Self::AudioExport => "音频导出",
             Self::AudioSettings => "音频设置",
             Self::DatapackExport => "导出为数据包",
-            Self::MidiImport => "从 MIDI 导入",
+            // 原版 `draw_window_midi_import.gml` 中文分支画的是 `"导入MIDI"`。
+            Self::MidiImport => "导入MIDI",
             Self::SchematicExport => "导出 Minecraft 原理图",
             Self::PngExport => "导出 PNG 谱面",
             Self::MacroEditor => "宏",
@@ -223,6 +224,20 @@ impl WindowKind {
             Self::MinecraftCompat => "Minecraft 兼容性",
         }
     }
+}
+
+/// 原版 `menu_shown` 在 MIDI 导入窗口里的四种下拉：括号内是那一行的行号
+/// （`menu.menub`），点箭头打开、点条目或菜单外任意处关闭。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MidiMenu {
+    /// 「乐器」页的音色列。
+    ChannelIns(usize),
+    /// 「乐器」页的八度调整列。
+    ChannelOct(usize),
+    /// 「打击乐」页的音色列。
+    PercIns(usize),
+    /// 「打击乐」页的音高列。
+    PercPitch(usize),
 }
 
 /// 原版的 `message()` / `question()` 模态框。`yes_no` 对应 `question()`，
@@ -637,6 +652,25 @@ pub struct EditorState {
     pub macro_pattern: String,
     pub macro_reverse: bool,
     pub midi_options: MidiImportOptions,
+    /// 原版 `midi_*` 那一堆全局：解析好的 MIDI。导入窗口只在这有值时才打开——
+    /// 原版 `open_midi()` 是先解析、再 `window = w_midi`，没有「先开空窗口」这条路。
+    pub midi_data: Option<nbs_io::midi::MidiData>,
+    /// 原版 `songs[song].midifile`：窗口右上角显示的文件名。
+    pub midi_file: String,
+    /// 原版 `w_midi_tab`：0 乐器 / 1 打击乐 / 2 轨道 / 3 音符长度。
+    pub midi_tab: usize,
+    /// 原版 `sb_val[midi_sb1..midi_sb4]`：四页各自的滚动行数（拖拽时可以是小数，
+    /// 取行号时才 `floor`，和原版一样）。
+    pub midi_scroll: [f32; 4],
+    /// 原版 `menu_shown`：导入窗口一次只允许开一个下拉菜单，下标是那一行的行号。
+    pub midi_menu: Option<MidiMenu>,
+    /// 原版 `obj_menu.menu_show[]`：打击乐音高那种带子菜单的下拉，当前展开的是第几行。
+    pub midi_submenu: Option<usize>,
+    /// 原版 `draw_dragvalue` 的亚像素累加器（通道最高层数 / 尾音起始 / 尾音结束）。
+    pub midi_drags: [f32; 3],
+    /// 原版 `midi_ins[*, 1..2]` / `midi_drum[*, 1..2]` 的生效副本：出厂表 +
+    /// 「记住我的更改」写回的改动。
+    pub midi_gm: nbs_io::MidiGmTable,
     pub schematic_options: SchematicOptions,
     /// 原版 `calculate_size()` 每次打开导出窗口时重算的歌曲统计。
     pub schematic_stats: nbs_io::schematic::SchematicStats,
@@ -764,6 +798,18 @@ impl EditorState {
         let png_dark = theme.kind.is_dark();
         // 原版 `load_settings` 的 `[schematic_export]` 段。
         let schematic_options = prefs.schematic.clone();
+        // 原版 `load_settings` 的 `[midi_import]` 段：14 个 `w_midi_*` 标量 +
+        // 「记住我的更改」写回的 GM 表。通道/鼓映射不在这里恢复，那是
+        // `open_midi` 每次解析完按 GM 表现算的（我们的 `MidiImportOptions::for_midi`）。
+        let mut midi_options = MidiImportOptions::default();
+        if let Some(p) = prefs.midi_import.as_ref() {
+            p.apply(&mut midi_options);
+        }
+        let midi_gm = prefs
+            .midi_gm
+            .as_ref()
+            .map(nbs_io::MidiGmTable::from_persist)
+            .unwrap_or_default();
 
         Self {
             doc: Document::with_song(song),
@@ -795,7 +841,15 @@ impl EditorState {
             macro_index: 0,
             macro_pattern: "0|4|7|12".into(),
             macro_reverse: false,
-            midi_options: MidiImportOptions::default(),
+            midi_options,
+            midi_data: None,
+            midi_file: String::new(),
+            midi_tab: 0,
+            midi_scroll: [0.0; 4],
+            midi_menu: None,
+            midi_submenu: None,
+            midi_drags: [0.0; 3],
+            midi_gm,
             schematic_options,
             schematic_stats: nbs_io::schematic::SchematicStats::default(),
             schematic_tab: 0,
@@ -1144,6 +1198,10 @@ impl EditorState {
         self.prefs.blackout = self.flags.blackout;
         // 原版把整份 sch_exp_* 无条件写进 settings.ini，「记住我的更改」并不门控它。
         self.prefs.schematic = self.schematic_options.clone();
+        // MIDI 导入同理：`import_midi()` 结尾的 `save_settings()` 每次都把
+        // 14 个 w_midi_* 和 128 组 ins_N / drum_N 全量写盘。
+        self.prefs.midi_import = Some(nbs_io::MidiImportPrefs::from_options(&self.midi_options));
+        self.prefs.midi_gm = Some(self.midi_gm.to_persist());
         self.prefs.recent_files = self.recent_files.iter().map(|p| p.to_string_lossy().into_owned()).collect();
     }
 

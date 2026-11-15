@@ -130,6 +130,13 @@ pub enum Command {
     ExportSchematicChecked,
     /// 原版「使用默认值」= `reset_schematic_export(1)`。
     ResetSchematicOptions,
+    /// 原版导入窗口的「导入」= `import_midi()`，随后 `save_settings()`。
+    MidiImportRun,
+    /// 原版导入窗口「使用默认值」答「是」之后那一大段：`midi_instruments()`
+    /// 重查出厂 GM 表 + 恢复 `w_midi_*` + 恢复各声部的音符长度。
+    MidiUseDefaults,
+    /// 原版「取消」：`songs[song].midifile = ""` + 关窗，解析好的那份 MIDI 一起丢掉。
+    MidiImportCancel,
     /// 回答当前模态框，`false` = 「否」（丢弃整个待弹队列）。
     AnswerModal(bool),
     /// 文件对话框确定。
@@ -566,11 +573,21 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 WindowKind::FileSave => {
                     dispatch(state, Command::OpenDialog(DialogAction::SaveSong), ctx)
                 }
+                // 原版没有「空白的 MIDI 导入窗口」：必须先选到文件、`open_midi()`
+                // 解析成功才画得出来。
+                WindowKind::MidiImport => {
+                    dispatch(state, Command::OpenDialog(DialogAction::ImportMidi), ctx)
+                }
                 _ => state.window = Some(kind),
             }
             state.context_menu = None;
         }
         Command::CloseWindow => {
+            if state.window == Some(WindowKind::MidiImport) {
+                // 键盘 Escape 关窗和点「取消」一样，解析好的那份 MIDI 跟着丢。
+                state.midi_data = None;
+                state.midi_file.clear();
+            }
             state.window = None;
             // 原版的 `obj_menu` 跟着窗口一起销毁。这里不清的话，下拉菜单开着时用
             // Escape / Ctrl+P 关窗，下次打开首选项会凭空冒出一个悬浮菜单。
@@ -629,6 +646,45 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         Command::ResetSchematicOptions => {
             state.schematic_options.reset();
             state.set_message("导出 Schematic 的设定已还原");
+        }
+        Command::MidiImportRun => {
+            // 原版 `import_midi()`：用窗口里那份已解析的 MIDI + 界面上的映射表落一首新歌，
+            // 收尾按「记住我的更改」把映射写回 GM 表，否则只把 w_midi_* 恢复成出厂值，
+            // 两种情况最后都会 `save_settings()`。
+            let Some(midi) = state.midi_data.clone() else {
+                state.window = None;
+                return;
+            };
+            let song = nbs_io::midi::import_midi_data(&midi, &state.midi_options);
+            let n = song.total_blocks;
+            state.midi_options.finish_import(&midi, &mut state.midi_gm);
+            state.window = None;
+            state.midi_data = None;
+            state.midi_file.clear();
+            state.midi_tab = 0;
+            state.doc.replace_song(song);
+            state.prepare_audio();
+            state.viewport.start_tick = 0;
+            state.viewport.start_layer = 0;
+            state.set_marker(0.0);
+            state.save_prefs();
+            state.set_message(format!("MIDI 导入完成：{n} 个音符"));
+        }
+        Command::MidiUseDefaults => {
+            // 原版「使用默认值」答「是」之后：先 `midi_instruments()` 把 GM 映射恢复出厂，
+            // 再按这份出厂表重刷界面四张表，最后把 w_midi_* 设成出厂值。
+            let Some(midi) = state.midi_data.clone() else { return };
+            state.midi_gm = nbs_io::MidiGmTable::default();
+            state.midi_options.use_defaults(&midi, &state.midi_gm);
+            state.set_message("MIDI 导入设定已还原");
+        }
+        Command::MidiImportCancel => {
+            // 原版「取消」：`songs[song].midifile = ""` 后关窗，解析好的那份 MIDI 一起丢掉，
+            // 不写 settings.ini（界面上的改动留在内存里，等下次开文件时重刷）。
+            state.window = None;
+            state.midi_data = None;
+            state.midi_file.clear();
+            state.midi_tab = 0;
         }
         Command::ExportSchematicChecked => {
             let st = state.schematic_stats.clone();
@@ -1022,18 +1078,24 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     state.window = None;
                 }
                 DialogAction::ImportMidi => {
-                    match nbs_io::midi::import_midi_path(&path, &state.midi_options.clone()) {
-                        Ok(song) => {
-                            let n = song.total_blocks;
-                            state.doc.replace_song(song);
-                            state.prepare_audio();
-                            state.viewport.start_tick = 0;
-                            state.viewport.start_layer = 0;
-                            state.set_marker(0.0);
-                            state.window = None;
-                            state.set_message(format!("MIDI 导入完成：{n} 个音符"));
+                    // 原版 `open_midi()`：先读盘解析，解析成功才开导入窗口，
+                    // 并把当前 GM 映射表摊到界面四张表上（不落歌，等「导入」）。
+                    match nbs_io::midi::parse_midi_path(&path) {
+                        Ok(midi) => {
+                            state.midi_options.reload_tables(&midi, &state.midi_gm);
+                            state.midi_data = Some(midi);
+                            state.midi_file = path
+                                .file_name()
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            state.midi_tab = 0;
+                            state.midi_scroll = [0.0; 4];
+                            state.window = Some(WindowKind::MidiImport);
                         }
-                        Err(e) => state.set_message(format!("导入 MIDI 失败: {e}")),
+                        Err(e) => {
+                            state.window = None;
+                            state.set_message(format!("导入 MIDI 失败: {e}"));
+                        }
                     }
                 }
                 DialogAction::ImportSchematic => {

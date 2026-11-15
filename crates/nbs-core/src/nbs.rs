@@ -273,7 +273,10 @@ pub fn save_bytes(song: &Song, version: u8) -> Result<Vec<u8>, NbsError> {
     w.string(&m.author);
     w.string(&m.original_author);
     w.string(&m.description);
-    w.u16(((m.tempo * 100.0).round() as i32).clamp(0, u16::MAX as i32) as u16);
+    // 原版 `buffer_write_short(real_tempo * 100)`：GameMaker 写整数类型时直接截断小数，
+    // 不是四舍五入。MIDI 导入算出的 23.459782 因此存成 2345（读回 23.45），
+    // 若这里 round 就会比原版多 0.01。
+    w.u16(((m.tempo * 100.0) as i32).clamp(0, u16::MAX as i32) as u16);
     w.u8(m.auto_save as u8);
     w.u8(m.auto_save_mins);
     w.u8(m.time_signature.clamp(2, 8));
@@ -361,7 +364,10 @@ mod tests {
         assert_eq!(back.total_blocks, song.total_blocks);
         assert_eq!(back.layers.len(), song.layers.len());
         assert_eq!(back.meta.name, song.meta.name);
-        assert_eq!((back.meta.tempo * 100.0).round(), (song.meta.tempo * 100.0).round());
+        assert_eq!(
+            (back.meta.tempo * 100.0).round(),
+            ((song.meta.tempo * 100.0) as i32) as f32
+        );
         assert_eq!(back.get(0, 0), song.get(0, 0));
         assert_eq!(back.get(63, 2), song.get(63, 2));
     }
@@ -371,6 +377,18 @@ mod tests {
         for v in 0..=MAX_NBS_VERSION {
             roundtrip(v);
         }
+    }
+
+    /// MIDI 导入算出的速度一般不是两位小数（例：《Whereabouts of the Heart》
+    /// 是 23.459782），原版存盘走 `buffer_write_short(real_tempo * 100)` 截断成
+    /// 2345，装机版读回来正好显示 23.45。这里 round 会多 0.01，导出的 .nbs
+    /// 和原版对不上。
+    #[test]
+    fn tempo_is_truncated_to_centihtz_not_rounded() {
+        let mut song = Song::demo();
+        song.meta.tempo = 23.459_782;
+        let back = load_bytes(&save_bytes(&song, MAX_NBS_VERSION).unwrap()).unwrap();
+        assert_eq!(back.meta.tempo, 23.45);
     }
 
     /// v6 只改了「内置乐器 16 → 20」这一件事：字段布局和 v5 完全一致，

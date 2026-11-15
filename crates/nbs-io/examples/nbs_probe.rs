@@ -27,9 +27,16 @@ fn main() {
                 for (_, _, note) in song.iter_notes() {
                     *hist.entry(note.instrument).or_default() += 1;
                 }
+                let used = song
+                    .iter_notes()
+                    .map(|(_, l, _)| l)
+                    .max()
+                    .map_or(0, |m| m as usize + 1);
                 println!(
-                    "  层 {}  长度 {}  音符 {}  自定义乐器 {} 个\n    曲名 {:?} 作者 {:?} 速度 {:.2}\n    索引分布 {hist:?}",
+                    "  层 {}（有音符 {}，尾空 {}）  长度 {}  音符 {}  自定义乐器 {} 个\n    曲名 {:?} 作者 {:?} 速度 {:.2}\n    索引分布 {hist:?}",
                     song.layers.len(),
+                    used,
+                    song.layers.len().saturating_sub(used),
                     song.song_length(),
                     song.total_blocks,
                     song.custom_instruments.len(),

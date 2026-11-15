@@ -81,7 +81,7 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
             });
             ui.separator();
             ui.menu_button("导入", |ui| {
-                if ui.button("从 MIDI 导入…").clicked() { state.emit(Command::ShowWindow(WindowKind::MidiImport)); ui.close_menu(); }
+                if ui.button("从 MIDI 导入…").clicked() { state.emit(Command::OpenDialog(crate::state::DialogAction::ImportMidi)); ui.close_menu(); }
                 if ui.button("从 Schematic 导入…").clicked() { state.emit(Command::OpenDialog(crate::state::DialogAction::ImportSchematic)); ui.close_menu(); }
                 if ui.button("导入片段 (.nbp)…").clicked() { state.emit(Command::OpenDialog(crate::state::DialogAction::ImportPattern)); ui.close_menu(); }
             });
