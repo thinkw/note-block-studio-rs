@@ -59,6 +59,11 @@ pub struct Preferences {
     pub show_grid_lines: bool,
     pub flats: bool,
     pub blackout: bool,
+    /// 原版 `refreshrate`（出厂 0，`control_create.gml:130`）：帧数上限档位。
+    pub refresh_rate: u8,
+    /// 原版 `window_scale`：界面缩放倍率。`None` = 跟随系统 DPI，
+    /// 也就是原版的出厂值 `display_get_dpi_x() / 96`（`get_default_window_scale.gml`）。
+    pub window_scale: Option<f32>,
     pub sounds_dir: Option<String>,
     /// 原版 `show_oldwarning`（出厂为 1）：打开旧版本存的文件时弹不弹警告。
     pub show_old_warning: bool,
@@ -120,6 +125,9 @@ impl Default for Preferences {
             show_grid_lines: true,
             flats: false,
             blackout: false,
+            // 原版 `control_create.gml:130`：refreshrate = 0，即 30 帧。
+            refresh_rate: 0,
+            window_scale: None,
             sounds_dir: None,
             // 原版 `control_create.gml:126`：show_oldwarning = 1。
             show_old_warning: true,
@@ -137,6 +145,10 @@ impl Default for Preferences {
     }
 }
 
+/// 原版 `control_draw.gml:47-50` 的 `game_set_speed` 档位表，也是首选项下拉里的五项。
+/// 0 档源码不调 `game_set_speed`，走的是房间默认的 30 帧，下拉里同样写「30帧」。
+pub const REFRESH_RATES: [u32; 5] = [30, 60, 120, 144, 240];
+
 impl Preferences {
     /// 原版 `if (autosave && …)`：开关关掉后间隔就不参与倒计时。
     pub fn autosave_interval(&self) -> u8 {
@@ -145,6 +157,23 @@ impl Preferences {
         } else {
             0
         }
+    }
+
+    /// 当前档位的帧数上限（手改过的越界档位按最后一档算）。
+    pub fn refresh_limit(&self) -> f64 {
+        REFRESH_RATES[self.refresh_rate as usize % REFRESH_RATES.len()] as f64
+    }
+
+    /// 生效中的界面缩放倍率。`None` 就是原版的 `get_default_window_scale()`，
+    /// Windows 上等于系统 DPI / 96，也就是传进来的 `native`。
+    pub fn effective_scale(&self, native: f32) -> f32 {
+        self.window_scale.unwrap_or(native)
+    }
+
+    /// 原版「重置」按钮的锁定条件 `window_scale == get_default_window_scale()`。
+    /// 拖动只能落在整数百分比上，落在系统倍率上时和出厂值等价，按钮照样变灰。
+    pub fn scale_is_default(&self, native: f32) -> bool {
+        (self.effective_scale(native) - native).abs() < 0.005
     }
 
     pub fn config_dir() -> PathBuf {
@@ -301,12 +330,21 @@ mod tests {
         let mut p = Preferences::default();
         p.master_volume = 0.42;
         p.theme = 2;
+        p.refresh_rate = 3;
+        p.window_scale = Some(1.25);
         p.recent_files.push("C:/songs/demo.nbs".into());
         let s = serde_json::to_string(&p).unwrap();
         let back: Preferences = serde_json::from_str(&s).unwrap();
         assert_eq!(back.theme, 2);
         assert!((back.master_volume - 0.42).abs() < 1e-6);
         assert_eq!(back.recent_files.len(), 1);
+        assert_eq!(back.refresh_rate, 3);
+        assert_eq!(back.window_scale, Some(1.25));
+        // 旧配置文件里没有这两项时必须退回默认值，不能整个文件读不出来。
+        let old = r#"{"version":1,"theme":3}"#;
+        let back: Preferences = serde_json::from_str(old).unwrap();
+        assert_eq!(back.refresh_rate, 0, "出厂就是 30 帧");
+        assert_eq!(back.window_scale, None, "出厂跟随系统 DPI");
     }
 
     /// `[schematic_export]` 段：整份选项 + 「警告已看过」都要能落盘，
@@ -395,5 +433,33 @@ mod tests {
             "警告：你正在打开旧版的 NBS 文件。保存此文件会使其与旧版 Note Block Studio 不兼容。"
         );
         assert!(old_file_warning("NBP").contains("NBP"));
+    }
+
+    /// 原版 `control_draw.gml:47-50` + 首选项下拉：0..4 = 30 / 60 / 120 / 144 / 240。
+    #[test]
+    fn refresh_rate_maps_to_original_frames() {
+        let mut p = Preferences::default();
+        assert_eq!(
+            p.refresh_limit(),
+            30.0,
+            "出厂 refreshrate = 0（control_create.gml:130），对应 30 帧"
+        );
+        for (rate, fps) in [(1u8, 60.0), (2, 120.0), (3, 144.0), (4, 240.0)] {
+            p.refresh_rate = rate;
+            assert_eq!(p.refresh_limit(), fps);
+        }
+    }
+
+    /// 原版出厂的 `window_scale` 是 `dpi / 96`，「重置」按钮只在两者相等时锁住。
+    #[test]
+    fn window_scale_default_tracks_native_dpi() {
+        let mut p = Preferences::default();
+        assert_eq!(p.effective_scale(1.25), 1.25, "没配过就跟随系统 DPI");
+        assert!(p.scale_is_default(1.25));
+        p.window_scale = Some(1.25);
+        assert!(p.scale_is_default(1.25), "拖回系统倍率后「重置」同样锁住");
+        p.window_scale = Some(2.0);
+        assert_eq!(p.effective_scale(1.25), 2.0);
+        assert!(!p.scale_is_default(1.25));
     }
 }

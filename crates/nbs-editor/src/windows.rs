@@ -269,7 +269,7 @@ fn statistics(state: &mut EditorState, ui: &mut Ui) {
 /// 差的那 4 像素是原版页签条比 Fluent 高的部分，归 egui 的标题栏。
 ///
 /// 只画真实接线的行。原版有、我们还没有对应行为的选项（启动页 / 检查更新 / Discord
-/// 富在位 / 界面音效 / 透明效果 / 取色器 / 帧率 / 窗口缩放 / 语言 / 程序图标 /
+/// 富在位 / 界面音效 / 透明效果 / 取色器 / 高分辨率纹理 / 语言 / 程序图标 /
 /// 音符盒不透明 / 删除淡出 / 五线谱 / 任务栏进度 / 重置键位 / 在区间起止播放）
 /// 整行不出现，免得留下点了没反应的假控件。
 fn preferences(state: &mut EditorState, ui: &mut Ui) {
@@ -304,6 +304,7 @@ fn preferences(state: &mut EditorState, ui: &mut Ui) {
     let tab = state.prefs_tab.min(4);
 
     let mut menu_at = Pos2::ZERO;
+    let mut rate_at = Pos2::ZERO;
     {
         let mut pg = Page {
             ui: &mut *ui,
@@ -326,7 +327,7 @@ fn preferences(state: &mut EditorState, ui: &mut Ui) {
         state.prefs_tab = tab;
         match tab {
             0 => prefs_general(state, &mut pg),
-            1 => prefs_interface(state, &mut pg, &mut menu_at),
+            1 => prefs_interface(state, &mut pg, &mut menu_at, &mut rate_at),
             2 => prefs_appearance(state, &mut pg),
             3 => prefs_usability(state, &mut pg),
             _ => prefs_playback(state, &mut pg),
@@ -344,6 +345,9 @@ fn preferences(state: &mut EditorState, ui: &mut Ui) {
     }
     if state.prefs_theme_menu {
         theme_menu(state, ui, menu_at);
+    }
+    if state.prefs_rate_menu {
+        rate_menu(state, ui, rate_at);
     }
 }
 
@@ -366,11 +370,15 @@ fn prefs_general(state: &mut EditorState, pg: &mut Page) {
     // 原版 `if (autosave = 0)`：整行涂 c_gray(128)，数字退化成静态文本。
     let on = state.prefs.autosave_enabled;
     let ink = if on { pg.ink() } else { ggray(128) };
-    pg.text(pg.row(326.0, 110.0), "间隔:            分钟", PREFS_FONT, ink);
+    // 和「缩放」同一套：原版把 `"间隔:            分钟"` 画成一整串，数字叠在空格上，
+    // 我们的空格更窄，照抄个数会让数字压住「分钟」，所以单位按最宽的数字（60）定死。
+    pg.text(pg.row(326.0, 110.0), "间隔:", PREFS_FONT, ink);
     let tip = "自动保存中间的间隔。";
     pg.tip_area(326.0, 110.0, 180.0, 16.0, tip);
     let mins = state.prefs.auto_save_minutes as i32;
     let drag = pg.drag(375.0, 110.0, mins, 1.0, 1, 60, !on, tip, &mut state.prefs_drag);
+    let unit_x = 375.0 + pg.measure("60", PREFS_FONT) + 4.0;
+    pg.text(pg.row(unit_x, 110.0), "分钟", PREFS_FONT, ink);
     if let Some(mins) = drag {
         state.prefs.auto_save_minutes = mins as u8;
         state.emit(Command::SavePreferences);
@@ -420,14 +428,10 @@ fn folder_row(state: &mut EditorState, pg: &mut Page, which: PrefsFolder, text_n
     }
 }
 
-/// 原版页 1「界面」：主题下拉 + 暗色 / 全黑两个开关。
-/// 同页的取色器（w_setaccent）、帧率限制、窗口缩放、语言、程序图标
-/// 都没有对应实现，不画。
-fn prefs_interface(
-    state: &mut EditorState,
-    pg: &mut Page,
-    menu_at: &mut Pos2,
-) {
+/// 原版页 1「界面」：主题下拉 + 暗色 / 全黑两个开关 + 帧率限制 + 窗口缩放。
+/// 同页的取色器（`w_setaccent`）、「为高分辨率优化」（要 `*_hires` 那套纹理）、
+/// 语言（还没做多语言）都没有对应实现，整行不画。
+fn prefs_interface(state: &mut EditorState, pg: &mut Page, menu_at: &mut Pos2, rate_at: &mut Pos2) {
     pg.header(22.0, 74.0, 218.0, 140.0, "主题");
     pg.frame_box(40.0, 95.0, 140.0, 115.0);
     let name = state.theme.kind.name().to_string();
@@ -435,7 +439,7 @@ fn prefs_interface(
     // 原版 `show_menu_ext("theme", x1 + 40, y1 + 74 + 16 + 21 + (theme = 3) * 22 + 5, …)`。
     *menu_at = pg.row(40.0, 116.0);
     // 只有右边那个箭头能开下拉；菜单开着时原版由 obj_menu 吞掉点击，这里交给提示区收起。
-    if pg.arrow(&state.icons) && !state.prefs_theme_menu {
+    if pg.arrow(&state.icons, 123.0, 96.0) && !state.prefs_theme_menu {
         state.prefs_theme_menu = true;
     }
     if pg.check(
@@ -460,6 +464,41 @@ fn prefs_interface(
         false,
     ) {
         state.emit(Command::ToggleFlag(Flag::Blackout));
+    }
+
+    // 原版 `draw_areaheader(x1 + 258, y1 + 74, 220, 60, "帧率限制")`。
+    pg.header(258.0, 74.0, 220.0, 60.0, "帧率限制");
+    pg.frame_box(274.0, 95.0, 374.0, 115.0);
+    let rate = state.prefs.refresh_rate as usize % RATE_ITEMS.len();
+    pg.text(pg.row(277.0, 98.0), RATE_ITEMS[rate], PREFS_FONT, pg.ink());
+    *rate_at = pg.row(274.0, 116.0);
+    if pg.arrow(&state.icons, 357.0, 96.0) && !state.prefs_rate_menu {
+        state.prefs_rate_menu = true;
+    }
+
+    // 原版 `draw_areaheader(x1 + 258, y1 + 150, 220, 64, "窗口")`。
+    let native = pg.ui.ctx().native_pixels_per_point().unwrap_or(1.0);
+    pg.header(258.0, 150.0, 220.0, 64.0, "窗口");
+    // 原版把 `"缩放:              %"` 整串画在 (276, 166)，数字用 `draw_dragvalue`
+    // 叠在中间那段空格上（14 个空格是源码里的原始个数）。我们的字体度量和
+    // GameMaker 的 fnt_main 不一样，照抄空格数会让数字压住百分号，所以 % 按
+    // 最宽的那个数字（400）定在数字右边，位置同样是固定的、不随数值跳动。
+    pg.text(pg.row(276.0, 166.0), "缩放:", PREFS_FONT, pg.ink());
+    let pct = (state.prefs.effective_scale(native) * 100.0).round() as i32;
+    // 原版灵敏度 `1 / window_scale^2`，而 `draw_dragvalue` 是拿它当除数用的：
+    // 100% 时约 10 像素进 1 格，400% 时不到 1 像素就进 1 格，倍率越大拖得越快。
+    let sens = 10000.0 / (pct * pct) as f32;
+    let drag = pg.drag(322.0, 166.0, pct, sens, 50, 400, false, "", &mut state.prefs_drag);
+    let sign_x = 322.0 + pg.measure("400", PREFS_FONT) + 4.0;
+    pg.text(pg.row(sign_x, 166.0), "%", PREFS_FONT, pg.ink());
+    if let Some(pct) = drag {
+        state.prefs.window_scale = Some(pct as f32 / 100.0);
+        state.emit(Command::SavePreferences);
+    }
+    // 原版 `draw_button2(x1 + 394, y1 + 161, 72, "重置", window_scale == get_default_window_scale())`。
+    if pg.button(394.0, 161.0, 72.0, "重置", state.prefs.scale_is_default(native)) {
+        state.prefs.window_scale = None;
+        state.emit(Command::SavePreferences);
     }
 }
 
@@ -647,41 +686,70 @@ const THEME_MENU_ORDER: [ThemeKind; 4] = [
     ThemeKind::Fluent,
 ];
 
-fn theme_menu(state: &mut EditorState, ui: &Ui, at: Pos2) {
+/// 原版 `show_menu_ext` + `obj_menu`：菜单开着时整屏吞输入，点哪儿都只用来收起；
+/// 当前值前面打一个勾。返回（选中的下标，是否被点掉）。
+/// 宽 98 对应原版 `draw_area` 那个 100 像素宽的框减掉两条边。
+fn popup_list(ui: &Ui, id: &str, at: Pos2, items: &[&str], sel: usize) -> (Option<usize>, bool) {
     let ctx = ui.ctx();
-    // 原版 `obj_menu`：菜单开着时全屏吞输入，点哪儿都只用来收起。
     let dismissed = egui::Area::new(Id::new("prefs_menu_blocker"))
         .order(egui::Order::Foreground)
         .fixed_pos(Pos2::ZERO)
         .show(ctx, |ui| ui.allocate_rect(ctx.screen_rect(), Sense::click()).clicked())
         .inner;
-    let mut picked: Option<ThemeKind> = None;
-    egui::Area::new(Id::new("prefs_theme_menu"))
+    let mut picked: Option<usize> = None;
+    egui::Area::new(Id::new(id))
         .order(egui::Order::Foreground)
         .fixed_pos(at)
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_min_width(98.0);
-                for kind in THEME_MENU_ORDER {
-                    let sel = state.theme.kind == kind;
-                    let label = format!("{} {}", if sel { "\u{2713}" } else { " " }, kind.name());
-                    if ui.selectable_label(sel, label).clicked() {
-                        picked = Some(kind);
+                for (i, label) in items.iter().enumerate() {
+                    let on = i == sel;
+                    let text = format!("{} {}", if on { "\u{2713}" } else { " " }, label);
+                    if ui.selectable_label(on, text).clicked() {
+                        picked = Some(i);
                     }
                 }
             });
         });
-    if let Some(kind) = picked {
-        state.emit(Command::SetTheme(kind));
+    (picked, dismissed)
+}
+
+/// 原版 `show_menu_ext("theme", …)`：四套主题，当前项打勾。
+fn theme_menu(state: &mut EditorState, ui: &Ui, at: Pos2) {
+    let names: Vec<&str> = THEME_MENU_ORDER.iter().map(|k| k.name()).collect();
+    let sel = THEME_MENU_ORDER
+        .iter()
+        .position(|k| *k == state.theme.kind)
+        .unwrap_or(usize::MAX);
+    let (picked, dismissed) = popup_list(ui, "prefs_theme_menu", at, &names, sel);
+    if let Some(i) = picked {
+        state.emit(Command::SetTheme(THEME_MENU_ORDER[i]));
     }
     if picked.is_some() || dismissed {
         state.prefs_theme_menu = false;
     }
 }
 
+/// 原版 `show_menu_ext("refreshrate", …)` 的中文分支 `"30帧|60帧|120帧|144帧|240帧"`。
+/// 框里显示的那一行和菜单五项是同一串字（`draw_text_dynamic` 那行的 `condstr` 链）。
+fn rate_menu(state: &mut EditorState, ui: &Ui, at: Pos2) {
+    let (picked, dismissed) = popup_list(ui, "prefs_rate_menu", at, &RATE_ITEMS, usize::MAX);
+    if let Some(i) = picked {
+        state.prefs.refresh_rate = i as u8;
+        state.emit(Command::SavePreferences);
+    }
+    if picked.is_some() || dismissed {
+        state.prefs_rate_menu = false;
+    }
+}
+
 /// 原版 `fnt_main` 9 像素（正文）和 `fnt_info_med` 11 像素（Fluent 的分组标题与页签）。
 const PREFS_FONT: f32 = 9.0;
 const PREFS_FONT_MED: f32 = 11.0;
+
+/// 原版「帧率限制」下拉的五项（中文分支），下标就是 `refreshrate`。
+const RATE_ITEMS: [&str; 5] = ["30帧", "60帧", "120帧", "144帧", "240帧"];
 
 /// GameMaker 的灰阶常量 `make_color_rgb(v, v, v)`。
 const fn ggray(v: u8) -> Color32 {
@@ -1173,8 +1241,13 @@ impl<'a> Page<'a> {
         let resp = self
             .ui
             .interact(rect, Id::new(("prefs-drag", x as i32, n as i32)), sense)
-            .on_hover_cursor(CursorIcon::ResizeNorth)
-            .on_hover_text(tip);
+            .on_hover_cursor(CursorIcon::ResizeNorth);
+        // 原版 `draw_dragvalue` 没有 `popup_set_window`，这类行就是没有提示。
+        let resp = if tip.is_empty() {
+            resp
+        } else {
+            resp.on_hover_text(tip)
+        };
         p.galley(at, g, Color32::BLACK);
         let mut out = None;
         if resp.drag_started() {
@@ -1209,10 +1282,10 @@ impl<'a> Page<'a> {
         }
     }
 
-    /// 原版 `draw_abutton(x1 + 123, y1 + 96)`：主题下拉框右边的箭头（`spr_button_arrow`）。
+    /// 原版 `draw_abutton(x2 - 17, y1 + 96)`：下拉框右边的箭头（`spr_button_arrow`）。
     /// 精灵图找不到时画一个同位置的三角形，仍接同一个开关——不能留个看不见的热点。
-    fn arrow(&mut self, icons: &crate::icons::Icons) -> bool {
-        let at = self.row(123.0, 96.0);
+    fn arrow(&mut self, icons: &crate::icons::Icons, x: f32, n: f32) -> bool {
+        let at = self.row(x, n);
         match icons.bank() {
             Some(b) => b.arrow_button(self.ui, at, self.th),
             None => {

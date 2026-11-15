@@ -404,9 +404,10 @@ impl Bank {
 
     /// 原版 `draw_abutton(x, y)`：下拉框右边的箭头，17×18，
     /// 帧号 `常态 / 悬停 / 按住 + 3 * 主题 (+ 3 * fdark)`。
+    /// Id 带坐标：首选项一页上有主题和帧率两个下拉框，共用一个 Id 会互相抢悬停态。
     pub fn arrow_button(&self, ui: &mut egui::Ui, at: Pos2, th: &Theme) -> bool {
         let rect = Rect::from_min_size(at, Vec2::new(17.0, 18.0));
-        let (resp, holding) = Self::ptr(ui, rect, Id::new("prefs_arrow"));
+        let (resp, holding) = Self::ptr(ui, rect, Id::new(("prefs_arrow", at.x as i32, at.y as i32)));
         let m = pointer_state(resp.hovered(), holding);
         let frame = m + 3 * theme_index(th.kind) + 3 * usize::from(th.fdark && th.kind == ThemeKind::Fluent);
         self.button_arrow.draw(&ui.painter(), at, frame, Color32::WHITE);

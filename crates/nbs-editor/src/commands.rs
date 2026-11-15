@@ -549,6 +549,10 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         }
         Command::CloseWindow => {
             state.window = None;
+            // 原版的 `obj_menu` 跟着窗口一起销毁。这里不清的话，下拉菜单开着时用
+            // Escape / Ctrl+P 关窗，下次打开首选项会凭空冒出一个悬浮菜单。
+            state.prefs_theme_menu = false;
+            state.prefs_rate_menu = false;
         }
         // ------------------------------------------------------------ 导出 Schematic
         // 原版 `menu_click`：`if (calculate_size()) window = w_schematic_export`。
@@ -1524,5 +1528,63 @@ mod tests {
         }
         let _ = std::fs::remove_file(&old);
         let _ = std::fs::remove_file(&current);
+    }
+
+    /// `predicted_dt = 0` 是关键：egui 会把「 predicted 帧长」从延时里减掉防止超调
+    /// （context.rs:187），留默认 1/60 秒的话 240 帧那一档会被减成 0，测不出档位。
+    fn raw_input() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            predicted_dt: 0.0,
+            ..Default::default()
+        }
+    }
+
+    /// 原版 `control_draw.gml:11-12`：窗口物理尺寸不变、逻辑分辨率除以 `window_scale`，
+    /// 等价于 egui 的 `pixels_per_point`。`None`（出厂值 = 系统 DPI / 96）就是 1.0。
+    #[test]
+    fn window_scale_pref_drives_pixels_per_point() {
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        state.prefs.window_scale = Some(2.0);
+        // 缩放要下一帧才生效（egui 在 begin_pass 里消费 new_zoom_factor），原版也是下一帧重算 rw/rh。
+        let _ = ctx.run(raw_input(), |c| state.tick_transport(c));
+        let out = ctx.run(raw_input(), |c| state.tick_transport(c));
+        assert_eq!(out.pixels_per_point, 2.0, "200% 就是每点 2 物理像素");
+        // 「重置」存回 None，必须真的退回系统倍率，不然按下去没反应。
+        state.prefs.window_scale = None;
+        let _ = ctx.run(raw_input(), |c| state.tick_transport(c));
+        let out = ctx.run(raw_input(), |c| state.tick_transport(c));
+        assert_eq!(out.pixels_per_point, 1.0, "重置后要退回出厂缩放");
+    }
+
+    /// 原版 `game_set_speed(N, gamespeed_fps)`：帧数上限压的是整个程序的步进，
+    /// 我们这边对应压住连续重绘的间隔。
+    #[test]
+    fn refresh_rate_caps_the_repaint_delay() {
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        state.scrub = 1; // 按住快进，和播放一样是连续重绘的来源
+        // 头两帧 egui 自己会补一次立即重绘（字体、outstanding 计数），先跑掉。
+        let _ = ctx.run(raw_input(), |c| state.tick_transport(c));
+        let _ = ctx.run(raw_input(), |c| state.tick_transport(c));
+        for (rate, fps) in [(0u8, 30.0f64), (1, 60.0), (2, 120.0), (3, 144.0), (4, 240.0)] {
+            state.prefs.refresh_rate = rate;
+            let out = ctx.run(raw_input(), |c| state.tick_transport(c));
+            let got = out
+                .viewport_output
+                .iter()
+                .find(|(id, _)| **id == egui::ViewportId::ROOT)
+                .map(|(_, v)| v.repaint_delay.as_secs_f64())
+                .unwrap_or(0.0);
+            let want = 1.0 / fps;
+            assert!(
+                (got - want).abs() < 0.002,
+                "refreshrate {rate} 应把重绘压到 {fps} 帧，实际延后 {got} 秒"
+            );
+        }
     }
 }

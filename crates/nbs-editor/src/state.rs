@@ -496,6 +496,9 @@ pub struct EditorState {
     pub prefs_tab: u8,
     /// 原版 `draw_abutton` 展开的 `obj_menu`：首选项里主题下拉框是否开着。
     pub prefs_theme_menu: bool,
+    /// 同上，页 1「帧率限制」的下拉框。原版的 `wmenu` 一次只允许开一个，
+    /// 菜单自带的整屏拦截区会先收掉已开的那个，所以两个开关不会同时为真。
+    pub prefs_rate_menu: bool,
     /// 原版 `w_dragvalue`：`draw_dragvalue` 的亚步进累加器。
     pub prefs_drag: f32,
     pub png_options: ImageOptions,
@@ -616,6 +619,7 @@ impl EditorState {
             datapack_tab: 0,
             prefs_tab: 0,
             prefs_theme_menu: false,
+            prefs_rate_menu: false,
             prefs_drag: 0.0,
             png_options: ImageOptions { dark: png_dark, ..ImageOptions::default() },
             export_status: None,
@@ -692,10 +696,23 @@ impl EditorState {
             .set_loop(s.meta.loop_enabled, s.meta.loop_start as f64, end, s.meta.loop_max);
     }
 
+    /// 原版 `control_draw.gml:11-12`：`rw = 窗口物理宽 / window_scale` —— 窗口尺寸不动，
+    /// 逻辑分辨率变小，等于整块界面变大。egui 的 `pixels_per_point` 就是同一个数，
+    /// 而 `zoom_factor` 是「相对系统 DPI 的倍率」，所以出厂值（`None`）对应 1.0。
+    fn apply_ui_scale(&self, ctx: &Context) {
+        let native = ctx.native_pixels_per_point().unwrap_or(1.0);
+        let want = self.prefs.effective_scale(native) / native;
+        // 拖动落点是整数百分比，和系统倍率比对时留一点余量，避免每帧都重设。
+        if (ctx.zoom_factor() - want).abs() > 0.001 {
+            ctx.set_zoom_factor(want);
+        }
+    }
+
     /// 每帧同步独立播放时钟。真实播放时位置由音频回调的采样计数推进，
     /// UI 只读；无音频设备时才由内部 `Instant` 时钟代理。
     /// **绝不在这里写 tempo/loop** —— 否则会覆盖 Tempo Changer 的运行时变速。
     pub fn tick_transport(&mut self, ctx: &Context) {
+        self.apply_ui_scale(ctx);
         let _crossed = self.audio.clock_mut().update();
         let playing = self.audio.clock().is_playing();
         // 原版 `if (playing = 0) record = 0`：播放一停，录音自动退出。
@@ -711,7 +728,10 @@ impl EditorState {
                 .follow_marker(position, self.follow_mode, self.scrub < 0);
         }
         if playing {
-            ctx.request_repaint();
+            // 原版 `game_set_speed(N, gamespeed_fps)`：帧数上限管的是整个程序的步进，
+            // 播放画面就是靠它推进的。这里对应改成定时重绘，而不是每帧立即重绘。
+            let frame = std::time::Duration::from_secs_f64(1.0 / self.prefs.refresh_limit());
+            ctx.request_repaint_after(frame);
         }
         // 原版快退 / 快进：按住时按歌曲速度滚动；播放中倒退是双倍速
         // （`forward - (forward < 0 && playing = 1)`）。
@@ -721,7 +741,9 @@ impl EditorState {
             let delta = self.audio.clock().tempo() as f64 * dt * factor * self.scrub as f64;
             let pos = (self.audio.clock().position() + delta).max(0.0);
             self.audio.clock_mut().seek(pos);
-            ctx.request_repaint();
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                1.0 / self.prefs.refresh_limit(),
+            ));
         }
         // 定时自动保存（只写备份，不改动当前文件名与脏标记）
         let mins = self.prefs.autosave_interval() as u64;
