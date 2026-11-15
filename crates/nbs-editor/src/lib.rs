@@ -812,12 +812,12 @@ mod gui_piano_tests {
         ctx.run(inp, |ctx| crate::show(ctx, state))
     }
 
-    /// 琴键是 `Shape::Rect`（纯色矩形），不是贴图网格，所以按矩形外框取。
-    fn rects(out: &egui::FullOutput) -> Vec<egui::Rect> {
+    /// 琴键现在是 `spr_piano` 贴图，egui 0.31 把贴图统一走 `Shape::Mesh`，一帧 40×121、按键步进 39。
+    fn images(out: &egui::FullOutput) -> Vec<egui::Rect> {
         out.shapes
             .iter()
             .filter_map(|cs| match &cs.shape {
-                egui::Shape::Rect(r) => Some(r.rect),
+                egui::Shape::Mesh(m) => Some(m.calc_bounds()),
                 _ => None,
             })
             .collect()
@@ -833,7 +833,7 @@ mod gui_piano_tests {
             .collect()
     }
 
-    /// 原版：白键 39×121、顶边在 `rh - 154`，整排居中；黑键 25×71、顶边再高 7px。
+    /// 原版：白键步进 39、顶边在 `rh - 154`，整排居中；黑键画在左边 19px、上边 7px 处。
     /// 1440 宽时 `keysshow = min(30, floor((1440-32)/39)) = 30`，左边留 (1440-1170)/2 = 135。
     #[test]
     fn piano_uses_the_original_fixed_key_geometry() {
@@ -841,11 +841,11 @@ mod gui_piano_tests {
         let mut state = EditorState::new();
         run(&mut state, &ctx, input());
         let out = run(&mut state, &ctx, input());
-        let rects = rects(&out);
+        let quads = images(&out);
 
-        let mut whites: Vec<f32> = rects
+        let mut whites: Vec<f32> = quads
             .iter()
-            .filter(|r| (r.width() - 39.0).abs() < 0.6 && (r.height() - 121.0).abs() < 0.6 && (r.min.y - 746.0).abs() < 0.6)
+            .filter(|r| (r.width() - 40.0).abs() < 0.6 && (r.height() - 121.0).abs() < 0.6 && (r.min.y - 746.0).abs() < 0.6)
             .map(|r| r.min.x)
             .collect();
         whites.sort_by(|a, b| a.total_cmp(b));
@@ -854,15 +854,17 @@ mod gui_piano_tests {
         assert_eq!(whites.first().copied(), Some(135.0));
         assert_eq!(whites.last().copied(), Some(135.0 + 29.0 * 39.0));
 
-        let mut blacks: Vec<f32> = rects
+        let mut blacks: Vec<f32> = quads
             .iter()
-            .filter(|r| (r.width() - 25.0).abs() < 0.6 && (r.height() - 71.0).abs() < 0.6 && (r.min.y - 739.0).abs() < 0.6)
+            .filter(|r| (r.width() - 40.0).abs() < 0.6 && (r.height() - 121.0).abs() < 0.6 && (r.min.y - 739.0).abs() < 0.6)
             .map(|r| r.min.x)
             .collect();
         blacks.sort_by(|a, b| a.total_cmp(b));
         blacks.dedup();
         // 30 根白键里有 8 根的左边没有黑键（C、F 以及最左那根），所以是 21 根黑键。
         assert_eq!(blacks.len(), 21, "黑键应当是 21 根，实际 {}", blacks.len());
+        // 黑键画在白键左缘再往左 19px 处。
+        assert_eq!(blacks.first().copied(), Some(135.0 + 39.0 - 19.0));
 
         let t = texts(&out);
         assert!(t.iter().any(|s| s == "F2"), "最左白键是 20 号键 = F2，实际文本 {t:?}");

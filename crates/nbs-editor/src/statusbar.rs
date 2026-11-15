@@ -153,7 +153,7 @@ fn instrument_label(state: &EditorState, idx: u8) -> String {
 
 /// 原版 `if (autosave && filename_ext(filename) = ".nbs")` 的剩余分钟数。
 fn autosave_in(state: &EditorState) -> Option<u32> {
-    let mins = state.prefs.auto_save_minutes as f64;
+    let mins = state.prefs.autosave_interval() as f64;
     let is_nbs = state
         .doc
         .song

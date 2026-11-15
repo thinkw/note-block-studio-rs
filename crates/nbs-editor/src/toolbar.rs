@@ -7,8 +7,7 @@
 //! 窗口太窄时按原版的 `if (xx > rw - 312) break` 逐个丢弃。
 //!
 //! 原版有、我们还没有的功能不画按钮，免得给出一个点了没反应的假图标：
-//! 键盘录音（`icons.RECORD`）、MIDI 设备管理器（`icons.MIDI_INPUT`）。
-//! 因此这两个位置会比原版各少 25px。
+//! MIDI 设备管理器（`icons.MIDI_INPUT`）。因此这一段会比原版少 25px。
 
 use std::sync::Arc;
 
@@ -282,13 +281,26 @@ fn sequence(state: &mut EditorState, ui: &mut Ui, bar: &mut Bar, rw: f32) {
     // 原版的快退 / 快进返回「按住」，所以是连续滚动而不是单击。
     let back = draw!(frame::BACK, "快退", false, false);
     let fwd = draw!(frame::FORWARD, "快进", false, false);
-    state.scrub = if back.held {
+    // 原版 790-791 行：按住 ← / → 就是 `forward = ∓1`，和这两个按钮共用同一个变量。
+    // 同样受「窗口开着 / 光标在输入框」闸门约束：那时 ←/→ 归窗口翻页签使用。
+    let busy = state.window.is_some() || ui.memory(|m| m.focused().is_some());
+    let (kbd_back, kbd_fwd) = if busy {
+        (false, false)
+    } else {
+        ui.input(|i| (i.key_down(egui::Key::ArrowLeft), i.key_down(egui::Key::ArrowRight)))
+    };
+    state.scrub = if back.held || kbd_back {
         -1
-    } else if fwd.held {
+    } else if fwd.held || kbd_fwd {
         1
     } else {
         0
     };
+    if draw!(frame::RECORD, "录制按键", false, (playing || state.record_armed) && state.record)
+        .clicked
+    {
+        state.emit(Command::ToggleRecord);
+    }
     if draw!(frame::LOOP_INACTIVE + loop_on as usize, "开关循环", false, loop_on).clicked {
         state.emit(Command::ToggleLoop);
     }

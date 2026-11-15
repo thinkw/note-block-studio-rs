@@ -475,7 +475,7 @@ fn emit_macro(state: &mut EditorState, action: &MacroAction) {
 }
 
 /// 原版 `time_str(sec)`：`hh:mm:ss;mmm`，各段补零。
-fn time_str(sec: f64) -> String {
+pub(crate) fn time_str(sec: f64) -> String {
     let s = sec.max(0.0);
     let msec = (s * 1000.0).floor() as i64 % 1000;
     let mi = (s / 60.0).floor() as i64 % 60;

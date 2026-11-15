@@ -58,6 +58,10 @@ pub enum Command {
     SetKey(i32),
     /// 原版点琴键：`selected_key = c` 同时把力度 / 平衡 / 音高偏移复位成 100/100/0，并试听。
     SelectKey(u8),
+    /// 原版 `draw_piano` 结尾的按键轮询：录音开着就直接往当前列写音符，否则只试听。
+    KeyPress(u8),
+    /// 原版工具栏「录制按键」：`playing = 0.25 record = !record`。
+    ToggleRecord,
     SetVel(i32),
     SetPan(i32),
     SetPit(i32),
@@ -77,6 +81,8 @@ pub enum Command {
     CloseWindow,
     SetTheme(ThemeKind),
     ToggleFlag(Flag),
+    /// 原版 F11：`fullscreen = !fullscreen`（`control_draw.gml:122-134`）。
+    ToggleFullscreen,
     Transpose(i32),
     SetAllInstrument(u8),
     BatchVelocity(u8),
@@ -90,6 +96,10 @@ pub enum Command {
     ClearSong,
     /// 鼠标悬停在音符上滚轮调整其属性（对应原版 `changepitch`）。
     WheelOnNote { tick: u32, layer: u32, delta: i32, shift: bool },
+    /// 原版 `mousewheel = 1`：滚轮在音色表上前后挪一格，力度/声像/微调复位并试听。
+    WheelInstrument(i32),
+    /// 原版 `mousewheel = 2`：滚轮在琴键上前后挪一格，同样复位并试听。
+    WheelKey(i32),
     /// 打开通用文件对话框（打开/保存/各类导入导出）。
     OpenDialog(DialogAction),
     /// 原版 `menu_click` 的导出 Schematic 入口：先过 `calculate_size()` 的提示与提问。
@@ -112,6 +122,36 @@ pub enum Command {
     ReloadSamples,
     SavePreferences,
     RestoreAutosave(PathBuf),
+}
+
+/// 原版键盘按下后实际用的那颗音：音色沿用当前的，键是**按下的键**，力度/声像/微调固定 100/100/0。
+/// `select_lastpressed` 只决定选中的音要不要跟着走，不影响这颗音。
+fn pressed_note(state: &EditorState, key: u8) -> Note {
+    let mut note = state.current;
+    note.key = key;
+    note.velocity = 100;
+    note.panning = 100;
+    note.pitch = 0;
+    note
+}
+
+/// 原版 `while (!add_block_manual(ceil(marker_pos), b, instrument, key, 100, 100, 0)) b += 1`：
+/// 从第 0 层往上找当前列的第一个**空格**（`add_block_manual` 只看格子里有没有音符，
+/// 不看图层锁定），全满就在最上面加一层。
+fn record_note(state: &mut EditorState, key: u8) {
+    let tick = state.marker().ceil().max(0.0) as u32;
+    let layers = state.doc.song.layer_count();
+    let mut layer = 0u32;
+    while layer < layers && state.doc.song.has(tick, layer) {
+        layer += 1;
+    }
+    if layer >= layers {
+        state.doc.song.layers.push(Default::default());
+    }
+    let note = pressed_note(state, key);
+    state.doc.place_note(tick, layer, note);
+    // 原版 add_block_manual 结尾 `if (ins.loaded) play_sound(...)`：写下去的同时出声。
+    state.audio.preview_note(&note);
 }
 
 /// 供右键菜单/快捷键共用的入口。
@@ -360,6 +400,62 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.current.pitch = 0;
             state.audio.preview_note(&state.current);
         }
+        Command::KeyPress(k) => {
+            // 原版 `if (select_lastpressed) {selected_key = a; selected_vel = 100; …}`
+            if state.prefs.select_lastpressed {
+                state.current.key = k;
+                state.current.velocity = 100;
+                state.current.panning = 100;
+                state.current.pitch = 0;
+            }
+            if state.record {
+                // 原版：`if (playing = 0.25) toggle_playing()` —— 第一个按键才真正起播，
+                // 这样第一个音符就落在播放起点上。
+                if state.record_armed {
+                    state.record_armed = false;
+                    state.prepare_audio();
+                    state.audio.clock_mut().play();
+                }
+                record_note(state, k);
+            } else {
+                // 原版 `if (record = 0) play_sound(instrument, a, 100, 100, 0)`。
+                let note = pressed_note(state, k);
+                state.audio.preview_note(&note);
+            }
+        }
+        Command::WheelInstrument(dir) => {
+            let list = state.instrument_list();
+            let cur = list
+                .iter()
+                .position(|(id, _)| *id == state.current.instrument)
+                .unwrap_or(0) as i32;
+            // 原版只在还能走的时候动：`if (down && insindex > 0)` / `if (up && insindex < size-1)`。
+            let next = (cur + dir).clamp(0, list.len() as i32 - 1);
+            if next == cur {
+                return;
+            }
+            state.current.instrument = list[next as usize].0;
+            state.current.velocity = 100;
+            state.current.panning = 100;
+            state.current.pitch = 0;
+            state.audio.preview_note(&state.current);
+        }
+        Command::WheelKey(dir) => {
+            let cur = state.current.key as i32;
+            let next = (cur + dir).clamp(0, KEY_MAX as i32);
+            if next == cur {
+                return;
+            }
+            state.current.key = next as u8;
+            state.current.velocity = 100;
+            state.current.panning = 100;
+            state.current.pitch = 0;
+            state.audio.preview_note(&state.current);
+        }
+        Command::ToggleRecord => {
+            state.record = !state.record;
+            state.record_armed = state.record && !state.is_playing();
+        }
         Command::SetVel(d) => {
             state.current.velocity =
                 (state.current.velocity as i32 + d).clamp(0, VEL_MAX as i32) as u8;
@@ -413,6 +509,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             if state.window.as_ref() != Some(&kind) {
                 state.datapack_tab = 0;
                 state.schematic_tab = 0;
+                state.prefs_tab = 0;
             }
             if matches!(kind, WindowKind::FileOpen | WindowKind::FileSave) {
                 let save = matches!(kind, WindowKind::FileSave);
@@ -505,6 +602,13 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.theme.apply(ctx);
             state.set_message(format!("主题 => {}", kind.name()));
         }
+        Command::ToggleFullscreen => {
+            // 原版把全屏记在自己的 `fullscreen` 变量上，这里同理：egui 的
+            // `ViewportCommand::Fullscreen` 只发不收，系统里退出全屏不会回传，
+            // 所以镜像可能比实际慢一拍（此时第一次 F11 只是把镜像翻回来）。
+            state.fullscreen = !state.fullscreen;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(state.fullscreen));
+        }
         Command::ToggleFlag(flag) => {
             let f = &mut state.flags;
             match flag {
@@ -517,6 +621,8 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 Flag::ShowOctaves => f.show_octaves = !f.show_octaves,
                 Flag::ShowKeyNames => f.show_keynames = !f.show_keynames,
                 Flag::ShowKeyNumbers => f.show_keynumbers = !f.show_keynumbers,
+                Flag::ShowKeyboard => f.show_keyboard = !f.show_keyboard,
+                Flag::ShowOutOfRange => f.show_outofrange = !f.show_outofrange,
                 Flag::ShowIncompatible => f.show_incompatible = !f.show_incompatible,
                 Flag::ShowGridLines => f.show_grid_lines = !f.show_grid_lines,
                 Flag::Flats => f.flats = !f.flats,
@@ -1200,5 +1306,49 @@ mod tests {
         let d = state.file_dialog.clone().unwrap();
         assert_eq!(d.ext, "nbt");
         assert_eq!(d.name, "megalovania_boss.nbt");
+    }
+
+    /// 原版 `select_lastpressed`：关掉之后，按下的键照样出声，但选中的音不跟着跑。
+    #[test]
+    fn key_press_only_moves_selection_when_allowed() {
+        let ctx = Context::default();
+        let mut state = state_with(four_case_song(10.0));
+        state.current.key = 30;
+        state.current.velocity = 60;
+        dispatch(&mut state, Command::KeyPress(50), &ctx);
+        assert_eq!(state.current.key, 50, "默认（开）时选中音跟到按下的键");
+        assert_eq!(state.current.velocity, 100, "选中时力度/声像/微调复位");
+
+        state.prefs.select_lastpressed = false;
+        state.current.key = 30;
+        state.current.velocity = 60;
+        dispatch(&mut state, Command::KeyPress(50), &ctx);
+        assert_eq!(state.current.key, 30, "关掉后选中音不动");
+        assert_eq!(state.current.velocity, 60);
+    }
+
+    /// 原版 `mousewheel = 1/2`：滚轮在音色表 / 琴键上挪一格并复位属性，走到头就不动。
+    #[test]
+    fn wheel_cycles_instrument_and_key() {
+        let ctx = Context::default();
+        let mut state = state_with(four_case_song(10.0));
+        state.current.instrument = 0;
+        state.current.velocity = 55;
+        dispatch(&mut state, Command::WheelInstrument(1), &ctx);
+        assert_eq!(state.current.instrument, 1, "原版 mouse_wheel_up 往后走一格");
+        assert_eq!(state.current.velocity, 100);
+        dispatch(&mut state, Command::WheelInstrument(-1), &ctx);
+        assert_eq!(state.current.instrument, 0);
+        dispatch(&mut state, Command::WheelInstrument(-1), &ctx);
+        assert_eq!(state.current.instrument, 0, "第 0 格再往下没有位置，保持不动");
+
+        state.current.key = 0;
+        dispatch(&mut state, Command::WheelKey(-1), &ctx);
+        assert_eq!(state.current.key, 0, "0 键再往下没有位置，保持不动");
+        dispatch(&mut state, Command::WheelKey(1), &ctx);
+        assert_eq!(state.current.key, 1);
+        state.current.key = nbs_core::model::KEY_MAX;
+        dispatch(&mut state, Command::WheelKey(1), &ctx);
+        assert_eq!(state.current.key, nbs_core::model::KEY_MAX, "最高键不动");
     }
 }

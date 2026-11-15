@@ -3,31 +3,36 @@
 //! 每帧只遍历 `[start_tick, start_tick + 可见列数)` × `[start_layer, +可见行数)`，
 //! 音符查询走 [`nbs_core::model::Song::notes_in_view`]（`BTreeMap::range` + colfirst/collast
 //! 早退），因此打开几十万 tick 的工程也不会因为「遍历全部音符」而卡死。
-//! 所有矩形先攒进 `Vec<Shape>` 一次 `Painter::extend` 提交，减少批次开销。
+//! 底色与网格线先攒进 `Vec<Shape>` 一次 `Painter::extend` 提交，音符随后直接贴在它们上面
+//! （原版 `control_draw` 就是这个顺序：线在下、方块在上）。
 
 use egui::{
-    pos2, Align2, Color32, CursorIcon, FontId, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui,
-    Vec2,
+    pos2, Align2, Color32, CursorIcon, FontId, Painter, Pos2, Rect, Sense, Shape, Stroke,
+    StrokeKind, Ui, Vec2,
 };
-use nbs_core::instruments::{instrument_color, instrument_shape};
-use nbs_core::model::{key_name, key_offset, Note, MC_KEY_MAX, MC_KEY_MIN, PAN_CENTER};
+use nbs_core::model::{key_name, Note, FIRST_CUSTOM_INDEX, MC_KEY_MAX, MC_KEY_MIN, PAN_CENTER};
 
 use crate::commands::Command;
+use crate::icons::BlockSet;
 use crate::interaction::{DragMode, InputSnapshot};
+use crate::layers_panel::time_str;
 use crate::state::{ContextKind, ContextMenu, EditMode, EditorState};
+use crate::theme::{Theme, ThemeKind};
 use crate::viewport::{SCROLLBAR_SIZE, TIMELINE_HEIGHT};
 
-struct TextDraw {
-    pos: Pos2,
-    text: String,
-    size: f32,
-    color: Color32,
-    align: Align2,
-}
+/// 原版标尺用的 `font_small`（fnt_small / fnt_wslui_small 的 size 都是 8）。
+const RULER_FONT: FontId = FontId::proportional(8.0);
+/// 原版标尺刻度线的 `draw_set_alpha(0.6)`。
+const RULER_A: u8 = 153;
 
 fn alpha(c: Color32, a: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
 }
+
+/// 原版 `c_red` / `c_blue` / `c_yellow`。
+const C_RED: Color32 = Color32::from_rgb(255, 0, 0);
+const C_BLUE: Color32 = Color32::from_rgb(0, 0, 255);
+const C_YELLOW: Color32 = Color32::from_rgb(255, 255, 0);
 
 /// 切分布局：时间轴 / 网格 / 水平滚动条 / 垂直滚动条。
 ///
@@ -126,27 +131,34 @@ fn handle_grid_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect)
     let interactive = hover.is_some() && state.window.is_none() && state.context_menu.is_none();
     let pointer_in_grid = input.pointer.is_some_and(|p| rect.contains(p));
 
-    // 滚轮：Ctrl 缩放 / 悬停音符调属性 / 默认平移视口。
+    // 滚轮：Ctrl 缩放 / 悬停音符调属性 / 按 `mousewheel` 档位决定是平移、换音色还是换键。
     if pointer_in_grid && (input.scroll.x.abs() > 0.0 || input.scroll.y.abs() > 0.0) {
         let delta = input.scroll.y + input.scroll.x;
         if input.ctrl {
             state.viewport.zoom_by(if delta > 0.0 { 1.1 } else { 0.9 });
-        } else if let Some((t, l)) = hover {
-            let on_note = state.doc.song.has(t as u32, l as u32)
-                || state.doc.selection.contains(t, l);
-            if on_note {
-                let d = if delta > 0.0 { 1 } else { -1 };
+        } else {
+            let d = if delta > 0.0 { 1 } else { -1 };
+            // 原版条件 `exist && changepitch`：停在音符上且开了「滚轮改音符属性」才改那颗音。
+            let note_cell = hover.filter(|(t, l)| {
+                state.prefs.changepitch
+                    && (state.doc.song.has(*t as u32, *l as u32)
+                        || state.doc.selection.contains(*t, *l))
+            });
+            if let Some((t, l)) = note_cell {
                 state.emit(Command::WheelOnNote {
                     tick: t as u32,
                     layer: l as u32,
                     delta: d,
                     shift: input.shift,
                 });
+            } else if state.prefs.mousewheel == 1 {
+                // 原版 `mousewheel = 1`：滚轮换音色，此时滚轮不再平移视口。
+                state.emit(Command::WheelInstrument(d));
+            } else if state.prefs.mousewheel == 2 {
+                state.emit(Command::WheelKey(d));
             } else {
                 scroll_viewport(state, delta, input.shift);
             }
-        } else {
-            scroll_viewport(state, delta, input.shift);
         }
     }
 
@@ -508,62 +520,112 @@ fn draw_scrollbars(state: &EditorState, ui: &Ui, hbar: Rect, vbar: Rect) {
 
 // ---------------------------------------------------------------- 绘制
 
+/// 原版 `control_draw.gml:1000-1037` 的两行标尺：
+/// 第一行是按 `tempo` 自适应步长的时间标签（`time_str`，顶边 y1+2，下方 3px 短刻度），
+/// 第二行是每 4 tick 一个的 tick 号（顶边 y1+17）和贴网格上沿的刻度线（y1+30..33，整 4 tick 加长到 27）。
 fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
     let p = ui.painter().with_clip_rect(rect);
     let th = &state.theme;
     let vp = &state.viewport;
     let cell = vp.cell();
-    let (t0, t1, _, _) = vp.visible_range();
-    let per_bar = state.doc.song.meta.ticks_per_bar().max(1);
-    let mut shapes = vec![Shape::rect_filled(rect, 0.0, th.panel)];
-    let mut texts: Vec<TextDraw> = Vec::new();
+    let meta = &state.doc.song.meta;
+    let tempo = (meta.tempo.max(0.01)) as f64;
+    let top = rect.min.y;
+    let mut shapes = vec![Shape::rect_filled(rect, 0.0, th.ruler_bg)];
 
-    for tick in t0..t1 {
+    // 原版 `c`：一秒一格，太慢就 5/10/30 秒一格，太快就半秒 / 四分之一秒一格。
+    let mut c = 1.0f64;
+    if tempo < 3.5 {
+        c = 5.0;
+    }
+    if tempo < 1.0 {
+        c = 10.0;
+    }
+    if tempo < 0.5 {
+        c = 30.0;
+    }
+    if tempo > 11.0 {
+        c = 0.5;
+    }
+    if tempo > 18.0 {
+        c = 0.25;
+    }
+    let ticks_per_step = tempo * c;
+    let px_per_step = (ticks_per_step * cell as f64) as f32;
+    let starta = vp.start_tick as f64;
+    let whole = (starta / ticks_per_step).ceil();
+    let x0 = vp.tick_x(vp.start_tick as i64);
+    let mut sec = whole * c;
+    let mut xx = (whole - starta / ticks_per_step) as f32 * px_per_step;
+    let mut first = true;
+    while xx < rect.width() + 16.0 {
+        let x = x0 + xx;
+        p.text(
+            pos2(x, top),
+            if first { Align2::LEFT_TOP } else { Align2::CENTER_TOP },
+            time_str(sec),
+            RULER_FONT,
+            th.text,
+        );
+        first = false;
+        shapes.push(Shape::rect_filled(
+            Rect::from_min_size(pos2(x, top + 12.0), Vec2::new(1.0, 3.0)),
+            0.0,
+            alpha(th.text, RULER_A),
+        ));
+        xx += px_per_step;
+        sec += c;
+    }
+
+    // 原版 `for (a = 0; a <= totalcols)`：刻度线 + 每 4 tick 一个的 tick 号。
+    for a in 0..=vp.columns() {
+        let tick = vp.start_tick + a;
         let x = vp.tick_x(tick as i64);
-        if x < rect.min.x - cell || x > rect.max.x + cell {
+        if x < rect.min.x - 1.0 || x > rect.max.x + 1.0 {
             continue;
         }
-        let is_bar = tick % per_bar == 0;
-        let is_beat = tick % 4 == 0;
-        let h = if is_bar { 12.0 } else if is_beat { 7.0 } else { 4.0 };
+        let by4 = tick % 4 == 0;
+        let h = if by4 { 7.0 } else { 4.0 };
         shapes.push(Shape::rect_filled(
-            Rect::from_min_size(pos2(x, rect.max.y - h), Vec2::new(1.0, h)),
+            Rect::from_min_size(pos2(x, top + 31.0 - h), Vec2::new(1.0, h)),
             0.0,
-            if is_bar { th.accent } else { th.text_dim },
+            alpha(th.text, RULER_A),
         ));
-        if (is_beat || (cell > 24.0 && tick % 2 == 0)) && cell >= 16.0 {
-            texts.push(TextDraw {
-                pos: pos2(x + 2.0, rect.min.y + 3.0),
-                text: tick.to_string(),
-                size: (cell * 0.30).clamp(8.0, 12.0),
-                color: if is_bar { th.accent } else { th.text_dim },
-                align: Align2::LEFT_TOP,
-            });
+        if by4 {
+            p.text(
+                pos2(x, top + 15.0),
+                if a == 0 { Align2::LEFT_TOP } else { Align2::CENTER_TOP },
+                tick.to_string(),
+                RULER_FONT,
+                th.text,
+            );
         }
     }
     p.extend(shapes);
-    for t in texts {
-        p.text(t.pos, t.align, t.text, FontId::proportional(t.size), t.color);
-    }
 
-    // 播放头（时间轴刻度 + 三角形）
+    // 播放头：原版在时间轴顶端画 spr_marker 的箭头帧，细身帧一路拉满整个网格；
+    // 精灵 xorigin = 8，贴图横坐标就是线所在的 x。网格那半截见 draw_grid。
     let mx = vp.tick_x(state.marker().floor() as i64)
         + (state.marker().fract() as f32) * cell;
-    if mx >= rect.min.x - 2.0 && mx <= rect.max.x + 2.0 {
-        p.add(Shape::rect_filled(
-            Rect::from_min_size(pos2(mx - 1.0, rect.min.y), Vec2::new(2.0, rect.height())),
-            0.0,
-            th.marker,
-        ));
-        p.add(Shape::convex_polygon(
-            vec![
-                pos2(mx - 6.0, rect.min.y),
-                pos2(mx + 6.0, rect.min.y),
-                pos2(mx, rect.min.y + 8.0),
-            ],
-            th.marker,
-            Stroke::NONE,
-        ));
+    if let Some(bank) = state.icons.bank() {
+        if mx >= rect.min.x - 8.0 && mx <= rect.max.x + 8.0 {
+            let tint = if th.kind == ThemeKind::Fluent {
+                Theme::accent_at(3)
+            } else {
+                Color32::WHITE
+            };
+            let k = cell / 32.0;
+            let at = pos2(mx, rect.min.y + 2.0);
+            let head = Vec2::new(16.0 * k, 15.0 * k);
+            bank.marker(&p, at, marker_frame(th, state.flags.blackout), head, tint);
+            bank.marker(
+                &p,
+                at,
+                marker_frame(th, state.flags.blackout) + 1,
+                Vec2::new(16.0 * k, rect.max.y - at.y),
+                tint,
+            );
+        }
     }
 }
 
@@ -578,7 +640,6 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
     let blackout = state.flags.blackout;
 
     let mut shapes: Vec<Shape> = Vec::with_capacity(4096);
-    let mut texts: Vec<TextDraw> = Vec::with_capacity(512);
 
     // 背景
     shapes.push(Shape::rect_filled(
@@ -587,21 +648,8 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
         if blackout { Color32::BLACK } else { th.grid_bg },
     ));
 
-    // 锁定层整行底纹
-    if !blackout {
-        for layer in l0..l1 {
-            if locked.get(layer as usize).copied().unwrap_or(false) {
-                let y = vp.layer_y(layer as i64);
-                shapes.push(Shape::rect_filled(
-                    Rect::from_min_size(pos2(rect.min.x, y), Vec2::new(rect.width(), cell)),
-                    0.0,
-                    th.locked,
-                ));
-            }
-        }
-    }
-
-    // 竖线：小节 / 拍 / 普通 tick，只画可见列
+    // 竖线：原版只有三种 —— 小节线（2px、alpha 0.3）、整 4 tick（1px、0.25）、其余（1px、0.1），
+    // 颜色一律是黑。原版没有横线。
     if state.flags.show_grid_lines && !blackout {
         for tick in t0..t1 {
             let x = vp.tick_x(tick as i64);
@@ -611,11 +659,11 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
             let is_bar = tick % ts == 0;
             let is_beat = tick % 4 == 0;
             let (w, c) = if is_bar {
-                (2.0, alpha(th.grid_bar, 90))
+                (2.0, th.grid_bar)
             } else if is_beat {
-                (1.0, alpha(th.grid_beat, 120))
+                (1.0, th.grid_beat)
             } else {
-                (1.0, alpha(th.grid_line, 90))
+                (1.0, th.grid_line)
             };
             shapes.push(Shape::rect_filled(
                 Rect::from_min_size(pos2(x, rect.min.y), Vec2::new(w, rect.height())),
@@ -623,34 +671,51 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
                 c,
             ));
         }
-        // 横向每 4 层一条淡分隔线
-        for layer in (l0..l1).step_by(4) {
-            let y = vp.layer_y(layer as i64);
-            shapes.push(Shape::rect_filled(
-                Rect::from_min_size(pos2(rect.min.x, y), Vec2::new(rect.width(), 1.0)),
-                0.0,
-                alpha(th.grid_line, 110),
+    }
+
+    // 原版顺序：底色与网格线 → 音符 → 浮动选区 → 锁定层蒙版 → 播放头。
+    p.extend(shapes);
+
+    // 拖框：原版 select = 1（左键加选）时才给框内音符加亮，select = 2（右键减选）什么都不画。
+    let mut box_sel: Option<(i64, i64, i64, i64)> = None;
+    let mut box_subtract = false;
+    if let DragMode::BoxSelect { anchor, subtract, .. } = &state.interaction.mode {
+        if let Some(hover) = state.hover_cell {
+            let end = (hover.0 as i64, hover.1 as i64);
+            box_sel = Some((
+                anchor.0.min(end.0),
+                anchor.0.max(end.0),
+                anchor.1.min(end.1),
+                anchor.1.max(end.1),
             ));
+            box_subtract = *subtract;
         }
     }
+    let inside_box = |tick: i64, layer: i64| {
+        box_sel.map_or(false, |r| {
+            tick >= r.0 && tick <= r.1 && layer >= r.2 && layer <= r.3
+        })
+    };
+    let hover = state.hover_cell.map(|(t, l)| (t as i64, l as i64));
 
     // 音符：唯一的查询入口，保证只处理可见区域
     let notes = state.doc.song.notes_in_view(t0, t1, l0, l1);
     let visible_count = notes.len();
     for (tick, layer, note) in notes {
-        push_note_shapes(
-            &mut shapes,
-            &mut texts,
-            state,
-            tick as i64,
-            layer as i64,
-            note,
-            false,
-            &locked,
-        );
+        let (tick, layer) = (tick as i64, layer as i64);
+        // 原版 `c = 0.5 * (vel / 100) + 0.25`，鼠标压着（select = 0）或落在加选框内再 +0.5。
+        let in_box = !box_subtract && inside_box(tick, layer);
+        let hovered = box_sel.is_none() && hover == Some((tick, layer));
+        let mut c = 0.25 + 0.5 * (note.velocity as f32 / 100.0);
+        if in_box || hovered {
+            c += 0.5;
+        }
+        let at = vp.cell_rect(tick, layer).min;
+        push_note(state, &p, at, note, c, if in_box { 0.8 } else { 0.0 });
     }
 
-    // 浮动选区：同样先做整体视口剔除，再逐音符裁剪
+    // 浮动选区：同样先做整体视口剔除，再逐音符裁剪。
+    // 原版 selection_draw 用 alpha = 1、salpha = 0.8，鼠标压住那格降到 0.7，减选框内降到 0.5。
     let sel = state.doc.selection.clone();
     if !sel.is_empty() {
         if let Some((bx0, by0, bx1, by1)) = sel.bounds() {
@@ -658,236 +723,194 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
                 for n in &sel.notes {
                     let at = sel.x + n.dx as i64;
                     let al = sel.y + n.dy as i64;
-                    if at < t0 as i64 - 1
-                        || at > t1 as i64
-                        || al < l0 as i64 - 1
-                        || al > l1 as i64
-                    {
+                    if at < t0 as i64 - 1 || at > t1 as i64 || al < l0 as i64 - 1 || al > l1 as i64 {
                         continue;
                     }
-                    push_note_shapes(&mut shapes, &mut texts, state, at, al, n.note, true, &locked);
+                    let mut salpha = 0.8_f32;
+                    if hover == Some((at, al)) {
+                        salpha = 0.7;
+                    }
+                    if box_subtract && inside_box(at, al) {
+                        salpha = 0.5;
+                    }
+                    let pos = vp.cell_rect(at, al).min;
+                    push_note(state, &p, pos, n.note, 1.0, salpha);
                 }
             }
         }
     }
     state.interaction.visible_notes = visible_count + sel.len();
 
-    // 框选矩形
-    if let DragMode::BoxSelect { anchor, subtract, .. } = &state.interaction.mode {
-        if let Some(hover) = state.hover_cell {
-            let end = (hover.0 as i64, hover.1 as i64);
-            let r = Rect::from_min_max(
-                pos2(vp.tick_x(anchor.0.min(end.0)), vp.layer_y(anchor.1.min(end.1))),
-                pos2(
-                    vp.tick_x(anchor.0.max(end.0)) + cell,
-                    vp.layer_y(anchor.1.max(end.1)) + cell,
-                ),
-            );
-            let color = if *subtract { th.subtract } else { th.selection };
-            shapes.push(Shape::rect_filled(r, 0.0, alpha(color, 55)));
-            shapes.push(Shape::rect_stroke(
-                r,
+    // 锁定层：原版把 32×32 的 spr_lock（整张纯黑）横向拉满整行，以 0.25 不透明度压在音符上面。
+    for layer in l0..l1 {
+        if locked.get(layer as usize).copied().unwrap_or(false) {
+            let y = vp.layer_y(layer as i64);
+            p.rect_filled(
+                Rect::from_min_size(pos2(rect.min.x, y), Vec2::new(rect.width(), cell)),
                 0.0,
-                Stroke::new(1.5_f32, color),
-                StrokeKind::Inside,
-            ));
+                alpha(Color32::BLACK, 64),
+            );
         }
     }
 
-    // 悬停格高亮
-    if let Some((t, l)) = state.hover_cell {
-        let r = vp.cell_rect(t as i64, l as i64);
-        shapes.push(Shape::rect_stroke(
-            r,
-            0.0,
-            Stroke::new(1.0_f32, alpha(th.accent, 150)),
-            StrokeKind::Inside,
-        ));
-    }
-
-    // 播放头
-    if !blackout {
+    // 播放头：原版 spr_marker 第 0 帧是箭头、第 1 帧是纵向拉满的细身（箭头画在时间轴那一格，
+    // 见 draw_timeline），精灵 xorigin = 8，所以贴图横坐标就是播放头所在的 x。
+    if let Some(bank) = state.icons.bank() {
         let mx = vp.tick_x(state.marker().floor() as i64)
             + (state.marker().fract() as f32) * cell;
         if mx >= rect.min.x && mx <= rect.max.x {
-            shapes.push(Shape::rect_filled(
-                Rect::from_min_size(pos2(mx - 1.0, rect.min.y), Vec2::new(2.0, rect.height())),
-                0.0,
-                alpha(th.marker, 200),
-            ));
+            let tint = if th.kind == ThemeKind::Fluent {
+                Theme::accent_at(3)
+            } else {
+                Color32::WHITE
+            };
+            bank.marker(
+                &p,
+                pos2(mx, rect.min.y),
+                marker_frame(th, blackout) + 1,
+                Vec2::new(16.0 * cell / 32.0, rect.height()),
+                tint,
+            );
         }
-    }
-
-    p.extend(shapes);
-    for t in texts {
-        p.text(t.pos, t.align, t.text, FontId::proportional(t.size), t.color);
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn push_note_shapes(
-    shapes: &mut Vec<Shape>,
-    texts: &mut Vec<TextDraw>,
-    state: &EditorState,
-    tick: i64,
-    layer: i64,
-    note: Note,
-    floating: bool,
-    locked_layers: &[bool],
-) {
-    let vp = &state.viewport;
-    let th = &state.theme;
-    let flags = &state.flags;
-    let cell = vp.cell();
-    let r = vp.cell_rect(tick, layer);
-    if r.max.x < -cell || r.max.y < -cell {
-        return;
-    }
-    let inner = r.shrink((cell * 0.06).max(1.0));
-    let center = inner.center();
-    let radius = (cell * 0.08).clamp(1.0, 4.0);
-    let vel_alpha = (0.55 + 0.45 * (note.velocity as f32 / 100.0)).clamp(0.4, 1.0);
-    let base = if flags.use_colors {
-        let (r8, g8, b8) = instrument_color(note.instrument);
-        Color32::from_rgb(r8, g8, b8)
-    } else {
-        if th.dark {
-            Color32::from_gray(110)
-        } else {
-            Color32::from_gray(140)
-        }
-    };
-    let mut fill = alpha(base, (255.0 * vel_alpha) as u8);
-    if floating {
-        fill = alpha(fill, 210);
-    }
-    let locked_layer = locked_layers.get(layer.max(0) as usize).copied().unwrap_or(false);
-    if locked_layer {
-        fill = alpha(fill, 110);
-    }
-
-    let shape_kind = if flags.use_shapes {
-        instrument_shape(note.instrument)
+/// 原版 `0 + 6 * (theme = 2 || (blackout && theme != 3)) + 8 * (theme = 3)`。
+fn marker_frame(th: &Theme, blackout: bool) -> usize {
+    if th.kind == ThemeKind::Fluent {
+        8
+    } else if th.kind == ThemeKind::Dark || blackout {
+        6
     } else {
         0
+    }
+}
+
+/// 原版 `draw_block(x, y, ins, key, pan, vel, pit, alpha, selalpha)`：
+/// 方块精灵 → 乐器图标 → 音高偏移蒙版 → 不兼容红框 → 选中叠层 → 数值 / 键名两行文字。
+/// 精灵库缺失时整格不画（原版没有「无贴图的音符」）。
+/// 原版方块固定 32px，缩放时所有偏移按 `k = cell / 32` 等比。
+fn push_note(
+    state: &EditorState,
+    p: &Painter,
+    at: Pos2,
+    note: Note,
+    block_alpha: f32,
+    salpha: f32,
+) {
+    let Some(bank) = state.icons.bank() else { return };
+    let th = &state.theme;
+    let flags = &state.flags;
+    let cell = state.viewport.cell();
+    let k = cell / 32.0;
+    let size = Vec2::splat(cell);
+    let index = note.instrument as usize;
+    let first_custom = FIRST_CUSTOM_INDEX as usize;
+    let iscustom = index >= first_custom;
+    let set = match (flags.use_colors, flags.use_shapes) {
+        (true, true) => BlockSet::ColorShape,
+        (true, false) => BlockSet::Color,
+        (false, true) => BlockSet::Shape,
+        (false, false) => BlockSet::Plain,
     };
-    match shape_kind {
-        1 => shapes.push(Shape::circle_filled(center, inner.width() * 0.42, fill)),
-        2 => shapes.push(Shape::convex_polygon(
-            vec![
-                pos2(center.x, inner.min.y),
-                pos2(inner.max.x, center.y),
-                pos2(center.x, inner.max.y),
-                pos2(inner.min.x, center.y),
-            ],
-            fill,
-            Stroke::NONE,
-        )),
-        3 => shapes.push(Shape::convex_polygon(
-            vec![inner.min, pos2(inner.max.x, inner.min.y), pos2(center.x, inner.max.y)],
-            fill,
-            Stroke::NONE,
-        )),
-        _ => shapes.push(Shape::rect_filled(inner, radius, fill)),
-    }
+    // 原版：`!use_colors && !use_shapes` 时帧号恒为 1（spr_block 只有一帧）；
+    // 自定义乐器按 `(index - first_custom) % 18 + first_custom` 循环取帧。
+    let frame = if matches!(set, BlockSet::Plain) {
+        1
+    } else if iscustom {
+        (index - first_custom) % 18 + first_custom
+    } else {
+        index
+    };
+    bank.block(p, at, set, frame, size, block_alpha);
 
-    // 边框
-    shapes.push(Shape::rect_stroke(
-        inner,
-        radius,
-        Stroke::new(1.0_f32, alpha(th.border, 200)),
-        StrokeKind::Inside,
-    ));
-
-    // 微调音分蒙版：负=红，正=蓝（与原版一致）
-    if note.pitch != 0 {
-        let tint = if note.pitch < 0 {
-            Color32::from_rgb(230, 70, 70)
+    if flags.use_icons {
+        let icon_at = at + Vec2::splat(16.0 * k);
+        let icon_size = Vec2::splat(16.0 * k);
+        if iscustom {
+            bank.custom_block_glyph(p, icon_at, index - first_custom, first_custom, icon_size, block_alpha);
         } else {
-            Color32::from_rgb(70, 120, 240)
-        };
-        shapes.push(Shape::rect_filled(
-            inner,
-            radius,
-            alpha(tint, ((note.pitch.abs() as f32 / 1200.0) * 110.0) as u8),
-        ));
+            bank.instrument_glyph(p, icon_at, index, icon_size, block_alpha);
+        }
     }
 
-    // 不兼容（自定义乐器 / 超出 MC 音域）红框
-    if flags.show_incompatible && (note.key < MC_KEY_MIN || note.key > MC_KEY_MAX) {
-        shapes.push(Shape::rect_stroke(
-            inner.shrink(1.0),
-            0.0,
-            Stroke::new(2.0_f32, Color32::from_rgb(230, 60, 60)),
-            StrokeKind::Inside,
-        ));
-    }
-    // 浮动选区高亮
-    if floating {
-        shapes.push(Shape::rect_stroke(
-            r.shrink(0.5),
-            0.0,
-            Stroke::new(2.0_f32, th.selection),
-            StrokeKind::Outside,
-        ));
+    // 音高偏移蒙版：负 = c_red，正 = c_blue，透明度 min(0.5, |pit| / 100 * alpha * 0.25)。
+    if note.pitch != 0 {
+        let a = ((note.pitch.abs() as f32 / 100.0) * block_alpha * 0.25).min(0.5);
+        let c = if note.pitch < 0 { C_RED } else { C_BLUE };
+        p.rect_filled(Rect::from_min_size(at, size), 0.0, alpha(c, (a * 255.0) as u8));
     }
 
-    // 文本：音名 + 当前编辑模式对应的属性数值
-    if cell >= 18.0 {
-        let small = (cell * 0.26).clamp(7.0, 12.0);
-        let big = (cell * 0.34).clamp(9.0, 16.0);
-        if flags.show_keynames {
-            texts.push(TextDraw {
-                pos: pos2(center.x, inner.min.y + 1.0),
-                text: key_name(note.key, flags.show_octaves, flags.flats),
-                size: small,
-                color: th.note_text,
-                align: Align2::CENTER_TOP,
-            });
+    // 不兼容：自定义乐器、或超出 MC 音域的键，画一圈红框（原版 draw_rectangle(..., 1)）。
+    if flags.show_incompatible
+        && (iscustom || note.key < MC_KEY_MIN || note.key > MC_KEY_MAX)
+    {
+        let r = Rect::from_min_max(at + Vec2::splat(k), at + Vec2::splat(32.0 * k));
+        p.rect_stroke(r, 0.0, Stroke::new(1.0_f32, C_RED), StrokeKind::Inside);
+    }
+
+    // 选中叠层用完后文字恢复不透明；否则文字比方块本身亮 0.25（原版 draw_set_alpha(alpha + 0.25)）。
+    if salpha > 0.0 {
+        bank.block_sel(p, at, size, salpha);
+    }
+    let text_alpha = if salpha > 0.0 { 1.0 } else { (block_alpha + 0.25).min(1.0) };
+    let font = FontId::proportional(9.0 * k);
+
+    if flags.show_numbers {
+        // 原版 `xx + 16 - 8 * use_icons`：勾了图标位就把数值往左挪半格。
+        let x = at.x + (if flags.use_icons { 8.0 } else { 16.0 }) * k;
+        p.text(
+            pos2(x, at.y + 16.0 * k),
+            Align2::CENTER_TOP,
+            note_value(state.tool, note),
+            font.clone(),
+            alpha(Color32::WHITE, (text_alpha * 255.0) as u8),
+        );
+    }
+    // 键名不受 show_keynames 开关控制（那个开关只管琴键），原版恒画。
+    let name_color = if th.kind == ThemeKind::Dark { Color32::WHITE } else { C_YELLOW };
+    p.text(
+        pos2(at.x + 16.0 * k, at.y + 4.0 * k),
+        Align2::CENTER_TOP,
+        key_name(note.key, flags.show_octaves, flags.flats),
+        font,
+        alpha(name_color, (text_alpha * 255.0) as u8),
+    );
+}
+
+/// 原版 `draw_block` 里按 `editmode` 选的那串数字。
+fn note_value(tool: EditMode, note: Note) -> String {
+    let mut s = String::new();
+    match tool {
+        EditMode::Key => {
+            if note.key < MC_KEY_MIN {
+                s.push_str(" < ");
+            }
+            if note.key > MC_KEY_MAX {
+                s.push_str(" > ");
+            }
+            if note.key >= MC_KEY_MIN && note.key <= MC_KEY_MAX {
+                s.push_str(&(note.key as i32 - MC_KEY_MIN as i32).to_string());
+            }
         }
-        if flags.show_numbers {
-            let value = match state.tool {
-                EditMode::Key => format!("{:+}", key_offset(note.key)),
-                EditMode::Velocity => format!("{}", note.velocity),
-                EditMode::Panning => {
-                    let p = note.panning as i32 - PAN_CENTER as i32;
-                    if p == 0 {
-                        "C".into()
-                    } else if p < 0 {
-                        format!("L{}", -p)
-                    } else {
-                        format!("R{p}")
-                    }
-                }
-                EditMode::Pitch => {
-                    if note.pitch == 0 {
-                        "0".into()
-                    } else {
-                        format!("{:+}", note.pitch / 100)
-                    }
-                }
-            };
-            texts.push(TextDraw {
-                pos: pos2(center.x, center.y + cell * 0.10),
-                text: value,
-                size: big,
-                color: th.note_text,
-                align: Align2::CENTER_CENTER,
-            });
+        EditMode::Velocity => s.push_str(&note.velocity.to_string()),
+        EditMode::Panning => {
+            let p = note.panning as i32 - PAN_CENTER as i32;
+            if p < 0 {
+                s.push_str("L ");
+            } else if p > 0 {
+                s.push_str("R ");
+            }
+            s.push_str(&p.abs().to_string());
         }
-        if flags.use_icons && cell >= 28.0 {
-            let short = nbs_core::instruments::instrument(note.instrument)
-                .map(|i| i.short)
-                .unwrap_or("CU");
-            texts.push(TextDraw {
-                pos: pos2(inner.min.x + 2.0, inner.max.y - 1.0),
-                text: short.to_string(),
-                size: small * 0.85,
-                color: alpha(th.note_text, 210),
-                align: Align2::LEFT_BOTTOM,
-            });
+        EditMode::Pitch => {
+            if note.pitch > 0 {
+                s.push('+');
+            }
+            s.push_str(&note.pitch.to_string());
         }
     }
+    s
 }
 
 // ---------------------------------------------------------------- 右键菜单

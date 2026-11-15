@@ -122,18 +122,33 @@ impl Viewport {
         x1 >= t0 as i64 && x0 <= t1 as i64 && y1 >= l0 as i64 && y0 <= l1 as i64
     }
 
-    /// 播放头滚动跟随：逐页 / 居中两种模式。
-    pub fn follow_marker(&mut self, marker: f64, center: bool) {
-        let cols = self.columns() as f64;
+    /// 播放头滚动跟随，对应原版 `marker_pagebypage` 的三档
+    /// （`control_draw.gml:1090-1106` + `:375`）。
+    /// `backward` 就是原版的 `forward = -1`（按住 ← 或快退按钮）。
+    pub fn follow_marker(&mut self, marker: f64, mode: u8, backward: bool) {
+        // 原版用的是 `totalcols`（完整可见的列数）；`columns()` 为平滑滚动多算了 1 列，
+        // 用它翻页会晚一列触发、居中也会偏一列。
+        let cols = (self.size.x / self.cell()).floor().max(1.0) as f64;
         let m = marker.max(0.0);
-        if center {
-            let target = (m - cols / 2.0).max(0.0);
-            self.start_tick = target.floor() as u32;
-            self.note_offset = ((target.fract()) * self.cell() as f64) as f32;
-        } else {
-            let page = (m / cols).floor() * cols;
-            self.start_tick = page.max(0.0) as u32;
+        if mode == 1 {
+            let start = self.start_tick as f64;
+            // 按页：只有播放头跑出可视页才翻页，翻完播放头落在第 2 列（`starta = marker_pos - 1`）。
+            if m.floor() >= start + cols - 1.0 {
+                self.start_tick = (m - 1.0).max(0.0) as u32;
+            } else if m.floor() < start + 1.0 && backward {
+                // 原版 1098 行：往回翻页只在按住 ← / 快进快退的「退」那一侧时才发生。
+                self.start_tick = (m.floor() - cols + 1.0).max(0.0) as u32;
+            }
             self.note_offset = 0.0;
+        } else {
+            let target = (m - (cols / 2.0).ceil()).max(0.0);
+            self.start_tick = target.floor() as u32;
+            // 原版 `note_offset` 只在按帧（=2）时才有亚刻位移；按刻（=0）整刻对齐。
+            self.note_offset = if mode == 2 {
+                (target.fract() * self.cell() as f64) as f32
+            } else {
+                0.0
+            };
         }
     }
 
@@ -169,5 +184,27 @@ mod tests {
         assert!(l1 - l0 <= 11);
         let song = Song::demo();
         assert_eq!(song.notes_in_view(t0, t1, l0, l1).len() <= 22 * 12, true);
+    }
+
+    /// 原版 `marker_pagebypage` 的三档必须互相有真实差别。
+    #[test]
+    fn follow_marker_has_three_modes() {
+        let mut v = Viewport::default();
+        v.size = egui::vec2(640.0, 320.0); // 原版 totalcols = 640 / 32 = 20
+        v.start_tick = 0;
+        v.follow_marker(10.0, 1, false);
+        assert_eq!((v.start_tick, v.note_offset), (0, 0.0), "按页：没跑出可视页就不动");
+        v.follow_marker(20.0, 1, false);
+        assert_eq!((v.start_tick, v.note_offset), (19, 0.0), "按页：翻过后播放头落在第 2 列");
+        v.follow_marker(5.0, 1, false);
+        assert_eq!(v.start_tick, 19, "按页：不按住 ← 不会自己往回翻页");
+        v.follow_marker(5.0, 1, true);
+        assert_eq!(v.start_tick, 0, "按页：按住 ← 倒回左边界外时回到它自己那页");
+        v.start_tick = 0;
+        v.follow_marker(24.5, 0, false);
+        assert_eq!((v.start_tick, v.note_offset), (14, 0.0), "按刻：居中但整刻对齐");
+        v.start_tick = 0;
+        v.follow_marker(24.5, 2, false);
+        assert_eq!((v.start_tick, v.note_offset), (14, 16.0), "按帧：居中且带半刻位移");
     }
 }

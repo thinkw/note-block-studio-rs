@@ -1,0 +1,472 @@
+//! 无窗口渲染一帧 UI 并存成 PNG，用来和原版逐像素对照。
+//!
+//! ```text
+//! cargo run -p nbs-editor --example uipng -- <song.nbs> <out.png> [宽] [高] [aqua|retro|dark|fluent]
+//!
+//! 环境变量 `NBS_UIPNG_WINDOW=<窗口名>[:页签]` 会先把那个对话框摆开再渲染，
+//! 窗口名见下面 `match name`（preferences / instruments / datapack / …）。
+//! `NBS_UIPNG_CROP=x0,y0,x1,y1[,倍率]` 只保存那块区域（逻辑像素）并可整数倍放大，
+//! `NBS_UIPNG_DUMP=1` 打印绘制顺序（大块矩形、文字坐标），`NBS_UIPNG_PIX=x,y`
+//! 打印写到某个像素上的每个图元。
+//! ```
+//!
+//! 走的是和 GUI 完全相同的一条路：`Context::run` → `tessellate` → 三角形。
+//! 这里自带一个只处理三角形的小光栅器，因为本机远程桌面的截屏通道拿不到
+//! glow(OpenGL) 窗口的内容。
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use egui::epaint::{ImageData, ImageDelta, Primitive, TextureId};
+use egui::{Color32, Rect, Vec2};
+use nbs_editor::{EditorState, Theme, ThemeKind, WindowKind};
+
+struct Tex {
+    w: usize,
+    h: usize,
+    px: Vec<Color32>,
+}
+
+/// 把 egui 交给后端的贴图取回像素。字体图集只存覆盖率，白色 + alpha 就是 GPU 看到的内容。
+fn to_tex(img: &ImageData) -> Tex {
+    match img {
+        ImageData::Color(ci) => Tex {
+            w: ci.size[0],
+            h: ci.size[1],
+            px: ci.pixels.clone(),
+        },
+        ImageData::Font(f) => Tex {
+            w: f.size[0],
+            h: f.size[1],
+            px: f
+                .pixels
+                .iter()
+                .map(|a| Color32::from_white_alpha((*a * 255.0).clamp(0.0, 255.0) as u8))
+                .collect(),
+        },
+    }
+}
+
+fn apply_delta(texs: &mut HashMap<TextureId, Tex>, id: TextureId, delta: &ImageDelta) {
+    let new = to_tex(&delta.image);
+    match delta.pos {
+        None => {
+            texs.insert(id, new);
+        }
+        Some([ox, oy]) => {
+            let t = texs.entry(id).or_insert(Tex { w: new.w, h: new.h, px: vec![Color32::TRANSPARENT; new.w * new.h] });
+            for y in 0..new.h {
+                for x in 0..new.w {
+                    let (dx, dy) = (ox + x, oy + y);
+                    if dx < t.w && dy < t.h {
+                        t.px[dy * t.w + dx] = new.px[y * new.w + x];
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 采样：ppp 取 1 时字形 uv 与图集像素一一对应，最近邻足够用于对照。
+fn sample(t: &Tex, uv: Vec2) -> Color32 {
+    let x = (uv.x * t.w as f32) as usize;
+    let y = (uv.y * t.h as f32) as usize;
+    let x = x.min(t.w - 1);
+    let y = y.min(t.h - 1);
+    t.px[y * t.w + x]
+}
+
+fn blend(dst: &mut Color32, src: Color32) {
+    let a = src.a() as f32 / 255.0;
+    if a >= 1.0 {
+        *dst = src;
+        return;
+    }
+    if a <= 0.0 {
+        return;
+    }
+    let m = |d: u8, s: u8| (s as f32 * a + d as f32 * (1.0 - a)).round().clamp(0.0, 255.0) as u8;
+    *dst = Color32::from_rgb(m(dst.r(), src.r()), m(dst.g(), src.g()), m(dst.b(), src.b()));
+}
+
+/// 边函数：>0 表示 c 在 a→b 的左侧。
+fn edge(a: Vec2, b: Vec2, c: Vec2) -> f32 {
+    (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+}
+
+/// 重心插值一个通道。
+fn lerp3(a: f32, b: f32, c: f32, w: [f32; 3]) -> f32 {
+    a * w[0] + b * w[1] + c * w[2]
+}
+
+/// 某个采样点要写入的颜色：顶点色 × 贴图，直通 alpha（覆盖率由「命中几个采样点」体现）。
+fn shade(v: &[egui::epaint::Vertex; 3], tex: Option<&Tex>, w: [f32; 3]) -> Color32 {
+    let uv = Vec2::new(
+        lerp3(v[0].uv.x, v[1].uv.x, v[2].uv.x, w),
+        lerp3(v[0].uv.y, v[1].uv.y, v[2].uv.y, w),
+    );
+    let t = tex.map(|t| sample(t, uv)).unwrap_or(Color32::WHITE);
+    let col = [0, 1, 2, 3].map(|k| {
+        let g = |vv: Color32| match k {
+            0 => vv.r(),
+            1 => vv.g(),
+            2 => vv.b(),
+            _ => vv.a(),
+        };
+        lerp3(g(v[0].color) as f32, g(v[1].color) as f32, g(v[2].color) as f32, w)
+    });
+    // 四舍五入而不是截断：截断会让所有纯色填充系统性偏暗一格。
+    let ch = |s: f32| (s.round().clamp(0.0, 255.0)) as u8;
+    Color32::from_rgba_unmultiplied(
+        ch(t.r() as f32 * col[0] / 255.0),
+        ch(t.g() as f32 * col[1] / 255.0),
+        ch(t.b() as f32 * col[2] / 255.0),
+        ch(t.a() as f32 * col[3] / 255.0),
+    )
+}
+
+fn main() -> Result<(), String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let arg = |i: usize, def: &str| args.get(i).cloned().unwrap_or_else(|| def.to_string());
+    let song = arg(0, "");
+    let out = PathBuf::from(arg(1, "target/ui.png"));
+    let w: f32 = arg(2, "1440").parse().map_err(|_| "宽不是数字")?;
+    let h: f32 = arg(3, "900").parse().map_err(|_| "高不是数字")?;
+    let kind = match arg(4, "fluent").as_str() {
+        "aqua" => ThemeKind::Aqua,
+        "retro" => ThemeKind::Retro,
+        "dark" => ThemeKind::Dark,
+        _ => ThemeKind::Fluent,
+    };
+
+    let mut state = EditorState::new();
+    if !song.is_empty() && song != "-" {
+        state.doc.replace_song(
+            nbs_core::nbs::load(Path::new(&song)).map_err(|e| format!("载入 {song} 失败: {e}"))?,
+        );
+    }
+    state.theme = Theme::new(kind);
+
+    // NBS_UIPNG_WINDOW=preferences:2 —— 直接把某个对话框摆开渲染，用来逐像素对照原版窗口。
+    // 冒号后面是页签序号（只有带页签的窗口用它）。
+    if let Ok(spec) = std::env::var("NBS_UIPNG_WINDOW") {
+        let mut it = spec.split(':');
+        let name = it.next().unwrap_or("");
+        let tab = it.next().and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
+        let k = match name {
+            "preferences" => WindowKind::Preferences,
+            "instruments" => WindowKind::Instruments,
+            "songinfo" => WindowKind::SongInfo,
+            "properties" => WindowKind::Properties,
+            "statistics" => WindowKind::Statistics,
+            "shortcuts" => WindowKind::Shortcuts,
+            "about" => WindowKind::About,
+            "set-tempo" => WindowKind::SetTempo,
+            "set-velocity" => WindowKind::SetVelocity,
+            "set-panning" => WindowKind::SetPanning,
+            "set-pitch" => WindowKind::SetPitch,
+            "tremolo" => WindowKind::Tremolo,
+            "stereo" => WindowKind::Stereo,
+            "clip-editor" => WindowKind::ClipEditor,
+            "macro-editor" => WindowKind::MacroEditor,
+            "audio-settings" => WindowKind::AudioSettings,
+            "audio-export" => WindowKind::AudioExport,
+            "midi-import" => WindowKind::MidiImport,
+            "datapack" => WindowKind::DatapackExport,
+            "schematic" => WindowKind::SchematicExport,
+            other => return Err(format!("未知窗口 {other}")),
+        };
+        state.window = Some(k);
+        state.prefs_tab = tab;
+    }
+
+    let ctx = egui::Context::default();
+    state.theme.apply(&ctx);
+    if nbs_editor::fonts::install(&ctx).is_none() {
+        eprintln!("提示: 没装系统中文字体，中文会画成空框");
+    }
+
+    let mut texs: HashMap<TextureId, Tex> = HashMap::new();
+    let mut prims = Vec::new();
+    let dump = std::env::var("NBS_UIPNG_DUMP").is_ok();
+    let mut ppp = 1.0f32;
+    // 第一帧只为了建立布局（滚动条、面板尺寸），后面几帧才是稳定画面。
+    // 必须把虚拟时间推过 egui 的 animation_time（0.1s）：Area 对刚打开的窗口做淡入，
+    // 整个窗口子树会被乘上一个不到 1 的不透明度（area.rs 的 multiply_opacity），
+    // 只渲染两帧 16ms 的话窗口底色会变成半透明，看起来就像「底色没画」。
+    const FRAMES: u32 = 8;
+    for frame in 0..FRAMES {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(w, h))),
+            time: Some(0.05 * (frame + 1) as f64),
+            ..Default::default()
+        };
+        let out = ctx.run(input, |c| nbs_editor::show(c, &mut state));
+        ppp = out.pixels_per_point;
+        for (id, delta) in &out.textures_delta.set {
+            apply_delta(&mut texs, *id, delta);
+        }
+        for id in &out.textures_delta.free {
+            texs.remove(id);
+        }
+        let shapes = out.shapes;
+        if dump && frame + 1 == FRAMES {
+            eprintln!(
+                "visuals: window_fill {:?} panel_fill {:?}",
+                ctx.style().visuals.window_fill,
+                ctx.style().visuals.panel_fill,
+            );
+            // shapes 的序号就是最终绘制顺序：按序列出所有大块矩形，查窗口底色有没有画。
+            fn walk(sh: &egui::Shape, path: &str, n: &mut usize, clip: Rect) {
+                match sh {
+                    egui::Shape::Rect(r) if r.rect.width() * r.rect.height() > 8_000.0 => eprintln!(
+                        "矩形 #{path} 填充 {:?} 描边 {:?} 圆角 {:?} 范围 ({:.0},{:.0})-({:.0},{:.0}) 裁剪 ({:.0},{:.0})-({:.0},{:.0})",
+                        r.fill, r.stroke.color, r.corner_radius,
+                        r.rect.min.x, r.rect.min.y, r.rect.max.x, r.rect.max.y,
+                        clip.min.x, clip.min.y, clip.max.x, clip.max.y,
+                    ),
+                    egui::Shape::Vec(v) => {
+                        for s in v {
+                            *n += 1;
+                            walk(s, &format!("{path}/{n}"), n, clip);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for (k, cs) in shapes.iter().enumerate() {
+                let mut n = 0usize;
+                walk(&cs.shape, &format!("#{k}"), &mut n, cs.clip_rect);
+            }
+            for (n, cs) in shapes.iter().enumerate() {
+                if let egui::Shape::Text(tx) = &cs.shape {
+                    let s: String = tx.galley.text().chars().collect();
+                    if !s.is_empty() {
+                        eprintln!("文字 #{n} @({:.0},{:.0}) {s:?}", tx.pos.x, tx.pos.y);
+                    }
+                }
+            }
+        }
+        prims = ctx.tessellate(shapes, ppp);
+    }
+
+    if std::env::var("NBS_UIPNG_DUMP").is_ok() {
+        for (id, t) in &texs {
+            let lit = t.px.iter().filter(|c| c.a() > 0).count();
+            eprintln!(
+                "贴图 {id:?}: {}×{} 左上角 {:?} 非透明像素 {lit}",
+                t.w,
+                t.h,
+                t.px[0],
+            );
+        }
+        let white = texs
+            .get(&TextureId::default())
+            .map(|t| t.px[0])
+            .unwrap_or(Color32::BLACK);
+        eprintln!("纯色图元取样到的「白」= {white:?}（必须是 alpha 255，否则所有纯色填充都会画成透明）");
+        for (n, cp) in prims.iter().enumerate() {
+            let Primitive::Mesh(mesh) = &cp.primitive else { continue };
+            let b = mesh.calc_bounds();
+            if b.width() * b.height() < 8_000.0 {
+                continue;
+            }
+            let colors: Vec<Color32> = {
+                let mut s: Vec<Color32> = mesh.vertices.iter().map(|v| v.color).collect();
+                s.sort_by_key(|c| c.to_array());
+                s.dedup();
+                s
+            };
+            eprintln!(
+                "图元 #{n} {}×{} 范围 ({:.0},{:.0})-({:.0},{:.0}) 裁剪 ({:.0},{:.0})-({:.0},{:.0}) 顶点色 {colors:?} 贴图 {:?}",
+                b.width(), b.height(), b.min.x, b.min.y, b.max.x, b.max.y,
+                cp.clip_rect.min.x, cp.clip_rect.min.y, cp.clip_rect.max.x, cp.clip_rect.max.y,
+                mesh.texture_id,
+            );
+        }
+    }
+
+    let (mut pw, mut ph) = ((w * ppp) as usize, (h * ppp) as usize);
+    let bg = state.theme.window_bg;
+    // 真实 GPU（eframe 默认开 MSAA）是逐采样点写入、每像素再平均的。
+    // 若改成「每像素算一个覆盖率、再顺序混合」，同一个网格内部相邻三角形共享的那条
+    // 对角边就会被两层部分覆盖叠加：窗口圆角的扇形三角上三层覆盖率 0.19+0.5+0.31=1，
+    // 混合出来却只剩 0.72，于是整条对角线上出现原版没有的暗缝。
+    // 所以这里也按采样点来：每像素 SS×SS 个采样点，全部图元写完再平均。
+    const SS: usize = 4;
+    const NS: usize = SS * SS;
+    let mut sfb = vec![bg; pw * ph * NS];
+    let mut tris = 0usize;
+
+    // NBS_UIPNG_PIX="x,y"：把逐个写到该像素的图元全打出来，用来查「谁盖住了谁」。
+    let trace = std::env::var("NBS_UIPNG_PIX").ok().and_then(|s| {
+        let mut it = s.split(',');
+        match (it.next()?.parse::<usize>().ok(), it.next()?.parse::<usize>().ok()) {
+            (Some(x), Some(y)) => Some((x, y)),
+            _ => None,
+        }
+    });
+
+    for (tn, cp) in prims.iter().enumerate() {
+        let Primitive::Mesh(mesh) = &cp.primitive else { continue };
+        let clip = cp.clip_rect * ppp;
+        let x0 = (clip.min.x.max(0.0)) as usize;
+        let y0 = (clip.min.y.max(0.0)) as usize;
+        let x1 = (clip.max.x.min(pw as f32 - 1.0)) as usize;
+        let y1 = (clip.max.y.min(ph as f32 - 1.0)) as usize;
+        let tex = texs.get(&mesh.texture_id);
+        for i in (0..mesh.indices.len()).step_by(3) {
+            let v: [egui::epaint::Vertex; 3] =
+                [0, 1, 2].map(|k| mesh.vertices[mesh.indices[i + k] as usize]);
+            let p: [Vec2; 3] = v.map(|x| Vec2::new(x.pos.x * ppp, x.pos.y * ppp));
+            tris += 1;
+            let area = edge(p[0], p[1], p[2]);
+            if area.abs() < 1e-4 {
+                continue;
+            }
+            let minx = p.iter().map(|q| q.x).fold(f32::MAX, f32::min).max(x0 as f32) as usize;
+            let maxx = p.iter().map(|q| q.x).fold(f32::MIN, f32::max).min(x1 as f32) as usize;
+            let miny = p.iter().map(|q| q.y).fold(f32::MAX, f32::min).max(y0 as f32) as usize;
+            let maxy = p.iter().map(|q| q.y).fold(f32::MIN, f32::max).min(y1 as f32) as usize;
+            // 内部像素走「全采样点命中」快速路径，压着边的像素逐采样点判定。
+            let neg = area < 0.0;
+            let side = [
+                (p[1] - p[2]).length(),
+                (p[2] - p[0]).length(),
+                (p[0] - p[1]).length(),
+            ];
+            for y in miny..=maxy {
+                for x in minx..=maxx {
+                    let base = (y * pw + x) * NS;
+                    let c = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
+                    let mut b = [
+                        edge(p[1], p[2], c),
+                        edge(p[2], p[0], c),
+                        edge(p[0], p[1], c),
+                    ];
+                    if neg {
+                        b = b.map(|e| -e);
+                    }
+                    // 像素中心到三条边的距离都超过 0.75px（角点最远 0.707px）时，
+                    // 16 个采样点必然全在三角形内，直接复用中心点的重心坐标。
+                    let whole = b.iter().enumerate().all(|(k, e)| *e >= 0.75 * side[k]);
+                    let (hit, w) = if whole {
+                        let sum = b[0] + b[1] + b[2];
+                        (NS, b.map(|e| e / sum))
+                    } else {
+                        let mut n = 0usize;
+                        let mut acc = [0.0f32; 3];
+                        for sy in 0..SS {
+                            for sx in 0..SS {
+                                let q = Vec2::new(
+                                    x as f32 + (sx as f32 + 0.5) / SS as f32,
+                                    y as f32 + (sy as f32 + 0.5) / SS as f32,
+                                );
+                                let mut s = [
+                                    edge(p[1], p[2], q),
+                                    edge(p[2], p[0], q),
+                                    edge(p[0], p[1], q),
+                                ];
+                                if neg {
+                                    s = s.map(|e| -e);
+                                }
+                                if s.iter().all(|e| *e >= 0.0) {
+                                    n += 1;
+                                    let sum = s[0] + s[1] + s[2];
+                                    let wsum = if sum > 0.0 { sum } else { 1.0 };
+                                    for (a, e) in acc.iter_mut().zip(s) {
+                                        *a += e / wsum;
+                                    }
+                                    blend(&mut sfb[base + sy * SS + sx], shade(&v, tex, s.map(|e| e / wsum)));
+                                }
+                            }
+                        }
+                        (n, acc.map(|e| e / n.max(1) as f32))
+                    };
+                    if hit == 0 {
+                        continue;
+                    }
+                    let src = shade(&v, tex, w);
+                    if trace == Some((x, y)) {
+                        eprintln!(
+                            "写 ({x},{y}) 图元#{tn} 三角形 {}/{} 顶点 ({:.1},{:.1})-({:.1},{:.1})-({:.1},{:.1}) area {area:.1} 命中采样点 {hit}/{NS} 平均权重 {w:?} 顶点色 {:?}{:?}{:?} src {src:?} 覆盖前 {:?}",
+                            i / 3,
+                            mesh.indices.len() / 3,
+                            p[0].x, p[0].y, p[1].x, p[1].y, p[2].x, p[2].y,
+                            v[0].color, v[1].color, v[2].color,
+                            sfb[base],
+                        );
+                    }
+                    if whole {
+                        for s in 0..NS {
+                            blend(&mut sfb[base + s], src);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // MSAA resolve：每像素把 SS×SS 个采样点四舍五入平均（UI 底色不透明，逐通道平均即可）。
+    let mut fb: Vec<Color32> = Vec::with_capacity(pw * ph);
+    for n in 0..pw * ph {
+        let base = n * NS;
+        let mut acc = [0u32; 4];
+        for s in 0..NS {
+            for (a, c) in acc.iter_mut().zip(sfb[base + s].to_array()) {
+                *a += c as u32;
+            }
+        }
+        let avg = |a: u32| ((a * 2 + NS as u32) / (2 * NS as u32)) as u8;
+        fb.push(Color32::from_rgba_unmultiplied(
+            avg(acc[0]),
+            avg(acc[1]),
+            avg(acc[2]),
+            avg(acc[3]),
+        ));
+    }
+
+    // NBS_UIPNG_CROP="x0,y0,x1,y1[,整数倍率]"：只留下这块并放大，用来逐像素对照原版。
+    if let Ok(spec) = std::env::var("NBS_UIPNG_CROP") {
+        let n: Vec<usize> = spec.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        if n.len() >= 4 {
+            let (x0, y0) = (n[0].min(pw), n[1].min(ph));
+            let (x1, y1) = (n[2].clamp(x0 + 1, pw), n[3].clamp(y0 + 1, ph));
+            let k = *n.get(4).unwrap_or(&1);
+            let k = (1..=8).contains(&k).then_some(k).unwrap_or(1);
+            let (cw, ch) = (x1 - x0, y1 - y0);
+            let mut crop = vec![Color32::TRANSPARENT; cw * ch * k * k];
+            for cy in 0..ch {
+                for cx in 0..cw {
+                    let c = fb[(y0 + cy) * pw + (x0 + cx)];
+                    for sy in 0..k {
+                        for sx in 0..k {
+                            crop[(cy * k + sy) * cw * k + (cx * k + sx)] = c;
+                        }
+                    }
+                }
+            }
+            pw = cw * k;
+            ph = ch * k;
+            fb = crop;
+        }
+    }
+
+    let bytes: Vec<u8> = fb.iter().flat_map(|c| c.to_array()).collect();
+    let img = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_vec(pw as u32, ph as u32, bytes)
+        .ok_or_else(|| "帧缓冲尺寸与像素数不符".to_string())?;
+    if let Some(d) = out.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    img.save(&out).map_err(|e| format!("写入 PNG 失败: {e}"))?;
+    println!(
+        "{}×{}，{} 个图元 / {} 个三角形 / {} 张贴图 → {}",
+        pw,
+        ph,
+        prims.len(),
+        tris,
+        texs.len(),
+        out.display()
+    );
+    Ok(())
+}

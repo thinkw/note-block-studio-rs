@@ -51,6 +51,8 @@ pub enum Flag {
     ShowOctaves,
     ShowKeyNames,
     ShowKeyNumbers,
+    ShowKeyboard,
+    ShowOutOfRange,
     ShowIncompatible,
     ShowGridLines,
     Flats,
@@ -58,21 +60,25 @@ pub enum Flag {
 }
 
 impl Flag {
+    /// 原版首选项里印的中文标签（`draw_window_preferences.gml` 外观页）。
+    /// `ShowGridLines` 是原版没有的我们自己加的开关，所以名字留着。
     pub fn label(self) -> &'static str {
         match self {
-            Self::ShowLayers => "显示图层栏",
-            Self::ShowPiano => "显示钢琴键盘",
-            Self::UseColors => "彩色方块",
-            Self::UseShapes => "乐器形状",
-            Self::UseIcons => "乐器图标",
-            Self::ShowNumbers => "显示属性数值",
-            Self::ShowOctaves => "显示八度",
-            Self::ShowKeyNames => "显示音名",
+            Self::ShowLayers => "显示每层操作区",
+            Self::ShowPiano => "显示琴键",
+            Self::UseColors => "彩色音符盒",
+            Self::UseShapes => "音符盒形状",
+            Self::UseIcons => "显示音色图标",
+            Self::ShowNumbers => "显示音符序号",
+            Self::ShowOctaves => "显示八度序号",
+            Self::ShowKeyNames => "显示键名",
             Self::ShowKeyNumbers => "显示音符序号",
-            Self::ShowIncompatible => "标记不兼容音符",
+            Self::ShowKeyboard => "显示键盘键位",
+            Self::ShowOutOfRange => "标记超范围琴键",
+            Self::ShowIncompatible => "标记不兼容的音符盒",
             Self::ShowGridLines => "显示网格线",
-            Self::Flats => "使用降号音名",
-            Self::Blackout => "黑场模式",
+            Self::Flats => "使用降记号",
+            Self::Blackout => "全黑模式",
         }
     }
     pub fn get(self, f: &UiFlags) -> bool {
@@ -86,6 +92,8 @@ impl Flag {
             Self::ShowOctaves => f.show_octaves,
             Self::ShowKeyNames => f.show_keynames,
             Self::ShowKeyNumbers => f.show_keynumbers,
+            Self::ShowKeyboard => f.show_keyboard,
+            Self::ShowOutOfRange => f.show_outofrange,
             Self::ShowIncompatible => f.show_incompatible,
             Self::ShowGridLines => f.show_grid_lines,
             Self::Flats => f.flats,
@@ -106,6 +114,10 @@ pub struct UiFlags {
     pub show_keynames: bool,
     /// 原版 `show_keynumbers`：在 MC 音域内的琴键上画「要按几次右键才够到音高」的序号。
     pub show_keynumbers: bool,
+    /// 原版 `show_keyboard`：在琴键上画 `init_keys()` 绑定的按键字符。
+    pub show_keyboard: bool,
+    /// 原版 `show_outofrange`：把 MC 两八度（33..=57）之外的琴键染成粉红。
+    pub show_outofrange: bool,
     pub show_incompatible: bool,
     pub show_grid_lines: bool,
     pub flats: bool,
@@ -117,13 +129,18 @@ impl Default for UiFlags {
         Self {
             show_layers: true,
             show_piano: true,
+            // 原版 `control_create.gml:244-248,314-318` 的出厂值：
+            // show_numbers=1、show_octaves=0、use_colors=1、use_icons=0、use_shapes=0、
+            // show_keynames=1、show_keynumbers=0、show_keyboard=1、show_outofrange=1。
             use_colors: true,
-            use_shapes: true,
-            use_icons: true,
+            use_shapes: false,
+            use_icons: false,
             show_numbers: true,
             show_octaves: false,
             show_keynames: true,
             show_keynumbers: false,
+            show_keyboard: true,
+            show_outofrange: true,
             show_incompatible: true,
             show_grid_lines: true,
             flats: false,
@@ -401,13 +418,16 @@ pub struct EditorState {
     pub flags: UiFlags,
     pub theme: Theme,
     pub window: Option<WindowKind>,
+    /// 原版的全屏开关（F11）。
+    pub fullscreen: bool,
     pub context_menu: Option<ContextMenu>,
     pub message: Option<(String, Instant)>,
     /// 真实音频引擎（无音频设备时自动降级为静音时钟）。
     pub audio: Box<dyn AudioEngine>,
     pub prefs: Preferences,
     pub marker_follow: bool,
-    pub follow_center: bool,
+    /// 原版 `marker_pagebypage`：1 = 按页，0 = 按刻，2 = 按帧。
+    pub follow_mode: u8,
     pub hover_cell: Option<(u32, u32)>,
     pub pending: Vec<Command>,
     pub file_dialog: Option<FileDialog>,
@@ -432,6 +452,13 @@ pub struct EditorState {
     pub datapack_options: DatapackOptions,
     /// 原版 `selected_tab_dat`：0 = 设置，1 = 效果器。
     pub datapack_tab: u8,
+    /// 原版 `selected_tab`：首选项的五页，0 通用 / 1 界面 / 2 外观 / 3 访问 / 4 播放。
+    /// 原版是全局变量（窗口间共享），我们只在这里用，关窗不清零也不影响别的窗口。
+    pub prefs_tab: u8,
+    /// 原版 `draw_abutton` 展开的 `obj_menu`：首选项里主题下拉框是否开着。
+    pub prefs_theme_menu: bool,
+    /// 原版 `w_dragvalue`：`draw_dragvalue` 的亚步进累加器。
+    pub prefs_drag: f32,
     pub png_options: ImageOptions,
     pub export_status: Option<String>,
     /// 原版 `startkey`：最左白键的白键序号（不是键号，键号还要加上左边的黑键数）。
@@ -452,6 +479,12 @@ pub struct EditorState {
     pub insbox_start: usize,
     /// 原版 `forward`：按住快退 / 快进时的滚动方向（-1 / 0 / +1）。
     pub scrub: i8,
+    /// 原版 `record`：工具栏「录制按键」开关。开着时按键不 preview，而是直接写进当前列。
+    pub record: bool,
+    /// 原版 `playing = 0.25`：按下了录音但还没出声，等第一个按键来启动播放。
+    pub record_armed: bool,
+    /// 原版 `key_press[a]`：当前按住的按键绑定，琴键要画成按下态。
+    pub keys_held: crate::piano::KeysHeld,
     /// 原版 `tempodrag`：拖速度框时的未量化累加值。
     pub tempo_drag: Option<f32>,
     /// 兼容性指示（原版 `compatible`），随 `song.rev` 重算。
@@ -474,12 +507,14 @@ impl EditorState {
         audio.prepare(&song);
         apply_audio_prefs(&mut *audio, &prefs);
 
-        let theme = Theme::new(match prefs.theme {
+        let mut theme = Theme::new(match prefs.theme {
             0 => ThemeKind::Aqua,
             1 => ThemeKind::Retro,
             2 => ThemeKind::Dark,
             _ => ThemeKind::Fluent,
         });
+        // 原版 `fdark` 只对 theme 3 生效（`control_create.gml:614` 在切到 theme 2 时也会置 1）。
+        theme.fdark = prefs.fdark && theme.kind == ThemeKind::Fluent;
         let mut flags = UiFlags::default();
         flags.show_layers = prefs.show_layers;
         flags.show_piano = prefs.show_piano;
@@ -490,6 +525,8 @@ impl EditorState {
         flags.show_octaves = prefs.show_octaves;
         flags.show_keynames = prefs.show_keynames;
         flags.show_keynumbers = prefs.show_keynumbers;
+        flags.show_keyboard = prefs.show_keyboard;
+        flags.show_outofrange = prefs.show_outofrange;
         flags.show_incompatible = prefs.show_incompatible;
         flags.show_grid_lines = prefs.show_grid_lines;
         flags.flats = prefs.flats;
@@ -499,7 +536,7 @@ impl EditorState {
         viewport.zoom = prefs.zoom.clamp(0.5, 4.0);
         let recent_files = prefs.recent_files.iter().map(PathBuf::from).collect();
         let follow_marker = prefs.follow_marker;
-        let follow_center = prefs.follow_center;
+        let follow_mode = prefs.follow_mode;
         let png_dark = theme.kind.is_dark();
         // 原版 `load_settings` 的 `[schematic_export]` 段。
         let schematic_options = prefs.schematic.clone();
@@ -512,13 +549,14 @@ impl EditorState {
             current: Note::default(),
             flags,
             theme,
+            fullscreen: false,
             window: None,
             context_menu: None,
             message: None,
             audio,
             prefs,
             marker_follow: follow_marker,
-            follow_center,
+            follow_mode,
             hover_cell: None,
             pending: Vec::new(),
             file_dialog: None,
@@ -537,6 +575,9 @@ impl EditorState {
             modals: ModalQueue::default(),
             datapack_options: DatapackOptions::default(),
             datapack_tab: 0,
+            prefs_tab: 0,
+            prefs_theme_menu: false,
+            prefs_drag: 0.0,
             png_options: ImageOptions { dark: png_dark, ..ImageOptions::default() },
             export_status: None,
             piano_start: 12,
@@ -549,6 +590,9 @@ impl EditorState {
             insbox_open: false,
             insbox_start: 0,
             scrub: 0,
+            record: false,
+            record_armed: false,
+            keys_held: [false; nbs_core::model::KEY_MAX as usize + 1],
             tempo_drag: None,
             compat_rev: u64::MAX,
             compat: 1,
@@ -615,9 +659,17 @@ impl EditorState {
     pub fn tick_transport(&mut self, ctx: &Context) {
         let _crossed = self.audio.clock_mut().update();
         let playing = self.audio.clock().is_playing();
+        // 原版 `if (playing = 0) record = 0`：播放一停，录音自动退出。
+        // 0.25（按下录音、等第一个键起播）不算「在播」，所以 armed 时不清。
+        if playing {
+            self.record_armed = false;
+        } else if !self.record_armed {
+            self.record = false;
+        }
         let position = self.audio.clock().position();
         if playing && self.marker_follow {
-            self.viewport.follow_marker(position, self.follow_center);
+            self.viewport
+                .follow_marker(position, self.follow_mode, self.scrub < 0);
         }
         if playing {
             ctx.request_repaint();
@@ -633,7 +685,7 @@ impl EditorState {
             ctx.request_repaint();
         }
         // 定时自动保存（只写备份，不改动当前文件名与脏标记）
-        let mins = self.prefs.auto_save_minutes as u64;
+        let mins = self.prefs.autosave_interval() as u64;
         if mins > 0
             && self.doc.song.dirty
             && self.last_autosave.elapsed().as_secs() >= mins * 60
@@ -733,9 +785,10 @@ impl EditorState {
             ThemeKind::Dark => 2,
             ThemeKind::Fluent => 3,
         };
+        self.prefs.fdark = self.theme.fdark;
         self.prefs.zoom = self.viewport.zoom;
         self.prefs.follow_marker = self.marker_follow;
-        self.prefs.follow_center = self.follow_center;
+        self.prefs.follow_mode = self.follow_mode;
         self.prefs.show_layers = self.flags.show_layers;
         self.prefs.show_piano = self.flags.show_piano;
         self.prefs.use_colors = self.flags.use_colors;
@@ -745,6 +798,8 @@ impl EditorState {
         self.prefs.show_octaves = self.flags.show_octaves;
         self.prefs.show_keynames = self.flags.show_keynames;
         self.prefs.show_keynumbers = self.flags.show_keynumbers;
+        self.prefs.show_keyboard = self.flags.show_keyboard;
+        self.prefs.show_outofrange = self.flags.show_outofrange;
         self.prefs.show_incompatible = self.flags.show_incompatible;
         self.prefs.show_grid_lines = self.flags.show_grid_lines;
         self.prefs.flats = self.flags.flats;

@@ -29,6 +29,9 @@ fn flush_all(state: &mut EditorState, ctx: &Context) {
 }
 
 pub fn show(ctx: &Context, state: &mut EditorState) {
+    // 原版是 GameMaker 的像素绘制：1px 的网格线就是结结实实一个像素。
+    // egui 默认把每条边羽化成渐变，1px 竖线会变成三列淡色，深度只有原版的一半，所以关掉。
+    ctx.tessellation_options_mut(|o| o.feathering = false);
     // 精灵图只需加载一次；缺失时面板自己退回文字按钮。
     state.icons.ensure(ctx);
     // 独立播放时钟（不绑 UI 帧率）+ 快捷键 + 偏好定时持久化

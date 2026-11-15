@@ -58,6 +58,18 @@ impl Drop for NbsApp {
 }
 
 impl eframe::App for NbsApp {
+    /// 原版 `control_draw.gml:153` 的 `draw_clear(window_background)`。
+    /// eframe 默认清成透明，glow 后端下就是一整片黑，凡是自己没重绘的面板都露黑底。
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        let c = self.state.theme.window_bg;
+        [
+            c.r() as f32 / 255.0,
+            c.g() as f32 / 255.0,
+            c.b() as f32 / 255.0,
+            1.0,
+        ]
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let title = self.state.song_title();
         if title != self.last_title {

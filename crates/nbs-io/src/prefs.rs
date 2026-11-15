@@ -27,8 +27,16 @@ pub struct Preferences {
     pub show_sound_count: bool,
     pub include_locked_in_export: bool,
     pub follow_marker: bool,
-    /// 原版 `marker_pagebypage`：false = 按页跟随，true = 居中跟随。
-    pub follow_center: bool,
+    /// 原版 `marker_pagebypage`：1 = 按页，0 = 按刻（居中），2 = 按帧（居中 + 亚刻位移）。
+    pub follow_mode: u8,
+    /// 原版 `autosave`：自动保存总开关，出厂是关的。间隔只在开启后才生效。
+    pub autosave_enabled: bool,
+    /// 原版 `mousewheel`：0 = 移动视口，1 = 换音色，2 = 换音调。
+    pub mousewheel: u8,
+    /// 原版 `changepitch`：滚轮停在音符上时改音符属性，而不是移动视口。
+    pub changepitch: bool,
+    /// 原版 `select_lastpressed`：键盘按下琴键后，选中的音跟到那个键。
+    pub select_lastpressed: bool,
     pub show_layers: bool,
     pub show_piano: bool,
     pub use_colors: bool,
@@ -39,6 +47,12 @@ pub struct Preferences {
     pub show_keynames: bool,
     /// 原版 `show_keynumbers`（默认关）：琴键上画 MC 音域内的序号。
     pub show_keynumbers: bool,
+    /// 原版 `show_keyboard`（默认开）：琴键上画 `init_keys()` 绑定的按键字符。
+    pub show_keyboard: bool,
+    /// 原版 `show_outofrange`（默认开）：MC 两八度之外的琴键染粉红。
+    pub show_outofrange: bool,
+    /// 原版 `fdark`（默认关）：Fluent 主题的深色变体，只对 theme 3 生效。
+    pub fdark: bool,
     /// 原版 `keysmax` / `keys_to_show`：钢琴最多画几根白键，20..50。
     pub keys_to_show: u8,
     pub show_incompatible: bool,
@@ -77,16 +91,24 @@ impl Default for Preferences {
             show_sound_count: false,
             include_locked_in_export: false,
             follow_marker: true,
-            follow_center: false,
+            follow_mode: 1,
+            autosave_enabled: false,
+            mousewheel: 0,
+            changepitch: true,
+            select_lastpressed: true,
             show_layers: true,
             show_piano: true,
             use_colors: true,
-            use_shapes: true,
-            use_icons: true,
+            // 原版 `control_create.gml:246-248`：use_colors=1、use_icons=0、use_shapes=0。
+            use_shapes: false,
+            use_icons: false,
             show_numbers: true,
             show_octaves: false,
             show_keynames: true,
             show_keynumbers: false,
+            show_keyboard: true,
+            show_outofrange: true,
+            fdark: false,
             keys_to_show: 30,
             show_incompatible: true,
             show_grid_lines: true,
@@ -106,7 +128,21 @@ impl Default for Preferences {
 }
 
 impl Preferences {
+    /// 原版 `if (autosave && …)`：开关关掉后间隔就不参与倒计时。
+    pub fn autosave_interval(&self) -> u8 {
+        if self.autosave_enabled {
+            self.auto_save_minutes
+        } else {
+            0
+        }
+    }
+
     pub fn config_dir() -> PathBuf {
+        // 无头校验（examples/uipng.rs）需要一份和真实用户配置隔离的设置，
+        // 否则正在运行的 GUI 会把默认值覆盖回来。
+        if let Ok(dir) = std::env::var("NBS_RUST_CONFIG_DIR") {
+            return PathBuf::from(dir);
+        }
         if let Ok(appdata) = std::env::var("APPDATA") {
             return PathBuf::from(appdata).join(APP_DIR);
         }
@@ -248,6 +284,22 @@ mod tests {
         assert_eq!(old.schematic.layout, 1, "旧文件缺 [schematic_export] 时退回原版默认");
         assert_eq!(old.schematic.ins_block, crate::schematic::default_ins_block());
         assert_eq!(old.theme, 2, "已有的键照常读出来");
+    }
+
+    /// 原版 `control_create.gml` 的出厂值：autosave=0、autosavemins=10、mousewheel=0、
+    /// changepitch=1、select_lastpressed=1、marker_pagebypage=1。
+    #[test]
+    fn startup_defaults_match_original() {
+        let p = Preferences::default();
+        assert!(!p.autosave_enabled, "原版 autosave = 0");
+        assert_eq!(p.auto_save_minutes, 10);
+        assert_eq!(p.autosave_interval(), 0, "开关关掉就不该有间隔");
+        assert_eq!(p.mousewheel, 0);
+        assert!(p.changepitch);
+        assert!(p.select_lastpressed);
+        assert_eq!(p.follow_mode, 1, "原版默认按页跟随");
+        let on = Preferences { autosave_enabled: true, ..Default::default() };
+        assert_eq!(on.autosave_interval(), 10);
     }
 
     #[test]

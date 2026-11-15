@@ -29,8 +29,9 @@ pub mod frame {
     pub const BACK: usize = 7;
     pub const FORWARD: usize = 8;
     /// 原版这一帧既是「键盘录音」按钮，也是所有拖条的圆形手柄
-    /// （`draw_dragbar` 里 `draw_sprite(spr_icons, 9, …)`）。我们没有录音功能，
-    /// 所以只当手柄用。
+    /// （`draw_dragbar` 里 `draw_sprite(spr_icons, 9, …)`）。
+    pub const RECORD: usize = 9;
+    /// 同上：拖条手柄用的就是录音图标那一帧。
     pub const DRAG_KNOB: usize = 9;
     pub const LOOP_INACTIVE: usize = 49;
     pub const LOOP: usize = 50;
@@ -93,6 +94,37 @@ pub mod macro_icon {
     pub const SET_PANNING: usize = 12;
     pub const SET_PITCH: usize = 13;
     pub const RESET: usize = 14;
+}
+
+/// 原版 `spr_piano` 的帧号（每组 40×121）。
+///
+/// `draw_piano_key` 的换算是 `sprite_offset = 6 * (theme == 3)`，Fluent 深色再 `+6`；
+/// 但三张淡出蒙版（`3/4/5`）只加 `sprite_offset`、不加深色偏移 —— 原版工程里
+/// Fluent 深色那组确实只有 12/13/14 三帧，蒙版是共用的。
+pub mod piano_frame {
+    pub const WHITE: usize = 0;
+    pub const BLACK_FACE: usize = 1;
+    pub const BLACK_BACK: usize = 2;
+    pub const WHITE_FADE: usize = 3;
+    pub const BLACK_FACE_FADE: usize = 4;
+    pub const BLACK_BACK_FADE: usize = 5;
+    /// 每组帧数：`sprite_offset = 6 * (theme == 3)`。
+    pub const GROUP: usize = 6;
+    /// Fluent 深色组的起始帧。
+    pub const DARK_GROUP: usize = 12;
+}
+
+/// 原版 `draw_block` 里 `(use_colors, use_shapes)` 选出的那套方块精灵。
+#[derive(Clone, Copy, Debug)]
+pub enum BlockSet {
+    /// `spr_block_color`
+    Color,
+    /// `spr_block_color_shape`
+    ColorShape,
+    /// `spr_block_shape`
+    Shape,
+    /// `spr_block`（原版 `!use_colors && !use_shapes`，只有一帧）
+    Plain,
 }
 
 /// 一行摆完所有帧的小图集。
@@ -191,6 +223,17 @@ pub struct Bank {
     tempobox: Strip,
     layerbox: Strip,
     iconbar: Strip,
+    piano: Strip,
+    block_color: Strip,
+    block_color_shape: Strip,
+    block_shape: Strip,
+    block: Strip,
+    block_sel: Strip,
+    instrumenticons: Strip,
+    numbers_mc: Strip,
+    marker: Strip,
+    back: Strip,
+    button_arrow: Strip,
 }
 
 /// 三态：0 常态、1 悬停、2 悬停且按住。
@@ -276,6 +319,17 @@ impl Bank {
             tempobox: strip("tempobox", 74, 22)?,
             layerbox: strip("layerbox", 256, 34)?,
             iconbar: strip("iconbar", 2, 30)?,
+            piano: strip("piano", 40, 121)?,
+            block_color: strip("block_color", 32, 32)?,
+            block_color_shape: strip("block_color_shape", 32, 32)?,
+            block_shape: strip("block_shape", 32, 32)?,
+            block: strip("block", 32, 32)?,
+            block_sel: strip("block_sel", 32, 32)?,
+            instrumenticons: strip("instrumenticons", 16, 16)?,
+            numbers_mc: strip("numbers_mc", 5, 7)?,
+            marker: strip("marker", 16, 15)?,
+            back: strip("back", 16, 16)?,
+            button_arrow: strip("button_arrow", 17, 18)?,
         })
     }
 
@@ -316,6 +370,47 @@ impl Bank {
         }
         let resp = resp.on_hover_text(tooltip);
         IconHit { clicked: resp.clicked(), held: state == 2 }
+    }
+
+    /// 原版 `draw_window_preferences.gml:52-68`：Fluent 首选项左上角的返回按钮。
+    /// 命中区 40×40，只有鼠标在上面才画圆角底（GameMaker `draw_roundrect` 的默认圆角半径
+    /// 10，全工程没调过 `draw_set_roundrect_size`），字形是 `spr_back`
+    /// （帧号 `fdark + 2 * 按住`），抬手即关窗。
+    pub fn back_button(&self, ui: &mut egui::Ui, at: Pos2, th: &Theme) -> bool {
+        let rect = Rect::from_min_size(at, Vec2::new(40.0, 40.0));
+        let (resp, holding) = Self::ptr(ui, rect, Id::new("prefs_back"));
+        let p = ui.painter();
+        if resp.hovered() {
+            let v = match (th.fdark, holding) {
+                (false, false) => 234, // $15395562
+                (false, true) => 238,  // $15658734
+                (true, false) => 69,   // $4539717
+                (true, true) => 88,    // $5789784
+            };
+            p.rect_filled(
+                Rect::from_min_size(at + Vec2::new(1.0, 1.0), Vec2::new(40.0, 36.0)),
+                10.0,
+                Color32::from_gray(v),
+            );
+        }
+        self.back.draw(
+            &p,
+            at + Vec2::new(14.0, 12.0),
+            usize::from(th.fdark) + 2 * usize::from(holding),
+            Color32::WHITE,
+        );
+        resp.on_hover_text("返回").clicked()
+    }
+
+    /// 原版 `draw_abutton(x, y)`：下拉框右边的箭头，17×18，
+    /// 帧号 `常态 / 悬停 / 按住 + 3 * 主题 (+ 3 * fdark)`。
+    pub fn arrow_button(&self, ui: &mut egui::Ui, at: Pos2, th: &Theme) -> bool {
+        let rect = Rect::from_min_size(at, Vec2::new(17.0, 18.0));
+        let (resp, holding) = Self::ptr(ui, rect, Id::new("prefs_arrow"));
+        let m = pointer_state(resp.hovered(), holding);
+        let frame = m + 3 * theme_index(th.kind) + 3 * usize::from(th.fdark && th.kind == ThemeKind::Fluent);
+        self.button_arrow.draw(&ui.painter(), at, frame, Color32::WHITE);
+        resp.clicked()
     }
 
     /// 原版 `draw_icon_insbox()`：音色框里的按钮。自定义音色在原版里是
@@ -536,6 +631,96 @@ impl Bank {
     pub fn icon_glyph(&self, p: &egui::Painter, at: Pos2, index: usize) {
         self.icons.draw(p, at, index, Color32::WHITE);
     }
+
+    /// 原版 `draw_piano_key` 的 `draw_sprite_ext(spr_piano, n, xx, yy, 1, 1, 0, col, a)`。
+    /// `index` 是已经加上 `sprite_offset + dark` 的绝对帧号；淡出蒙版传
+    /// `window_background` 和 `0.8 - alpha / 3`。
+    pub fn piano_key(&self, p: &egui::Painter, at: Pos2, index: usize, tint: Color32) {
+        self.piano.blit(p, at, index, Vec2::new(self.piano.fw, self.piano.fh), tint);
+    }
+
+    /// `spr_piano` 一帧的原始尺寸（40×121），调用方据此算命中区。
+    pub fn piano_key_size(&self) -> Vec2 {
+        Vec2::new(self.piano.fw, self.piano.fh)
+    }
+
+    /// 原版 `draw_block` 的方块精灵：`draw_sprite_ext(sprite, frame, xx, yy, 1, 1, 0, -1, alpha)`。
+    /// 颜色不染色（-1），只按 `alpha` 乘透明度；帧号就是乐器在列表里的下标。
+    pub fn block(&self, p: &egui::Painter, at: Pos2, set: BlockSet, frame: usize, size: Vec2, alpha: f32) {
+        let strip = match set {
+            BlockSet::Color => &self.block_color,
+            BlockSet::ColorShape => &self.block_color_shape,
+            BlockSet::Shape => &self.block_shape,
+            BlockSet::Plain => &self.block,
+        };
+        strip.blit(p, at, frame, size, alpha_tint(alpha));
+    }
+
+    /// 原版 `draw_sprite_ext(spr_block_sel, 0, xx, yy, …, salpha)`：选中叠层。
+    pub fn block_sel(&self, p: &egui::Painter, at: Pos2, size: Vec2, alpha: f32) {
+        self.block_sel.blit(p, at, 0, size, alpha_tint(alpha));
+    }
+
+    /// 原版 `draw_sprite_ext(spr_instrumenticons, index, xx + 16, yy + 16, 1, 1, 0, -1, alpha)`。
+    pub fn instrument_glyph(&self, p: &egui::Painter, at: Pos2, index: usize, size: Vec2, alpha: f32) {
+        self.instrumenticons.blit(p, at, index, size, alpha_tint(alpha));
+    }
+
+    /// 原版 `draw_icon_customins(..., large = true)` 里自定义乐器的方块图标：
+    /// 通用帧（`spr_instrumenticons` 的第 `first_custom` 帧）染色 + 两位 Minecraft 体数字
+    /// （先暗后亮，各偏 1px）。
+    pub fn custom_block_glyph(
+        &self,
+        p: &egui::Painter,
+        at: Pos2,
+        ins: usize,
+        first_custom: usize,
+        size: Vec2,
+        alpha: f32,
+    ) {
+        let display = (ins + 1) % 100;
+        let c1 = hsv(((ins * 16) % 256) as u8, 192, 255);
+        let c2 = hsv(((ins * 16) % 256) as u8, 255, 128);
+        self.instrumenticons.blit(p, at, first_custom, size, multiply(c1, alpha));
+        let dsize = Vec2::new(self.numbers_mc.fw, self.numbers_mc.fh);
+        for (d, dx) in [(display / 10, 3.0), (display % 10, 9.0)] {
+            self.numbers_mc.blit(p, at + Vec2::new(dx, 5.0), d, dsize, multiply(c2, alpha));
+            self.numbers_mc.blit(p, at + Vec2::new(dx - 1.0, 4.0), d, dsize, alpha_tint(alpha));
+        }
+    }
+
+    /// 原版 `draw_sprite_ext(spr_marker, 0/1, x, y, 1, (totalrows + 1) * 32 / 15, …)`：
+    /// 播放头是「箭头 + 一条纵向拉伸的细身」，`index` 传 0（头）或 1（身）。
+    pub fn marker(&self, p: &egui::Painter, at: Pos2, index: usize, size: Vec2, tint: Color32) {
+        self.marker.blit(p, at, index, size, tint);
+    }
+
+    /// 方块精灵的原生边长（32）。
+    pub fn block_size(&self) -> Vec2 {
+        Vec2::new(self.block_color.fw, self.block_color.fh)
+    }
+
+    /// 原版 `spr_block_color` 只有 34 帧；装机版 20 种内置乐器 + 自定义乐器的
+    /// `frame = (index - first_custom) % 18 + first_custom` 可能算到 34 以上，
+    /// 这里报告实际可用的帧数，调用方据此判断有没有画过头。
+    pub fn block_frames(&self, set: BlockSet) -> usize {
+        match set {
+            BlockSet::Color => self.block_color.count,
+            BlockSet::ColorShape => self.block_color_shape.count,
+            BlockSet::Shape => self.block_shape.count,
+            BlockSet::Plain => self.block.count,
+        }
+    }
+}
+
+/// 原版 `draw_sprite_ext(..., -1, alpha)`：不染色，只乘透明度。
+fn alpha_tint(alpha: f32) -> Color32 {
+    Color32::from_rgba_unmultiplied(255, 255, 255, (alpha.clamp(0.0, 1.0) * 255.0) as u8)
+}
+
+/// 原版 `draw_sprite_ext(..., color, alpha)`：既染色又乘透明度。
+fn multiply(c: Color32, alpha: f32) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (c.a() as f32 * alpha.clamp(0.0, 1.0)) as u8)
 }
 
 /// 挂在 `EditorState` 上的懒加载精灵缓存。

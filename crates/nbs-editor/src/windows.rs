@@ -1,7 +1,10 @@
 //! 弹窗集合：歌曲信息 / 属性 / 统计 / 首选项 / 音色 / 宏窗口 / 文件对话框 /
 //! 图层重命名 / 快捷键帮助 / 关于。原版 47 个 `w_*` 窗口状态收敛成一个枚举。
 
-use egui::{Context, RichText, Ui};
+use egui::{
+    Color32, Context, CursorIcon, FontId, Id, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui,
+    UiBuilder, Vec2,
+};
 use nbs_core::instruments::{instrument_name, INSTRUMENTS};
 use nbs_core::model::{key_name, SongMeta};
 use nbs_core::Macro;
@@ -9,7 +12,7 @@ use nbs_core::Macro;
 use crate::commands::Command;
 use crate::shortcuts::SHORTCUT_HELP;
 use crate::state::{EditorState, Flag, ModalQueue, WindowKind};
-use crate::theme::ThemeKind;
+use crate::theme::{Theme, ThemeKind};
 
 pub fn show_windows(state: &mut EditorState, ctx: &Context) {
     show_modal(state, ctx);
@@ -17,7 +20,9 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
     let mut open = true;
     let title = kind.title().to_string();
     let default_width = match kind {
-        WindowKind::Preferences | WindowKind::Shortcuts => 460.0,
+        // 原版 `draw_window(x1, y1, x1 + 500, y1 + 510)`。
+        WindowKind::Preferences => 500.0,
+        WindowKind::Shortcuts => 460.0,
         WindowKind::FileOpen | WindowKind::FileSave => 520.0,
         WindowKind::ClipEditor => 500.0,
         // 原版数据包导出窗口 550×430，两列布局。
@@ -255,73 +260,958 @@ fn statistics(state: &mut EditorState, ui: &mut Ui) {
     footer(state, ui);
 }
 
+/// 原版 `draw_window_preferences.gml`：500×510 的五页对话框
+/// （通用 / 界面 / 外观 / 访问 / 播放）。
+///
+/// 原版全程按 `x1 + K` / `y1 + N` 的绝对坐标画，这里把 `(x1, y1)` 换成 egui 窗口的
+/// 内容原点（= 原版页签条左上角），其余数字一比一照抄。源码里写成
+/// `y1 + N + (theme = 3) * 22` 的行，Fluent 落在 `N - 8`、另外三套落在 `N - 26`，
+/// 差的那 4 像素是原版页签条比 Fluent 高的部分，归 egui 的标题栏。
+///
+/// 只画真实接线的行。原版有、我们还没有对应行为的选项（启动页 / 检查更新 / 歌曲目录 /
+/// Discord / 界面音效 / 透明效果 / 取色器 / 帧率 / 窗口缩放 / 语言 / 程序图标 /
+/// 音符盒不透明 / 删除淡出 / 五线谱 / 任务栏进度 / 重置键位 / 在区间起止播放）
+/// 整行不出现，免得留下点了没反应的假控件。
 fn preferences(state: &mut EditorState, ui: &mut Ui) {
-    ui.label(RichText::new("主题").strong());
-    ui.horizontal_wrapped(|ui| {
-        for kind in ThemeKind::ALL {
-            if ui.selectable_label(state.theme.kind == kind, kind.name()).clicked() {
-                state.emit(Command::SetTheme(kind));
+    let th = state.theme.clone();
+    let fluent = th.kind == ThemeKind::Fluent;
+    let margin = ui.spacing().window_margin;
+    // 窗口外沿宽 500（原版 `draw_window(x1, y1, x1 + 500, y1 + 510)`），
+    // 内容区扣掉 egui 的窗口内边距；把原点左移一个内边距，行内 x 就能直接用原版的 K。
+    let (ml, mr) = (margin.left as f32, margin.right as f32);
+    let body = ui.allocate_exact_size(
+        egui::vec2(500.0 - ml - mr, 472.0),
+        egui::Sense::hover(),
+    );
+    // allocate_exact_size 之后 cursor 已经移到这块区域的下面，原点必须取分配到的矩形。
+    let o = body.0.min - egui::vec2(ml, 0.0);
+    let ry = if fluent { -8.0 } else { -26.0 };
+
+    // 原版 `selected_tab += keyboard_check_pressed(vk_right) - keyboard_check_pressed(vk_left)`，
+    // 出界绕到另一头。
+    let (left, right) = ui.input(|i| {
+        (
+            i.key_pressed(egui::Key::ArrowLeft),
+            i.key_pressed(egui::Key::ArrowRight),
+        )
+    });
+    if left {
+        state.prefs_tab = (state.prefs_tab + 4) % 5;
+    }
+    if right {
+        state.prefs_tab = (state.prefs_tab + 1) % 5;
+    }
+    let tab = state.prefs_tab.min(4);
+
+    let mut menu_at = Pos2::ZERO;
+    {
+        let mut pg = Page {
+            ui: &mut *ui,
+            o,
+            ry,
+            th: &th,
+            fluent,
+        };
+        if fluent {
+            // 原版只在 theme 3 画左上角返回按钮，抬手关窗。
+            if pg.back(&state.icons) {
+                state.emit(Command::CloseWindow);
             }
         }
-    });
-    ui.separator();
-    ui.label(RichText::new("显示选项").strong());
-    for flag in [
-        Flag::ShowLayers, Flag::ShowPiano,
-        Flag::UseColors, Flag::UseShapes, Flag::UseIcons,
-        Flag::ShowNumbers, Flag::ShowOctaves, Flag::ShowKeyNames,
-        Flag::ShowKeyNumbers,
-        Flag::ShowIncompatible, Flag::ShowGridLines, Flag::Flats, Flag::Blackout,
-    ] {
-        let mut v = Flag::get(flag, &state.flags);
-        if ui.checkbox(&mut v, flag.label()).changed() {
+        if !fluent {
+            // 先铺面板再画页签：原版的选中页签会压掉面板顶边那一像素。
+            pg.panel_box();
+        }
+        let tab = pg.tabs(if fluent { 40.0 } else { 8.0 }, tab);
+        state.prefs_tab = tab;
+        match tab {
+            0 => prefs_general(state, &mut pg),
+            1 => prefs_interface(state, &mut pg, &mut menu_at),
+            2 => prefs_appearance(state, &mut pg),
+            3 => prefs_usability(state, &mut pg),
+            _ => prefs_playback(state, &mut pg),
+        }
+        // 原版 `draw_button2(x1 + 420, y1 + 478, 72, "确定")`：确定 / Escape / Ctrl+P 都关窗。
+        if pg.button(420.0, 478.0, 72.0, "确定", false) {
+            state.emit(Command::CloseWindow);
+        }
+        let ctrl_p = pg.ui.input(|i| {
+            (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::P)
+        });
+        if ctrl_p {
+            state.emit(Command::CloseWindow);
+        }
+    }
+    if state.prefs_theme_menu {
+        theme_menu(state, ui, menu_at);
+    }
+}
+
+/// 原版页 0「通用」。源码这一页还有「启动」「歌曲」「Discord」三组，
+/// 我们没有欢迎页、更新检查、歌曲/片段目录和 Discord 富在位，整组不画。
+fn prefs_general(state: &mut EditorState, pg: &mut Page) {
+    pg.header(278.0, 74.0, 200.0, 85.0, "自动保存");
+    if pg.check(
+        296.0,
+        90.0,
+        state.prefs.autosave_enabled,
+        "启用自动保存",
+        "歌曲是否每过一段时间自动保存一次。",
+        true,
+        false,
+    ) {
+        state.prefs.autosave_enabled = !state.prefs.autosave_enabled;
+        state.emit(Command::SavePreferences);
+    }
+    // 原版 `if (autosave = 0)`：整行涂 c_gray(128)，数字退化成静态文本。
+    let on = state.prefs.autosave_enabled;
+    let ink = if on { pg.ink() } else { ggray(128) };
+    pg.text(pg.row(326.0, 110.0), "间隔:            分钟", PREFS_FONT, ink);
+    let tip = "自动保存中间的间隔。";
+    pg.tip_area(326.0, 110.0, 180.0, 16.0, tip);
+    let mins = state.prefs.auto_save_minutes as i32;
+    let drag = pg.drag(375.0, 110.0, mins, 1.0, 1, 60, !on, tip, &mut state.prefs_drag);
+    if let Some(mins) = drag {
+        state.prefs.auto_save_minutes = mins as u8;
+        state.emit(Command::SavePreferences);
+    }
+}
+
+/// 原版页 1「界面」：主题下拉 + 暗色 / 全黑两个开关。
+/// 同页的取色器（w_setaccent）、帧率限制、窗口缩放、语言、程序图标
+/// 都没有对应实现，不画。
+fn prefs_interface(
+    state: &mut EditorState,
+    pg: &mut Page,
+    menu_at: &mut Pos2,
+) {
+    pg.header(22.0, 74.0, 218.0, 140.0, "主题");
+    pg.frame_box(40.0, 95.0, 140.0, 115.0);
+    let name = state.theme.kind.name().to_string();
+    pg.text(pg.row(43.0, 98.0), &name, PREFS_FONT, pg.ink());
+    // 原版 `show_menu_ext("theme", x1 + 40, y1 + 74 + 16 + 21 + (theme = 3) * 22 + 5, …)`。
+    *menu_at = pg.row(40.0, 116.0);
+    // 只有右边那个箭头能开下拉；菜单开着时原版由 obj_menu 吞掉点击，这里交给提示区收起。
+    if pg.arrow(&state.icons) && !state.prefs_theme_menu {
+        state.prefs_theme_menu = true;
+    }
+    if pg.check(
+        40.0,
+        135.0,
+        state.theme.fdark,
+        "暗色模式",
+        "是否在界面上使用暗色调。\n（仅限 Fluent 主题）",
+        true,
+        state.theme.kind != ThemeKind::Fluent,
+    ) {
+        state.theme.fdark = !state.theme.fdark;
+        state.emit(Command::SavePreferences);
+    }
+    if pg.check(
+        40.0,
+        195.0,
+        state.flags.blackout,
+        "全黑模式",
+        "使背景变为纯黑色，可以用于剪辑时扣掉。",
+        true,
+        false,
+    ) {
+        state.emit(Command::ToggleFlag(Flag::Blackout));
+    }
+}
+
+/// 原版页 2「外观」：音符盒与琴键。
+/// 源码里的「音符盒不透明」(210)、「显示删除效果」(250)、
+/// 「在琴键上时显示五线谱对应音符」(410) 我们没有这三项行为，整行不画。
+fn prefs_appearance(state: &mut EditorState, pg: &mut Page) {
+    pg.header(22.0, 74.0, 456.0, 196.0, "音符盒");
+    let blocks = [
+        (90.0, Flag::UseColors, "彩色音符盒", "用音符盒颜色区分音色。"),
+        (110.0, Flag::UseIcons, "显示音色图标", "用音色图标区分音色。"),
+        (130.0, Flag::UseShapes, "音符盒形状", "用音符盒形状区分音色。"),
+        (150.0, Flag::ShowNumbers, "显示音符序号", "在音符盒上显示需要按右键次数。"),
+        (170.0, Flag::ShowOctaves, "显示八度序号", "在音符盒上显示第几八度。"),
+        (190.0, Flag::ShowIncompatible, "标记不兼容的音符盒", "在自定义音色或超出 2 八度范围的音符盒周围显示红框。"),
+        (230.0, Flag::ShowLayers, "显示每层操作区", "显示在界面左侧操作每层设定的区域。"),
+    ];
+    for (n, flag, label, tip) in blocks {
+        if pg.check(40.0, n, flag.get(&state.flags), label, tip, false, false) {
             state.emit(Command::ToggleFlag(flag));
         }
     }
-    ui.separator();
-    // 原版 `keysmax`（首选项 `keys_to_show`，20..50，默认 30）：钢琴最多画几根白键。
-    ui.horizontal(|ui| {
-        ui.label("琴键数量");
-        let mut keys = state.prefs.keys_to_show as i32;
-        if ui.add(egui::DragValue::new(&mut keys).range(20..=50)).changed() {
-            state.prefs.keys_to_show = keys.clamp(20, 50) as u8;
-            state.emit(Command::SavePreferences);
-        }
-    });
-    // 原版 `draw_window_preferences.gml` 549-552「进度条」组。原版有三种跟随模式
-    // （按页 / 按刻 / 按帧），后两种都居中，只差亚刻偏移；我们的 `follow_center`
-    // 就是「居中 + 亚刻偏移」，所以这里给两格：按页 与 居中逐帧。
-    ui.label(RichText::new("进度条").strong());
-    if ui.checkbox(&mut state.marker_follow, "播放时跟随进度条").changed() {
+
+    pg.header(22.0, 294.0, 456.0, 171.0, "琴键");
+    let piano = state.flags.show_piano;
+    if pg.check(40.0, 310.0, piano, "显示琴键", "钢琴键是否可见。", true, false) {
+        state.emit(Command::ToggleFlag(Flag::ShowPiano));
+    }
+    // 「最多显示键数」：琴键隐藏时同样退化成灰色静态数字（原版 `if (!show_piano) draw_set_color(c_gray)`）。
+    let ink = if piano { pg.ink() } else { ggray(128) };
+    pg.text(pg.row(70.0, 328.0), "最多显示键数:", PREFS_FONT, ink);
+    let tip = "同屏显示的琴键数。过多可能会在老电脑上造成卡顿。";
+    pg.tip_area(70.0, 328.0, 150.0, 21.0, tip);
+    let keys = state.prefs.keys_to_show as i32;
+    let drag = pg.drag(150.0, 328.0, keys, 2.0, 20, 50, !piano, tip, &mut state.prefs_drag);
+    if let Some(keys) = drag {
+        state.prefs.keys_to_show = keys.clamp(20, 50) as u8;
         state.emit(Command::SavePreferences);
     }
-    ui.add_enabled_ui(state.marker_follow, |ui| {
-        if ui.radio(!state.follow_center, "按页").clicked() {
-            state.follow_center = false;
+    let keys_rows = [
+        (350.0, Flag::ShowKeyNames, "显示键名", "显示琴键所对应音的名称。"),
+        (370.0, Flag::ShowKeyNumbers, "显示音符序号", "在 2 八度内的琴键上显示需要按右键次数。"),
+        (390.0, Flag::ShowKeyboard, "显示键盘键位", "在琴键上显示绑定的键盘键位。"),
+        (430.0, Flag::ShowOutOfRange, "标记超范围琴键", "是否为在 2 八度之外的琴键上标红。"),
+        (450.0, Flag::Flats, "使用降记号", "是否为键名使用降记号（b）而不是升记号（#）。"),
+    ];
+    for (n, flag, label, tip) in keys_rows {
+        if pg.check(40.0, n, flag.get(&state.flags), label, tip, false, false) {
+            state.emit(Command::ToggleFlag(flag));
+        }
+    }
+}
+
+/// 原版页 3「访问」：滚轮行为与琴键选中行为。
+/// 源码末尾的「对琴键右键可更改键位。」和「重置键位」按钮依赖键位编辑功能，
+/// 我们只有固定键位，所以这两行也不出现。
+fn prefs_usability(state: &mut EditorState, pg: &mut Page) {
+    pg.header(22.0, 74.0, 456.0, 120.0, "鼠标滚轮");
+    let wheel_rows = [
+        (90.0, 0u8, "使用鼠标滚轮移动位置", "使用鼠标滚轮横向或竖向移动编辑区域位置。"),
+        (110.0, 1, "使用鼠标滚轮改变音色", "使用鼠标滚轮切换可用音色。"),
+        (130.0, 2, "使用鼠标滚轮改变音调", "使用鼠标滚轮改变目前使用的音调。"),
+    ];
+    for (n, value, label, tip) in wheel_rows {
+        if pg.radio(40.0, n, state.prefs.mousewheel == value, label, tip, false) {
+            state.prefs.mousewheel = value;
             state.emit(Command::SavePreferences);
         }
-        if ui.radio(state.follow_center, "居中逐帧").clicked() {
-            state.follow_center = true;
+    }
+    if pg.check(
+        40.0,
+        158.0,
+        state.prefs.changepitch,
+        "当在音符上使用鼠标滚轮改变音符属性",
+        "在音符上使用鼠标滚轮时是否根据目前模式改变其音调、音量、声道或音高。",
+        false,
+        false,
+    ) {
+        state.prefs.changepitch = !state.prefs.changepitch;
+        state.emit(Command::SavePreferences);
+    }
+
+    pg.header(22.0, 220.0, 456.0, 105.0, "琴键");
+    if pg.check(
+        40.0,
+        236.0,
+        state.prefs.select_lastpressed,
+        "选择按下的键",
+        "是否选择按下的键所对应的音。",
+        false,
+        false,
+    ) {
+        state.prefs.select_lastpressed = !state.prefs.select_lastpressed;
+        state.emit(Command::SavePreferences);
+    }
+}
+
+/// 原版页 4「播放」：进度条跟随、播放开关、速度单位。
+/// 「在区间时开始播放」/「在区间后停止播放」/「启用任务栏进度」三行
+/// 我们没有区间起播和任务栏进度，整行不画。
+fn prefs_playback(state: &mut EditorState, pg: &mut Page) {
+    pg.header(22.0, 74.0, 456.0, 145.0, "进度条");
+    if pg.check(
+        40.0,
+        90.0,
+        state.marker_follow,
+        "播放时跟随进度条",
+        "播放歌曲时和进度条一起滚动。",
+        false,
+        false,
+    ) {
+        state.emit(Command::ToggleFollow);
+    }
+    // 原版 `marker_pagebypage`：1 按页 / 0 按刻 / 2 按帧，跟随关掉时三格都锁定。
+    let lock = !state.marker_follow;
+    let follow_rows = [
+        (110.0, 1u8, "按页", "跟随进度条翻页。"),
+        (130.0, 0, "按刻", "跟随进度条滚动。"),
+        (150.0, 2, "按帧", "跟随进度条逐帧滚动。"),
+    ];
+    for (n, value, label, tip) in follow_rows {
+        if pg.radio(70.0, n, state.follow_mode == value, label, tip, lock) {
+            state.follow_mode = value;
             state.emit(Command::SavePreferences);
         }
-    });
-    ui.separator();
-    ui.horizontal(|ui| {
-        ui.label("撤销栈容量");
-        let mut cap = state.doc.history.capacity() as f64;
-        if ui.add(egui::DragValue::new(&mut cap).range(16.0..=4096.0)).changed() {
-            state.doc.history.set_capacity(cap as usize);
+    }
+
+    pg.header(22.0, 244.0, 218.0, 120.0, "播放");
+    if pg.check(
+        32.0,
+        260.0,
+        state.prefs.show_layer_volumes,
+        "显示每层音量",
+        "是否显示每层的音量。",
+        false,
+        false,
+    ) {
+        state.prefs.show_layer_volumes = !state.prefs.show_layer_volumes;
+        state.emit(Command::SavePreferences);
+    }
+    if pg.check(32.0, 280.0, state.prefs.mono, "关闭立体声", "关闭立体声音效。", false, false) {
+        state.emit(Command::ToggleMono);
+    }
+    if pg.check(
+        32.0,
+        300.0,
+        state.prefs.show_sound_count,
+        "显示正在播放的声音数",
+        "在状态栏里显示正在播放的声音数。",
+        false,
+        false,
+    ) {
+        state.prefs.show_sound_count = !state.prefs.show_sound_count;
+        state.emit(Command::SavePreferences);
+    }
+    if pg.check(
+        32.0,
+        320.0,
+        state.prefs.extended_voices,
+        "提升声音限制",
+        "提升可同时播放的声音数。",
+        false,
+        false,
+    ) {
+        state.emit(Command::ToggleExtendedVoices);
+    }
+
+    pg.header(255.0, 244.0, 223.0, 60.0, "速度单位");
+    if pg.radio(265.0, 260.0, !state.prefs.use_bpm, "红石刻 / 秒 (t/s)", "使用每秒几刻显示速度。", false) {
+        state.prefs.use_bpm = false;
+        state.emit(Command::SavePreferences);
+    }
+    if pg.radio(265.0, 280.0, state.prefs.use_bpm, "拍数 / 分钟 (BPM)", "使用每分钟多少拍显示速度。", false) {
+        state.prefs.use_bpm = true;
+        state.emit(Command::SavePreferences);
+    }
+}
+
+/// 原版 `show_menu_ext("theme", …)`：主题下拉展开的那四个条目，
+/// 顺序照源码 `经典 | 暗黑 | 复古 | Fluent`。
+const THEME_MENU_ORDER: [ThemeKind; 4] = [
+    ThemeKind::Aqua,
+    ThemeKind::Dark,
+    ThemeKind::Retro,
+    ThemeKind::Fluent,
+];
+
+fn theme_menu(state: &mut EditorState, ui: &Ui, at: Pos2) {
+    let ctx = ui.ctx();
+    // 原版 `obj_menu`：菜单开着时全屏吞输入，点哪儿都只用来收起。
+    let dismissed = egui::Area::new(Id::new("prefs_menu_blocker"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(Pos2::ZERO)
+        .show(ctx, |ui| ui.allocate_rect(ctx.screen_rect(), Sense::click()).clicked())
+        .inner;
+    let mut picked: Option<ThemeKind> = None;
+    egui::Area::new(Id::new("prefs_theme_menu"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(at)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(98.0);
+                for kind in THEME_MENU_ORDER {
+                    let sel = state.theme.kind == kind;
+                    let label = format!("{} {}", if sel { "\u{2713}" } else { " " }, kind.name());
+                    if ui.selectable_label(sel, label).clicked() {
+                        picked = Some(kind);
+                    }
+                }
+            });
+        });
+    if let Some(kind) = picked {
+        state.emit(Command::SetTheme(kind));
+    }
+    if picked.is_some() || dismissed {
+        state.prefs_theme_menu = false;
+    }
+}
+
+/// 原版 `fnt_main` 9 像素（正文）和 `fnt_info_med` 11 像素（Fluent 的分组标题与页签）。
+const PREFS_FONT: f32 = 9.0;
+const PREFS_FONT_MED: f32 = 11.0;
+
+/// GameMaker 的灰阶常量 `make_color_rgb(v, v, v)`。
+const fn ggray(v: u8) -> Color32 {
+    Color32::from_rgb(v, v, v)
+}
+
+/// 首选项页面的绝对坐标绘制器。原版的 `draw_checkbox` / `draw_radiobox` /
+/// `draw_button2` / `draw_areaheader` / `draw_area` / `draw_dragvalue` 各自只有
+/// 一处调用形态，这里一一对应成方法，常量和圆角全部照抄源码。
+struct Page<'a> {
+    ui: &'a mut Ui,
+    /// 内容原点，相当于原版的 `(x1, y1 + 30)`（Fluent）/ `(x1, y1 + 26)`（其余主题）。
+    o: Pos2,
+    /// 行号换算：原版 `y1 + N + (theme = 3) * 22` → `N + ry`。
+    ry: f32,
+    th: &'a Theme,
+    fluent: bool,
+}
+
+impl<'a> Page<'a> {
+    /// 不带主题行偏移的绝对位置（页签条、返回按钮这一类）。
+    fn at(&self, x: f32, y: f32) -> Pos2 {
+        self.o + Vec2::new(x, y)
+    }
+
+    /// 一行控件的左上角，`n` 是源码里 `y1 +` 后面的那个数。
+    fn row(&self, x: f32, n: f32) -> Pos2 {
+        self.at(x, n + self.ry)
+    }
+
+    /// 原版 GameMaker 的矩形写法：`(x1, y1)` 到 `(x2, y2)`，宽高取两端之差。
+    fn row_rect(&self, x1: f32, n1: f32, x2: f32, n2: f32) -> Rect {
+        Rect::from_min_max(self.row(x1, n1), self.row(x2, n2))
+    }
+
+    fn ink(&self) -> Color32 {
+        self.th.text
+    }
+
+    /// 原版 `string_width_dynamic`。
+    fn measure(&self, s: &str, font: f32) -> f32 {
+        self.ui
+            .painter()
+            .layout_no_wrap(s.to_string(), FontId::proportional(font), self.ink())
+            .size()
+            .x
+    }
+
+    /// 原版 `draw_text_dynamic`：左上角对齐，返回宽度好接着排版。
+    fn text(&self, at: Pos2, s: &str, font: f32, color: Color32) -> f32 {
+        let p = self.ui.painter().clone();
+        let g = p.layout_no_wrap(s.to_string(), FontId::proportional(font), color);
+        let w = g.size().x;
+        p.galley(at, g, Color32::BLACK);
+        w
+    }
+
+    /// 原版 `mouse_rectangle` + `m += mouse_check_button(左)`：0 = 不在，1 = 悬停，
+    /// 2 = 悬停且按住；`Response::clicked` 就是原版的「在本框内抬手」。
+    /// 锁定行不给点击，只留悬停好挂提示。
+    fn hit(&self, rect: Rect, id: Id, lock: bool) -> (egui::Response, usize) {
+        let sense = if lock { Sense::hover() } else { Sense::click() };
+        let resp = self.ui.interact(rect, id, sense);
+        if lock {
+            return (resp, 0);
         }
-    });
-    ui.separator();
-    ui.horizontal_wrapped(|ui| {
-        if ui.button("音频与采样设置…").clicked() { state.emit(Command::ShowWindow(WindowKind::AudioSettings)); }
-        if ui.button("音频导出设置…").clicked() { state.emit(Command::ShowWindow(WindowKind::AudioExport)); }
-        if ui.button("自动保存 / 备份…").clicked() { state.emit(Command::ShowWindow(WindowKind::Autosaves)); }
-        if ui.button("保存偏好").clicked() { state.emit(Command::SavePreferences); }
-    });
-    ui.label(RichText::new("主题、显示开关、音频参数、最近文件自动写入用户配置目录的 prefs.json").small().weak());
-    footer(state, ui);
+        let held = resp.hovered() && self.ui.input(|i| i.pointer.any_down());
+        let m = if held {
+            2
+        } else if resp.hovered() {
+            1
+        } else {
+            0
+        };
+        (resp, m)
+    }
+
+    /// 原版 `draw_areaheader(x, y, w, h, str)`。Fluent 只剩一行 11 像素文字
+    /// （`case 3:` 只设了颜色，`draw_rectangle` 那行条件是 `theme != 3`，都不执行）；
+    /// 主题 0 是 (213,223,229) 的实心圆角框，主题 1/2 是 `draw_frame` 立体框。
+    /// 三套旧主题都在标题左上角挖一块底衬色（白 / (212,208,200) / c_dark）。
+    /// `draw_frame` 依赖 `spr_interface4` 九宫格，这张图我们没导出，非 Fluent 用 1 像素边框近似。
+    fn header(&self, x: f32, n: f32, w: f32, h: f32, label: &str) {
+        let font = if self.fluent { PREFS_FONT_MED } else { PREFS_FONT };
+        if !self.fluent {
+            let p = self.ui.painter().clone();
+            let rect = Rect::from_min_size(self.row(x, n), Vec2::new(w, h));
+            match self.th.kind {
+                // `draw_roundrect` 的第五个参数是「要不要圆角」，画的是填充，线宽不影响它。
+                // 圆角半径取 GameMaker 的默认值 10（全工程没调过 `draw_set_roundrect_size`）。
+                ThemeKind::Aqua => {
+                    p.rect_filled(rect, 10.0, Color32::from_rgb(213, 223, 229));
+                }
+                ThemeKind::Retro | ThemeKind::Dark => {
+                    p.rect_stroke(rect, 2.0, Stroke::new(1.0_f32, self.th.border), StrokeKind::Inside);
+                }
+                ThemeKind::Fluent => {}
+            }
+            let notch = match self.th.kind {
+                ThemeKind::Aqua => Color32::WHITE,
+                ThemeKind::Retro => Color32::from_rgb(212, 208, 200),
+                _ => self.th.window_bg,
+            };
+            let tw = self.measure(label, font);
+            p.rect_filled(
+                Rect::from_min_size(self.row(x + 12.0, n - 6.0), Vec2::new(tw + 6.0, 12.0)),
+                0.0,
+                notch,
+            );
+        }
+        self.text(self.row(x + 16.0, n - 6.0), label, font, self.ink());
+    }
+
+    /// 原版 `draw_area(x1, y1, x2, y2)`：下拉框那一圈。Fluent 是 2 像素圆角描边
+    /// （light 165 / fdark 182），其余主题是 `spr_interface1` 九宫格（同样没导出，用主题描边）。
+    fn frame_box(&self, x1: f32, n1: f32, x2: f32, n2: f32) {
+        let rect = self.row_rect(x1, n1, x2 - 2.0, n2 - 2.0);
+        let (line, r) = if self.fluent {
+            (if self.th.fdark { ggray(182) } else { ggray(165) }, 2.0)
+        } else {
+            (self.th.border, 0.0)
+        };
+        self.ui
+            .painter()
+            .rect_stroke(rect, r, Stroke::new(1.0_f32, line), StrokeKind::Inside);
+    }
+
+    /// 非 Fluent 主题那一整块面板：原版
+    /// `draw_rectangle(x1+6, y1+46, x1+494, y1+472)` 铺底 + (137,140,149) 描边，
+    /// 主题 0 再套一层 (213,223,229) 圆角框。
+    fn panel_box(&self) {
+        let p = self.ui.painter().clone();
+        let rect = Rect::from_min_max(self.at(6.0, 20.0), self.at(494.0, 446.0));
+        let fill = if self.th.kind == ThemeKind::Dark {
+            self.th.window_bg
+        } else {
+            Color32::WHITE
+        };
+        p.rect_filled(rect, 0.0, fill);
+        p.rect_stroke(
+            rect,
+            0.0,
+            Stroke::new(1.0_f32, Color32::from_rgb(137, 140, 149)),
+            StrokeKind::Inside,
+        );
+        if self.th.kind == ThemeKind::Aqua {
+            p.rect_stroke(
+                Rect::from_min_max(self.at(10.0, 24.0), self.at(490.0, 442.0)),
+                10.0,
+                Stroke::new(1.0_f32, Color32::from_rgb(213, 223, 229)),
+                StrokeKind::Inside,
+            );
+        }
+    }
+
+    /// 原版页签条。Fluent：文字 `(b+6, 13)`，选中项下面画 `spr_tabsel`
+    /// （实测 14×3 的圆条，水平居中于文字）；其余主题：`(b+6, 4)`，选中项是
+    /// 一块压住面板线的矩形（原版 `spr_tabbuttons`，没导出，按同尺寸矩形近似）。
+    fn tabs(&mut self, b0: f32, tab: u8) -> u8 {
+        const LABELS: [&str; 5] = ["通用", "界面", "外观", "访问", "播放"];
+        let font = if self.fluent { PREFS_FONT_MED } else { PREFS_FONT };
+        let mut nsel = tab;
+        let mut b = b0;
+        for (i, name) in LABELS.iter().enumerate() {
+            let tw = self.measure(name, font);
+            let (hy, hh) = if self.fluent { (0.0, 39.0) } else { (2.0, 18.0) };
+            let rect = Rect::from_min_size(self.at(b, hy), Vec2::new(tw + 12.0, hh));
+            let resp = self.ui.interact(rect, Id::new(("prefs-tab", i)), Sense::click());
+            let sel = i as u8 == tab;
+            // 原版选中页签的文字比未选中高两像素（`y1 + 28` 对 `y1 + 30`）。
+            let ty = match (self.fluent, sel) {
+                (true, _) => 13.0,
+                (false, true) => 2.0,
+                (false, false) => 4.0,
+            };
+            let held = resp.hovered() && self.ui.input(|i| i.pointer.any_down());
+            let ink = if !self.fluent {
+                self.ink()
+            } else if held || (resp.hovered() && sel) {
+                match (sel, self.th.fdark) {
+                    (true, false) => ggray(152),
+                    (true, true) => ggray(163),
+                    (false, false) => ggray(116),
+                    (false, true) => ggray(176),
+                }
+            } else if self.th.fdark {
+                Color32::WHITE
+            } else {
+                Color32::BLACK
+            };
+            if sel {
+                let p = self.ui.painter().clone();
+                if self.fluent {
+                    p.rect_filled(
+                        Rect::from_min_size(self.at(b + tw / 2.0 - 1.0, 33.0), Vec2::new(14.0, 3.0)),
+                        1.5,
+                        self.th.accent,
+                    );
+                } else {
+                    // 原版：填一块 (stabx, 26)-(stabx+stabw, 46) 的白底（主题 2 用 c_dark），
+                    // 描 (137,140,149) 一圈，再把面板顶线在页签正下方那一段擦掉，
+                    // 让选中的页签和面板连成一片。
+                    let fill = if self.th.kind == ThemeKind::Dark {
+                        self.th.window_bg
+                    } else {
+                        Color32::WHITE
+                    };
+                    let body = Rect::from_min_size(self.at(b - 2.0, 0.0), Vec2::new(tw + 15.0, 20.0));
+                    let line = Rect::from_min_size(self.at(b - 2.0, 0.0), Vec2::new(tw + 15.0, 21.0));
+                    p.rect_filled(body, 0.0, fill);
+                    p.rect_stroke(
+                        line,
+                        0.0,
+                        Stroke::new(1.0_f32, Color32::from_rgb(137, 140, 149)),
+                        StrokeKind::Inside,
+                    );
+                    p.rect_filled(
+                        Rect::from_min_size(self.at(b - 1.0, 20.0), Vec2::new(tw + 13.0, 1.0)),
+                        0.0,
+                        fill,
+                    );
+                }
+            }
+            self.text(self.at(b + 6.0, ty), name, font, ink);
+            if resp.clicked() {
+                nsel = i as u8;
+            }
+            b += tw + 12.0;
+        }
+        nsel
+    }
+
+    /// 原版 `draw_checkbox(x, y, expr, str, tip[, lock[, is_switch]])`。
+    /// Fluent 照 `draw_checkbox.gml` 的常量手绘方框 / 胶囊开关；
+    /// 其余三套主题原版画的是 `spr_checkbox` / `spr_switch` 贴图（没导出），
+    /// 所以退回 egui 原生复选框摆在同一行坐标上。
+    fn check(&mut self, x: f32, n: f32, on: bool, label: &str, tip: &str, switch: bool, lock: bool) -> bool {
+        let tw = self.measure(label, PREFS_FONT);
+        let id = Id::new(("prefs-check", x as i32, n as i32, label));
+        if !self.fluent {
+            return self.legacy_check(x, n, on, label, lock, tw);
+        }
+        let at = self.row(x, n);
+        let (resp, m) = self.hit(Rect::from_min_size(at, Vec2::new(26.0 + tw + 8.0, 13.0)), id, lock);
+        let fdark = self.th.fdark;
+        let acc = Theme::accent_at(5 + if m == 1 { 2 } else { 0 } + if m == 2 { 3 } else { 0 });
+        let fill = if on && !lock {
+            acc
+        } else if on {
+            if fdark {
+                ggray(51)
+            } else if switch {
+                ggray(227)
+            } else {
+                ggray(136)
+            }
+        } else if lock {
+            if fdark {
+                ggray(0)
+            } else {
+                ggray(243)
+            }
+        } else if fdark {
+            ggray([32, 42, 48][m])
+        } else {
+            ggray([243, 229, 220][m])
+        };
+        let p = self.ui.painter().clone();
+        if switch {
+            p.rect_filled(
+                Rect::from_min_size(at + Vec2::new(-1.0, -1.0), Vec2::new(26.0, 13.0)),
+                12.0,
+                fill,
+            );
+            if !on {
+                let line = if fdark {
+                    if lock { ggray(56) } else { ggray(204) }
+                } else if lock {
+                    ggray(199)
+                } else {
+                    ggray(51)
+                };
+                p.rect_stroke(
+                    Rect::from_min_size(at, Vec2::new(24.0, 11.0)),
+                    6.0,
+                    Stroke::new(1.0_f32, line),
+                    StrokeKind::Inside,
+                );
+            }
+            let knob_fill = match (on, lock, fdark) {
+                (true, false, false) => ggray(243),
+                (true, false, true) => ggray(32),
+                (true, true, false) => ggray(204),
+                (true, true, true) => ggray(76),
+                (false, false, false) => ggray(51),
+                (false, false, true) => ggray(204),
+                (false, true, false) => ggray(199),
+                (false, true, true) => ggray(56),
+            };
+            let (kx, ky) = if on {
+                (at.x + 15.0 - if m == 2 && !lock { 1.0 } else { 0.0 }, at.y + if lock { 3.0 } else { 2.0 })
+            } else {
+                (at.x + 2.0, at.y + 2.0)
+            };
+            let kw = if on { 7.0 } else { 7.0 + if m == 2 && !lock { 1.0 } else { 0.0 } };
+            p.rect_filled(Rect::from_min_size(Pos2::new(kx, ky), Vec2::new(kw, 7.0)), 12.0, knob_fill);
+        } else {
+            let box_rect = Rect::from_min_size(at + Vec2::new(-1.0, -1.0), Vec2::new(13.0, 13.0));
+            p.rect_filled(box_rect, 4.0, fill);
+            if !on {
+                let line = if fdark {
+                    if lock {
+                        ggray(56)
+                    } else {
+                        ggray(if m == 2 { 76 } else { 153 })
+                    }
+                } else if lock {
+                    ggray(204)
+                } else {
+                    ggray(if m == 2 { 178 } else { 136 })
+                };
+                p.rect_stroke(box_rect, 2.0, Stroke::new(1.0_f32, line), StrokeKind::Inside);
+            } else {
+                let mark = match (lock, fdark) {
+                    (false, false) => ggray(243),
+                    (false, true) => ggray(32),
+                    (true, false) => Color32::WHITE,
+                    (true, true) => Color32::BLACK,
+                };
+                let s = Stroke::new(1.0_f32, mark);
+                p.line_segment([at + Vec2::new(2.0, 5.0), at + Vec2::new(4.0, 8.0)], s);
+                p.line_segment([at + Vec2::new(4.0, 8.0), at + Vec2::new(9.0, 3.0)], s);
+            }
+        }
+        self.text(
+            at + Vec2::new(if switch { 31.0 } else { 18.0 }, -1.0),
+            label,
+            PREFS_FONT,
+            if lock { ggray(204) } else { self.ink() },
+        );
+        resp.on_hover_text(tip).clicked()
+    }
+
+    /// 原版 `draw_radiobox(x, y, expr, str, tip[, lock])`，同上的 Fluent 手绘 /
+    /// 其余主题退回原生单选框。
+    fn radio(&mut self, x: f32, n: f32, on: bool, label: &str, tip: &str, lock: bool) -> bool {
+        let tw = self.measure(label, PREFS_FONT);
+        let id = Id::new(("prefs-radio", x as i32, n as i32, label));
+        if !self.fluent {
+            return self.legacy_radio(x, n, on, label, lock);
+        }
+        let at = self.row(x, n);
+        let (resp, m) = self.hit(Rect::from_min_size(at, Vec2::new(12.0 + tw + 8.0, 12.0)), id, lock);
+        let fdark = self.th.fdark;
+        let c = at + Vec2::new(5.0, 6.0);
+        let p = self.ui.painter().clone();
+        let fill = match (lock, on) {
+            (false, true) => Theme::accent_at(5),
+            (false, false) if fdark => ggray([32, 42, 42][m]),
+            (false, false) => ggray([243, 229, 229][m]),
+            (true, true) if fdark => ggray(119),
+            (true, true) => ggray(136),
+            (true, false) if fdark => ggray(0),
+            (true, false) => ggray(243),
+        };
+        p.circle_filled(c, 6.0, fill);
+        if !on || lock {
+            let line = match (lock, on, fdark) {
+                (false, _, false) => ggray(136),
+                (false, _, true) => ggray(119),
+                (true, true, false) => ggray(136),
+                (true, true, true) => ggray(119),
+                (true, false, false) => ggray(204),
+                (true, false, true) => ggray(51),
+            };
+            p.circle_stroke(c, 6.0, Stroke::new(1.0_f32, line));
+        }
+        if !lock && (m == 2 || on) || lock && on {
+            // 锁定态的圆点是另一套色（源码在 `lock = 1` 分支里单独设 255 / 0）。
+            let dot = if lock {
+                if fdark {
+                    ggray(0)
+                } else {
+                    Color32::WHITE
+                }
+            } else if on {
+                if fdark {
+                    ggray(32)
+                } else {
+                    ggray(229)
+                }
+            } else if fdark {
+                ggray(0)
+            } else {
+                ggray(243)
+            };
+            let r = if lock { 3.0 } else { 3.0 + if m == 1 && on { 1.0 } else { 0.0 } };
+            p.circle_filled(c, r, dot);
+        }
+        self.text(at + Vec2::new(18.0, -1.0), label, PREFS_FONT, if lock { ggray(204) } else { self.ink() });
+        resp.on_hover_text(tip).clicked()
+    }
+
+    /// 原版 `draw_button2(x, y, w, str[, lock])`。Fluent 是强调色圆角矩形，
+    /// 其余三套是 `spr_button` 九宫格（没导出），退回 egui 原生按钮。
+    fn button(&mut self, x: f32, n: f32, w: f32, label: &str, lock: bool) -> bool {
+        let id = Id::new(("prefs-btn", x as i32, n as i32, label));
+        if !self.fluent {
+            return self.legacy_row(x, n, w, id, lock, |ui| {
+                ui.add_sized([w, 21.0], egui::Button::new(label)).clicked()
+            });
+        }
+        let at = self.row(x, n);
+        let (resp, m) = self.hit(Rect::from_min_size(at, Vec2::new(w, 23.0)), id, lock);
+        let body = Rect::from_min_size(at, Vec2::new(w - 2.0, 21.0));
+        let p = self.ui.painter().clone();
+        let (fill, line) = if lock {
+            if self.th.fdark {
+                (ggray(72), ggray(80))
+            } else {
+                (ggray(248), ggray(238))
+            }
+        } else {
+            (
+                Theme::accent_at(5 - m),
+                Theme::accent_at([4, 5, 3][m]),
+            )
+        };
+        p.rect_filled(body, 4.0, fill);
+        p.rect_stroke(body, 4.0, Stroke::new(1.0_f32, line), StrokeKind::Inside);
+        let ink = if lock {
+            ggray(127)
+        } else if self.th.fdark {
+            Color32::BLACK
+        } else {
+            Color32::WHITE
+        };
+        let push = if m == 2 { 1.0 } else { 0.0 };
+        let g = p.layout_no_wrap(label.to_string(), FontId::proportional(PREFS_FONT), ink);
+        let tx = body.center().x - g.size().x / 2.0 + push;
+        p.galley(Pos2::new(tx, at.y + 4.0 + push), g, Color32::BLACK);
+        resp.clicked()
+    }
+
+    /// 原版 `draw_dragvalue(id, x, y, val, sens)`：就是一行纯文本数字，
+    /// 命中区放大一圈（`x-8, y-4, 宽+16, 高+4`），光标变上下箭头，
+    /// 按住竖向拖：`累加器 += 0.1 * 向上位移 / sens`，满 1 才进一位。
+    /// `lock` 对应原版调用点在开关关掉时改用 `draw_text_dynamic` 画静态数字：
+    /// 数字和左边的标题一起涂成 c_gray(128)，并且不再响应拖动（提示仍然给）。
+    fn drag(
+        &mut self,
+        x: f32,
+        n: f32,
+        val: i32,
+        sens: f32,
+        min: i32,
+        max: i32,
+        lock: bool,
+        tip: &str,
+        accum: &mut f32,
+    ) -> Option<i32> {
+        let at = self.row(x, n);
+        let ink = if lock { ggray(128) } else { self.ink() };
+        let p = self.ui.painter().clone();
+        let g = p.layout_no_wrap(val.to_string(), FontId::proportional(PREFS_FONT), ink);
+        let size = g.size();
+        let rect = Rect::from_min_size(at + Vec2::new(-8.0, -4.0), Vec2::new(size.x + 16.0, size.y + 4.0));
+        let sense = if lock { Sense::hover() } else { Sense::drag() };
+        let resp = self
+            .ui
+            .interact(rect, Id::new(("prefs-drag", x as i32, n as i32)), sense)
+            .on_hover_cursor(CursorIcon::ResizeNorth)
+            .on_hover_text(tip);
+        p.galley(at, g, Color32::BLACK);
+        let mut out = None;
+        if resp.drag_started() {
+            *accum = 0.0;
+        }
+        if resp.dragged() {
+            *accum += 0.1 * -resp.drag_delta().y / sens;
+            let step = accum.floor();
+            if step != 0.0 {
+                *accum -= step;
+                out = Some((val + step as i32).clamp(min, max));
+            }
+        }
+        out
+    }
+
+    /// 原版 `popup_set_window(x, y, w, h, str)`：一块只用来挂悬停提示的透明命中区。
+    /// 先注册它、再注册里面的控件，提示范围就是原版那一块，而控件仍拿得到自己的悬停。
+    fn tip_area(&mut self, x: f32, n: f32, w: f32, h: f32, tip: &str) {
+        if tip.is_empty() {
+            return;
+        }
+        let rect = Rect::from_min_size(self.row(x, n), Vec2::new(w, h));
+        // 0.31 里 `Ui::interact` 已标 deprecated，但它是唯一能「指定 Id + 只响应悬停 +
+        // 不占用布局」的入口；`put` 要求闭包控件，会改掉命中区的 id 语义。
+        #[allow(deprecated)]
+        {
+            let id = Id::new(("prefs-tip", x as i32, n as i32, tip));
+            self.ui
+                .interact(rect, id, Sense::hover())
+                .on_hover_text(tip);
+        }
+    }
+
+    /// 原版 `draw_abutton(x1 + 123, y1 + 96)`：主题下拉框右边的箭头（`spr_button_arrow`）。
+    /// 精灵图找不到时画一个同位置的三角形，仍接同一个开关——不能留个看不见的热点。
+    fn arrow(&mut self, icons: &crate::icons::Icons) -> bool {
+        let at = self.row(123.0, 96.0);
+        match icons.bank() {
+            Some(b) => b.arrow_button(self.ui, at, self.th),
+            None => {
+                let rect = Rect::from_min_size(at, Vec2::new(17.0, 18.0));
+                let ink = self.ink();
+                let p = self.ui.painter().clone();
+                p.add(egui::Shape::convex_polygon(
+                    vec![at + Vec2::new(4.0, 7.0), at + Vec2::new(13.0, 7.0), at + Vec2::new(8.5, 12.5)],
+                    ink,
+                    Stroke::NONE,
+                ));
+                self.ui.allocate_rect(rect, Sense::click()).clicked()
+            }
+        }
+    }
+
+    /// 原版 Fluent 首选项左上角的返回按钮（`spr_back`，40×40 命中区，抬手关窗）。
+    fn back(&mut self, icons: &crate::icons::Icons) -> bool {
+        let at = self.at(0.0, 0.0);
+        match icons.bank() {
+            Some(b) => b.back_button(self.ui, at, self.th),
+            None => {
+                let rect = Rect::from_min_size(at, Vec2::new(40.0, 40.0));
+                let ink = self.ink();
+                let p = self.ui.painter().clone();
+                p.add(egui::Shape::convex_polygon(
+                    vec![at + Vec2::new(23.0, 13.0), at + Vec2::new(23.0, 27.0), at + Vec2::new(15.0, 20.0)],
+                    ink,
+                    Stroke::NONE,
+                ));
+                self.ui.allocate_rect(rect, Sense::click()).clicked()
+            }
+        }
+    }
+
+    /// 非 Fluent 主题的一行：原版这里画的是精灵图（`spr_checkbox` / `spr_radiobox` /
+    /// `spr_button` 我们都没导出），所以交给 egui 原生控件，坐标仍是原版坐标。
+    /// 锁定的行走 `set_enabled(false)`，灰掉且不回报改动。
+    fn legacy_row(&mut self, x: f32, n: f32, w: f32, id: Id, lock: bool, add: impl FnOnce(&mut Ui) -> bool) -> bool {
+        let rect = Rect::from_min_size(self.row(x, n), Vec2::new(w, 20.0));
+        self.ui
+            .allocate_new_ui(UiBuilder::new().id_salt(id).max_rect(rect), |ui| {
+                ui.spacing_mut().item_spacing = Vec2::ZERO;
+                ui.add_enabled_ui(!lock, |ui| add(ui)).inner
+            })
+            .inner
+    }
+
+    fn legacy_check(&mut self, x: f32, n: f32, on: bool, label: &str, lock: bool, tw: f32) -> bool {
+        let id = Id::new(("prefs-check", x as i32, n as i32, label));
+        self.legacy_row(x, n, 18.0 + tw + 8.0, id, lock, |ui| {
+            let mut v = on;
+            ui.checkbox(&mut v, label).changed()
+        })
+    }
+
+    fn legacy_radio(&mut self, x: f32, n: f32, on: bool, label: &str, lock: bool) -> bool {
+        let id = Id::new(("prefs-radio", x as i32, n as i32, label));
+        self.legacy_row(x, n - 3.0, 18.0 + self.measure(label, PREFS_FONT) + 24.0, id, lock, |ui| {
+            ui.radio(on, label).clicked() && !on
+        })
+    }
 }
 
 fn instruments_window(state: &mut EditorState, ui: &mut Ui) {
@@ -687,34 +1577,7 @@ fn audio_settings_window(state: &mut EditorState, ui: &mut Ui) {
     if ui.checkbox(&mut metronome, "节拍器（每 4 tick）").changed() {
         state.emit(Command::ToggleMetronome);
     }
-    // 以下四格对应原版 `draw_window_preferences.gml` 558-562「播放」组里的四个开关。
-    let mut mono = state.prefs.mono;
-    if ui.checkbox(&mut mono, "关闭立体声").changed() {
-        state.emit(Command::ToggleMono);
-    }
-    let mut layer_vol = state.prefs.show_layer_volumes;
-    if ui.checkbox(&mut layer_vol, "显示每层音量").changed() {
-        state.prefs.show_layer_volumes = layer_vol;
-        state.emit(Command::SavePreferences);
-    }
-    let mut soundcount = state.prefs.show_sound_count;
-    if ui.checkbox(&mut soundcount, "显示正在播放的声音数").changed() {
-        state.prefs.show_sound_count = soundcount;
-        state.emit(Command::SavePreferences);
-    }
-    let mut extended = state.prefs.extended_voices;
-    if ui.checkbox(&mut extended, "提升声音限制（1024 voices）").changed() {
-        state.emit(Command::ToggleExtendedVoices);
-    }
-    ui.separator();
-    ui.label(RichText::new("速度单位").strong());
-    let mut bpm = state.prefs.use_bpm;
-    ui.radio_value(&mut bpm, false, "红石刻 / 秒 (t/s)");
-    ui.radio_value(&mut bpm, true, "拍数 / 分钟 (BPM)");
-    if bpm != state.prefs.use_bpm {
-        state.prefs.use_bpm = bpm;
-        state.emit(Command::SavePreferences);
-    }
+    // 「播放」那四个开关和速度单位属于首选项的播放页，这里不重复一份。
     ui.separator();
     ui.label("内置采样目录（留空 = 自动搜索）");
     let mut dir = state.prefs.sounds_dir.clone().unwrap_or_default();
