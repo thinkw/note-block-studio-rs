@@ -15,18 +15,24 @@ use egui::{Pos2, Rect, Shape, Vec2};
 const W: f32 = 1440.0;
 const H: f32 = 900.0;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Item {
     kind: &'static str,
     x: f32,
     y: f32,
     w: f32,
     h: f32,
+    /// 只有文字形状有内容，用来确认「画的是原版那几个字」而不是随便一个控件。
+    label: String,
 }
 
 impl Item {
     fn new(kind: &'static str, r: Rect) -> Self {
-        Self { kind, x: r.min.x, y: r.min.y, w: r.width(), h: r.height() }
+        Self { kind, x: r.min.x, y: r.min.y, w: r.width(), h: r.height(), label: String::new() }
+    }
+
+    fn text(pos: Pos2, label: String) -> Self {
+        Self { kind: "文字", x: pos.x, y: pos.y, w: 0.0, h: 0.0, label }
     }
 }
 
@@ -43,7 +49,7 @@ fn walk(shape: &Shape, out: &mut Vec<Item>) {
             }
         }
         Shape::Rect(r) => out.push(Item::new("矩形", r.rect)),
-        Shape::Text(t) => out.push(Item::new("文字", Rect::from_min_size(t.pos, Vec2::new(0.0, 0.0)))),
+        Shape::Text(t) => out.push(Item::text(t.pos, t.galley.text().to_string())),
         Shape::Vec(list) => {
             for s in list {
                 walk(s, out);
@@ -206,6 +212,58 @@ fn report(mode: &str) {
     match items.iter().filter(|i| i.kind == "文字" && i.y > 870.0).map(|i| i.y).reduce(f32::min) {
         Some(y) => mark(near(y, 882.0), "状态栏文字顶 y", &format!("{y:.1}"), "882.0 (rh-18)"),
         None => mark(false, "状态栏文字顶 y", "未找到", "882.0 (rh-18)"),
+    }
+    // 钢琴：原版 `draw_piano` 的键宽固定 39px，整排水平居中，靠边缘自动平移翻页。
+    if mode == "no_piano" {
+        println!("SKIP 钢琴            原版 `if (show_piano)` 收起时整块不画");
+    } else {
+        // 1440 宽：keysshow = min(30, floor((1440-32)/39)) = 30，左端 x = floor((1440-1170)/2) = 135，
+        // 面板顶 = 900 - 状态栏 24 - 钢琴 130 = 746；默认 startkey = 27 - 15 = 12。
+        let (keys, x0, key_y) = (30usize, 135.0f32, 746.0f32);
+        let mut wx: Vec<f32> = items
+            .iter()
+            .filter(|i| i.kind == "矩形" && near(i.w, 39.0) && near(i.h, 121.0) && near(i.y, key_y))
+            .map(|i| i.x)
+            .collect();
+        wx.sort_by(f32::total_cmp);
+        wx.dedup();
+        let step_ok = wx.windows(2).all(|p| (p[1] - p[0] - 39.0).abs() < 0.6);
+        mark(
+            wx.len() == keys && step_ok,
+            "白键",
+            &format!("{} 根 x {:.0}..{:.0} 步进 {:.0}", wx.len(), wx.first().copied().unwrap_or(0.0), wx.last().copied().unwrap_or(0.0), if wx.len() > 1 { wx[1] - wx[0] } else { 0.0 }),
+            &format!("{keys} 根 39×121 x {x0:.0}..{:.0} 步进 39", x0 + (keys as f32 - 1.0) * 39.0),
+        );
+        let mut bx: Vec<f32> = items
+            .iter()
+            .filter(|i| i.kind == "矩形" && near(i.w, 25.0) && near(i.h, 71.0) && near(i.y, key_y - 7.0))
+            .map(|i| i.x)
+            .collect();
+        bx.sort_by(f32::total_cmp);
+        bx.dedup();
+        mark(
+            bx.len() == 21,
+            "黑键",
+            &format!("{} 根 顶 y={:.0}", bx.len(), key_y - 7.0),
+            "21 根 25×71 顶 y=739（startkey 12 时有 8 根白键左侧无黑键）",
+        );
+        let names: Vec<&str> = items
+            .iter()
+            .filter(|i| i.kind == "文字" && i.y > 780.0 && i.y < 870.0 && i.label.chars().next().map_or(false, |c| c.is_ascii_alphabetic()))
+            .map(|i| i.label.as_str())
+            .collect();
+        mark(
+            names.first().copied() == Some("F2") && names.last().copied() == Some("G6"),
+            "琴键音名",
+            &format!("{} .. {}（{} 个）", names.first().copied().unwrap_or("?"), names.last().copied().unwrap_or("?"), names.len()),
+            "F2 .. G6（startkey 12、keysshow 30 的最左 / 最右白键）",
+        );
+        let arrows: Vec<&str> = items
+            .iter()
+            .filter(|i| i.kind == "文字" && (i.label == "<" || i.label == ">" || i.label == "◀" || i.label == "▶"))
+            .map(|i| i.label.as_str())
+            .collect();
+        mark(arrows.is_empty(), "翻页按钮", &format!("{arrows:?}"), "无（原版没有，靠边缘自动平移）");
     }
     if mode == "dump" {
         println!("--- 全部形状（按 y、x 排序）---");

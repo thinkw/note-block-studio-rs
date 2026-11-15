@@ -37,6 +37,10 @@ pub struct Preferences {
     pub show_numbers: bool,
     pub show_octaves: bool,
     pub show_keynames: bool,
+    /// 原版 `show_keynumbers`（默认关）：琴键上画 MC 音域内的序号。
+    pub show_keynumbers: bool,
+    /// 原版 `keysmax` / `keys_to_show`：钢琴最多画几根白键，20..50。
+    pub keys_to_show: u8,
     pub show_incompatible: bool,
     pub show_grid_lines: bool,
     pub flats: bool,
@@ -82,6 +86,8 @@ impl Default for Preferences {
             show_numbers: true,
             show_octaves: false,
             show_keynames: true,
+            show_keynumbers: false,
+            keys_to_show: 30,
             show_incompatible: true,
             show_grid_lines: true,
             flats: false,

@@ -56,6 +56,8 @@ pub enum Command {
     SetInstrument(u8),
     SetEditMode(EditMode),
     SetKey(i32),
+    /// 原版点琴键：`selected_key = c` 同时把力度 / 平衡 / 音高偏移复位成 100/100/0，并试听。
+    SelectKey(u8),
     SetVel(i32),
     SetPan(i32),
     SetPit(i32),
@@ -343,6 +345,13 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         Command::SetKey(d) => {
             state.current.key = (state.current.key as i32 + d).clamp(0, KEY_MAX as i32) as u8;
         }
+        Command::SelectKey(k) => {
+            state.current.key = k;
+            state.current.velocity = 100;
+            state.current.panning = 100;
+            state.current.pitch = 0;
+            state.audio.preview_note(&state.current);
+        }
         Command::SetVel(d) => {
             state.current.velocity =
                 (state.current.velocity as i32 + d).clamp(0, VEL_MAX as i32) as u8;
@@ -499,6 +508,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 Flag::ShowNumbers => f.show_numbers = !f.show_numbers,
                 Flag::ShowOctaves => f.show_octaves = !f.show_octaves,
                 Flag::ShowKeyNames => f.show_keynames = !f.show_keynames,
+                Flag::ShowKeyNumbers => f.show_keynumbers = !f.show_keynumbers,
                 Flag::ShowIncompatible => f.show_incompatible = !f.show_incompatible,
                 Flag::ShowGridLines => f.show_grid_lines = !f.show_grid_lines,
                 Flag::Flats => f.flats = !f.flats,

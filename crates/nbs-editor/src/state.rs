@@ -50,6 +50,7 @@ pub enum Flag {
     ShowNumbers,
     ShowOctaves,
     ShowKeyNames,
+    ShowKeyNumbers,
     ShowIncompatible,
     ShowGridLines,
     Flats,
@@ -67,6 +68,7 @@ impl Flag {
             Self::ShowNumbers => "显示属性数值",
             Self::ShowOctaves => "显示八度",
             Self::ShowKeyNames => "显示音名",
+            Self::ShowKeyNumbers => "显示音符序号",
             Self::ShowIncompatible => "标记不兼容音符",
             Self::ShowGridLines => "显示网格线",
             Self::Flats => "使用降号音名",
@@ -83,6 +85,7 @@ impl Flag {
             Self::ShowNumbers => f.show_numbers,
             Self::ShowOctaves => f.show_octaves,
             Self::ShowKeyNames => f.show_keynames,
+            Self::ShowKeyNumbers => f.show_keynumbers,
             Self::ShowIncompatible => f.show_incompatible,
             Self::ShowGridLines => f.show_grid_lines,
             Self::Flats => f.flats,
@@ -101,6 +104,8 @@ pub struct UiFlags {
     pub show_numbers: bool,
     pub show_octaves: bool,
     pub show_keynames: bool,
+    /// 原版 `show_keynumbers`：在 MC 音域内的琴键上画「要按几次右键才够到音高」的序号。
+    pub show_keynumbers: bool,
     pub show_incompatible: bool,
     pub show_grid_lines: bool,
     pub flats: bool,
@@ -118,6 +123,7 @@ impl Default for UiFlags {
             show_numbers: true,
             show_octaves: false,
             show_keynames: true,
+            show_keynumbers: false,
             show_incompatible: true,
             show_grid_lines: true,
             flats: false,
@@ -428,7 +434,12 @@ pub struct EditorState {
     pub datapack_tab: u8,
     pub png_options: ImageOptions,
     pub export_status: Option<String>,
+    /// 原版 `startkey`：最左白键的白键序号（不是键号，键号还要加上左边的黑键数）。
     pub piano_start: u8,
+    /// 原版 `keysshow`：上一帧画了几根白键，宽度变了要重新居中。
+    pub piano_keys_shown: u8,
+    /// 原版 `delay`：边缘自动平移的节流计时（秒）。
+    pub piano_scroll_delay: f32,
     pub last_autosave: Instant,
     pub last_prefs_save: Instant,
     /// 已同步给音频引擎的 `Song::rev`，用于只在内容真变化时重建事件表。
@@ -478,6 +489,7 @@ impl EditorState {
         flags.show_numbers = prefs.show_numbers;
         flags.show_octaves = prefs.show_octaves;
         flags.show_keynames = prefs.show_keynames;
+        flags.show_keynumbers = prefs.show_keynumbers;
         flags.show_incompatible = prefs.show_incompatible;
         flags.show_grid_lines = prefs.show_grid_lines;
         flags.flats = prefs.flats;
@@ -527,7 +539,9 @@ impl EditorState {
             datapack_tab: 0,
             png_options: ImageOptions { dark: png_dark, ..ImageOptions::default() },
             export_status: None,
-            piano_start: 33,
+            piano_start: 12,
+            piano_keys_shown: 0,
+            piano_scroll_delay: 0.0,
             last_autosave: Instant::now(),
             last_prefs_save: Instant::now(),
             audio_rev: 0,
@@ -730,6 +744,7 @@ impl EditorState {
         self.prefs.show_numbers = self.flags.show_numbers;
         self.prefs.show_octaves = self.flags.show_octaves;
         self.prefs.show_keynames = self.flags.show_keynames;
+        self.prefs.show_keynumbers = self.flags.show_keynumbers;
         self.prefs.show_incompatible = self.flags.show_incompatible;
         self.prefs.show_grid_lines = self.flags.show_grid_lines;
         self.prefs.flats = self.flags.flats;

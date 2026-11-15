@@ -742,3 +742,145 @@ mod gui_encoder_tests {
     }
 }
 
+
+/// 底部钢琴：几何、点击、边缘平移，全部对着原版 `draw_piano` 的绝对像素。
+#[cfg(test)]
+mod gui_piano_tests {
+    use super::*;
+
+    fn input() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1440.0, 900.0),
+            )),
+            ..Default::default()
+        }
+    }
+
+    fn run(state: &mut EditorState, ctx: &egui::Context, inp: egui::RawInput) -> egui::FullOutput {
+        ctx.run(inp, |ctx| crate::show(ctx, state))
+    }
+
+    /// 琴键是 `Shape::Rect`（纯色矩形），不是贴图网格，所以按矩形外框取。
+    fn rects(out: &egui::FullOutput) -> Vec<egui::Rect> {
+        out.shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Rect(r) => Some(r.rect),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn texts(out: &egui::FullOutput) -> Vec<String> {
+        out.shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 原版：白键 39×121、顶边在 `rh - 154`，整排居中；黑键 25×71、顶边再高 7px。
+    /// 1440 宽时 `keysshow = min(30, floor((1440-32)/39)) = 30`，左边留 (1440-1170)/2 = 135。
+    #[test]
+    fn piano_uses_the_original_fixed_key_geometry() {
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        run(&mut state, &ctx, input());
+        let out = run(&mut state, &ctx, input());
+        let rects = rects(&out);
+
+        let mut whites: Vec<f32> = rects
+            .iter()
+            .filter(|r| (r.width() - 39.0).abs() < 0.6 && (r.height() - 121.0).abs() < 0.6 && (r.min.y - 746.0).abs() < 0.6)
+            .map(|r| r.min.x)
+            .collect();
+        whites.sort_by(|a, b| a.total_cmp(b));
+        whites.dedup();
+        assert_eq!(whites.len(), 30, "白键应当是 30 根，实际 {}", whites.len());
+        assert_eq!(whites.first().copied(), Some(135.0));
+        assert_eq!(whites.last().copied(), Some(135.0 + 29.0 * 39.0));
+
+        let mut blacks: Vec<f32> = rects
+            .iter()
+            .filter(|r| (r.width() - 25.0).abs() < 0.6 && (r.height() - 71.0).abs() < 0.6 && (r.min.y - 739.0).abs() < 0.6)
+            .map(|r| r.min.x)
+            .collect();
+        blacks.sort_by(|a, b| a.total_cmp(b));
+        blacks.dedup();
+        // 30 根白键里有 8 根的左边没有黑键（C、F 以及最左那根），所以是 21 根黑键。
+        assert_eq!(blacks.len(), 21, "黑键应当是 21 根，实际 {}", blacks.len());
+
+        let t = texts(&out);
+        assert!(t.iter().any(|s| s == "F2"), "最左白键是 20 号键 = F2，实际文本 {t:?}");
+        assert!(t.iter().any(|s| s == "G6"), "最右白键是 70 号键 = G6");
+        assert!(
+            !t.iter().any(|s| s == "<" || s == ">"),
+            "原版没有翻页按钮，界面上不该出现 < 或 >"
+        );
+    }
+
+    /// 原版按下琴键即选中并把力度 / 平衡 / 音高偏移复位成 100 / 100 / 0。
+    #[test]
+    fn pressing_a_key_selects_it_and_resets_the_note_properties() {
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.current.velocity = 42;
+        state.current.panning = 7;
+        state.current.pitch = 30;
+        run(&mut state, &ctx, input());
+        let mut press = input();
+        let p = egui::pos2(150.0, 800.0);
+        press.events.push(egui::Event::PointerMoved(p));
+        press.events.push(egui::Event::PointerButton {
+            pos: p,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Default::default(),
+        });
+        run(&mut state, &ctx, press);
+        assert_eq!(state.current.key, 20, "最左白键是 20 号键");
+        assert_eq!(state.current.velocity, 100);
+        assert_eq!(state.current.panning, 100);
+        assert_eq!(state.current.pitch, 0);
+    }
+
+    /// 原版没有翻页按钮，靠鼠标停在最左 / 最右白键上自动平移音域。
+    #[test]
+    fn hovering_an_edge_key_shifts_the_keyboard() {
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        run(&mut state, &ctx, input());
+        let start = state.piano_start;
+        assert_eq!(start, 12, "默认 startkey = 27 - keysshow/2");
+
+        let mut hover = input();
+        hover.events.push(egui::Event::PointerMoved(egui::pos2(150.0, 800.0)));
+        for _ in 0..60 {
+            run(&mut state, &ctx, hover.clone());
+        }
+        assert!(
+            state.piano_start < start,
+            "停在最左白键上应当往低音平移，实际 startkey = {}",
+            state.piano_start
+        );
+
+        let mut state = EditorState::new();
+        run(&mut state, &ctx, input());
+        let start = state.piano_start;
+        let mut hover = input();
+        // 最右一根白键：x = 135 + 29*39 = 1266，宽 39。
+        hover.events.push(egui::Event::PointerMoved(egui::pos2(1280.0, 800.0)));
+        for _ in 0..60 {
+            run(&mut state, &ctx, hover.clone());
+        }
+        assert!(
+            state.piano_start > start,
+            "停在最右白键上应当往高音平移，实际 startkey = {}",
+            state.piano_start
+        );
+    }
+}

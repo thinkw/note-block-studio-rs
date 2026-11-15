@@ -265,6 +265,7 @@ fn preferences(state: &mut EditorState, ui: &mut Ui) {
         Flag::ShowLayers, Flag::ShowPiano,
         Flag::UseColors, Flag::UseShapes, Flag::UseIcons,
         Flag::ShowNumbers, Flag::ShowOctaves, Flag::ShowKeyNames,
+        Flag::ShowKeyNumbers,
         Flag::ShowIncompatible, Flag::ShowGridLines, Flag::Flats, Flag::Blackout,
     ] {
         let mut v = Flag::get(flag, &state.flags);
@@ -273,6 +274,15 @@ fn preferences(state: &mut EditorState, ui: &mut Ui) {
         }
     }
     ui.separator();
+    // 原版 `keysmax`（首选项 `keys_to_show`，20..50，默认 30）：钢琴最多画几根白键。
+    ui.horizontal(|ui| {
+        ui.label("琴键数量");
+        let mut keys = state.prefs.keys_to_show as i32;
+        if ui.add(egui::DragValue::new(&mut keys).range(20..=50)).changed() {
+            state.prefs.keys_to_show = keys.clamp(20, 50) as u8;
+            state.emit(Command::SavePreferences);
+        }
+    });
     // 原版 `draw_window_preferences.gml` 549-552「进度条」组。原版有三种跟随模式
     // （按页 / 按刻 / 按帧），后两种都居中，只差亚刻偏移；我们的 `follow_center`
     // 就是「居中 + 亚刻偏移」，所以这里给两格：按页 与 居中逐帧。

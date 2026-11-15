@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use nbs_core::model::Song;
+use nbs_core::model::{Note, Song};
 
 use crate::mixer::Voice;
 use crate::samples::{SoundBank, SAMPLE_RATE};
@@ -22,6 +22,8 @@ pub trait AudioEngine {
     fn name(&self) -> &str;
     /// 载入歌曲（构建事件表，必要时补载自定义采样）。
     fn prepare(&mut self, song: &Song);
+    /// 原版 `play_sound()`：不动播放头，立刻用当前音色试听一个音。
+    fn preview_note(&mut self, note: &Note);
     fn start(&mut self, from_tick: f64);
     fn stop(&mut self);
     fn is_playing(&self) -> bool;
@@ -200,6 +202,12 @@ impl AudioEngine for CpalEngine {
         self.clock.set_tempo(song.meta.tempo);
         self.last_song = Some(song.clone());
     }
+    fn preview_note(&mut self, note: &Note) {
+        let mut st = self.shared.lock();
+        let bank = st.bank.clone();
+        // 试听固定按图层音量 100 / 平衡 100，跟原版 `play_sound(ins, key, 100, 100, 0)` 一致。
+        st.mixer.spawn(note, 100, 100, &bank);
+    }
     fn start(&mut self, from_tick: f64) {
         self.clock.seek(from_tick);
         self.clock.play();
@@ -290,6 +298,9 @@ impl AudioEngine for SilentEngine {
             song.song_length().max(1) as f64,
             song.meta.loop_max,
         );
+    }
+    fn preview_note(&mut self, _note: &Note) {
+        // 没有输出设备，试听无处可去；时钟照常推进。
     }
     fn start(&mut self, from_tick: f64) {
         self.clock.seek(from_tick);
