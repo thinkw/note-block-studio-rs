@@ -54,6 +54,7 @@ pub enum Flag {
     ShowKeyboard,
     ShowOutOfRange,
     ShowIncompatible,
+    Fade,
     ShowGridLines,
     Flats,
     Blackout,
@@ -76,6 +77,7 @@ impl Flag {
             Self::ShowKeyboard => "显示键盘键位",
             Self::ShowOutOfRange => "标记超范围琴键",
             Self::ShowIncompatible => "标记不兼容的音符盒",
+            Self::Fade => "音符盒不透明",
             Self::ShowGridLines => "显示网格线",
             Self::Flats => "使用降记号",
             Self::Blackout => "全黑模式",
@@ -95,6 +97,7 @@ impl Flag {
             Self::ShowKeyboard => f.show_keyboard,
             Self::ShowOutOfRange => f.show_outofrange,
             Self::ShowIncompatible => f.show_incompatible,
+            Self::Fade => f.fade,
             Self::ShowGridLines => f.show_grid_lines,
             Self::Flats => f.flats,
             Self::Blackout => f.blackout,
@@ -119,6 +122,8 @@ pub struct UiFlags {
     /// 原版 `show_outofrange`：把 MC 两八度（33..=57）之外的琴键染成粉红。
     pub show_outofrange: bool,
     pub show_incompatible: bool,
+    /// 原版 `fade`：真 = 音符盒不透明（力度与选区都不再影响透明度）。
+    pub fade: bool,
     pub show_grid_lines: bool,
     pub flats: bool,
     pub blackout: bool,
@@ -142,6 +147,8 @@ impl Default for UiFlags {
             show_keyboard: true,
             show_outofrange: true,
             show_incompatible: true,
+            // 原版 `control_create.gml:131`：fade = 0，即默认按力度做透明。
+            fade: false,
             show_grid_lines: true,
             flats: false,
             blackout: false,
@@ -577,6 +584,7 @@ impl EditorState {
         flags.show_keyboard = prefs.show_keyboard;
         flags.show_outofrange = prefs.show_outofrange;
         flags.show_incompatible = prefs.show_incompatible;
+        flags.fade = prefs.fade;
         flags.show_grid_lines = prefs.show_grid_lines;
         flags.flats = prefs.flats;
         flags.blackout = prefs.blackout;
@@ -886,6 +894,7 @@ impl EditorState {
         self.prefs.show_keyboard = self.flags.show_keyboard;
         self.prefs.show_outofrange = self.flags.show_outofrange;
         self.prefs.show_incompatible = self.flags.show_incompatible;
+        self.prefs.fade = self.flags.fade;
         self.prefs.show_grid_lines = self.flags.show_grid_lines;
         self.prefs.flats = self.flags.flats;
         self.prefs.blackout = self.flags.blackout;

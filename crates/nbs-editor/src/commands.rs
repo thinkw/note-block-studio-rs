@@ -643,6 +643,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 Flag::ShowKeyboard => f.show_keyboard = !f.show_keyboard,
                 Flag::ShowOutOfRange => f.show_outofrange = !f.show_outofrange,
                 Flag::ShowIncompatible => f.show_incompatible = !f.show_incompatible,
+                Flag::Fade => f.fade = !f.fade,
                 Flag::ShowGridLines => f.show_grid_lines = !f.show_grid_lines,
                 Flag::Flats => f.flats = !f.flats,
                 Flag::Blackout => f.blackout = !f.blackout,

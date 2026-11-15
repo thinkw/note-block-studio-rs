@@ -704,10 +704,15 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
     for (tick, layer, note) in notes {
         let (tick, layer) = (tick as i64, layer as i64);
         // 原版 `c = 0.5 * (vel / 100) + 0.25`，鼠标压着（select = 0）或落在加选框内再 +0.5。
+        // 「音符盒不透明」(fade) 勾上时这两步都不做，`c` 恒为 1（`control_draw.gml:398-405`）。
         let in_box = !box_subtract && inside_box(tick, layer);
         let hovered = box_sel.is_none() && hover == Some((tick, layer));
-        let mut c = 0.25 + 0.5 * (note.velocity as f32 / 100.0);
-        if in_box || hovered {
+        let mut c = if state.flags.fade {
+            1.0
+        } else {
+            0.25 + 0.5 * (note.velocity as f32 / 100.0)
+        };
+        if !state.flags.fade && (in_box || hovered) {
             c += 0.5;
         }
         let at = vp.cell_rect(tick, layer).min;

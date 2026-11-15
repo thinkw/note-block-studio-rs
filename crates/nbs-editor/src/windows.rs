@@ -527,8 +527,8 @@ fn prefs_interface(state: &mut EditorState, pg: &mut Page, menu_at: &mut Pos2, r
 }
 
 /// 原版页 2「外观」：音符盒与琴键。
-/// 源码里的「音符盒不透明」(210)、「显示删除效果」(250)、
-/// 「在琴键上时显示五线谱对应音符」(410) 我们没有这三项行为，整行不画。
+/// 源码里的「显示删除效果」(250)、「在琴键上时显示五线谱对应音符」(410) 我们没有这两项
+/// 行为（删除淡出边框只在 theme 3 画，五线谱要另做一份 notechart 渲染），整行不画。
 fn prefs_appearance(state: &mut EditorState, pg: &mut Page) {
     pg.header(22.0, 74.0, 456.0, 196.0, "音符盒");
     let blocks = [
@@ -538,6 +538,7 @@ fn prefs_appearance(state: &mut EditorState, pg: &mut Page) {
         (150.0, Flag::ShowNumbers, "显示音符序号", "在音符盒上显示需要按右键次数。"),
         (170.0, Flag::ShowOctaves, "显示八度序号", "在音符盒上显示第几八度。"),
         (190.0, Flag::ShowIncompatible, "标记不兼容的音符盒", "在自定义音色或超出 2 八度范围的音符盒周围显示红框。"),
+        (210.0, Flag::Fade, "音符盒不透明", "关闭音符盒上的透明效果。"),
         (230.0, Flag::ShowLayers, "显示每层操作区", "显示在界面左侧操作每层设定的区域。"),
     ];
     for (n, flag, label, tip) in blocks {

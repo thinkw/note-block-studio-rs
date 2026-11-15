@@ -56,6 +56,10 @@ pub struct Preferences {
     /// 原版 `keysmax` / `keys_to_show`：钢琴最多画几根白键，20..50。
     pub keys_to_show: u8,
     pub show_incompatible: bool,
+    /// 原版 `fade`（出厂 0，`control_create.gml:131`）：勾上 = 音符盒不透明，
+    /// 力度不再参与透明度，鼠标压格 / 选区也不再 +0.5。原版在 ini 里的键名是反着的
+    /// `use_fading`（`load_settings.gml:38`），读写沿用同一个键才能和原版配置对得上。
+    pub fade: bool,
     pub show_grid_lines: bool,
     pub flats: bool,
     pub blackout: bool,
@@ -124,6 +128,7 @@ impl Default for Preferences {
             fdark: false,
             keys_to_show: 30,
             show_incompatible: true,
+            fade: false,
             show_grid_lines: true,
             flats: false,
             blackout: false,
