@@ -7,7 +7,13 @@
 //! 窗口名见下面 `match name`（preferences / instruments / datapack / …）。
 //! `NBS_UIPNG_CROP=x0,y0,x1,y1[,倍率]` 只保存那块区域（逻辑像素）并可整数倍放大，
 //! `NBS_UIPNG_DUMP=1` 打印绘制顺序（大块矩形、文字坐标），`NBS_UIPNG_PIX=x,y`
-//! 打印写到某个像素上的每个图元。
+//! 打印写到某个像素上的每个图元，`NBS_UIPNG_MIDI=<路径>` 换 MIDI 导入窗口解析的文件，
+//! `NBS_UIPNG_NOTE_DURATION=1` 打开 MIDI 导入窗口的「音符长度」（第四页签才会出现），
+//! `NBS_UIPNG_MIDI_SCROLL=页签:行数` / `NBS_UIPNG_MIDI_MENU=ins|oct|pins|ppitch:行号`
+//! 把 MIDI 导入窗口那张表滚到指定行 / 摆成某个下拉正打开的状态。
+//! `NBS_UIPNG_POINTER=x,y` 每帧往该逻辑坐标发一次鼠标移动，用来渲染悬停态；
+//! `NBS_UIPNG_FDARK=1` 打开 Fluent 的暗色模式；
+//! `NBS_UIPNG_PREFS_MENU=theme|rate` 把首选项「界面」页的某个下拉摆成打开状态。
 //! ```
 //!
 //! 走的是和 GUI 完全相同的一条路：`Context::run` → `tessellate` → 三角形。
@@ -146,6 +152,8 @@ fn main() -> Result<(), String> {
         );
     }
     state.theme = Theme::new(kind);
+    // `NBS_UIPNG_FDARK=1`：Fluent 的「暗色模式」（原版 `fdark`，和 state.rs 一样只对 theme 3 生效）。
+    state.theme.fdark = kind == ThemeKind::Fluent && std::env::var("NBS_UIPNG_FDARK").is_ok();
 
     // NBS_UIPNG_WINDOW=preferences:2 —— 直接把某个对话框摆开渲染，用来逐像素对照原版窗口。
     // 冒号后面是页签序号（只有带页签的窗口用它）。
@@ -182,7 +190,58 @@ fn main() -> Result<(), String> {
             WindowKind::MinecraftCompat => state.mc_tab = tab,
             WindowKind::DatapackExport => state.datapack_tab = tab,
             WindowKind::SchematicExport => state.schematic_tab = tab,
+            WindowKind::MidiImport => state.midi_tab = tab as usize,
             _ => state.prefs_tab = tab,
+        }
+        // 原版没有空白的 MIDI 导入窗口：`open_midi()` 先解析成功才开。这里同样先解析
+        // （`NBS_UIPNG_MIDI=<路径>`，默认取仓库里那首偶像曲），窗口才有内容可画。
+        if k == WindowKind::MidiImport {
+            let path = PathBuf::from(
+                std::env::var("NBS_UIPNG_MIDI")
+                    .as_deref()
+                    .unwrap_or("assets/Songs/Entrusting this World to Idols ~ Idolatrize World.mid"),
+            );
+            let midi = nbs_io::midi::parse_midi_path(&path)
+                .map_err(|e| format!("解析 {} 失败: {e}", path.display()))?;
+            state.midi_options.reload_tables(&midi, &state.midi_gm);
+            state.midi_file = path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            state.midi_data = Some(midi);
+            // 原版第四页只在「音符长度」打开时存在，用它来单独渲染那一页。
+            state.midi_options.note_duration |=
+                std::env::var("NBS_UIPNG_NOTE_DURATION").is_ok();
+            // 无头渲染喂不进鼠标，滚动位置和「点开某个下拉」用环境变量直接摆好。
+            // 格式：`NBS_UIPNG_MIDI_SCROLL=页签:行数`、`NBS_UIPNG_MIDI_MENU=ins|oct|pins|ppitch:行号`。
+            if let Ok(spec) = std::env::var("NBS_UIPNG_MIDI_SCROLL") {
+                let mut it = spec.split(':');
+                let page = it.next().unwrap_or("0").parse::<usize>().unwrap_or(0);
+                let val = it.next().unwrap_or("0").parse::<f32>().unwrap_or(0.0);
+                if let Some(slot) = state.midi_scroll.get_mut(page) {
+                    *slot = val;
+                }
+            }
+            if let Ok(spec) = std::env::var("NBS_UIPNG_MIDI_MENU") {
+                let mut it = spec.split(':');
+                let kind = it.next().unwrap_or("");
+                let row = it.next().unwrap_or("0").parse::<usize>().unwrap_or(0);
+                use nbs_editor::state::MidiMenu as M;
+                state.midi_menu = Some(match kind {
+                    "oct" => M::ChannelOct(row),
+                    "pins" => M::PercIns(row),
+                    "ppitch" => M::PercPitch(row),
+                    _ => M::ChannelIns(row),
+                });
+            }
+        }
+        // `NBS_UIPNG_PREFS_MENU=theme|rate`：把首选项「界面」页的某个下拉摆成打开状态。
+        if matches!(k, WindowKind::Preferences) {
+            match std::env::var("NBS_UIPNG_PREFS_MENU").as_deref() {
+                Ok("rate") => state.prefs_rate_menu = true,
+                Ok("theme") => state.prefs_theme_menu = true,
+                _ => {}
+            }
         }
         state.window = Some(k);
     }
@@ -197,6 +256,15 @@ fn main() -> Result<(), String> {
     let mut prims = Vec::new();
     let dump = std::env::var("NBS_UIPNG_DUMP").is_ok();
     let mut ppp = 1.0f32;
+    // `NBS_UIPNG_POINTER=x,y`：每帧往这个逻辑坐标发一次 `PointerMoved`，
+    // 用来渲染「悬停某一行」的状态——菜单的选中底色、子菜单展开都靠悬停驱动。
+    let pointer = std::env::var("NBS_UIPNG_POINTER").ok().and_then(|s| {
+        let mut it = s.split(',');
+        Some(egui::pos2(
+            it.next()?.parse().ok()?,
+            it.next()?.parse().ok()?,
+        ))
+    });
     // 第一帧只为了建立布局（滚动条、面板尺寸），后面几帧才是稳定画面。
     // 必须把虚拟时间推过 egui 的 animation_time（0.1s）：Area 对刚打开的窗口做淡入，
     // 整个窗口子树会被乘上一个不到 1 的不透明度（area.rs 的 multiply_opacity），
@@ -206,6 +274,9 @@ fn main() -> Result<(), String> {
         let input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(w, h))),
             time: Some(0.05 * (frame + 1) as f64),
+            events: pointer
+                .map(|p| vec![egui::Event::PointerMoved(p)])
+                .unwrap_or_default(),
             ..Default::default()
         };
         let out = ctx.run(input, |c| nbs_editor::show(c, &mut state));

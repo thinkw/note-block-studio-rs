@@ -18,7 +18,15 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
     show_modal(state, ctx);
     let Some(kind) = state.window.clone() else { return; };
     let mut open = true;
-    let title = kind.title().to_string();
+    let title = match &kind {
+        // 原版在标题带左边写「导入MIDI」、右边右对齐写文件名
+        // （`draw_text_dynamic(x1 + 590, y1 + 6, songs[song].midifile, true)`）。
+        // egui 的标题带归 `Window` 自己，文件名只能并到标题文字里。
+        WindowKind::MidiImport if !state.midi_file.is_empty() => {
+            format!("{} · {}", kind.title(), state.midi_file)
+        }
+        _ => kind.title().to_string(),
+    };
     let default_width = match kind {
         // 原版 `draw_window(x1, y1, x1 + 500, y1 + 510)`。
         WindowKind::Preferences => 500.0,
@@ -31,6 +39,8 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         WindowKind::SchematicExport => 560.0,
         // 原版 `draw_window(x1, y1, x1 + 490, y1 + 450)`。
         WindowKind::MinecraftCompat => 490.0,
+        // 原版 `draw_window(x1, y1, x1 + 600, y1 + 400 + navigation_space)`。
+        WindowKind::MidiImport => 600.0,
         _ => 360.0,
     };
     egui::Window::new(title)
@@ -326,7 +336,7 @@ fn preferences(state: &mut EditorState, ui: &mut Ui) {
             // 先铺面板再画页签：原版的选中页签会压掉面板顶边那一像素。
             pg.panel_box();
         }
-        let tab = pg.tabs(if fluent { 40.0 } else { 8.0 }, tab);
+        let tab = pg.tabs(if fluent { 40.0 } else { 8.0 }, 0.0, &PREFS_TABS, tab);
         state.prefs_tab = tab;
         match tab {
             0 => prefs_general(state, &mut pg),
@@ -714,33 +724,27 @@ const THEME_MENU_ORDER: [ThemeKind; 4] = [
     ThemeKind::Fluent,
 ];
 
-/// 原版 `show_menu_ext` + `obj_menu`：菜单开着时整屏吞输入，点哪儿都只用来收起；
-/// 当前值前面打一个勾。返回（选中的下标，是否被点掉）。
-/// 宽 98 对应原版 `draw_area` 那个 100 像素宽的框减掉两条边。
-fn popup_list(ui: &Ui, id: &str, at: Pos2, items: &[&str], sel: usize) -> (Option<usize>, bool) {
-    let ctx = ui.ctx();
-    let dismissed = egui::Area::new(Id::new("prefs_menu_blocker"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(Pos2::ZERO)
-        .show(ctx, |ui| ui.allocate_rect(ctx.screen_rect(), Sense::click()).clicked())
-        .inner;
-    let mut picked: Option<usize> = None;
-    egui::Area::new(Id::new(id))
-        .order(egui::Order::Foreground)
-        .fixed_pos(at)
-        .show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_min_width(98.0);
-                for (i, label) in items.iter().enumerate() {
-                    let on = i == sel;
-                    let text = format!("{} {}", if on { "\u{2713}" } else { " " }, label);
-                    if ui.selectable_label(on, text).clicked() {
-                        picked = Some(i);
-                    }
-                }
-            });
-        });
-    (picked, dismissed)
+/// 原版 `show_menu_ext` + `obj_menu`：首选项「主题 / 帧率限制」那两个下拉和 MIDI 导入
+/// 窗口用的是同一个菜单对象，所以直接复用 `midi_popup` 的板子、勾和屏幕内收边。
+/// 返回（选中的下标，是否被点掉）。
+fn popup_list(
+    ui: &Ui,
+    id: &str,
+    at: Pos2,
+    items: &[&str],
+    sel: usize,
+    th: &Theme,
+    bank: Option<&crate::icons::Bank>,
+) -> (Option<usize>, bool) {
+    let rows: Vec<MidiMenuItem> = items
+        .iter()
+        .enumerate()
+        .map(|(i, s)| MidiMenuItem::item(*s, i as i16, i == sel))
+        .collect();
+    // 这两项都没有子菜单，展开状态只是走个形式。
+    let mut open = None;
+    let (picked, dismissed) = midi_popup(ui, id, at, &rows, &mut open, th, bank);
+    (picked.map(|v| v as usize), dismissed)
 }
 
 /// 原版 `show_menu_ext("theme", …)`：四套主题，当前项打勾。
@@ -750,7 +754,9 @@ fn theme_menu(state: &mut EditorState, ui: &Ui, at: Pos2) {
         .iter()
         .position(|k| *k == state.theme.kind)
         .unwrap_or(usize::MAX);
-    let (picked, dismissed) = popup_list(ui, "prefs_theme_menu", at, &names, sel);
+    let th = state.theme.clone();
+    let bank = state.icons.bank();
+    let (picked, dismissed) = popup_list(ui, "prefs_theme_menu", at, &names, sel, &th, bank.as_deref());
     if let Some(i) = picked {
         state.emit(Command::SetTheme(THEME_MENU_ORDER[i]));
     }
@@ -762,7 +768,11 @@ fn theme_menu(state: &mut EditorState, ui: &Ui, at: Pos2) {
 /// 原版 `show_menu_ext("refreshrate", …)` 的中文分支 `"30帧|60帧|120帧|144帧|240帧"`。
 /// 框里显示的那一行和菜单五项是同一串字（`draw_text_dynamic` 那行的 `condstr` 链）。
 fn rate_menu(state: &mut EditorState, ui: &Ui, at: Pos2) {
-    let (picked, dismissed) = popup_list(ui, "prefs_rate_menu", at, &RATE_ITEMS, usize::MAX);
+    let th = state.theme.clone();
+    let bank = state.icons.bank();
+    // 原版五项都有 `check(refreshrate = i)`，当前帧率那一项前面要打勾。
+    let sel = state.prefs.refresh_rate as usize;
+    let (picked, dismissed) = popup_list(ui, "prefs_rate_menu", at, &RATE_ITEMS, sel, &th, bank.as_deref());
     if let Some(i) = picked {
         state.prefs.refresh_rate = i as u8;
         state.emit(Command::SavePreferences);
@@ -778,6 +788,9 @@ const PREFS_FONT_MED: f32 = 11.0;
 
 /// 原版「帧率限制」下拉的五项（中文分支），下标就是 `refreshrate`。
 const RATE_ITEMS: [&str; 5] = ["30帧", "60帧", "120帧", "144帧", "240帧"];
+
+/// 原版首选项的五个页签（`draw_window_preferences.gml` 的 `str` 数组中文分支）。
+const PREFS_TABS: [&str; 5] = ["通用", "界面", "外观", "访问", "播放"];
 
 /// GameMaker 的灰阶常量 `make_color_rgb(v, v, v)`。
 const fn ggray(v: u8) -> Color32 {
@@ -956,16 +969,15 @@ impl<'a> Page<'a> {
     /// 原版页签条。Fluent：文字 `(b+6, 13)`，选中项下面画 `spr_tabsel`
     /// （实测 14×3 的圆条，水平居中于文字）；其余主题：`(b+6, 4)`，选中项是
     /// 一块压住面板线的矩形（原版 `spr_tabbuttons`，没导出，按同尺寸矩形近似）。
-    fn tabs(&mut self, b0: f32, tab: u8) -> u8 {
-        const LABELS: [&str; 5] = ["通用", "界面", "外观", "访问", "播放"];
+    fn tabs(&mut self, b0: f32, base: f32, labels: &[&str], tab: u8) -> u8 {
         let font = if self.fluent { PREFS_FONT_MED } else { PREFS_FONT };
         let mut nsel = tab;
         let mut b = b0;
-        for (i, name) in LABELS.iter().enumerate() {
+        for (i, name) in labels.iter().enumerate() {
             let tw = self.measure(name, font);
             let (hy, hh) = if self.fluent { (0.0, 39.0) } else { (2.0, 18.0) };
-            let rect = Rect::from_min_size(self.at(b, hy), Vec2::new(tw + 12.0, hh));
-            let resp = self.ui.interact(rect, Id::new(("prefs-tab", i)), Sense::click());
+            let rect = Rect::from_min_size(self.at(b, base + hy), Vec2::new(tw + 12.0, hh));
+            let resp = self.ui.interact(rect, Id::new(("tabs", i)), Sense::click());
             let sel = i as u8 == tab;
             // 原版选中页签的文字比未选中高两像素（`y1 + 28` 对 `y1 + 30`）。
             let ty = match (self.fluent, sel) {
@@ -992,7 +1004,7 @@ impl<'a> Page<'a> {
                 let p = self.ui.painter().clone();
                 if self.fluent {
                     p.rect_filled(
-                        Rect::from_min_size(self.at(b + tw / 2.0 - 1.0, 33.0), Vec2::new(14.0, 3.0)),
+                        Rect::from_min_size(self.at(b + tw / 2.0 - 1.0, base + 33.0), Vec2::new(14.0, 3.0)),
                         1.5,
                         self.th.accent,
                     );
@@ -1005,8 +1017,8 @@ impl<'a> Page<'a> {
                     } else {
                         Color32::WHITE
                     };
-                    let body = Rect::from_min_size(self.at(b - 2.0, 0.0), Vec2::new(tw + 15.0, 20.0));
-                    let line = Rect::from_min_size(self.at(b - 2.0, 0.0), Vec2::new(tw + 15.0, 21.0));
+                    let body = Rect::from_min_size(self.at(b - 2.0, base), Vec2::new(tw + 15.0, 20.0));
+                    let line = Rect::from_min_size(self.at(b - 2.0, base), Vec2::new(tw + 15.0, 21.0));
                     p.rect_filled(body, 0.0, fill);
                     p.rect_stroke(
                         line,
@@ -1015,13 +1027,13 @@ impl<'a> Page<'a> {
                         StrokeKind::Inside,
                     );
                     p.rect_filled(
-                        Rect::from_min_size(self.at(b - 1.0, 20.0), Vec2::new(tw + 13.0, 1.0)),
+                        Rect::from_min_size(self.at(b - 1.0, base + 20.0), Vec2::new(tw + 13.0, 1.0)),
                         0.0,
                         fill,
                     );
                 }
             }
-            self.text(self.at(b + 6.0, ty), name, font, ink);
+            self.text(self.at(b + 6.0, base + ty), name, font, ink);
             if resp.clicked() {
                 nsel = i as u8;
             }
@@ -1201,24 +1213,48 @@ impl<'a> Page<'a> {
         resp.on_hover_text(tip).clicked()
     }
 
-    /// 原版 `draw_button2(x, y, w, str[, lock])`。Fluent 是强调色圆角矩形，
-    /// 其余三套是 `spr_button` 九宫格（没导出），退回 egui 原生按钮。
+    /// 原版 `draw_button2(x, y, w, str, lock)`：没有第 6 个参数就是主按钮。
     fn button(&mut self, x: f32, n: f32, w: f32, label: &str, lock: bool) -> bool {
+        self.button2(x, n, w, label, lock, false)
+    }
+
+    /// 原版 `draw_button2(x, y, w, str[, lock[, secondary]])`。Fluent 是圆角矩形，
+    /// 主按钮填强调色、次按钮填 `secondary` 那组灰阶（取消 / 使用默认值都是次按钮，
+    /// 而且只有主按钮吃回车，见源码的 `keyboard_invoke`）；
+    /// 其余三套是 `spr_button` 九宫格（没导出），退回 egui 原生按钮。
+    fn button2(
+        &mut self,
+        x: f32,
+        n: f32,
+        w: f32,
+        label: &str,
+        lock: bool,
+        secondary: bool,
+    ) -> bool {
         let id = Id::new(("prefs-btn", x as i32, n as i32, label));
         if !self.fluent {
             return self.legacy_row(x, n, w, id, lock, |ui| {
-                ui.add_sized([w, 21.0], egui::Button::new(label)).clicked()
+                ui.add_sized([w, 21.0], egui::Button::new(RichText::new(label).size(PREFS_FONT)))
+                    .clicked()
             });
         }
         let at = self.row(x, n);
         let (resp, m) = self.hit(Rect::from_min_size(at, Vec2::new(w, 23.0)), id, lock);
         let body = Rect::from_min_size(at, Vec2::new(w - 2.0, 21.0));
         let p = self.ui.painter().clone();
+        // 次按钮的三组灰阶：`16579836 / 16185078 / 16185078` 填、
+        // `15592941 / 15066597 / 15066597` 描边；fdark 是 `45 / 50 / 38` 与 `54 / 86 / 54`。
         let (fill, line) = if lock {
             if self.th.fdark {
                 (ggray(72), ggray(80))
             } else {
                 (ggray(248), ggray(238))
+            }
+        } else if secondary {
+            if self.th.fdark {
+                (ggray([45, 50, 38][m]), ggray([54, 86, 54][m]))
+            } else {
+                (ggray([252, 246, 246][m]), ggray([238, 229, 229][m]))
             }
         } else {
             (
@@ -1228,8 +1264,11 @@ impl<'a> Page<'a> {
         };
         p.rect_filled(body, 4.0, fill);
         p.rect_stroke(body, 4.0, Stroke::new(1.0_f32, line), StrokeKind::Inside);
+        // 主按钮是强调色底，文字才用白 / 黑；次按钮沿用主题文字色（`draw_theme_color()`）。
         let ink = if lock {
             ggray(127)
+        } else if secondary {
+            self.ink()
         } else if self.th.fdark {
             Color32::BLACK
         } else {
@@ -1352,6 +1391,8 @@ impl<'a> Page<'a> {
     /// 非 Fluent 主题的一行：原版这里画的是精灵图（`spr_checkbox` / `spr_radiobox` /
     /// `spr_button` 我们都没导出），所以交给 egui 原生控件，坐标仍是原版坐标。
     /// 锁定的行走 `set_enabled(false)`，灰掉且不回报改动。
+    /// 控件文字一律显式带 `PREFS_FONT`：默认字号是主题的 body 字号，比原版大一号，
+    /// 长标签会在这 20 像素的一行里被折成两行。
     fn legacy_row(&mut self, x: f32, n: f32, w: f32, id: Id, lock: bool, add: impl FnOnce(&mut Ui) -> bool) -> bool {
         let rect = Rect::from_min_size(self.row(x, n), Vec2::new(w, 20.0));
         self.ui
@@ -1366,14 +1407,14 @@ impl<'a> Page<'a> {
         let id = Id::new(("prefs-check", x as i32, n as i32, label));
         self.legacy_row(x, n, 18.0 + tw + 8.0, id, lock, |ui| {
             let mut v = on;
-            ui.checkbox(&mut v, label).changed()
+            ui.checkbox(&mut v, RichText::new(label).size(PREFS_FONT)).changed()
         })
     }
 
     fn legacy_radio(&mut self, x: f32, n: f32, on: bool, label: &str, lock: bool) -> bool {
         let id = Id::new(("prefs-radio", x as i32, n as i32, label));
         self.legacy_row(x, n - 3.0, 18.0 + self.measure(label, PREFS_FONT) + 24.0, id, lock, |ui| {
-            ui.radio(on, label).clicked() && !on
+            ui.radio(on, RichText::new(label).size(PREFS_FONT)).clicked() && !on
         })
     }
 }
@@ -1764,35 +1805,1418 @@ fn audio_settings_window(state: &mut EditorState, ui: &mut Ui) {
     footer(state, ui);
 }
 
-fn midi_import_window(state: &mut EditorState, ui: &mut Ui) {
-    ui.label(RichText::new("量化：tick = floor((midi_tick − 起始空白) / (PPQ / (4 × 精度倍率)))").small().weak());
-    ui.separator();
-    egui::Grid::new("midi_import_grid").num_columns(2).show(ui, |ui| {
-        ui.label("时间精度");
-        let mut p = state.midi_options.precision;
-        egui::ComboBox::from_id_salt("midi_precision")
-            .selected_text(format!("{}×", p + 1))
-            .show_ui(ui, |ui| {
-                for v in [0u8, 1, 3, 7] {
-                    ui.selectable_value(&mut p, v, format!("{}×", v + 1));
-                }
-            });
-        state.midi_options.precision = p;
-        ui.end_row();
-        ui.label("八度偏移");
-        ui.add(egui::Slider::new(&mut state.midi_options.octave_shift, -24..=24).suffix(" 半音"));
-        ui.end_row();
-    });
-    ui.checkbox(&mut state.midi_options.remove_silent, "去掉开头空白");
-    ui.checkbox(&mut state.midi_options.use_velocity, "使用 MIDI 力度（上限 100）");
-    ui.checkbox(&mut state.midi_options.fold_octaves, "折叠到 MC 音域 33..57");
-    ui.checkbox(&mut state.midi_options.tempo_changer, "写入 Tempo Changer 分段速度");
-    ui.checkbox(&mut state.midi_options.split_channels, "按 MIDI 通道分层");
-    ui.separator();
-    if ui.button("选择 MIDI 文件并导入…").clicked() {
-        state.emit(Command::OpenDialog(crate::state::DialogAction::ImportMidi));
+// ---------------------------------------------------------------- MIDI 导入窗口
+//
+// 逐行对照 `target/v312/draw_window_midi_import.gml` 的中文分支。原版所有坐标都是窗口
+// 左上角 `(x1, y1)` 的偏移，而 `Page::row(x, n)` 落在 `y1 + n + 22`（Fluent）/`y1 + n`
+// （其余主题），所以按原版 `y1 + N` 摆放的行还要补上原版自己加的那一截：
+//   * 设定区 `settings_y = y1 + (theme == 3) * 48` → `set_dy`（26 / 0）
+//   * 表格里 `y1 += navigation_space`（只有 Fluent 加 32）→ `body_dy`（10 / 0）
+// 22 是 `Page::row` 自带的 Fluent 偏移，所以下面这两个数才是「原版多出来的部分」。
+
+/// 原版一页九行（`draw_scrollbar(id, x, y, 17, 9, 总数, 0, 1)` 里的那个 slots），行高 20。
+const MIDI_SLOTS: usize = 9;
+const MIDI_ROW_H: f32 = 20.0;
+
+/// 原版横竖分隔线的颜色 `12632256`。
+const MIDI_LINE: Color32 = ggray(192);
+
+/// 原版页签（中文分支）；第四页只在「音符长度」打开时出现
+/// （`tab_count = 3 + (w_midi_note_duration != 0)`）。
+const MIDI_TABS: [&str; 4] = ["乐器", "打击乐", "轨道", "音符长度"];
+
+/// 原版各页 `tabstr` / `tabtip` / `tabw` 的中文分支：`(列宽, 表头, 悬停提示)`。
+const MIDI_COLS: [&[(f32, &str, &str)]; 4] = [
+    &[
+        (50.0, "通道", "通道的个数。"),
+        (41.0, "乐器", "通道所用的乐器。"),
+        (260.0, "乐器名", "通道所用乐器的名称。"),
+        (130.0, "音色", "通道内的音符应被转换成的音色。"),
+        (100.0, "八度调整", "该通道的八度偏移设定。"),
+    ],
+    &[
+        (50.0, "音调", "代表声音的音调。"),
+        (220.0, "声音名", "该声音的名称。"),
+        (210.0, "音色", "声音应被转换成的音色。"),
+        (100.0, "音高", "输出的音高设定。"),
+    ],
+    &[
+        (79.0, "轨道序号", "轨道的序号。"),
+        (300.0, "轨道名", "轨道的名称。"),
+        (200.0, "事件数", "轨道上的事件数量。"),
+    ],
+    &[
+        (50.0, "轨道", "声部所在的轨道。\n将鼠标移到轨道序号上可查看名称。"),
+        (60.0, "通道", "声部使用的 MIDI 通道。\n不同轨道上的声部可分别设置音符长度。"),
+        (320.0, "乐器名", "声部使用的 MIDI 乐器。"),
+        (151.0, "音符长度", "为当前文件中的此声部导入音符长度。\n新 MIDI 文件默认启用所有非打击乐声部。"),
+    ],
+];
+
+/// 一帧里四张表共用的上下文：界面上的映射表、解析结果、可选音色、图标册、待播的试听
+/// 音符、当前打开的下拉（原版 `menu_shown`，一次只允许一个），以及表格区的主题偏移。
+struct MidiCtx<'a> {
+    opt: &'a mut nbs_io::midi::MidiImportOptions,
+    midi: &'a nbs_io::midi::MidiData,
+    names: &'a [(u8, String)],
+    icons: &'a crate::icons::Icons,
+    flats: bool,
+    body_dy: f32,
+    previews: &'a mut Vec<nbs_core::model::Note>,
+    menu: &'a mut Option<crate::state::MidiMenu>,
+    /// 原版 `menu_show[]`：带子菜单那一层展开的是第几行，每次重开菜单都要清零。
+    sub: &'a mut Option<usize>,
+}
+
+impl MidiCtx<'_> {
+    /// 原版 `show_menu_ext`：新开一个菜单，同时把子菜单的展开状态清掉
+    /// （新实例的 `menu_show[]` 全是 0）。
+    fn open_menu(&mut self, m: crate::state::MidiMenu) {
+        *self.menu = Some(m);
+        *self.sub = None;
     }
-    footer(state, ui);
+}
+
+fn midi_import_window(state: &mut EditorState, ui: &mut Ui) {
+    // 原版没有「空白的 MIDI 导入窗口」：`command_open_midi` 一定先解析、解析成功才开窗，
+    // 所以这里只在数据被清掉的边缘情况下退回一句说明。
+    let Some(midi) = state.midi_data.as_ref() else {
+        ui.label(RichText::new("没有已解析的 MIDI 文件。").weak());
+        return;
+    };
+    let th = state.theme.clone();
+    let fluent = th.kind == ThemeKind::Fluent;
+    let names = state.instrument_list();
+    let flats = state.flags.flats;
+    let margin = ui.spacing().window_margin;
+    // 原版窗口外沿 600×(400 + Fluent 的 32 像素导航条)，内容区要扣掉 egui 的窗口内边距；
+    // 把原点左移一个内边距，行内 x 就能直接写原版的数字。
+    let (ml, mr) = (margin.left as f32, margin.right as f32);
+    let body = ui.allocate_exact_size(
+        egui::vec2(600.0 - ml - mr, if fluent { 402.0 } else { 374.0 }),
+        egui::Sense::hover(),
+    );
+    let o = body.0.min - egui::vec2(ml, 0.0);
+    let ry = if fluent { -8.0 } else { -26.0 };
+    let set_dy = if fluent { 26.0 } else { 0.0 };
+    let body_dy = if fluent { 10.0 } else { 0.0 };
+    // `row()` 里已经含了 Fluent 那 22 像素的行偏移，凡是原版直接写 `y1 + N`
+    // （不带 `settings_y`、也不在 `y1 += navigation_space` 之后）的矩形都要减回去。
+    let abs_dy = if fluent { -22.0 } else { 0.0 };
+
+    let mut previews: Vec<nbs_core::model::Note> = Vec::new();
+    let mut do_import = false;
+    let mut do_cancel = false;
+    let mut do_defaults = false;
+    {
+        let mut pg = Page {
+            ui: &mut *ui,
+            o,
+            ry,
+            th: &th,
+            fluent,
+        };
+        let opt = &mut state.midi_options;
+        let tab = &mut state.midi_tab;
+        let scroll = &mut state.midi_scroll;
+        let menu = &mut state.midi_menu;
+        let sub = &mut state.midi_submenu;
+        let drags = &mut state.midi_drags;
+        let icons = &state.icons;
+
+        // ---- 上半部设定区。Fluent 先铺一块 0xCCCCCC（fdark 0x333333）的圆角卡片。
+        if fluent {
+            pg.ui.painter().clone().rect_filled(
+                pg.row_rect(8.0, 74.0 + abs_dy, 592.0, 176.0 + abs_dy),
+                16.0,
+                if th.fdark {
+                    ggray(51)
+                } else {
+                    ggray(204)
+                },
+            );
+        }
+        if pg.check(
+            32.0,
+            32.0 + set_dy,
+            opt.remove_silent,
+            "去除开始时空部分",
+            "是否移除歌曲开始时无音符的部分。",
+            false,
+            false,
+        ) {
+            opt.remove_silent = !opt.remove_silent;
+        }
+        if pg.check(
+            32.0,
+            52.0 + set_dy,
+            opt.name_layers,
+            "给每层命名......",
+            "是否根据 MIDI 内数据为每层命名。",
+            false,
+            false,
+        ) {
+            opt.name_layers = !opt.name_layers;
+        }
+        if pg.radio(
+            52.0,
+            72.0 + set_dy,
+            opt.name_after_patch,
+            "......根据乐器",
+            "是否根据 MIDI 中的乐器为每层命名。",
+            !opt.name_layers,
+        ) {
+            opt.name_after_patch = true;
+        }
+        if pg.radio(
+            52.0,
+            92.0 + set_dy,
+            !opt.name_after_patch,
+            "......根据层号",
+            "是否根据 MIDI 中的层序号为每层命名。",
+            !opt.name_layers,
+        ) {
+            opt.name_after_patch = false;
+        }
+        if pg.check(
+            300.0,
+            32.0 + set_dy,
+            opt.tempo_from_file,
+            "导入速度",
+            "是否将速度设定为与 MIDI 文件中一样。",
+            false,
+            false,
+        ) {
+            opt.tempo_from_file = !opt.tempo_from_file;
+        }
+        if pg.check(
+            410.0,
+            32.0 + set_dy,
+            opt.tempo_changer,
+            "速度变化",
+            "是否添加 MIDI 文件中的速度变化。\n速度调节器（Tempo Changer）在游戏中及大多数NBS兼容软件中不被支持。",
+            false,
+            false,
+        ) {
+            opt.tempo_changer = !opt.tempo_changer;
+        }
+        // 打开「音符长度」会让第四页出现，并立刻跳过去（原版 `w_midi_tab = 3`）。
+        if pg.check(
+            300.0,
+            52.0 + set_dy,
+            opt.note_duration,
+            "音符长度",
+            "是否将长音以震荡式的排列方式表示。\n可在“音符长度”页面为各声部分别设置。",
+            false,
+            false,
+        ) {
+            opt.note_duration = !opt.note_duration;
+            if opt.note_duration {
+                *tab = 3;
+            }
+        }
+        pg.text(
+            pg.row(300.0, 72.0 + set_dy),
+            "通道最高层数:",
+            PREFS_FONT,
+            pg.ink(),
+        );
+        pg.tip_area(
+            300.0,
+            72.0 + set_dy,
+            140.0,
+            16.0,
+            "每个通道所允许使用的最多层数。拖拽来更改。",
+        );
+        if let Some(v) = pg.drag(420.0, 72.0 + set_dy, opt.max_height as i32, 1.0, 1, 20, false, "", &mut drags[0]) {
+            opt.max_height = v as u8;
+        }
+        if pg.check(
+            300.0,
+            92.0 + set_dy,
+            opt.keep_octave_range,
+            "保持八度范围",
+            "是否自动将音符转换到 2 八度限制内。",
+            false,
+            false,
+        ) {
+            opt.keep_octave_range = !opt.keep_octave_range;
+        }
+        if pg.check(
+            32.0,
+            112.0 + set_dy,
+            opt.use_velocity,
+            "导入音符音量",
+            "是否将 MIDI 文件中音符音量应用到音符上。",
+            false,
+            false,
+        ) {
+            opt.use_velocity = !opt.use_velocity;
+        }
+        if pg.check(
+            300.0,
+            112.0 + set_dy,
+            opt.note_duration_fade,
+            "尾音渐变",
+            "将生成的尾音从起始百分比线性变化到结束百分比。\n原音符起始音的音量保持不变。",
+            false,
+            !opt.note_duration,
+        ) {
+            opt.note_duration_fade = !opt.note_duration_fade;
+        }
+        // 「音符长度」或「尾音渐变」没开时，原版把这一整行涂成 c_gray 并改成静态数字。
+        let fade_locked = !opt.note_duration || !opt.note_duration_fade;
+        let dim = ggray(128);
+        let head_ink = if fade_locked { dim } else { pg.ink() };
+        pg.text(pg.row(405.0, 111.0 + set_dy), "起始:", PREFS_FONT, head_ink);
+        let start_n = if fade_locked { 111.0 } else { 112.0 };
+        if let Some(v) = pg.drag(
+            445.0,
+            start_n + set_dy,
+            opt.note_duration_fade_start as i32,
+            1.0,
+            0,
+            100,
+            fade_locked,
+            "",
+            &mut drags[1],
+        ) {
+            opt.note_duration_fade_start = v as u8;
+        }
+        pg.text(pg.row(466.0, 111.0 + set_dy), "%", PREFS_FONT, head_ink);
+        pg.text(pg.row(485.0, 111.0 + set_dy), "结束:", PREFS_FONT, head_ink);
+        if let Some(v) = pg.drag(
+            525.0,
+            start_n + set_dy,
+            opt.note_duration_fade_end as i32,
+            1.0,
+            0,
+            100,
+            fade_locked,
+            "",
+            &mut drags[2],
+        ) {
+            opt.note_duration_fade_end = v as u8;
+        }
+        pg.text(pg.row(546.0, 111.0 + set_dy), "%", PREFS_FONT, head_ink);
+        pg.tip_area(
+            403.0,
+            108.0 + set_dy,
+            72.0,
+            20.0,
+            "第一个尾音相对于 MIDI 音符音量的百分比。\n拖拽来更改。",
+        );
+        pg.tip_area(
+            483.0,
+            108.0 + set_dy,
+            72.0,
+            20.0,
+            "最后一个尾音相对于 MIDI 音符音量的百分比。\n拖拽来更改。",
+        );
+        pg.text(pg.row(470.0, 52.0 + set_dy), "精准度", PREFS_FONT, pg.ink());
+        pg.tip_area(
+            470.0,
+            52.0 + set_dy,
+            100.0,
+            20.0,
+            "调整音符间的距离，以在中间放下更多音符。",
+        );
+        let prec = [
+            (470.0, 72.0, 0u8, "1 倍", "与 MIDI 文件中音符间距一致。"),
+            (470.0, 92.0, 1, "2 倍", "在音符间使用两倍间距。"),
+            (520.0, 72.0, 3, "4 倍", "在音符间使用四倍间距。"),
+            (
+                520.0,
+                92.0,
+                7,
+                "8 倍",
+                "在音符间使用八倍间距。\n（歌曲将会很长！）",
+            ),
+        ];
+        for (x, n, value, label, tip) in prec {
+            if pg.radio(x, n + set_dy, opt.precision == value, label, tip, false) {
+                opt.precision = value;
+            }
+        }
+
+        // ---- 页签条。原版 `tab_count = 3 + (w_midi_note_duration != 0)`，越界回到 0。
+        let tab_count = 3 + usize::from(opt.note_duration);
+        if *tab >= tab_count {
+            *tab = 0;
+        }
+        if fluent {
+            // `draw_navigationview` 自带左上角返回按钮（原版在 `(x1, y1 + 30)` 的 40×40 那块）。
+            if pg.back(icons) {
+                do_cancel = true;
+            }
+        } else {
+            // 非 Fluent 先铺面板再画页签：选中的页签要压掉面板顶边那一像素。
+            midi_panel_box(&mut pg);
+        }
+        let nsel = pg.tabs(
+            if fluent { 40.0 } else { 8.0 },
+            if fluent { 0.0 } else { 102.0 },
+            &MIDI_TABS[..tab_count],
+            *tab as u8,
+        ) as usize;
+        if nsel != *tab {
+            *tab = nsel;
+        }
+        // 原版 `w_midi_tab += keyboard_check_pressed(vk_right) - keyboard_check_pressed(vk_left)`，
+        // 出界绕到另一头。
+        let (left, right) = pg.ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::ArrowLeft),
+                i.key_pressed(egui::Key::ArrowRight),
+            )
+        });
+        if left {
+            *tab = (*tab + tab_count - 1) % tab_count;
+        }
+        if right {
+            *tab = (*tab + 1) % tab_count;
+        }
+
+        // 原版把文件名和总时长画在标题带里（右对齐到 `x1 + 590`）。egui 的标题带归
+        // `Window` 自己，所以文件名并进了窗口标题，这里只留时长那一行。
+        let secs = midi.song_length(opt.tempo_changer, opt.remove_silent);
+        let len_str = if secs > 0.0 {
+            crate::layers_panel::time_str(secs)
+        } else {
+            "速度未定义".to_string()
+        };
+        let lw = pg.measure(&len_str, PREFS_FONT);
+        pg.text(pg.at(590.0 - lw, 2.0), &len_str, PREFS_FONT, pg.ink());
+
+        // ---- 四张表。原版每页九行，行号从 `floor(sb_val) ` 起，超出总数就截断。
+        let mut ctx = MidiCtx {
+            opt,
+            midi,
+            names: &names,
+            icons,
+            flats,
+            body_dy,
+            previews: &mut previews,
+            menu,
+            sub,
+        };
+        match *tab {
+            // 乐器页的总行数含「10 号通道 = 打击乐」那一行，所以是 channels + 1。
+            0 => midi_table(
+                &mut pg,
+                &mut ctx,
+                MIDI_COLS[0],
+                midi.channels as usize + 1,
+                586.0,
+                MIDI_VLINES[0],
+                &mut scroll[0],
+                midi_row_ins,
+            ),
+            1 => midi_table(
+                &mut pg,
+                &mut ctx,
+                MIDI_COLS[1],
+                midi.perc_notes.len(),
+                586.0,
+                MIDI_VLINES[1],
+                &mut scroll[1],
+                midi_row_perc,
+            ),
+            2 => midi_table(
+                &mut pg,
+                &mut ctx,
+                MIDI_COLS[2],
+                midi.tracks.len(),
+                586.0,
+                MIDI_VLINES[2],
+                &mut scroll[2],
+                midi_row_track,
+            ),
+            _ => {
+                let rows = midi.parts.len();
+                midi_table(
+                    &mut pg,
+                    &mut ctx,
+                    MIDI_COLS[3],
+                    rows,
+                    570.0,
+                    MIDI_VLINES[3],
+                    &mut scroll[3],
+                    midi_row_part,
+                );
+                if rows == 0 {
+                    pg.text(
+                        pg.row(16.0, 178.0 + body_dy),
+                        "此文件中没有音符。",
+                        PREFS_FONT,
+                        pg.ink(),
+                    );
+                }
+            }
+        }
+
+        // ---- 底部：原版 `draw_checkbox(..., false, true)` 的「记住我的更改」是胶囊开关。
+        if pg.check(
+            12.0,
+            374.0 + body_dy,
+            ctx.opt.remember,
+            "记住我的更改",
+            "下次导入 MIDI 文件时是否使用同样的设定。",
+            true,
+            false,
+        ) {
+            ctx.opt.remember = !ctx.opt.remember;
+        }
+        if pg.button(520.0, 368.0 + body_dy, 72.0, "导入", false) {
+            do_import = true;
+        }
+        if pg.button2(440.0, 368.0 + body_dy, 72.0, "取消", false, true) {
+            do_cancel = true;
+        }
+        if pg.button2(360.0, 368.0 + body_dy, 72.0, "使用默认值", false, true) {
+            do_defaults = true;
+        }
+    }
+
+    for note in previews {
+        state.audio.preview_note(&note);
+    }
+    if do_import {
+        state.emit(Command::MidiImportRun);
+        return;
+    }
+    if do_cancel {
+        state.emit(Command::MidiImportCancel);
+        return;
+    }
+    if do_defaults {
+        // 原版 `question("你确定吗？", "确定")`：确认后才重查 GM 表并恢复 `w_midi_*`。
+        state.modals = ModalQueue::question("确定", "你确定吗？", Command::MidiUseDefaults);
+    }
+    if let Some(kind) = state.midi_menu {
+        use crate::state::MidiMenu as M;
+        let items = midi_menu_items(&names, flats, &state.midi_options, kind);
+        let (x, n) = midi_menu_pos(kind, &state.midi_scroll, body_dy);
+        let bank = state.icons.bank();
+        let (picked, dismissed) = midi_popup(
+            ui,
+            "midi_menu",
+            o + Vec2::new(x, n + ry),
+            &items,
+            &mut state.midi_submenu,
+            &th,
+            bank.as_deref(),
+        );
+        if let Some(v) = picked {
+            let v = v as i8;
+            let opt = &mut state.midi_options;
+            match kind {
+                M::ChannelIns(b) if b < 16 => opt.channel_ins[b] = v,
+                M::ChannelOct(b) if b < 16 => opt.channel_octave[b] = v,
+                M::PercIns(b) => {
+                    if let Some(s) = opt.perc_ins.get_mut(b) {
+                        *s = v;
+                    }
+                }
+                M::PercPitch(b) => {
+                    if let Some(s) = opt.perc_pitch.get_mut(b) {
+                        *s = v;
+                    }
+                }
+                _ => {}
+            }
+            state.midi_menu = None;
+        }
+        if dismissed {
+            state.midi_menu = None;
+        }
+    }
+}
+
+/// 原版非 Fluent 的表格底板。主题 1 先在外面再套一层小窗口
+/// （`draw_window(x1 + 4, y1 + 145, x1 + 596, y1 + 364)`，`spr_interface2` 没导出，
+/// 用同色底 + 主题描边近似），然后在 `(6, 146)-(594, 362)` 铺一块白
+/// （主题 2 是 c_dark）并描 (137,140,149) 一圈；主题 1 再在里面补
+/// `(9, 149)-(589, 358)` 的白底加 `draw_area` 那一圈。Fluent 没有这块
+/// （源码那两行 `draw_rectangle` 的条件都是 `theme != 3`）。
+fn midi_panel_box(pg: &mut Page) {
+    let retro = pg.th.kind == ThemeKind::Retro;
+    let p = pg.ui.painter().clone();
+    if retro {
+        let outer = pg.row_rect(4.0, 145.0, 596.0, 364.0);
+        p.rect_filled(outer, 0.0, ggray(200));
+        p.rect_stroke(outer, 0.0, Stroke::new(1.0_f32, pg.th.border), StrokeKind::Inside);
+    }
+    let rect = if retro {
+        pg.row_rect(9.0, 149.0, 589.0, 358.0)
+    } else {
+        pg.row_rect(6.0, 146.0, 594.0, 362.0)
+    };
+    let fill = if pg.th.kind == ThemeKind::Dark {
+        ggray(64)
+    } else {
+        Color32::WHITE
+    };
+    p.rect_filled(rect, 0.0, fill);
+    p.rect_stroke(
+        rect,
+        0.0,
+        Stroke::new(1.0_f32, Color32::from_rgb(137, 140, 149)),
+        StrokeKind::Inside,
+    );
+    if retro {
+        pg.frame_box(9.0, 149.0, 590.0, 360.0);
+    }
+}
+
+/// 原版第 `k` 列的右边界 `x1 + 8 + Σ tabw[..k]`：表头、试听热区和下拉菜单都以它为准。
+fn midi_col_end(cols: &[(f32, &str, &str)], k: usize) -> f32 {
+    8.0 + cols[..k.min(cols.len())].iter().map(|c| c.0).sum::<f32>()
+}
+
+/// 原版格子里文字的起点：`x1 + 12 + 4 + Σ tabw[..k]`。
+fn midi_col_x(cols: &[(f32, &str, &str)], k: usize) -> f32 {
+    midi_col_end(cols, k) + 8.0
+}
+
+/// 原版每页表格的竖分隔线，逐条照该页 `draw_line` 那几行抄。多数页符合
+/// `x1 + 11 - k + Σ tabw[..k]`（每往右一列就多退一像素），只有「轨道」页最后一条
+/// 写成 `x1 + 9 + Σ`，比公式多一像素——原版的笔误，这里照抄不修。
+const MIDI_VLINES: [&[f32]; 4] = [
+    &[12.0, 60.0, 100.0, 359.0, 488.0],
+    &[12.0, 60.0, 279.0, 488.0],
+    &[12.0, 89.0, 388.0, 588.0],
+    &[12.0, 66.0, 127.0, 438.0],
+];
+
+/// 原版试听热区：`(列左边界, y1 + 170 + 20a, 列宽 - 20, 20)`。
+fn midi_preview_rect(pg: &Page, cols: &[(f32, &str, &str)], k: usize, a: usize, body_dy: f32) -> Rect {
+    let at = pg.row(
+        midi_col_end(cols, k),
+        170.0 + a as f32 * MIDI_ROW_H + body_dy,
+    );
+    Rect::from_min_size(at, Vec2::new(cols[k].0 - 20.0, MIDI_ROW_H))
+}
+
+fn midi_hline(pg: &Page, x1: f32, x2: f32, n: f32) {
+    let p = pg.ui.painter().clone();
+    p.line_segment(
+        [pg.row(x1, n), pg.row(x2, n)],
+        Stroke::new(1.0_f32, MIDI_LINE),
+    );
+}
+
+fn midi_vline(pg: &Page, x: f32, n1: f32, n2: f32) {
+    let p = pg.ui.painter().clone();
+    p.line_segment(
+        [pg.row(x, n1), pg.row(x, n2)],
+        Stroke::new(1.0_f32, MIDI_LINE),
+    );
+}
+
+/// 原版表格区：九行内容 + 分隔线 + 从右往左铺的表头 + 右侧那根 17×185 的滚动条。
+/// `rows` 是这一页的总条数，`line_right` 是每行下面那条横线伸到哪儿（原版「音符长度」
+/// 页只到 570，其余到 586），`vlines` 是这一页的竖线 x（见 `MIDI_VLINES`），
+/// `row_fn(pg, ctx, 行号, 可见序号)` 负责画一整行。
+fn midi_table(
+    pg: &mut Page,
+    ctx: &mut MidiCtx,
+    cols: &[(f32, &str, &str)],
+    rows: usize,
+    line_right: f32,
+    vlines: &[f32],
+    scroll: &mut f32,
+    row_fn: fn(&mut Page, &mut MidiCtx, usize, usize),
+) {
+    let base = scroll.floor().max(0.0) as usize;
+    let mut drawn = 0usize;
+    for a in 0..MIDI_SLOTS {
+        let b = base + a;
+        if b >= rows {
+            break;
+        }
+        row_fn(pg, ctx, b, a);
+        drawn += 1;
+        midi_hline(
+            pg,
+            12.0,
+            line_right,
+            190.0 + a as f32 * MIDI_ROW_H + ctx.body_dy,
+        );
+    }
+    // 竖线的下沿按实际画出的行数收（原版用的是循环结束后的那个 `a`）；一行都没画时
+    // 原版根本不进这个分支（「打击乐」页），所以这时整组竖线都不画。
+    let top = 170.0 + ctx.body_dy;
+    if drawn > 0 {
+        let bottom = top + drawn as f32 * MIDI_ROW_H;
+        for x in vlines {
+            midi_vline(pg, *x, top, bottom);
+        }
+    }
+    // 表头：`xx = x1 + 588` 起从最后一列往左铺，相邻列重叠一像素，画在内容之上。
+    let mut xx = 588.0;
+    for (w, name, tip) in cols.iter().rev() {
+        midi_header_cell(pg, xx - w, *w, name, tip);
+        xx -= w - 1.0;
+    }
+    midi_scrollbar(pg, 171.0 + ctx.body_dy, rows.max(1), scroll);
+}
+
+/// 原版 `draw_window(xx - tabw, y1 + 151, xx, y1 + 151 + 20, 1)` 的那一格表头。
+/// `sml = 1` 只是不画阴影；底色按主题分别是 240 / 200 / c_dark / 243（fdark 32），
+/// 九宫格边框 `spr_interface2` 没导出，用主题描边近似（同 `Page::frame_box`）。
+fn midi_header_cell(pg: &mut Page, x: f32, w: f32, name: &str, tip: &str) {
+    let top = 151.0 + if pg.fluent { 10.0 } else { 0.0 };
+    let rect = pg.row_rect(x, top, x + w, top + 20.0);
+    let fill = match pg.th.kind {
+        ThemeKind::Aqua => ggray(240),
+        ThemeKind::Retro => ggray(200),
+        ThemeKind::Dark => ggray(64),
+        ThemeKind::Fluent if pg.th.fdark => ggray(32),
+        ThemeKind::Fluent => ggray(243),
+    };
+    let p = pg.ui.painter().clone();
+    p.rect_filled(rect, 0.0, fill);
+    p.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, pg.th.border), StrokeKind::Inside);
+    pg.tip_area(x, top, w, 20.0, tip);
+    pg.text(pg.row(x + 4.0, top + 3.0), name, PREFS_FONT, pg.ink());
+}
+
+/// 原版 `draw_scrollbar(id, x1 + 572, y1 + 171, 17, 9, 总数, 0, 1)` 的竖直分支：
+/// 上下各一个 16×16 箭头，中间 153 像素的槽；滑块高 `max(10, 9/总数 × 153)`，
+/// 顶边在 `滚动量 / 总数 × 153`（取整）。滚轮 ±1 行，拖拽按 `dy ÷ (153/总数)` 折算，
+/// 松手时 `round` 取整；总数不到一页时整条锁定（滑块不画，点了也不动）。
+/// 两处和原版不一样，都是有意的：①滚轮在指针悬停于滚动条上时即生效，原版要先点一下
+/// 让 `sb_sel` 指到它；②按住箭头或槽底不做按帧连发（原版的 `sb_press` 计时），
+/// 只响应单次按下——连发要跨帧计时，功能上和单击没有区别。
+fn midi_scrollbar(pg: &mut Page, n: f32, total: usize, scroll: &mut f32) {
+    const TRACK: f32 = 17.0 * 9.0;
+    let slots = MIDI_SLOTS as f32;
+    let x = 572.0;
+    let max_scroll = (total as f32 - slots).max(0.0);
+    *scroll = scroll.clamp(0.0, max_scroll);
+    let locked = total as f32 <= slots;
+    let bwh = if locked {
+        0.0
+    } else {
+        (slots / total as f32 * TRACK).max(10.0)
+    };
+    let bpos = if locked {
+        0.0
+    } else {
+        (*scroll / total as f32 * TRACK).floor()
+    };
+    let p = pg.ui.painter().clone();
+    p.rect_filled(
+        Rect::from_min_size(pg.row(x, n), Vec2::new(17.0, TRACK + 32.0)),
+        3.0,
+        pg.th.panel,
+    );
+    if !locked {
+        let thumb = Rect::from_min_size(
+            pg.row(x, n + 20.0 + bpos),
+            Vec2::new(17.0, bwh.floor() - 6.0),
+        );
+        p.rect_filled(thumb, 3.0, pg.th.accent_soft);
+        p.rect_stroke(
+            thumb,
+            3.0,
+            Stroke::new(1.0_f32, pg.th.accent),
+            StrokeKind::Inside,
+        );
+    }
+    // 上下箭头。原版是 `spr_scrollbar_v_button_up/down`，精灵图没导出，画同位置的三角形。
+    let ink = pg.ink();
+    for (down, dy) in [(false, 0.0), (true, TRACK + 16.0)] {
+        let rect = Rect::from_min_size(pg.row(x, n + dy), Vec2::new(16.0, 16.0));
+        let (resp, _) = pg.hit(rect, Id::new(("midi-sb-btn", n as i32, dy as i32)), locked);
+        let c = rect.center();
+        let pts = if down {
+            vec![
+                c + Vec2::new(-3.5, -1.5),
+                c + Vec2::new(3.5, -1.5),
+                c + Vec2::new(0.0, 3.0),
+            ]
+        } else {
+            vec![
+                c + Vec2::new(-3.5, 1.5),
+                c + Vec2::new(3.5, 1.5),
+                c + Vec2::new(0.0, -3.0),
+            ]
+        };
+        p.add(egui::Shape::convex_polygon(pts, ink, Stroke::NONE));
+        if resp.clicked() {
+            *scroll = (*scroll + if down { 1.0 } else { -1.0 }).clamp(0.0, max_scroll);
+        }
+    }
+    // 槽底（滑块上/下那两段）按整页翻。
+    for above in [true, false] {
+        if locked {
+            break;
+        }
+        let y = if above { n + 16.0 } else { n + 16.0 + bpos + bwh };
+        let h = if above { bpos } else { TRACK - (bpos + bwh) };
+        if h <= 0.0 {
+            continue;
+        }
+        let rect = Rect::from_min_size(pg.row(x, y), Vec2::new(16.0, h));
+        let (resp, _) = pg.hit(rect, Id::new(("midi-sb-track", n as i32, above)), false);
+        if resp.clicked() {
+            *scroll = (*scroll + if above { -slots } else { slots }).clamp(0.0, max_scroll);
+        }
+    }
+    // 拖滑块：原版 `sb_val += dy / (mwh / ms)`，松手取整。
+    if !locked {
+        let grip = Rect::from_min_size(pg.row(x, n + 16.0 + bpos), Vec2::new(16.0, bwh));
+        let resp = pg.ui.interact(grip, Id::new(("midi-sb-thumb", n as i32)), Sense::drag());
+        if resp.dragged() {
+            *scroll = (*scroll + resp.drag_delta().y / (TRACK / total as f32)).clamp(0.0, max_scroll);
+        } else if resp.drag_stopped() {
+            *scroll = scroll.round().clamp(0.0, max_scroll);
+        }
+    }
+    // 滚轮（悬停在整条上就算，见函数头第 ① 条）。
+    let zone = Rect::from_min_size(pg.row(x, n), Vec2::new(17.0, TRACK + 32.0));
+    let hover = pg.ui.interact(zone, Id::new(("midi-sb-wheel", n as i32)), Sense::hover());
+    if hover.hovered() {
+        let d = pg.ui.input(|i| i.raw_scroll_delta.y);
+        if d != 0.0 {
+            *scroll = (*scroll - d).clamp(0.0, max_scroll);
+        }
+    }
+}
+
+/// 原版「乐器」页的一行：通道号、GM 乐器号与名、映射到的音色（点名字试听）、八度调整。
+/// 下标 9（10 号通道）是打击乐，整行涂 rgb(120,120,120)，后三格换成固定说明。
+fn midi_row_ins(pg: &mut Page, ctx: &mut MidiCtx, b: usize, a: usize) {
+    use crate::state::MidiMenu;
+    let cols = MIDI_COLS[0];
+    let dy = ctx.body_dy;
+    let n = 174.0 + a as f32 * MIDI_ROW_H + dy;
+    let n_box = 170.0 + a as f32 * MIDI_ROW_H + dy;
+    let n_arrow = 172.0 + a as f32 * MIDI_ROW_H + dy;
+    let ink = if b == 9 { ggray(120) } else { pg.ink() };
+    pg.text(pg.row(midi_col_x(cols, 0), n), &format!("{}", b + 1), PREFS_FONT, ink);
+    if b == 9 {
+        for (k, s) in [" - ", "打击乐", "请查看“打击乐”页面", "-"]
+            .iter()
+            .enumerate()
+        {
+            pg.text(pg.row(midi_col_x(cols, k + 1), n), s, PREFS_FONT, ink);
+        }
+        return;
+    }
+    let c = b.min(15);
+    let patch = ctx.midi.channel_patch[c] as usize;
+    pg.text(pg.row(midi_col_x(cols, 1), n), &format!("{}", patch + 1), PREFS_FONT, ink);
+    let pname = if patch < 128 {
+        nbs_io::MidiGmTable::patch_name(patch as u8)
+    } else {
+        "未知"
+    };
+    pg.text(pg.row(midi_col_x(cols, 2), n), pname, PREFS_FONT, ink);
+    let ins = ctx.opt.channel_ins[c];
+    if ins < 0 {
+        // 原版只把这一格涂成 c_gray，右边那列仍是主题色。
+        pg.text(pg.row(midi_col_x(cols, 3), n), "无", PREFS_FONT, ggray(128));
+    } else {
+        let name = ctx
+            .names
+            .get(ins as usize)
+            .map(|(_, s)| s.as_str())
+            .unwrap_or("");
+        let shown = pg.truncate(name, cols[3].0 - 20.0);
+        let (resp, _) = pg.hit(
+            Rect::from_min_size(
+                pg.row(midi_col_end(cols, 3), n_box),
+                Vec2::new(cols[3].0 - 20.0, MIDI_ROW_H),
+            ),
+            Id::new(("midi-ins-play", b)),
+            false,
+        );
+        pg.text(pg.row(midi_col_x(cols, 3), n), &shown, PREFS_FONT, pg.ink());
+        let clicked = resp
+            .on_hover_text("点击预览声音")
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .clicked();
+        if clicked {
+            // 原版 `play_sound(instrument_list[| ins], 45 + midi_channeloctave[b] * 12, 100, 100, 0)`。
+            let key = (45 + 12 * i32::from(ctx.opt.channel_octave[c])).clamp(0, 87) as u8;
+            ctx.previews.push(nbs_core::model::Note::new(ins as u8, key));
+        }
+    }
+    if pg.arrow(ctx.icons, midi_col_end(cols, 4) - 20.0, n_arrow) {
+        ctx.open_menu(MidiMenu::ChannelIns(b));
+    }
+    // 八度调整：0 显示「无」，正数带 `+`（原版 `condstr(oct > 0, " + ") + string(oct)`）。
+    let oct = ctx.opt.channel_octave[c];
+    let label = match oct {
+        0 => "无".to_string(),
+        v if v > 0 => format!(" + {v}"),
+        v => format!("{v}"),
+    };
+    pg.text(pg.row(midi_col_x(cols, 4), n), &label, PREFS_FONT, ink);
+    if pg.arrow(ctx.icons, midi_col_end(cols, 5) - 36.0, n_arrow) {
+        ctx.open_menu(MidiMenu::ChannelOct(b));
+    }
+}
+
+/// 原版「打击乐」页的一行：音调是原始音号，声音名查 GM 表，音色可点试听并带下拉，
+/// 音高是 0..=87 的下拉。
+fn midi_row_perc(pg: &mut Page, ctx: &mut MidiCtx, b: usize, a: usize) {
+    use crate::state::MidiMenu;
+    let cols = MIDI_COLS[1];
+    let dy = ctx.body_dy;
+    let n = 174.0 + a as f32 * MIDI_ROW_H + dy;
+    let note = ctx.midi.perc_notes[b];
+    pg.text(pg.row(midi_col_x(cols, 0), n), &format!("{note}"), PREFS_FONT, pg.ink());
+    pg.text(
+        pg.row(midi_col_x(cols, 1), n),
+        nbs_io::MidiGmTable::drum_name(note),
+        PREFS_FONT,
+        pg.ink(),
+    );
+    let ins = ctx.opt.perc_ins.get(b).copied().unwrap_or(-1);
+    if ins < 0 {
+        pg.text(pg.row(midi_col_x(cols, 2), n), "无视", PREFS_FONT, ggray(128));
+    } else {
+        let name = ctx
+            .names
+            .get(ins as usize)
+            .map(|(_, s)| s.as_str())
+            .unwrap_or("");
+        let shown = pg.truncate(name, cols[2].0 - 20.0);
+        let (resp, _) = pg.hit(
+            midi_preview_rect(pg, cols, 2, a, dy),
+            Id::new(("midi-perc-play", b)),
+            false,
+        );
+        pg.text(pg.row(midi_col_x(cols, 2), n), &shown, PREFS_FONT, pg.ink());
+        let clicked = resp
+            .on_hover_text("点击预览声音")
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .clicked();
+        if clicked {
+            // 原版直接拿界面上设定的音高来试听：`play_sound(ins, midi_percpitch[b], 100, 100, 0)`。
+            let key = ctx.opt.perc_pitch.get(b).copied().unwrap_or(0).clamp(0, 87) as u8;
+            ctx.previews.push(nbs_core::model::Note::new(ins as u8, key));
+        }
+    }
+    if pg.arrow(ctx.icons, midi_col_end(cols, 3) - 19.0, 172.0 + a as f32 * MIDI_ROW_H + dy) {
+        ctx.open_menu(MidiMenu::PercIns(b));
+    }
+    let pitch = ctx.opt.perc_pitch.get(b).copied().unwrap_or(0);
+    pg.text(
+        pg.row(midi_col_x(cols, 3), n),
+        &key_name(pitch.clamp(0, 87) as u8, true, ctx.flats),
+        PREFS_FONT,
+        pg.ink(),
+    );
+    if pg.arrow(ctx.icons, midi_col_end(cols, 4) - 35.0, 172.0 + a as f32 * MIDI_ROW_H + dy) {
+        ctx.open_menu(MidiMenu::PercPitch(b));
+    }
+}
+
+/// 原版「轨道」页的一行，三列纯文字：序号、轨道名、事件数。
+fn midi_row_track(pg: &mut Page, ctx: &mut MidiCtx, b: usize, a: usize) {
+    let cols = MIDI_COLS[2];
+    let n = 174.0 + a as f32 * MIDI_ROW_H + ctx.body_dy;
+    let track = &ctx.midi.tracks[b];
+    pg.text(pg.row(midi_col_x(cols, 0), n), &format!("{}", b + 1), PREFS_FONT, pg.ink());
+    pg.text(
+        pg.row(midi_col_x(cols, 1), n),
+        &pg.truncate(&track.name, cols[1].0),
+        PREFS_FONT,
+        pg.ink(),
+    );
+    pg.text(
+        pg.row(midi_col_x(cols, 2), n),
+        &format!("{}", track.events.len()),
+        PREFS_FONT,
+        pg.ink(),
+    );
+}
+
+/// 原版「音符长度」页的一行：轨道号（悬停出轨道名）、通道号、乐器名，最后一个是
+/// 该声部要不要导入尾音的勾选框；10 号通道的格子是锁住的（打击乐按单音导入）。
+fn midi_row_part(pg: &mut Page, ctx: &mut MidiCtx, b: usize, a: usize) {
+    let cols = MIDI_COLS[3];
+    let dy = ctx.body_dy;
+    let n = 174.0 + a as f32 * MIDI_ROW_H + dy;
+    let part = &ctx.midi.parts[b];
+    pg.text(
+        pg.row(midi_col_x(cols, 0), n),
+        &format!("{}", part.track + 1),
+        PREFS_FONT,
+        pg.ink(),
+    );
+    let name = ctx
+        .midi
+        .tracks
+        .get(part.track)
+        .map(|t| t.name.as_str())
+        .unwrap_or("");
+    pg.tip_area(12.0, 172.0 + a as f32 * MIDI_ROW_H + dy, cols[0].0 - 4.0, 18.0, name);
+    pg.text(
+        pg.row(midi_col_x(cols, 1), n),
+        &format!("{}", part.channel + 1),
+        PREFS_FONT,
+        pg.ink(),
+    );
+    let label = if part.channel == 9 {
+        "打击乐".to_string()
+    } else if (part.patch as usize) < 128 {
+        format!("{}. {}", part.patch + 1, nbs_io::MidiGmTable::patch_name(part.patch as u8))
+    } else {
+        "未知".to_string()
+    };
+    pg.text(
+        pg.row(midi_col_x(cols, 2), n),
+        &pg.truncate(&label, cols[2].0),
+        PREFS_FONT,
+        pg.ink(),
+    );
+    let tip = if part.channel == 9 {
+        "打击乐以单个音符导入。"
+    } else {
+        cols[3].2
+    };
+    let on = ctx
+        .opt
+        .part_durations
+        .get(b)
+        .copied()
+        .unwrap_or(part.note_duration);
+    if pg.check(
+        midi_col_end(cols, 3) + 16.0,
+        175.0 + a as f32 * MIDI_ROW_H + dy,
+        on,
+        "",
+        tip,
+        false,
+        part.channel == 9,
+    ) {
+        if let Some(v) = ctx.opt.part_durations.get_mut(b) {
+            *v = !*v;
+        }
+    }
+}
+
+/// 原版 `show_menu_ext` 的一行。`children` 非空就是原版用 `\` `/` 包出来的子菜单
+/// （只有打击乐音高的「N 八度」用到）：悬停展开、点标题行什么都不选也不收起；
+/// `shortcut` 是右对齐的那列字（原版 `x$` 前缀的 `(outside)`）；`checked` 在左边
+/// 36 像素的图标槽里画一个勾（原版 `check()` 给的 `icons.CHECK`）。
+struct MidiMenuItem {
+    label: String,
+    shortcut: &'static str,
+    value: i16,
+    checked: bool,
+    children: Vec<MidiMenuItem>,
+}
+
+impl MidiMenuItem {
+    fn item(label: impl Into<String>, value: i16, checked: bool) -> Self {
+        Self {
+            label: label.into(),
+            shortcut: "",
+            value,
+            checked,
+            children: Vec::new(),
+        }
+    }
+
+    fn with_shortcut(mut self, s: &'static str) -> Self {
+        self.shortcut = s;
+        self
+    }
+
+    fn head(label: impl Into<String>, children: Vec<MidiMenuItem>) -> Self {
+        Self {
+            label: label.into(),
+            shortcut: "",
+            value: -1,
+            checked: false,
+            children,
+        }
+    }
+
+    fn is_head(&self) -> bool {
+        !self.children.is_empty()
+    }
+}
+
+/// 「无」+ 整张音色表（原版遍历 `instrument_list`）。界面上这两个映射存的是 `i8`，
+/// 所以下标超过 127 的自定义音色进不了菜单——导入器也只认 0..=127。
+fn midi_ins_items(names: &[(u8, String)], cur: i8) -> Vec<MidiMenuItem> {
+    let mut out = Vec::with_capacity(names.len().min(128) + 1);
+    out.push(MidiMenuItem::item("无", -1, cur == -1));
+    for (i, (_, name)) in names.iter().enumerate().take(128) {
+        out.push(MidiMenuItem::item(name.clone(), i as i16, cur == i as i8));
+    }
+    out
+}
+
+/// 四个下拉各自的条目，全部照 `show_menu_ext` 传进去那串 `str` 拼。
+fn midi_menu_items(
+    names: &[(u8, String)],
+    flats: bool,
+    opt: &nbs_io::midi::MidiImportOptions,
+    kind: crate::state::MidiMenu,
+) -> Vec<MidiMenuItem> {
+    use crate::state::MidiMenu as M;
+    match kind {
+        M::ChannelIns(b) => midi_ins_items(names, opt.channel_ins.get(b.min(15)).copied().unwrap_or(-1)),
+        M::PercIns(b) => midi_ins_items(names, opt.perc_ins.get(b).copied().unwrap_or(-1)),
+        M::ChannelOct(b) => {
+            let cur = opt.channel_octave.get(b.min(15)).copied().unwrap_or(0);
+            (-3..=3i16)
+                .map(|v| {
+                    MidiMenuItem::item(
+                        if v > 0 { format!("+{v}") } else { v.to_string() },
+                        v,
+                        v == i16::from(cur),
+                    )
+                })
+                .collect()
+        }
+        M::PercPitch(b) => {
+            let cur = i32::from(opt.perc_pitch.get(b).copied().unwrap_or(0));
+            // 原版每遇到 `key ≡ 3 (mod 12)` 就 `/|N 八度|\|` 换一节子菜单，且这个判断排在
+            // `key = 88` 的收尾之后——所以第 0 节只有 0..2 三个音，中间每节十二个，
+            // 最后 key 87 自己单独剩一节「8 八度」。父菜单就只有这些标题行。
+            let mut out = Vec::new();
+            let (mut key, mut oct) = (0i32, 0i32);
+            loop {
+                let take = if oct == 0 { 3 } else { (88 - key).min(12) };
+                let children = (0..take)
+                    .map(|i| {
+                        let k = key + i;
+                        MidiMenuItem::item(key_name(k as u8, true, flats), k as i16, k == cur)
+                            .with_shortcut(if k < 33 || k > 57 { "(outside)" } else { "" })
+                    })
+                    .collect();
+                out.push(MidiMenuItem::head(format!("{oct} 八度"), children));
+                key += take;
+                if key >= 88 {
+                    break;
+                }
+                oct += 1;
+            }
+            out
+        }
+    }
+}
+
+/// 原版菜单的锚点：`(该列左边界, y1 + 190 + 20 × 可见行号)`，
+/// 可见行号 = 行号 - `floor(滚动量)`，和画那一行时用的是同一个数。
+fn midi_menu_pos(
+    kind: crate::state::MidiMenu,
+    scroll: &[f32; 4],
+    body_dy: f32,
+) -> (f32, f32) {
+    use crate::state::MidiMenu as M;
+    let (cols, page, b, k) = match kind {
+        M::ChannelIns(b) => (MIDI_COLS[0], 0, b, 3),
+        M::ChannelOct(b) => (MIDI_COLS[0], 0, b, 4),
+        M::PercIns(b) => (MIDI_COLS[1], 1, b, 2),
+        M::PercPitch(b) => (MIDI_COLS[1], 1, b, 3),
+    };
+    let a = (b as f32 - scroll[page].floor()).max(0.0);
+    (
+        midi_col_end(cols, k),
+        190.0 + a * MIDI_ROW_H + body_dy,
+    )
+}
+
+/// 原版 `show_menu_ext` 的 `menu_wid[a]`：最长的一条（文字 + 快捷字 + 七个空格）再加 56。
+fn midi_menu_wid(ui: &Ui, th: &Theme, items: &[MidiMenuItem]) -> f32 {
+    items
+        .iter()
+        .map(|it| {
+            let s = if it.shortcut.is_empty() {
+                it.label.clone()
+            } else {
+                format!("{}{}       ", it.label, it.shortcut)
+            };
+            ui.painter()
+                .layout_no_wrap(s, FontId::proportional(PREFS_FONT), th.text)
+                .size()
+                .x
+        })
+        .fold(0.0_f32, f32::max)
+        + 56.0
+}
+
+/// 原版 `menu_draw` 的 `black_text`：选中底色按 sRGB 线性化求亮度，浅色 Fluent 比的是
+/// 「跟黑比划算还是跟白比划算」，深色 Fluent 直接看亮度有没有过半；非 Fluent 恒为白。
+fn menu_sel_text(th: &Theme, bg: Color32) -> Color32 {
+    let lin = |v: u8| {
+        let v = f32::from(v) / 255.0;
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let lum = 0.2126 * lin(bg.r()) + 0.7152 * lin(bg.g()) + 0.0722 * lin(bg.b());
+    let black = if th.fdark {
+        lum >= 0.5
+    } else {
+        (lum + 0.05) / 0.05 >= 1.05 / (lum + 0.05)
+    };
+    if black {
+        Color32::BLACK
+    } else {
+        Color32::WHITE
+    }
+}
+
+/// 原版 `menu_draw` 里那块板：底色非 Fluent 是 `window_background`，Fluent 浅色
+/// rgb(249,249,249)、深色 rgb(41,41,41)（`liquid_glass_settings("menu")` 的 tint），
+/// Fluent 圆角 16；描边一律 `draw_theme_color()`（= 主题文字色）叠 25%。非 Fluent 还在
+/// `+29/+30` 画一条图标槽分隔线（25% 主题色压一条、白描一条）。原版的投影
+/// `spr_shadowext` 和 Fluent 的亚克力模糊都没有，只铺平色。
+fn midi_menu_board(p: &egui::Painter, th: &Theme, rect: Rect) {
+    let fluent = th.kind == ThemeKind::Fluent;
+    let radius = if fluent { 16.0 } else { 0.0 };
+    let fill = if fluent {
+        if th.fdark {
+            ggray(41)
+        } else {
+            ggray(249)
+        }
+    } else {
+        th.window_bg
+    };
+    let dim = th.text.linear_multiply(0.25);
+    p.rect_filled(rect, radius, fill);
+    p.rect_stroke(rect, radius, Stroke::new(1.0_f32, dim), StrokeKind::Inside);
+    if !fluent {
+        for (dx, col) in [(29.0, dim), (30.0, Color32::WHITE)] {
+            p.line_segment(
+                [
+                    egui::pos2(rect.min.x + dx, rect.min.y + 3.0),
+                    egui::pos2(rect.min.x + dx, rect.max.y - 3.0),
+                ],
+                Stroke::new(1.0_f32, col),
+            );
+        }
+    }
+}
+
+/// 画一层菜单的所有行并处理命中。度量全按原版：命中区 `(x + 3, 行顶)`、宽 `wid - 5`、
+/// 高 22；正文左边 `+36`（`check()` 的勾在 `+2` 的图标槽里），快捷字右对齐在
+/// `wid - 20`，子菜单箭头在 `wid - 24`。
+fn midi_menu_rows(
+    ui: &Ui,
+    th: &Theme,
+    bank: Option<&crate::icons::Bank>,
+    id: &str,
+    org: Pos2,
+    wid: f32,
+    items: &[MidiMenuItem],
+    open: &mut Option<usize>,
+) -> Option<i16> {
+    let p = ui.painter().clone();
+    let fluent = th.kind == ThemeKind::Fluent;
+    // 原版选中底色：Fluent 用 `accent[5]`，其余是 `16684072` = rgb(40,148,254)。
+    let sel_bg = if fluent {
+        Theme::accent_at(5)
+    } else {
+        Color32::from_rgb(40, 148, 254)
+    };
+    let sel_text = if fluent {
+        menu_sel_text(th, sel_bg)
+    } else {
+        Color32::WHITE
+    };
+    let mut picked = None;
+    for (i, it) in items.iter().enumerate() {
+        let top = org.y + 3.0 + i as f32 * 22.0;
+        let hit = Rect::from_min_size(egui::pos2(org.x + 3.0, top), Vec2::new(wid - 5.0, 22.0));
+        let resp = ui.interact(hit, Id::new((id, i)), Sense::click());
+        if resp.hovered() {
+            // 原版：悬停到哪一行就先把更深的菜单收掉，那一行是标题再把它展开。
+            *open = it.is_head().then_some(i);
+        }
+        if resp.clicked() && !it.is_head() {
+            picked = Some(it.value);
+        }
+        let sel = resp.hovered();
+        if sel {
+            p.rect_filled(hit, if fluent { 8.0 } else { 0.0 }, sel_bg);
+        }
+        let ink = if sel { sel_text } else { th.text };
+        // 原版 `menu_draw` 的图标层：勾在非 Fluent 完全不染色（精灵自带黑白，Dark 主题另取
+        // 白字那帧），Fluent 是 `draw_sprite_ext(..., 选中 ? 选中文字色 : c_white)` 再叠一层
+        // `spr_icons_col` 的 `accent[6 - 2 * !fdark]`（选中时这层也换成选中文字色）。
+        let check_tint = if fluent && sel { sel_text } else { Color32::WHITE };
+        let accent = fluent.then(|| if sel { sel_text } else { th.accent_icon() });
+        if it.checked {
+            if let Some(bank) = bank {
+                let frame = if th.kind == ThemeKind::Dark {
+                    crate::icons::frame::CHECK_DARK
+                } else {
+                    crate::icons::frame::CHECK
+                };
+                bank.menu_icon(&p, egui::pos2(org.x + 2.0, top - 1.0), frame, check_tint, accent, th);
+            } else {
+                // 精灵资源缺失：位置和形状照旧，只是不拿贴图冒充。
+                let b = egui::pos2(org.x + 5.0, top + 3.0);
+                let s = Stroke::new(1.5_f32, ink);
+                p.line_segment([b, b + Vec2::new(2.5, 3.0)], s);
+                p.line_segment([b + Vec2::new(2.5, 3.0), b + Vec2::new(7.0, -2.0)], s);
+            }
+        }
+        let g = p.layout_no_wrap(it.label.clone(), FontId::proportional(PREFS_FONT), ink);
+        p.galley(egui::pos2(org.x + 36.0, top + 5.0), g, Color32::TRANSPARENT);
+        if !it.shortcut.is_empty() {
+            // 原版 `x$`：右对齐在 `wid - 20`，颜色和正文一样。
+            let s = p.layout_no_wrap(
+                it.shortcut.to_string(),
+                FontId::proportional(PREFS_FONT),
+                ink,
+            );
+            p.galley(
+                egui::pos2(org.x + wid - 20.0 - s.size().x, top + 5.0),
+                s,
+                Color32::TRANSPARENT,
+            );
+        }
+        if it.is_head() {
+            // 原版 `icons.SUB_MENU` 画在 `(wid - 24, 行顶 - 1)`：非 Fluent 的箭头是白字蒙版，
+            // 颜色 `theme = 2 ? (选中 ? 黑 : 白) : (选中 ? 白 : 黑)`；Fluent 未选中用
+            // `c_gray` / `c_ltgray` 打底，再叠强调色。
+            let at = egui::pos2(org.x + wid - 24.0, top - 1.0);
+            let col = if fluent {
+                if sel {
+                    sel_text
+                } else if th.fdark {
+                    Color32::from_gray(211)
+                } else {
+                    Color32::from_gray(128)
+                }
+            } else if th.kind == ThemeKind::Dark {
+                if sel {
+                    Color32::BLACK
+                } else {
+                    Color32::WHITE
+                }
+            } else if sel {
+                Color32::WHITE
+            } else {
+                Color32::BLACK
+            };
+            match bank {
+                Some(bank) => bank.menu_icon(
+                    &p,
+                    at,
+                    crate::icons::frame::SUB_MENU,
+                    col,
+                    accent,
+                    th,
+                ),
+                None => {
+                    let c = at + Vec2::splat(12.5);
+                    p.add(egui::Shape::convex_polygon(
+                        vec![
+                            c + Vec2::new(-2.5, -4.0),
+                            c + Vec2::new(-2.5, 4.0),
+                            c + Vec2::new(2.5, 0.0),
+                        ],
+                        col,
+                        Stroke::NONE,
+                    ));
+                }
+            }
+        }
+    }
+    picked
+}
+
+/// 原版 `show_menu_ext(name, x, y, str)`：先铺一层吞掉全屏输入的遮罩（点哪儿都只用来
+/// 收起菜单），再从锚点展开一列条目；板子高 = `Σ行高 + 6`（上下各留 3 像素）。
+/// 位置也按原版：横向放不下就往锚点左边开，再按「父 + 子」的总跨度往回挪，纵向超出屏幕
+/// 就整块上移。原版没有内滚动——菜单比屏幕还高时上半截直接画到屏幕外，这里只多做一个
+/// 「贴住屏幕顶」的兜底。`open` 记着展开的是第几行标题，对应原版 `menu_show[]`：鼠标停在
+/// 子菜单上时父行不算悬停，所以子菜单不会一闪一闪。
+/// 返回（选中项的值，是否被点掉）。
+fn midi_popup(
+    ui: &Ui,
+    id: &str,
+    at: Pos2,
+    items: &[MidiMenuItem],
+    open: &mut Option<usize>,
+    th: &Theme,
+    bank: Option<&crate::icons::Bank>,
+) -> (Option<i16>, bool) {
+    let ctx = ui.ctx();
+    let screen = ctx.screen_rect();
+    let dismissed = egui::Area::new(Id::new((id, "blocker")))
+        .order(egui::Order::Foreground)
+        .fixed_pos(Pos2::ZERO)
+        .show(ctx, |ui| ui.allocate_rect(screen, Sense::click()).clicked())
+        .inner;
+
+    let wid = midi_menu_wid(ui, th, items);
+    let hei = items.len() as f32 * 22.0 + 6.0;
+    let span = items
+        .iter()
+        .filter(|it| it.is_head())
+        .map(|it| wid + midi_menu_wid(ui, th, &it.children) - 3.0)
+        .fold(wid, f32::max);
+    // 原版 `rootx = clamp(sx - (sx + menu_wid[0] > rw) * menu_wid[0], 0, rw - menu_wid[0])`。
+    let flip = if at.x + wid > screen.max.x { at.x - wid } else { at.x };
+    let mut x = flip.clamp(0.0, (screen.max.x - wid).max(0.0));
+    if span <= screen.width() {
+        let right = x.min(screen.max.x - span);
+        let left = x.max(span - wid);
+        if (right - x).abs() <= (left - x).abs() {
+            x = right
+        } else {
+            x = left
+        }
+    }
+    let mut y = at.y;
+    if y + hei > screen.max.y {
+        y = screen.max.y - hei;
+    }
+    let pos = Pos2::new(x, y.max(0.0));
+
+    let mut picked = None;
+    egui::Area::new(Id::new(id))
+        .order(egui::Order::Foreground)
+        .fixed_pos(pos)
+        .show(ctx, |ui| {
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(wid, hei), Sense::hover());
+            midi_menu_board(ui.painter(), th, rect);
+            picked = midi_menu_rows(ui, th, bank, id, rect.min, wid, items, open);
+        });
+    // 子菜单：原版 `menux = dx + menu_wid - 3`、`menuy = dy + 22 × 行号`，也就是子菜单第一行
+    // 正好压在被悬停的那一行上。深层只按 `dx = clamp(dx, 0, rw - wid)` 收进屏幕。
+    let head = open.filter(|i| items.get(*i).is_some_and(|it| it.is_head()));
+    if let Some(i) = head {
+        let kids = &items[i].children;
+        let kw = midi_menu_wid(ui, th, kids);
+        let kh = kids.len() as f32 * 22.0 + 6.0;
+        let mut k = Pos2::new(pos.x + wid - 3.0, pos.y + i as f32 * 22.0);
+        k.x = k.x.clamp(0.0, (screen.max.x - kw).max(0.0));
+        if k.y + kh > screen.max.y {
+            k.y = (screen.max.y - kh).max(0.0);
+        }
+        egui::Area::new(Id::new((id, "sub")))
+            .order(egui::Order::Foreground)
+            .fixed_pos(k)
+            .show(ctx, |ui| {
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(kw, kh), Sense::hover());
+                midi_menu_board(ui.painter(), th, rect);
+                // 子菜单下面没有第三层，命中状态用本地的，别把父层的 `open` 冲掉。
+                let mut deeper = None;
+                // 行号要和父菜单错开，否则同一帧里同一个 widget 出现在两个图层，egui 会直接 panic。
+                picked = midi_menu_rows(ui, th, bank, &format!("{id}/sub"), rect.min, kw, kids, &mut deeper);
+            });
+    }
+    (picked, dismissed)
 }
 
 /// 原版 `draw_window_schematic_export`：设计 / 方块两页 + 记住我的更改 + 三个底部按钮。

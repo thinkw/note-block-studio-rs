@@ -1,6 +1,7 @@
 帧顺序取自原版 GameMaker 工程 sprites/<name>/<name>.yy 里 "frames" 数组的书写顺序，
 文件名 <序号>.png 即 draw_sprite(sprite, <序号>, ...) 的 subimg。
 来源仓库：OpenNBS/OpenNoteBlockStudio（GPL-3.0-or-later）。
+icons_classic/ = spr_icons（经典主题的 UI 字形），icons_light/ = spr_icons_f（Fluent 浅色主题的深字），icons_d/ = spr_icons_d（Fluent 深色 / 选中态的浅字），icons_accent/ = spr_icons_col（叠在字形上的强调色层）；都是 60 帧 25x25，帧号就是原版 `enum icons` 的下标（scripts/icons_init/icons_init.gml）。目录名是导出后改的，所以和精灵名不完全一致。
 iconbar/ 只用到 00-02（原版 draw_sprite(spr_iconbar, 0/1/2) 的左端帽、可拉伸中段、右端帽），每帧 2x30；03-08 是原版工程里存在但从未被引用的帧，一并导出以保持序号一致。
 back/ = spr_back，4 帧，序号 = fdark + 2 * 按下（draw_window_preferences.gml:58 的首选项返回按钮），每帧 16x16，原版画在 x1+14, y1+42。
 button_arrow/ = spr_button_arrow，15 帧，序号 = m + 3 * theme + 3 * (fdark && theme = 3)，其中 m = 0 未悬停 / 1 悬停 / 2 悬停且按下（draw_abutton.gml:6-9），每帧 17x18。

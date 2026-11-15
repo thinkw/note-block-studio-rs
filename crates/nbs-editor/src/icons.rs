@@ -44,6 +44,12 @@ pub mod frame {
     pub const EDITMODE_PIT: usize = 57;
     pub const INSBOX_EXPAND: usize = 58;
     pub const INSBOX_COLLAPSE: usize = 59;
+    /// 菜单里的勾（`icons.CHECK`，`check()` 在 Dark 主题会取 +2 的 `CHECK_INACTIVE` 帧，
+    /// 那帧是白字蒙版而不是「灰掉」）。
+    pub const CHECK: usize = 46;
+    pub const CHECK_DARK: usize = 48;
+    /// 子菜单箭头（`icons.SUB_MENU`），同样是白字蒙版，靠染色出黑/白/灰。
+    pub const SUB_MENU: usize = 47;
     /// 自定义音色的角标底。
     pub const CUSTOM_INS_OVERLAY: usize = 27;
     /// 原版给「没有专属图标的乐器」用的通用音色图标（`icons.INS_1 + first_custom_index`）。
@@ -207,6 +213,7 @@ pub struct IconHit {
 pub struct Bank {
     icons: Strip,
     icons_light: Strip,
+    icons_dark: Strip,
     icons_accent: Strip,
     layer: Strip,
     layer_fluent: Strip,
@@ -305,6 +312,7 @@ impl Bank {
         Some(Bank {
             icons: strip("icons_classic", 25, 25)?,
             icons_light: strip("icons_light", 25, 25)?,
+            icons_dark: strip("icons_d", 25, 25)?,
             icons_accent: strip("icons_accent", 25, 25)?,
             layer: strip("layer_classic", 16, 16)?,
             layer_fluent: strip("layer_fluent", 16, 16)?,
@@ -650,6 +658,32 @@ impl Bank {
     /// 只画字形、不画按钮框：原版拖条手柄就是 `draw_sprite(spr_icons, 9, …)`。
     pub fn icon_glyph(&self, p: &egui::Painter, at: Pos2, index: usize) {
         self.icons.draw(p, at, index, Color32::WHITE);
+    }
+
+    /// 原版 `menu_draw` 菜单行的图标槽：`draw_sprite(spr_icons, 帧, dx + 2, 行顶 - 1)`，
+    /// 25×25 的帧画在 36 像素的左边距里。非 Fluent 只有经典精灵（勾本身是黑字，
+    /// Dark 主题换 48 帧的白字，箭头是白字蒙版所以要染色）。Fluent 按原版的
+    /// `light_icons = 选中 || fdark` 取字形集合：浅色用 `spr_icons_f`（深字），
+    /// 深色或选中用 `spr_icons_d`（浅字），再叠一层 `spr_icons_col` 的强调色。
+    /// `tint` 就是原版 `draw_sprite_ext` 的那个乘色，`accent` 传 `None` 就不叠强调层。
+    pub fn menu_icon(
+        &self,
+        p: &egui::Painter,
+        at: Pos2,
+        index: usize,
+        tint: Color32,
+        accent: Option<Color32>,
+        th: &Theme,
+    ) {
+        if th.kind == ThemeKind::Fluent {
+            let strip = if th.fdark { &self.icons_dark } else { &self.icons_light };
+            strip.draw(p, at, index, tint);
+        } else {
+            self.icons.draw(p, at, index, tint);
+        }
+        if let Some(c) = accent {
+            self.icons_accent.draw(p, at, index, c);
+        }
     }
 
     /// 原版 `draw_piano_key` 的 `draw_sprite_ext(spr_piano, n, xx, yy, 1, 1, 0, col, a)`。
