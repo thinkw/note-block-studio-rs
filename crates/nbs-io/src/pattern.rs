@@ -103,10 +103,22 @@ pub fn parse_pattern(data: &[u8]) -> Result<Pattern, String> {
     Ok(Pattern { version, enda, endb, selection_l, code, col_bounds })
 }
 
-pub fn import_pattern(path: &Path) -> Result<Selection, String> {
+/// 原版 `pattern_import.gml:31-37`：读到的片段版本和本程序 `pat_version` 不一致时弹什么。
+/// 旧版警告受首选项「打开旧版格式时提示」管，新版那句不受（源码就没管）。
+pub fn version_warning(version: u8, show_old_warning: bool) -> Option<String> {
+    if version < PAT_VERSION && show_old_warning {
+        Some(crate::prefs::old_file_warning("NBP"))
+    } else if version > PAT_VERSION {
+        Some("警告：你正在打开在新版 Note Block Studio 里保存的文件。打开时可能会崩溃。".into())
+    } else {
+        None
+    }
+}
+
+/// 给回整个 `Pattern`（含 `version`），原版 `pattern_import` 要用版本号决定弹不弹警告。
+pub fn import_pattern(path: &Path) -> Result<Pattern, String> {
     let data = std::fs::read(path).map_err(|e| format!("读取片段失败: {e}"))?;
-    let p = parse_pattern(&data)?;
-    Ok(p.selection())
+    parse_pattern(&data)
 }
 
 // ---------------------------------------------------------------- 压缩文本
@@ -223,5 +235,22 @@ mod tests {
         let pat = parse_pattern(&data).unwrap();
         assert_eq!(pat.version, 1);
         assert!(!pat.selection().is_empty(), "应能还原原版示例片段的音符");
+    }
+
+    /// 原版 `pattern_import.gml:31-37`：版本比 `pat_version` 旧的警告受首选项开关管，
+    /// 比它新的那句「可能会崩溃」不受开关管。
+    #[test]
+    fn nbp_version_warnings() {
+        assert_eq!(version_warning(1, true), None);
+        assert_eq!(version_warning(1, false), None);
+        assert_eq!(
+            version_warning(0, true).as_deref(),
+            Some(crate::prefs::old_file_warning("NBP").as_str())
+        );
+        assert_eq!(version_warning(0, false), None, "旧版警告要看「打开旧版格式时提示」");
+        assert_eq!(
+            version_warning(2, false).as_deref(),
+            Some("警告：你正在打开在新版 Note Block Studio 里保存的文件。打开时可能会崩溃。")
+        );
     }
 }

@@ -8,7 +8,7 @@ use nbs_audio::{export_wav, ExportOptions, EXTENDED_MAX_VOICES, DEFAULT_MAX_VOIC
 use nbs_core::model::{LockMode, Note, Song, SongMeta, KEY_MAX, PAN_MAX, VEL_MAX, PIT_MAX};
 use nbs_core::Macro;
 
-use crate::state::{DialogAction, EditMode, EditorState, FileDialog, Flag, Modal, ModalQueue, WindowKind};
+use crate::state::{DialogAction, EditMode, EditorState, FileDialog, Flag, Modal, ModalQueue, PrefsFolder, WindowKind};
 use crate::theme::{Theme, ThemeKind};
 
 #[derive(Clone, Debug)]
@@ -102,6 +102,12 @@ pub enum Command {
     WheelKey(i32),
     /// 打开通用文件对话框（打开/保存/各类导入导出）。
     OpenDialog(DialogAction),
+    /// 原版首选项目录行的「打开」：`open_url(songfolder)`，目录没了先弹「该路径不存在！」。
+    OpenPrefsFolder(PrefsFolder),
+    /// 原版首选项目录行的「还原默认」：退回 `songs_directory` / `pattern_directory`。
+    ResetPrefsFolder(PrefsFolder),
+    /// 原版首选项目录行的「修改」：先 `message()` 说明一句，再弹目录选择框。
+    ChangePrefsFolder(PrefsFolder),
     /// 原版 `menu_click` 的导出 Schematic 入口：先过 `calculate_size()` 的提示与提问。
     OpenSchematicExport,
     /// 原版「导出」按钮：两道闸门都过才弹保存框。
@@ -196,6 +202,12 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         Command::OpenPath(path) => match nbs_core::nbs::load(&path) {
             Ok(song) => {
                 let name = song.meta.name.clone();
+                // 原版 `open_song_nbs.gml:12-13`：文件版本比 `nbs_version` 旧就先警告。
+                // 比它新的文件根本进不来这一支（加载器直接报「不支持的 NBS 版本」，
+                // 对应源码 :14-18 的报错并 return -1）。
+                let old = song.meta.save_version < nbs_core::nbs::NBS_VERSION
+                    && state.prefs.show_old_warning;
+                let text = nbs_io::prefs::old_file_warning("NBS");
                 state.doc.replace_song(song);
                 state.prepare_audio();
                 state.viewport.start_tick = 0;
@@ -203,6 +215,9 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 state.set_marker(0.0);
                 state.add_recent(path.clone());
                 state.window = None;
+                if old {
+                    state.modals = ModalQueue::message("警告", &text);
+                }
                 state.set_message(format!(
                     "已打开 {}（{} 个音符）",
                     name,
@@ -705,13 +720,52 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             }
         }
         // ------------------------------------------------------------ 导入导出 / 音频 / 宏
+        Command::OpenPrefsFolder(folder) => {
+            let dir = match folder {
+                PrefsFolder::Song => state.prefs.song_folder_path(),
+                PrefsFolder::Pattern => state.prefs.pattern_folder_path(),
+            };
+            // 原版 `if (!directory_exists_lib(…)) message("该路径不存在！", "错误") else open_url(…)`。
+            if !dir.is_dir() {
+                state.modals = ModalQueue::message("错误", "该路径不存在！");
+            } else if open_in_file_manager(&dir).is_err() {
+                state.modals = ModalQueue::message("错误", "无法打开文件管理器。");
+            }
+        }
+        Command::ResetPrefsFolder(folder) => match folder {
+            PrefsFolder::Song => state.prefs.song_folder = None,
+            PrefsFolder::Pattern => state.prefs.pattern_folder = None,
+        },
+        Command::ChangePrefsFolder(folder) => {
+            // 原版按钮里先 `message(说明, "")`，再弹 `get_save_filename_ext`。
+            state.modals = ModalQueue {
+                items: [Modal { title: "", text: folder.tip().into(), yes_no: false }]
+                    .into_iter()
+                    .collect(),
+                then: Some(Command::OpenDialog(DialogAction::PickFolder(folder))),
+            };
+        }
         Command::OpenDialog(action) => {
             let initial = if action.is_save() {
                 state.doc.song.filename.clone()
             } else {
                 None
             };
-            let mut dialog = FileDialog::for_action(action, initial.as_ref());
+            // 原版每个对话框的起始目录都写死在调用处：歌曲看 `songfolder`、片段看
+            // `patternfolder`（`load_song.gml:11`、`pattern_export.gml:9`），当前文件在哪个
+            // 目录它们一概不看；只有音频导出用 `filename_path(filename)`。
+            let start: Option<PathBuf> = match action {
+                DialogAction::OpenSong
+                | DialogAction::SaveSong
+                | DialogAction::PickFolder(PrefsFolder::Song) => Some(state.prefs.song_folder_path()),
+                DialogAction::ImportPattern
+                | DialogAction::ExportPattern
+                | DialogAction::PickFolder(PrefsFolder::Pattern) => {
+                    Some(state.prefs.pattern_folder_path())
+                }
+                _ => None,
+            };
+            let mut dialog = FileDialog::for_action(action, initial.as_ref(), start.as_deref());
             if action == DialogAction::ExportAudio {
                 // 原版把保存对话框的文件类型绑在所选导出格式上（.mp3/.wav/.aiff/.flac）。
                 if let Some(f) = audio_format(state) {
@@ -763,6 +817,20 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             match action {
                 DialogAction::OpenSong => dispatch(state, Command::OpenPath(path), ctx),
                 DialogAction::SaveSong => dispatch(state, Command::SavePath(path), ctx),
+                DialogAction::PickFolder(folder) => {
+                    // 原版 `songfolder = filename_dir(a)`：认的是对话框当时所在的那个目录。
+                    // `windows.rs` 的目录模式直接把 `dialog.dir` 传过来，不带文件名。
+                    match folder {
+                        PrefsFolder::Song => state.prefs.song_folder = Some(path.to_string_lossy().into_owned()),
+                        PrefsFolder::Pattern => {
+                            state.prefs.pattern_folder = Some(path.to_string_lossy().into_owned())
+                        }
+                    }
+                    state.file_dialog = None;
+                    // 原版的系统对话框叠在首选项窗口上；我们同时只开一个窗口，
+                    // 选完把首选项放回去（页签存在 `state.prefs_tab`，不会丢）。
+                    state.window = Some(WindowKind::Preferences);
+                }
                 DialogAction::ExportAudio => {
                     export_audio(state, &path);
                     state.window = None;
@@ -847,7 +915,13 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 }
                 DialogAction::ImportPattern => {
                     match nbs_io::pattern::import_pattern(&path) {
-                        Ok(sel) => {
+                        Ok(pat) => {
+                            // 原版 `pattern_import.gml:31-37`：按文件头的版本字节决定警告。
+                            let warn = nbs_io::pattern::version_warning(
+                                pat.version,
+                                state.prefs.show_old_warning,
+                            );
+                            let sel = pat.selection();
                             let n = sel.len();
                             state.doc.clipboard_text = sel.encode_rle();
                             state.doc.clipboard = sel.notes;
@@ -857,6 +931,9 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                                 .unwrap_or((state.viewport.start_tick as i64, state.viewport.start_layer as i64));
                             state.doc.paste(x, y);
                             state.window = None;
+                            if let Some(warn) = warn {
+                                state.modals = ModalQueue::message("警告", &warn);
+                            }
                             state.set_message(format!("片段已导入：{n} 个音符（浮动选区）"));
                         }
                         Err(e) => state.set_message(format!("导入片段失败: {e}")),
@@ -949,6 +1026,19 @@ fn import_schematic(state: &mut EditorState, path: &std::path::Path) {
             None => state.set_message(format!("导入 Schematic 失败: {e}")),
         },
     }
+}
+
+/// 原版 `open_url(folder)`：把这个目录交给系统文件管理器。
+/// Windows 的 `explorer` 即使成功也返回非 0，所以只看 `spawn` 是否起来。
+fn open_in_file_manager(dir: &std::path::Path) -> std::io::Result<std::process::Child> {
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(program).arg(dir).spawn()
 }
 
 /// 当前选中的音频导出格式。解析失败时返回 None，让调用方报真实错误，
@@ -1350,5 +1440,89 @@ mod tests {
         state.current.key = nbs_core::model::KEY_MAX;
         dispatch(&mut state, Command::WheelKey(1), &ctx);
         assert_eq!(state.current.key, nbs_core::model::KEY_MAX, "最高键不动");
+    }
+
+    /// 原版首选项「歌曲」组三个按钮的真实行为（`draw_window_preferences.gml:269-297`）。
+    /// 「打开」的成功分支会真的开一个资源管理器窗口，测试里只验它「目录不存在要报错」这一支。
+    #[test]
+    fn prefs_folder_buttons_are_wired() {
+        let ctx = Context::default();
+        let tmp = std::env::temp_dir();
+        let tmp_str = tmp.to_string_lossy().into_owned();
+        let mut state = state_with(Song::new());
+
+        // 起始目录：原版歌曲对话框只看 songfolder，当前文件在哪它不看。
+        state.prefs.song_folder = Some(tmp_str.clone());
+        dispatch(&mut state, Command::OpenDialog(DialogAction::OpenSong), &ctx);
+        assert_eq!(state.file_dialog.clone().unwrap().dir, tmp);
+        state.file_dialog = None;
+        dispatch(&mut state, Command::OpenDialog(DialogAction::ExportPattern), &ctx);
+        assert_eq!(
+            state.file_dialog.clone().unwrap().dir,
+            nbs_io::prefs::Preferences::default_pattern_folder(),
+            "片段对话框只看 patternfolder"
+        );
+        state.file_dialog = None;
+
+        // 「还原默认」清掉自定义值，界面与对话框一起退回出厂目录。
+        dispatch(&mut state, Command::ResetPrefsFolder(PrefsFolder::Song), &ctx);
+        assert_eq!(state.prefs.song_folder, None);
+        assert_eq!(state.prefs.song_folder_path(), nbs_io::prefs::Preferences::default_song_folder());
+
+        // 「修改」：原版先 message 说明，答完才弹目录选择框。
+        dispatch(&mut state, Command::ChangePrefsFolder(PrefsFolder::Pattern), &ctx);
+        assert_eq!(titles(&state), vec![""]);
+        assert_eq!(texts(&state), vec!["选择导出和导入片段的文件夹"]);
+        assert!(matches!(
+            state.modals.then,
+            Some(Command::OpenDialog(DialogAction::PickFolder(PrefsFolder::Pattern)))
+        ));
+        dispatch(&mut state, Command::AnswerModal(true), &ctx);
+        let d = state.file_dialog.clone().unwrap();
+        assert_eq!(d.action, DialogAction::PickFolder(PrefsFolder::Pattern));
+        assert_eq!(d.ext, "", "目录选择框不带扩展名过滤器");
+        assert_eq!(d.name, "", "目录选择框不填文件名");
+
+        // 确定：认的是对话框当时显示的目录，随后把首选项窗口放回去。
+        dispatch(&mut state, Command::DialogConfirm(tmp.clone()), &ctx);
+        assert_eq!(state.prefs.pattern_folder, Some(tmp_str));
+        assert_eq!(state.window, Some(WindowKind::Preferences));
+
+        // 「打开」：连出厂目录都不存在时，原版弹「该路径不存在！」。
+        state.prefs.pattern_folder = Some("Z:\\nbs-rust 没有这个目录".into());
+        dispatch(&mut state, Command::OpenPrefsFolder(PrefsFolder::Pattern), &ctx);
+        assert_eq!(titles(&state), vec!["错误"]);
+        assert_eq!(texts(&state), vec!["该路径不存在！"]);
+    }
+
+    /// 原版 `open_song_nbs.gml:12-13`：文件版本比本程序旧才警告，
+    /// 而且完全受首选项「打开旧版格式时提示」管。
+    #[test]
+    fn opening_an_older_nbs_warns_only_when_told_to() {
+        let ctx = Context::default();
+        let dir = std::env::temp_dir();
+        let old = dir.join("nbs_rust_old_version.nbs");
+        let current = dir.join("nbs_rust_current_version.nbs");
+        let mut song = Song::new();
+        song.set(0, 0, Note::new(0, 40));
+        nbs_core::nbs::save(&old, &song, 3).unwrap();
+        nbs_core::nbs::save(&current, &song, nbs_core::nbs::NBS_VERSION).unwrap();
+
+        let mut state = state_with(Song::new());
+        for show in [false, true] {
+            state.prefs.show_old_warning = show;
+            dispatch(&mut state, Command::OpenPath(old.clone()), &ctx);
+            if show {
+                assert_eq!(titles(&state), vec!["警告"]);
+                assert_eq!(texts(&state), vec![nbs_io::prefs::old_file_warning("NBS")]);
+            } else {
+                assert!(state.modals.is_empty(), "开关关着不该弹旧版警告");
+            }
+            state.modals = ModalQueue::default();
+            dispatch(&mut state, Command::OpenPath(current.clone()), &ctx);
+            assert!(state.modals.is_empty(), "同版本的文件不该弹任何警告");
+        }
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::remove_file(&current);
     }
 }

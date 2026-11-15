@@ -11,7 +11,7 @@ use nbs_core::Macro;
 
 use crate::commands::Command;
 use crate::shortcuts::SHORTCUT_HELP;
-use crate::state::{EditorState, Flag, ModalQueue, WindowKind};
+use crate::state::{EditorState, Flag, ModalQueue, PrefsFolder, WindowKind};
 use crate::theme::{Theme, ThemeKind};
 
 pub fn show_windows(state: &mut EditorState, ctx: &Context) {
@@ -268,8 +268,8 @@ fn statistics(state: &mut EditorState, ui: &mut Ui) {
 /// `y1 + N + (theme = 3) * 22` 的行，Fluent 落在 `N - 8`、另外三套落在 `N - 26`，
 /// 差的那 4 像素是原版页签条比 Fluent 高的部分，归 egui 的标题栏。
 ///
-/// 只画真实接线的行。原版有、我们还没有对应行为的选项（启动页 / 检查更新 / 歌曲目录 /
-/// Discord / 界面音效 / 透明效果 / 取色器 / 帧率 / 窗口缩放 / 语言 / 程序图标 /
+/// 只画真实接线的行。原版有、我们还没有对应行为的选项（启动页 / 检查更新 / Discord
+/// 富在位 / 界面音效 / 透明效果 / 取色器 / 帧率 / 窗口缩放 / 语言 / 程序图标 /
 /// 音符盒不透明 / 删除淡出 / 五线谱 / 任务栏进度 / 重置键位 / 在区间起止播放）
 /// 整行不出现，免得留下点了没反应的假控件。
 fn preferences(state: &mut EditorState, ui: &mut Ui) {
@@ -347,8 +347,8 @@ fn preferences(state: &mut EditorState, ui: &mut Ui) {
     }
 }
 
-/// 原版页 0「通用」。源码这一页还有「启动」「歌曲」「Discord」三组，
-/// 我们没有欢迎页、更新检查、歌曲/片段目录和 Discord 富在位，整组不画。
+/// 原版页 0「通用」。源码这一页还有「启动」「Discord」两组，
+/// 我们没有欢迎页 / 更新检查 / Discord 富在位，整组不画。
 fn prefs_general(state: &mut EditorState, pg: &mut Page) {
     pg.header(278.0, 74.0, 200.0, 85.0, "自动保存");
     if pg.check(
@@ -374,6 +374,49 @@ fn prefs_general(state: &mut EditorState, pg: &mut Page) {
     if let Some(mins) = drag {
         state.prefs.auto_save_minutes = mins as u8;
         state.emit(Command::SavePreferences);
+    }
+
+    // 原版 `draw_areaheader(x1 + 22, y1 + 184, 456, 145, "歌曲")`。
+    pg.header(22.0, 184.0, 456.0, 145.0, "歌曲");
+    let warn = state.prefs.show_old_warning;
+    if pg.check(
+        40.0,
+        200.0,
+        warn,
+        "打开旧版格式时提示",
+        "打开在旧版 Note Block Studio 中保存的文件时是否显示警告。",
+        true,
+        false,
+    ) {
+        state.prefs.show_old_warning = !warn;
+        state.emit(Command::SavePreferences);
+    }
+    folder_row(state, pg, PrefsFolder::Song, 230.0, 246.0);
+    folder_row(state, pg, PrefsFolder::Pattern, 280.0, 296.0);
+}
+
+/// 原版「歌曲」组里的那两行目录：
+/// `draw_text_dynamic(x1 + 40, y1 + N, "歌曲路径: " + string_truncate(songfolder, 340))`
+/// 加 `draw_button2` 打开 76 / 修改 76 / 还原默认 96，起点 40、间隔 84。
+/// 「修改」用我们自己的目录选择框（原版是系统对话框），确定后取对话框当前所在目录。
+fn folder_row(state: &mut EditorState, pg: &mut Page, which: PrefsFolder, text_n: f32, btn_n: f32) {
+    let dir = match which {
+        PrefsFolder::Song => state.prefs.song_folder_path(),
+        PrefsFolder::Pattern => state.prefs.pattern_folder_path(),
+    };
+    let full = dir.to_string_lossy().into_owned();
+    let line = format!("{}{}", which.label(), pg.truncate(&full, 340.0));
+    pg.text(pg.row(40.0, text_n), &line, PREFS_FONT, pg.ink());
+    // 原版 `popup_set_window(x1 + 40, y1 + N, 430, 18, songfolder)`：悬停看完整路径。
+    pg.tip_area(40.0, text_n, 430.0, 18.0, &full);
+    if pg.button(40.0, btn_n, 76.0, "打开", false) {
+        state.emit(Command::OpenPrefsFolder(which));
+    }
+    if pg.button(124.0, btn_n, 76.0, "修改", false) {
+        state.emit(Command::ChangePrefsFolder(which));
+    }
+    if pg.button(208.0, btn_n, 96.0, "还原默认", false) {
+        state.emit(Command::ResetPrefsFolder(which));
     }
 }
 
@@ -685,6 +728,26 @@ impl<'a> Page<'a> {
             .layout_no_wrap(s.to_string(), FontId::proportional(font), self.ink())
             .size()
             .x
+    }
+
+    /// 原版 `string_truncate(str, maxwidth)` + `string_maxwidth`：逐字累加宽度，
+    /// 放不下就截断并在末尾补 `...`（省略号本身不给预留宽度，源码就是这么算的）。
+    fn truncate(&self, s: &str, max_w: f32) -> String {
+        if self.measure(s, PREFS_FONT) <= max_w {
+            return s.to_string();
+        }
+        let mut out = String::new();
+        let mut w = 0.0;
+        for c in s.chars() {
+            let cw = self.measure(&c.to_string(), PREFS_FONT);
+            if w + cw > max_w {
+                break;
+            }
+            w += cw;
+            out.push(c);
+        }
+        out.push_str("...");
+        out
     }
 
     /// 原版 `draw_text_dynamic`：左上角对齐，返回宽度好接着排版。
@@ -1327,11 +1390,15 @@ fn file_dialog(state: &mut EditorState, ui: &mut Ui, save: bool) {
         .map(|d| (d.action, d.ext))
         .unwrap_or((crate::state::DialogAction::OpenSong, "nbs"));
     ui.label(
-        RichText::new(format!(
-            "文件类型：*.{}   {}",
-            ext,
-            if action.is_save() { "（保存 / 导出）" } else { "（打开 / 导入）" }
-        ))
+        RichText::new(match action {
+            // 原版这两个框的过滤器是空字符串，选的是目录不是文件。
+            crate::state::DialogAction::PickFolder(f) => f.tip().to_string(),
+            _ => format!(
+                "文件类型：*.{}   {}",
+                ext,
+                if action.is_save() { "（保存 / 导出）" } else { "（打开 / 导入）" }
+            ),
+        })
         .small()
         .weak(),
     );
@@ -1345,10 +1412,13 @@ fn file_dialog(state: &mut EditorState, ui: &mut Ui, save: bool) {
                 }
             }
         });
-        ui.horizontal(|ui| {
-            ui.label("文件名");
-            ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(f32::INFINITY));
-        });
+        let pick_folder = matches!(action, crate::state::DialogAction::PickFolder(_));
+        if !pick_folder {
+            ui.horizontal(|ui| {
+                ui.label("文件名");
+                ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(f32::INFINITY));
+            });
+        }
         egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
             let entries = d.entries.clone();
             for entry in entries {
@@ -1367,9 +1437,10 @@ fn file_dialog(state: &mut EditorState, ui: &mut Ui, save: bool) {
         });
         ui.separator();
         ui.horizontal(|ui| {
-            if ui.button(if save { "保存" } else { "打开" }).clicked() {
-                let path = d.selected_path();
-                let path = if path.extension().is_none() {
+            if ui.button(if pick_folder { "选择" } else if save { "保存" } else { "打开" }).clicked() {
+                // 原版「修改」拿的是 `filename_dir(a)`，即对话框当前显示的目录本身。
+                let path = if pick_folder { d.dir.clone() } else { d.selected_path() };
+                let path = if path.extension().is_none() && !pick_folder {
                     path.with_extension(ext)
                 } else {
                     path

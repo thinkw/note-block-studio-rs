@@ -267,6 +267,31 @@ pub struct ContextMenu {
     pub kind: ContextKind,
 }
 
+/// 原版首选项「歌曲」组里那两个目录：`songfolder` 和 `patternfolder`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrefsFolder {
+    Song,
+    Pattern,
+}
+
+impl PrefsFolder {
+    /// 原版 `draw_text_dynamic` 那行的前缀（冒号和空格由源码写在一起）。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Song => "歌曲路径: ",
+            Self::Pattern => "片段路径: ",
+        }
+    }
+
+    /// 原版「修改」按钮里先弹的那句 `message(…, "")`。
+    pub fn tip(self) -> &'static str {
+        match self {
+            Self::Song => "选择保存和打开的文件夹",
+            Self::Pattern => "选择导出和导入片段的文件夹",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DialogAction {
     OpenSong,
@@ -280,6 +305,9 @@ pub enum DialogAction {
     ImportMidi,
     ImportPattern,
     ImportSchematic,
+    /// 原版「修改」按钮：`get_save_filename_ext("", "选择歌曲文件夹", songfolder, "歌曲文件夹")`。
+    /// 原版取的是那个假文件名所在的目录，所以这里确定后认的是当前目录本身。
+    PickFolder(PrefsFolder),
 }
 
 impl DialogAction {
@@ -302,6 +330,8 @@ impl DialogAction {
             // 原版：get_open_filename_ext("Minecraft Schematics (*.schematic)|*.schematic", …)。
             Self::ExportSchematic | Self::ImportSchematic => "schematic",
             Self::ExportPattern | Self::ImportPattern => "nbp",
+            // 原版这两个对话框的过滤器是空字符串：不做过滤，选的是目录。
+            Self::PickFolder(_) => "",
         }
     }
 }
@@ -323,14 +353,23 @@ impl FileDialog {
         Self::for_action(
             if save { DialogAction::SaveSong } else { DialogAction::OpenSong },
             initial,
+            None,
         )
     }
 
-    pub fn for_action(action: DialogAction, initial: Option<&PathBuf>) -> Self {
-        let dir = initial
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .filter(|d| d.is_dir())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    /// `start` = 原版调用处写死的起始目录（歌曲用 `songfolder`、片段用 `patternfolder`）；
+    /// 给了就不看当前文件所在的目录，这一点和原版一致。
+    pub fn for_action(
+        action: DialogAction,
+        initial: Option<&PathBuf>,
+        start: Option<&Path>,
+    ) -> Self {
+        let dir = start.map(|d| d.to_path_buf()).unwrap_or_else(|| {
+            initial
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                .filter(|d| d.is_dir())
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        });
         let base = initial
             .and_then(|p| p.file_stem())
             .map(|s| s.to_string_lossy().into_owned())
@@ -896,14 +935,14 @@ mod tests {
     /// 音频导出的文件类型必须跟着所选格式走（原版 `get_save_filename_ext`）。
     #[test]
     fn audio_dialog_ext_follows_chosen_format() {
-        let mut d = FileDialog::for_action(DialogAction::ExportAudio, None);
+        let mut d = FileDialog::for_action(DialogAction::ExportAudio, None, None);
         assert_eq!(d.ext, "mp3", "原版默认 audio_exp_format = MP3");
         assert!(d.name.ends_with(".mp3"), "{}", d.name);
         d.set_ext("flac");
         assert_eq!(d.ext, "flac");
         assert!(d.name.ends_with(".flac"), "{}", d.name);
         // 其它动作用默认扩展名，且 set_ext 只对当前对话框生效
-        let song = FileDialog::for_action(DialogAction::SaveSong, None);
+        let song = FileDialog::for_action(DialogAction::SaveSong, None, None);
         assert_eq!(song.ext, "nbs");
     }
 }

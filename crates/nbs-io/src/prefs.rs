@@ -60,6 +60,12 @@ pub struct Preferences {
     pub flats: bool,
     pub blackout: bool,
     pub sounds_dir: Option<String>,
+    /// 原版 `show_oldwarning`（出厂为 1）：打开旧版本存的文件时弹不弹警告。
+    pub show_old_warning: bool,
+    /// 原版 `songfolder`：打开 / 保存歌曲对话框的起始目录，`None` = 出厂的 `工作目录\Songs\`。
+    pub song_folder: Option<String>,
+    /// 原版 `patternfolder`：导入 / 导出片段的起始目录，`None` = 出厂的 `工作目录\Patterns\`。
+    pub pattern_folder: Option<String>,
     pub export_sample_rate: u32,
     pub export_channels: u16,
     /// 音频导出容器，对齐原版 `audio_exp_format`：MP3 / WAV / AIFF / FLAC。
@@ -115,6 +121,10 @@ impl Default for Preferences {
             flats: false,
             blackout: false,
             sounds_dir: None,
+            // 原版 `control_create.gml:126`：show_oldwarning = 1。
+            show_old_warning: true,
+            song_folder: None,
+            pattern_folder: None,
             export_sample_rate: 44100,
             export_channels: 2,
             export_format: "MP3".into(),
@@ -192,6 +202,45 @@ impl Preferences {
     pub fn sounds_dir_path(&self) -> Option<PathBuf> {
         self.sounds_dir.as_ref().map(PathBuf::from).filter(|p| p.is_dir())
     }
+
+    /// 原版宏的 `working_directory`：可执行文件所在目录。
+    fn program_dir() -> PathBuf {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// 原版 `macros.gml:25`：`songs_directory = working_directory + "Songs\\"`。
+    pub fn default_song_folder() -> PathBuf {
+        Self::program_dir().join("Songs")
+    }
+
+    /// 原版 `macros.gml:26`：`pattern_directory = working_directory + "Patterns\\"`。
+    pub fn default_pattern_folder() -> PathBuf {
+        Self::program_dir().join("Patterns")
+    }
+
+    /// 原版 `load_song.gml:11` / `save_song.gml:13`：目录已经不在了就用出厂目录。
+    pub fn song_folder_path(&self) -> PathBuf {
+        existing_dir(self.song_folder.as_deref()).unwrap_or_else(Self::default_song_folder)
+    }
+
+    /// 原版 `pattern_import.gml:17` / `pattern_export.gml:9` 的同一句回退。
+    pub fn pattern_folder_path(&self) -> PathBuf {
+        existing_dir(self.pattern_folder.as_deref()).unwrap_or_else(Self::default_pattern_folder)
+    }
+}
+
+fn existing_dir(s: Option<&str>) -> Option<PathBuf> {
+    s.map(PathBuf::from).filter(|p| p.is_dir())
+}
+
+/// 原版 `open_song_nbs.gml:12-13` / `pattern_import.gml:31-32`：文件版本比本程序旧时的警告，
+/// 受首选项「打开旧版格式时提示」管。文案照抄源码的中文分支，只换扩展名。
+/// 比本程序新的文件不走这里：原版直接拒绝打开，我们的加载器已经报了错。
+pub fn old_file_warning(ext: &str) -> String {
+    format!("警告：你正在打开旧版的 {ext} 文件。保存此文件会使其与旧版 Note Block Studio 不兼容。")
 }
 
 /// 原子保存歌曲：写临时文件再替换。
@@ -322,5 +371,29 @@ mod tests {
         p.add_recent(Path::new("a.nbs"));
         assert_eq!(p.recent_files.len(), 2);
         assert_eq!(p.recent_files[0], "a.nbs");
+    }
+
+    /// 原版 `load_song.gml:11` / `save_song.gml:13`：没配过就用出厂目录，
+    /// 配过但目录已经没了同样退回出厂目录。
+    #[test]
+    fn song_folder_falls_back_to_program_dir() {
+        let tmp = std::env::temp_dir();
+        let mut p = Preferences::default();
+        assert_eq!(p.song_folder_path(), Preferences::default_song_folder());
+        assert_eq!(p.pattern_folder_path(), Preferences::default_pattern_folder());
+        p.song_folder = Some(tmp.to_string_lossy().into_owned());
+        assert_eq!(p.song_folder_path(), tmp);
+        p.pattern_folder = Some("Z:\\nbs-rust 不存在的目录".into());
+        assert_eq!(p.pattern_folder_path(), Preferences::default_pattern_folder());
+    }
+
+    /// 原版 `open_song_nbs.gml:13` / `pattern_import.gml:37` 的中文文案。
+    #[test]
+    fn old_file_warning_text_matches_source() {
+        assert_eq!(
+            old_file_warning("NBS"),
+            "警告：你正在打开旧版的 NBS 文件。保存此文件会使其与旧版 Note Block Studio 不兼容。"
+        );
+        assert!(old_file_warning("NBP").contains("NBP"));
     }
 }
