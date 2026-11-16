@@ -1764,6 +1764,41 @@ mod tests {
         assert_eq!(out.pixels_per_point, 1.0, "重置后要退回出厂缩放");
     }
 
+    /// 原版 `control_draw.gml:736-751` 的那串 `else if`：Ctrl+滚轮 / Ctrl+± 只能停在
+    /// 离散档位上，两端封顶 0.5 和 4，中间按当前值就近跳下一档；Ctrl+0 回出厂值。
+    #[test]
+    fn window_scale_ladder_is_the_original_discrete_steps() {
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        let step = |up: bool, state: &mut EditorState| {
+            dispatch(
+                state,
+                if up { Command::WindowScaleUp } else { Command::WindowScaleDown },
+                &ctx,
+            )
+        };
+        // 出厂是 None（= 系统倍率，测试环境里 1.0），往上第一档 1.25 而不是连续值。
+        step(true, &mut state);
+        assert_eq!(state.prefs.window_scale, Some(1.25), "1.0 的上一档应是 1.25");
+        // 再往下要一路退到 0.5，中间一档都不能漏。
+        for want in [1.0, 0.9, 0.8, 0.75, 0.67, 0.5] {
+            step(false, &mut state);
+            assert_eq!(state.prefs.window_scale, Some(want), "往下漏了一档");
+        }
+        step(false, &mut state);
+        assert_eq!(state.prefs.window_scale, Some(0.5), "0.5 是原版下界，不能再小");
+        for want in [0.67, 0.75, 0.8, 0.9, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0] {
+            step(true, &mut state);
+            assert_eq!(state.prefs.window_scale, Some(want), "往上漏了一档");
+        }
+        for _ in 0..5 {
+            step(true, &mut state);
+        }
+        assert_eq!(state.prefs.window_scale, Some(4.0), "4 是原版上界");
+        dispatch(&mut state, Command::WindowScaleReset, &ctx);
+        assert_eq!(state.prefs.window_scale, None, "Ctrl+0 要存回出厂值");
+    }
+
     /// 原版 `game_set_speed(N, gamespeed_fps)`：帧数上限压的是整个程序的步进，
     /// 我们这边对应压住连续重绘的间隔。
     #[test]
