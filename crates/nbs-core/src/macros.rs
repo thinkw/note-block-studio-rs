@@ -319,49 +319,25 @@ pub fn transform(items: Vec<(i64, i64, Note)>, m: &Macro) -> Vec<(i64, i64, Note
 }
 
 impl Document {
-    /// 对浮动选区（无选区时对全曲）执行一次宏，记录一条紧凑 diff 历史。
+    /// 对浮动选区执行一次宏，记录一条紧凑 diff 历史。空选区直接忽略 ——
+    /// 原版 macro_fadein / macro_vibrato / macro_tremolo 等每个宏开头都是
+    /// `if (songs[song].selected = 0) return 0`（macro_chorus 传空数组等效）。
     pub fn run_macro(&mut self, m: &Macro) {
-        if self.selection.is_empty() && self.song.total_blocks == 0 {
+        if self.selection.is_empty() {
             return;
         }
-        let had_selection = !self.selection.is_empty();
-        if !had_selection {
-            let all: Vec<(u32, u32, Note)> = self.song.iter_notes().collect();
-            if all.is_empty() {
-                return;
-            }
-            let abs: Vec<(i64, i64, Note)> =
-                all.iter().map(|&(t, l, n)| (t as i64, l as i64, n)).collect();
-            let result = transform(abs, m);
-            let mut tx = self.begin(format!("宏: {}", m.name()));
-            // 监视所有原格与所有新格
-            for (t, l, _) in &all {
-                tx.watch(*t, *l);
-            }
-            for (x, y, _) in &result {
-                tx.watch(*x as u32, *y as u32);
-            }
-            for (t, l, _) in &all {
-                tx.song().remove(*t, *l);
-            }
-            for (x, y, n) in result {
-                tx.song().set(x as u32, y as u32, n.clamped());
-            }
-            tx.commit();
-        } else {
-            let sel = self.selection.clone();
-            let abs: Vec<(i64, i64, Note)> = sel
-                .notes
-                .iter()
-                .map(|n| (sel.x + n.dx as i64, sel.y + n.dy as i64, n.note))
-                .collect();
-            let result = transform(abs, m);
-            let mut tx = self.begin(format!("宏: {}", m.name()));
-            tx.track_selection();
-            let new_sel = selection_from_absolute(&result);
-            *tx.selection() = new_sel;
-            tx.commit();
-        }
+        let sel = self.selection.clone();
+        let abs: Vec<(i64, i64, Note)> = sel
+            .notes
+            .iter()
+            .map(|n| (sel.x + n.dx as i64, sel.y + n.dy as i64, n.note))
+            .collect();
+        let result = transform(abs, m);
+        let mut tx = self.begin(format!("宏: {}", m.name()));
+        tx.track_selection();
+        let new_sel = selection_from_absolute(&result);
+        *tx.selection() = new_sel;
+        tx.commit();
     }
 }
 
@@ -402,31 +378,33 @@ mod tests {
     #[test]
     fn fade_in_ramps_velocity() {
         let mut d = doc_with_column();
+        d.select_rect(0, 0, 7, 0, false, false, false);
         d.run_macro(&Macro::FadeIn);
-        let first = d.song.get(0, 0).unwrap().velocity;
-        let last = d.song.get(7, 0).unwrap().velocity;
+        let first = d.selection.at(0, 0).unwrap().velocity;
+        let last = d.selection.at(7, 0).unwrap().velocity;
         assert!(first <= 1, "首列应最轻: {first}");
         assert_eq!(last, 100);
         assert!(d.history.can_undo());
         d.undo();
-        assert_eq!(d.song.get(0, 0).unwrap().velocity, 100);
+        assert_eq!(d.selection.at(0, 0).unwrap().velocity, 100);
     }
 
     #[test]
     fn vibrato_writes_pitch_wave() {
         let mut d = doc_with_column();
+        d.select_rect(0, 0, 2, 0, false, false, false);
         d.run_macro(&Macro::Vibrato);
-        assert_eq!(d.song.get(0, 0).unwrap().pitch, 40);
-        assert_eq!(d.song.get(1, 0).unwrap().pitch, 0);
-        assert_eq!(d.song.get(2, 0).unwrap().pitch, -40);
+        assert_eq!(d.selection.at(0, 0).unwrap().pitch, 40);
+        assert_eq!(d.selection.at(1, 0).unwrap().pitch, 0);
+        assert_eq!(d.selection.at(2, 0).unwrap().pitch, -40);
     }
 
     #[test]
     fn tremolo_expands_notes() {
         let mut d = doc_with_column();
-        let before = d.song.total_blocks;
+        d.select_rect(0, 0, 7, 0, false, false, false);
         d.run_macro(&Macro::Tremolo { spacing: 2, fade: TremoloFade::None, amount: 0 });
-        assert_eq!(d.song.total_blocks, before * 2);
+        assert_eq!(d.selection.len(), 16);
     }
 
     #[test]
@@ -444,9 +422,27 @@ mod tests {
     #[test]
     fn stereo_alternates_pan() {
         let mut d = doc_with_column();
+        d.select_rect(0, 0, 7, 0, false, false, false);
         d.run_macro(&Macro::Stereo { width: 60, reverse: false });
-        assert_eq!(d.song.get(0, 0).unwrap().panning, 40);
-        assert_eq!(d.song.get(1, 0).unwrap().panning, 160);
+        assert_eq!(d.selection.at(0, 0).unwrap().panning, 40);
+        assert_eq!(d.selection.at(1, 0).unwrap().panning, 160);
+    }
+
+    /// 原版每个宏开头都是 `if (songs[song].selected = 0) return 0`：没有选区
+    /// 时宏必须什么都不做（不改歌、不进历史），绝不退化成「对全曲生效」。
+    #[test]
+    fn macro_without_selection_is_a_noop() {
+        let mut d = doc_with_column();
+        let before = d.history.len();
+        d.run_macro(&Macro::Vibrato);
+        d.run_macro(&Macro::FadeIn);
+        d.run_macro(&Macro::Stereo { width: 60, reverse: false });
+        assert_eq!(d.history.len(), before);
+        assert!(d.selection.is_empty());
+        let n = d.song.get(0, 0).unwrap();
+        assert_eq!(n.pitch, 0);
+        assert_eq!(n.velocity, 100);
+        assert_eq!(n.panning, 100);
     }
 
     #[test]
@@ -455,9 +451,10 @@ mod tests {
         d.place_note(0, 0, Note::new(0, 45));
         d.place_note(0, 1, Note::new(0, 45));
         d.place_note(0, 2, Note::new(0, 45));
+        d.select_rect(0, 0, 0, 2, false, false, false);
         d.run_macro(&Macro::Arpeggio { pattern: vec![0, 4, 7] });
-        assert_eq!(d.song.get(0, 0).unwrap().key, 45);
-        assert_eq!(d.song.get(0, 1).unwrap().key, 49);
-        assert_eq!(d.song.get(0, 2).unwrap().key, 52);
+        assert_eq!(d.selection.at(0, 0).unwrap().key, 45);
+        assert_eq!(d.selection.at(0, 1).unwrap().key, 49);
+        assert_eq!(d.selection.at(0, 2).unwrap().key, 52);
     }
 }

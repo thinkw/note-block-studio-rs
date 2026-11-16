@@ -198,7 +198,9 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
                 if p(Key::F) {
                     out.push(step_cmd(-small));
                 }
-                // `mode_action(5)`：按当前模式打开批量设置窗口，音高模式没有这一步。
+                // `mode_action(5)`：按当前模式打开批量设置窗口。原版调用点写死
+                // `editmode != m_key`：音调模式（Key）没有 T/G；微调模式有，
+                // 打开的是 w_setpitch（v3.12 的 mode_action 已补齐 m_pit 分支）。
                 let batch_window = match state.tool {
                     EditMode::Key => None,
                     EditMode::Velocity => Some(WindowKind::SetVelocity),
@@ -211,6 +213,8 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
                     }
                 }
                 // `mode_action(6)`：把当前模式的属性恢复默认（力度 / 声像 100、微调 0）。
+                // 空选区时 selection_change 直接 return，这里靠 batch_change 的
+                // 空选区早退对齐。
                 if p(Key::G) {
                     match state.tool {
                         EditMode::Key => {}
@@ -242,29 +246,33 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
                     }
                 }
             }
-            // 原版的 Ctrl+Shift+ 字母：宏窗口和批量设置窗口（都要求有选区，
-            // 空选区由窗口自己给出提示）。Tempo Tapper / 琶音 / 滑音 / 交错这几个
-            // 窗口本端口还没实现，不占用按键。
+            // 原版的 Ctrl+Shift+ 字母：宏窗口和批量设置窗口。这一族（A/S/D/F/G/H/
+            // J/K/Q/W/E/R/T/Y/U）整段包在 `if current_song.selected != 0` 里，
+            // 没有选区时按键无效果；片段编辑器 Ctrl+Shift+P 和节拍器 Ctrl+Shift+I
+            // 在闸门外。Tempo Tapper / 琶音 / 滑音 / 交错这几个窗口本端口还没实现，
+            // 不占用按键。
             // 每一行原版都写死 `keyboard_check(vk_shift)`：这一族必须带 Shift，
             // 否则 Ctrl+P/S/A/R/Y 会和上面 `ctrl && !shift` 那批功能撞车。
             if shift {
                 if p(Key::P) {
                     out.push(Command::ShowWindow(WindowKind::ClipEditor));
                 }
-                if p(Key::R) {
-                    out.push(Command::ShowWindow(WindowKind::SetVelocity));
-                }
-                if p(Key::T) {
-                    out.push(Command::ShowWindow(WindowKind::SetPanning));
-                }
-                if p(Key::Y) {
-                    out.push(Command::ShowWindow(WindowKind::SetPitch));
-                }
-                if p(Key::A) {
-                    out.push(Command::ShowWindow(WindowKind::Tremolo));
-                }
-                if p(Key::S) {
-                    out.push(Command::ShowWindow(WindowKind::Stereo));
+                if !state.doc.selection.is_empty() {
+                    if p(Key::R) {
+                        out.push(Command::ShowWindow(WindowKind::SetVelocity));
+                    }
+                    if p(Key::T) {
+                        out.push(Command::ShowWindow(WindowKind::SetPanning));
+                    }
+                    if p(Key::Y) {
+                        out.push(Command::ShowWindow(WindowKind::SetPitch));
+                    }
+                    if p(Key::A) {
+                        out.push(Command::ShowWindow(WindowKind::Tremolo));
+                    }
+                    if p(Key::S) {
+                        out.push(Command::ShowWindow(WindowKind::Stereo));
+                    }
                 }
             }
         }
@@ -292,15 +300,15 @@ pub const SHORTCUT_HELP: &[(&str, &str)] = &[
     ("Ctrl+C/X/V", "复制 / 剪切 / 粘贴"),
     ("Ctrl+Z / Ctrl+Y", "撤销 / 重做"),
     ("Ctrl+A / Ctrl+I", "全选 / 反选"),
-    ("Ctrl+E / D", "按当前模式 ±大步（音高 ±12，其余 ±10）"),
+    ("Ctrl+E / D", "按当前模式 ±大步（音调 ±12，其余 ±10）"),
     ("Ctrl+R / F", "按当前模式 ±1"),
-    ("Ctrl+T / Ctrl+G", "批量设置窗口 / 当前属性回默认（音高模式无）"),
+    ("Ctrl+T / Ctrl+G", "批量设置窗口 / 当前属性回默认（音调模式无，需选区才生效）"),
     ("Ctrl+P", "首选项"),
     ("Ctrl+1..9", "选前 9 种乐器（力度 / 声像 / 微调复位并试听）"),
     ("Ctrl+Shift+1..7", "选第 10..16 种乐器"),
     ("Ctrl+Shift+P", "片段编辑器"),
-    ("Ctrl+Shift+R / T / Y", "批量设置力度 / 声像 / 微调"),
-    ("Ctrl+Shift+A / S", "颤音 / 立体声宏窗口"),
+    ("Ctrl+Shift+R / T / Y", "批量设置力度 / 声像 / 微调（需选区，无选区按键无效）"),
+    ("Ctrl+Shift+A / S", "颤音 / 立体声宏窗口（需选区，无选区按键无效）"),
     ("Ctrl+0 / Ctrl+±", "重置 / 调整整窗口缩放"),
     ("Delete", "删除选区（停止播放时）"),
     ("Space / Enter", "播放暂停 / 停止并回到开头"),
@@ -390,6 +398,73 @@ mod tests {
             "Ctrl+Shift+P 应开片段编辑器: {got:?}"
         );
         assert!(!got.iter().any(prefs_open_cmd), "Ctrl+Shift+P 不该开首选项: {got:?}");
+    }
+
+    /// 原版 `control_draw.gml` 的 Macro Hotkeys 区整段包在
+    /// `if current_song.selected != 0` 里：Ctrl+Shift+R/T/Y/A/S 没有选区时必须
+    /// 无效果，而 Ctrl+Shift+P（片段编辑器）在闸门外，空选区照样打开。
+    #[test]
+    fn ctrl_shift_macro_keys_require_a_selection() {
+        let both = egui::Modifiers { ctrl: true, shift: true, ..Default::default() };
+        let empty = EditorState::new();
+        let got = cmds_with(
+            vec![
+                key(Key::R, true, both),
+                key(Key::T, true, both),
+                key(Key::Y, true, both),
+                key(Key::A, true, both),
+                key(Key::S, true, both),
+            ],
+            &empty,
+        );
+        assert!(
+            !got.iter().any(|c| matches!(
+                c,
+                Command::ShowWindow(
+                    WindowKind::SetVelocity
+                        | WindowKind::SetPanning
+                        | WindowKind::SetPitch
+                        | WindowKind::Tremolo
+                        | WindowKind::Stereo
+                )
+            )),
+            "无选区时宏族按键必须全部无效: {got:?}"
+        );
+        // 片段编辑器不受闸门限制。
+        let got = cmds_with(vec![key(Key::P, true, both)], &empty);
+        assert!(
+            got.iter().any(|c| matches!(c, Command::ShowWindow(WindowKind::ClipEditor))),
+            "Ctrl+Shift+P 不该受选区闸门限制: {got:?}"
+        );
+
+        // 框一个有音符的矩形后，同一批按键全部放行。
+        let mut sel = EditorState::new();
+        sel.doc.place_note(0, 0, nbs_core::model::Note::new(0, 45));
+        sel.doc.place_note(1, 0, nbs_core::model::Note::new(0, 47));
+        sel.doc.select_rect(0, 0, 1, 0, false, false, false);
+        assert!(!sel.doc.selection.is_empty(), "测试前提：框选要摘出音符");
+        let got = cmds_with(
+            vec![
+                key(Key::R, true, both),
+                key(Key::T, true, both),
+                key(Key::Y, true, both),
+                key(Key::A, true, both),
+                key(Key::S, true, both),
+            ],
+            &sel,
+        );
+        for want in [
+            WindowKind::SetVelocity,
+            WindowKind::SetPanning,
+            WindowKind::SetPitch,
+            WindowKind::Tremolo,
+            WindowKind::Stereo,
+        ] {
+            assert!(
+                got.iter().any(|c| matches!(c, Command::ShowWindow(k) if *k == want)),
+                "有选区时应打开 {want:?}: {got:?}"
+            );
+        }
     }
 
     /// 自带状态的 cmds 变体（theme 闸门要切主题才能测）。

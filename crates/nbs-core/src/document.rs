@@ -522,25 +522,18 @@ impl Document {
 
     // ---------------------------------------------------------------- 批量属性
 
-    /// 对浮动选区（无选区时对全部音符）批量修改属性，等价于原版各类宏。
+    /// 对浮动选区批量修改属性，等价于原版 `selection_change` 系。空选区直接忽略、
+    /// 不进历史 —— 原版 `selection_change.gml:8` 一句 `if (selected = 0) return 0`，
+    /// 所有批量属性入口（宏 / 批量窗口 / 模式操作）共用这一条闸门。
     pub fn batch_change(&mut self, label: impl Into<String>, mut f: impl FnMut(&mut Note)) {
         let label = label.into();
-        if !self.selection.is_empty() {
-            let mut tx = self.begin(label);
-            tx.track_selection();
-            tx.selection().change_all(|n| f(n));
-            tx.commit();
-        } else {
-            let mut tx = self.begin(label);
-            let all: Vec<_> = tx.read_song().iter_notes().collect();
-            tx.watch_notes(&all);
-            for (t, l, n) in all {
-                let mut n = n;
-                f(&mut n);
-                tx.song().set(t, l, n.clamped());
-            }
-            tx.commit();
+        if self.selection.is_empty() {
+            return;
         }
+        let mut tx = self.begin(label);
+        tx.track_selection();
+        tx.selection().change_all(|n| f(n));
+        tx.commit();
     }
 
     pub fn transpose(&mut self, semitones: i32) {
@@ -792,10 +785,29 @@ mod tests {
         for i in 0..50u32 {
             doc.place_note(i, 0, Note::new(0, 45));
         }
+        doc.select_rect(0, 0, 49, 0, false, false, false);
         let before = doc.history.len();
         doc.batch_change("升八度", |n| n.key += 12);
         assert_eq!(doc.history.len(), before + 1);
-        assert_eq!(doc.song.get(0, 0).unwrap().key, 57);
+        assert_eq!(doc.selection.at(0, 0).unwrap().key, 57);
+    }
+
+    /// 原版 `selection_change.gml:8`：`if (selected = 0) return 0`。空选区时
+    /// 批量属性操作必须完全无效 —— 不改音符、不进历史。旧行为「无选区就对
+    /// 全曲生效」是原版没有的增强，Ctrl+G 空选区会把整首歌力度清成 100。
+    #[test]
+    fn batch_change_without_selection_is_a_noop() {
+        let mut doc = Document::new();
+        doc.place_note(0, 0, Note::new(0, 45));
+        let before = doc.history.len();
+        doc.batch_change("批量设置力度", |n| n.velocity = 30);
+        doc.transpose(12);
+        doc.set_instrument_all(3);
+        assert_eq!(doc.history.len(), before);
+        let n = doc.song.get(0, 0).unwrap();
+        assert_eq!(n.velocity, 100);
+        assert_eq!(n.key, 45);
+        assert_eq!(n.instrument, 0);
     }
 
     /// 兼容性窗口那三个按钮的后半截：`select_outside` / `select_custom` 摘音符，

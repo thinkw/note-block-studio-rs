@@ -1526,10 +1526,10 @@ enum Numeric {
 fn numeric_window(state: &mut EditorState, ui: &mut Ui, which: Numeric) {
     let (label, hint) = match which {
         Numeric::Tempo => ("速度 (tick/s)", "10 t/s = 150 BPM"),
-        Numeric::Velocity => ("力度 0..100", "应用到浮动选区；无选区时应用到全曲"),
-        Numeric::Panning => ("声像 0..200", "100 = 中央，<100 偏左，>100 偏右"),
-        Numeric::Pitch => ("微调 -1200..1200 ¢", "100 ¢ = 1 半音"),
-        Numeric::Transpose => ("移调（半音）", "正数为升，负数为降"),
+        Numeric::Velocity => ("力度 0..100", "应用到选区；无选区时无效（原版空选区直接忽略）"),
+        Numeric::Panning => ("声像 0..200", "应用到选区；无选区时无效。100 = 中央，<100 偏左，>100 偏右"),
+        Numeric::Pitch => ("微调 -1200..1200 ¢", "应用到选区；无选区时无效。100 ¢ = 1 半音"),
+        Numeric::Transpose => ("移调（半音）", "应用到选区；正数为升，负数为降"),
         Numeric::Tremolo => ("颤音强度", "按音高奇偶交替增减力度"),
         Numeric::Stereo => ("立体声展开量", "按音符顺序左右交替偏移声像"),
     };
@@ -3863,14 +3863,15 @@ fn png_export_window(state: &mut EditorState, ui: &mut Ui) {
 
 fn macro_editor_window(state: &mut EditorState, ui: &mut Ui) {
     let macros = Macro::all();
-    ui.label(RichText::new(format!(
-        "作用对象：{}（无选区时对全曲生效）",
-        if state.doc.selection.is_empty() {
-            "全曲".to_string()
-        } else {
-            format!("浮动选区 {} 音符", state.doc.selection.len())
-        }
-    )).small().weak());
+    // 原版菜单里 Macros... 的锁定条件是 `selected = 0 || selection_l = 0`，
+    // 宏本体也全部空选区早退 —— 这里如实显示作用对象。
+    ui.label(RichText::new(if state.doc.selection.is_empty() {
+        "作用对象：无选区（应用无效）".to_string()
+    } else {
+        format!("作用对象：浮动选区 {} 音符", state.doc.selection.len())
+    })
+    .small()
+    .weak());
     ui.separator();
     egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
         for (i, m) in macros.iter().enumerate() {

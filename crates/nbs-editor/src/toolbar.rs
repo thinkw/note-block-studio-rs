@@ -113,9 +113,31 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
             if ui.button("取消选择").clicked() { state.emit(Command::Deselect); ui.close_menu(); }
             if ui.button("反选  Ctrl+I").clicked() { state.emit(Command::InvertSelection); ui.close_menu(); }
             ui.separator();
-            if ui.button("升八度 +12").clicked() { state.emit(Command::Transpose(12)); ui.close_menu(); }
-            if ui.button("降八度 -12").clicked() { state.emit(Command::Transpose(-12)); ui.close_menu(); }
-            if ui.button("移调…").clicked() { state.emit(Command::ShowWindow(WindowKind::Transpose)); ui.close_menu(); }
+            // 原版右键菜单里模式操作（升/降调）和「更改音色」「Macros...」都带
+            // `inactive(current_song.selected = 0)`：没有选区就置灰；批量设置 /
+            // 宏条目保持可点，点了空选区静默无效（宏本体 `selected = 0` 早退）。
+            let has_sel = !state.doc.selection.is_empty();
+            if ui
+                .add_enabled(has_sel, egui::Button::new("升八度 +12"))
+                .clicked()
+            {
+                state.emit(Command::Transpose(12));
+                ui.close_menu();
+            }
+            if ui
+                .add_enabled(has_sel, egui::Button::new("降八度 -12"))
+                .clicked()
+            {
+                state.emit(Command::Transpose(-12));
+                ui.close_menu();
+            }
+            if ui
+                .add_enabled(has_sel, egui::Button::new("移调…"))
+                .clicked()
+            {
+                state.emit(Command::ShowWindow(WindowKind::Transpose));
+                ui.close_menu();
+            }
             ui.menu_button("批量设置", |ui| {
                 if ui.button("力度…").clicked() { state.emit(Command::ShowWindow(WindowKind::SetVelocity)); }
                 if ui.button("声像…").clicked() { state.emit(Command::ShowWindow(WindowKind::SetPanning)); }
@@ -124,7 +146,15 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
             ui.separator();
             instrument_menus(state, ui);
             ui.separator();
-            if ui.button("宏编辑器（15 种宏）…  Ctrl+M").clicked() { state.emit(Command::ShowWindow(WindowKind::MacroEditor)); ui.close_menu(); }
+            // 原版没有给 Macros... 绑键盘快捷键（get_hotkey 里没有这一项），
+            // 菜单文案不标 Ctrl+M。
+            if ui
+                .add_enabled(has_sel, egui::Button::new("宏编辑器（15 种宏）…"))
+                .clicked()
+            {
+                state.emit(Command::ShowWindow(WindowKind::MacroEditor));
+                ui.close_menu();
+            }
             ui.menu_button("快捷宏", |ui| {
                 for m in [
                     nbs_core::Macro::FadeIn,
@@ -191,13 +221,17 @@ pub fn instrument_menus(state: &mut EditorState, ui: &mut Ui) {
             }
         });
     });
-    ui.menu_button("更改乐器到…", |ui| {
-        egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
-            for (idx, name) in &names {
-                if ui.button(name).clicked() {
-                    state.emit(Command::SetAllInstrument(*idx));
+    // 原版「更改音色......」在无选区时置灰（`inactive(current_song.selected = 0)`）。
+    let has_sel = !state.doc.selection.is_empty();
+    ui.add_enabled_ui(has_sel, |ui| {
+        ui.menu_button("更改乐器到…", |ui| {
+            egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
+                for (idx, name) in &names {
+                    if ui.button(name).clicked() {
+                        state.emit(Command::SetAllInstrument(*idx));
+                    }
                 }
-            }
+            });
         });
     });
 }
