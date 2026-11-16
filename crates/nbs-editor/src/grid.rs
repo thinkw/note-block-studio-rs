@@ -131,34 +131,31 @@ fn handle_grid_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect)
     let interactive = hover.is_some() && state.window.is_none() && state.context_menu.is_none();
     let pointer_in_grid = input.pointer.is_some_and(|p| rect.contains(p));
 
-    // 滚轮：Ctrl 缩放 / 悬停音符调属性 / 按 `mousewheel` 档位决定是平移、换音色还是换键。
-    if pointer_in_grid && (input.scroll.x.abs() > 0.0 || input.scroll.y.abs() > 0.0) {
+    // 滚轮：悬停音符调属性 / 按 `mousewheel` 档位决定是平移、换音色还是换键。
+    // Ctrl+滚轮不在这里处理——原版把它归在键盘快捷键段（`control_draw.gml:736-751`），
+    // 改的是整窗口缩放，见 `shortcuts.rs`。
+    if pointer_in_grid && !input.ctrl && (input.scroll.x.abs() > 0.0 || input.scroll.y.abs() > 0.0) {
         let delta = input.scroll.y + input.scroll.x;
-        if input.ctrl {
-            state.viewport.zoom_by(if delta > 0.0 { 1.1 } else { 0.9 });
-        } else {
-            let d = if delta > 0.0 { 1 } else { -1 };
-            // 原版条件 `exist && changepitch`：停在音符上且开了「滚轮改音符属性」才改那颗音。
-            let note_cell = hover.filter(|(t, l)| {
-                state.prefs.changepitch
-                    && (state.doc.song.has(*t as u32, *l as u32)
-                        || state.doc.selection.contains(*t, *l))
+        let d = if delta > 0.0 { 1 } else { -1 };
+        // 原版条件 `exist && changepitch`：停在音符上且开了「滚轮改音符属性」才改那颗音。
+        let note_cell = hover.filter(|(t, l)| {
+            state.prefs.changepitch
+                && (state.doc.song.has(*t as u32, *l as u32) || state.doc.selection.contains(*t, *l))
+        });
+        if let Some((t, l)) = note_cell {
+            state.emit(Command::WheelOnNote {
+                tick: t as u32,
+                layer: l as u32,
+                delta: d,
+                shift: input.shift,
             });
-            if let Some((t, l)) = note_cell {
-                state.emit(Command::WheelOnNote {
-                    tick: t as u32,
-                    layer: l as u32,
-                    delta: d,
-                    shift: input.shift,
-                });
-            } else if state.prefs.mousewheel == 1 {
-                // 原版 `mousewheel = 1`：滚轮换音色，此时滚轮不再平移视口。
-                state.emit(Command::WheelInstrument(d));
-            } else if state.prefs.mousewheel == 2 {
-                state.emit(Command::WheelKey(d));
-            } else {
-                scroll_viewport(state, delta, input.shift);
-            }
+        } else if state.prefs.mousewheel == 1 {
+            // 原版 `mousewheel = 1`：滚轮换音色，此时滚轮不再平移视口。
+            state.emit(Command::WheelInstrument(d));
+        } else if state.prefs.mousewheel == 2 {
+            state.emit(Command::WheelKey(d));
+        } else {
+            scroll_viewport(state, delta, input.shift);
         }
     }
 
@@ -614,15 +611,13 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
             } else {
                 Color32::WHITE
             };
-            let k = cell / 32.0;
             let at = pos2(mx, rect.min.y + 2.0);
-            let head = Vec2::new(16.0 * k, 15.0 * k);
-            bank.marker(&p, at, marker_frame(th, state.flags.blackout), head, tint);
+            bank.marker(&p, at, marker_frame(th, state.flags.blackout), Vec2::new(16.0, 15.0), tint);
             bank.marker(
                 &p,
                 at,
                 marker_frame(th, state.flags.blackout) + 1,
-                Vec2::new(16.0 * k, rect.max.y - at.y),
+                Vec2::new(16.0, rect.max.y - at.y),
                 tint,
             );
         }
@@ -794,7 +789,8 @@ fn marker_frame(th: &Theme, blackout: bool) -> usize {
 /// 原版 `draw_block(x, y, ins, key, pan, vel, pit, alpha, selalpha)`：
 /// 方块精灵 → 乐器图标 → 音高偏移蒙版 → 不兼容红框 → 选中叠层 → 数值 / 键名两行文字。
 /// 精灵库缺失时整格不画（原版没有「无贴图的音符」）。
-/// 原版方块固定 32px，缩放时所有偏移按 `k = cell / 32` 等比。
+/// 原版所有偏移都是写死的像素：方块 32、图标 16（左上角在 `xx + 16, yy + 16`）、
+/// 数值在 `xx + 16 - 8 * use_icons, yy + 16`、键名在 `xx + 16, yy + 4`。
 fn push_note(
     state: &EditorState,
     p: &Painter,
@@ -806,9 +802,7 @@ fn push_note(
     let Some(bank) = state.icons.bank() else { return };
     let th = &state.theme;
     let flags = &state.flags;
-    let cell = state.viewport.cell();
-    let k = cell / 32.0;
-    let size = Vec2::splat(cell);
+    let size = Vec2::splat(state.viewport.cell());
     let index = note.instrument as usize;
     let first_custom = FIRST_CUSTOM_INDEX as usize;
     let iscustom = index >= first_custom;
@@ -830,8 +824,8 @@ fn push_note(
     bank.block(p, at, set, frame, size, block_alpha);
 
     if flags.use_icons {
-        let icon_at = at + Vec2::splat(16.0 * k);
-        let icon_size = Vec2::splat(16.0 * k);
+        let icon_at = pos2(at.x + 16.0, at.y + 16.0);
+        let icon_size = Vec2::splat(16.0);
         if iscustom {
             bank.custom_block_glyph(p, icon_at, index - first_custom, first_custom, icon_size, block_alpha);
         } else {
@@ -850,7 +844,7 @@ fn push_note(
     if flags.show_incompatible
         && (iscustom || note.key < MC_KEY_MIN || note.key > MC_KEY_MAX)
     {
-        let r = Rect::from_min_max(at + Vec2::splat(k), at + Vec2::splat(32.0 * k));
+        let r = Rect::from_min_max(pos2(at.x + 1.0, at.y + 1.0), pos2(at.x + 32.0, at.y + 32.0));
         p.rect_stroke(r, 0.0, Stroke::new(1.0_f32, C_RED), StrokeKind::Inside);
     }
 
@@ -859,13 +853,13 @@ fn push_note(
         bank.block_sel(p, at, size, salpha);
     }
     let text_alpha = if salpha > 0.0 { 1.0 } else { (block_alpha + 0.25).min(1.0) };
-    let font = FontId::proportional(9.0 * k);
+    let font = FontId::proportional(9.0);
 
     if flags.show_numbers {
         // 原版 `xx + 16 - 8 * use_icons`：勾了图标位就把数值往左挪半格。
-        let x = at.x + (if flags.use_icons { 8.0 } else { 16.0 }) * k;
+        let x = at.x + (if flags.use_icons { 8.0 } else { 16.0 });
         p.text(
-            pos2(x, at.y + 16.0 * k),
+            pos2(x, at.y + 16.0),
             Align2::CENTER_TOP,
             note_value(state.tool, note),
             font.clone(),
@@ -875,7 +869,7 @@ fn push_note(
     // 键名不受 show_keynames 开关控制（那个开关只管琴键），原版恒画。
     let name_color = if th.kind == ThemeKind::Dark { Color32::WHITE } else { C_YELLOW };
     p.text(
-        pos2(at.x + 16.0 * k, at.y + 4.0 * k),
+        pos2(at.x + 16.0, at.y + 4.0),
         Align2::CENTER_TOP,
         key_name(note.key, flags.show_octaves, flags.flats),
         font,

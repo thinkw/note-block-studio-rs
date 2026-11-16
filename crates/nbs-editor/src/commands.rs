@@ -65,9 +65,12 @@ pub enum Command {
     SetVel(i32),
     SetPan(i32),
     SetPit(i32),
-    ZoomIn,
-    ZoomOut,
-    ZoomReset,
+    /// 原版 `control_draw.gml:736-751`：Ctrl+滚轮 / Ctrl+± 沿固定档位改整窗口缩放
+    /// （`window_scale`），网格本身恒 32px。
+    WindowScaleUp,
+    WindowScaleDown,
+    /// 原版 `control_draw.gml:732-735`：Ctrl+0 回到出厂缩放 `get_default_window_scale()`。
+    WindowScaleReset,
     /// 按页平移视口（Home/End/PageUp/PageDown）。
     PageHorizontal(i32),
     PageVertical(i32),
@@ -506,9 +509,9 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.current.pitch =
                 (state.current.pitch as i32 + d).clamp(-PIT_MAX as i32, PIT_MAX as i32) as i16;
         }
-        Command::ZoomIn => state.viewport.zoom_by(1.25),
-        Command::ZoomOut => state.viewport.zoom_by(0.8),
-        Command::ZoomReset => state.viewport.zoom = 1.0,
+        Command::WindowScaleUp => state.step_window_scale(ctx, true),
+        Command::WindowScaleDown => state.step_window_scale(ctx, false),
+        Command::WindowScaleReset => state.reset_window_scale(ctx),
         Command::PageHorizontal(d) => {
             let cols = state.viewport.columns() as i64;
             let max = state.doc.song.enda.max(64) as i64;

@@ -1,8 +1,8 @@
 //! 视口与坐标换算 —— 视口剔除（culling）的所在地。
 //!
-//! 原版的 32px 固定格在这里抽成 `BASE_CELL * zoom`，并新增了独立的网格缩放
-//! （原版只有整窗口 UI 缩放）。所有绘制只遍历 `[start_tick, start_tick+cols)`，
-//! 与歌曲总长度无关。
+//! 原版每格固定 32px（`draw_block(x1 + 2 + 32 * a - note_offset, y1 + 34 + 32 * b, …)`），
+//! 没有网格缩放，只有整窗口的 `window_scale`。所有绘制只遍历
+//! `[start_tick, start_tick+cols)`，与歌曲总长度无关。
 
 use egui::{Pos2, Rect, Vec2};
 
@@ -33,8 +33,6 @@ pub struct Viewport {
     pub start_tick: u32,
     /// 左上角可见 layer（原版 `startb`）。
     pub start_layer: u32,
-    /// 网格独立缩放 0.5..=4.0。
-    pub zoom: f32,
     /// 网格区域左上角（屏幕坐标），每帧由布局计算。
     pub origin: Pos2,
     /// 网格区域尺寸。
@@ -48,7 +46,6 @@ impl Default for Viewport {
         Self {
             start_tick: 0,
             start_layer: 0,
-            zoom: 1.0,
             origin: Pos2::ZERO,
             size: egui::vec2(800.0, 400.0),
             note_offset: 0.0,
@@ -57,8 +54,9 @@ impl Default for Viewport {
 }
 
 impl Viewport {
+    /// 原版网格恒 32px，没有缩放。
     pub fn cell(&self) -> f32 {
-        BASE_CELL * self.zoom
+        BASE_CELL
     }
 
     /// 可见列数（多算 1 列给平滑滚动留余量）。
@@ -150,10 +148,6 @@ impl Viewport {
                 0.0
             };
         }
-    }
-
-    pub fn zoom_by(&mut self, factor: f32) {
-        self.zoom = (self.zoom * factor).clamp(0.5, 4.0);
     }
 }
 

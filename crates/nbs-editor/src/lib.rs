@@ -53,7 +53,6 @@ mod tests {
         isolate_prefs();
         let s = EditorState::new();
         assert!(s.doc.song.total_blocks > 0);
-        assert_eq!(s.viewport.zoom, 1.0);
         assert!(s.doc.history.can_undo() == false);
     }
 

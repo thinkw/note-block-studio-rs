@@ -13,7 +13,6 @@ const APP_DIR: &str = "nbs-rust";
 pub struct Preferences {
     pub version: u8,
     pub theme: u8,
-    pub zoom: f32,
     pub master_volume: f32,
     pub play_speed: f32,
     pub metronome: bool,
@@ -105,7 +104,6 @@ impl Default for Preferences {
         Self {
             version: 1,
             theme: 3,
-            zoom: 1.0,
             master_volume: 1.0,
             play_speed: 1.0,
             metronome: false,

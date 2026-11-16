@@ -790,8 +790,7 @@ impl EditorState {
         flags.flats = prefs.flats;
         flags.blackout = prefs.blackout;
 
-        let mut viewport = Viewport::default();
-        viewport.zoom = prefs.zoom.clamp(0.5, 4.0);
+        let viewport = Viewport::default();
         let recent_files = prefs.recent_files.iter().map(PathBuf::from).collect();
         let follow_marker = prefs.follow_marker;
         let follow_mode = prefs.follow_mode;
@@ -1003,6 +1002,31 @@ impl EditorState {
         }
     }
 
+    /// 原版 `control_draw.gml:736-751`：Ctrl+滚轮 / Ctrl+± 把 `window_scale` 推到
+    /// 下一个（上一个）固定档位，档位表就是那串 `else if` 里的数，两端是 0.5 和 4。
+    /// 网格本身恒 32px，缩放的是整块界面。
+    pub fn step_window_scale(&mut self, ctx: &Context, up: bool) {
+        const STEPS: [f32; 14] = [
+            0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0,
+        ];
+        let cur = self.prefs.effective_scale(ctx.native_pixels_per_point().unwrap_or(1.0));
+        let next = if up {
+            STEPS.iter().find(|s| **s > cur + 1e-4).copied()
+        } else {
+            STEPS.iter().rev().find(|s| cur > **s + 1e-4).copied()
+        };
+        let Some(next) = next else { return };
+        self.prefs.window_scale = Some(next);
+        self.set_message(format!("窗口缩放 => {}%", (next * 100.0).round()));
+    }
+
+    /// 原版 `control_draw.gml:732-735`：Ctrl+0 回到 `get_default_window_scale()`（= 系统 DPI / 96）。
+    pub fn reset_window_scale(&mut self, ctx: &Context) {
+        self.prefs.window_scale = None;
+        let native = ctx.native_pixels_per_point().unwrap_or(1.0);
+        self.set_message(format!("窗口缩放 => {}%", (native * 100.0).round()));
+    }
+
     /// 原版 `control_draw.gml:27-31` + `control_step.gml:21-29`：`window_icon` 一变就重设窗口图标。
     /// 原版为此留了 1 秒的重发窗口（`icon_display`），因为 GM 的 `window_set_icon_raw`
     /// 不保证第一次就生效；egui 的窗口命令是排队给平台层的，一次就够，所以只在档位变化时发。
@@ -1177,7 +1201,6 @@ impl EditorState {
             ThemeKind::Fluent => 3,
         };
         self.prefs.fdark = self.theme.fdark;
-        self.prefs.zoom = self.viewport.zoom;
         self.prefs.follow_marker = self.marker_follow;
         self.prefs.follow_mode = self.follow_mode;
         self.prefs.show_layers = self.flags.show_layers;

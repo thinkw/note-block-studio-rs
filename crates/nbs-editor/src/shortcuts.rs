@@ -3,9 +3,8 @@
 //! 一律不响应（窗口自己只认 ←/→ 翻页签、Escape、Ctrl+P）。其中 Ctrl+ 字母、Delete、
 //! Home/End 又再被 `playing = 0` 包一层，空格 / Enter / F10 / F11 不受此限。
 //!
-//! 与原版的已知差异：原版只有窗口缩放（`window_scale`），没有网格缩放，这里的
-//! Ctrl+0 / Ctrl+± / Ctrl+滚轮 走的是本端口的网格缩放；PageUp/PageDown 原版是把播放头
-//! 推到曲尾 / 曲首（要先用 Tab 把标尺焦点切过去 `sb_sel`），我们按视口翻页，标尺焦点没实现。
+//! 与原版的已知差异：PageUp/PageDown 原版是把播放头推到曲尾 / 曲首（要先用 Tab 把标尺
+//! 焦点切过去 `sb_sel`），我们按视口翻页，标尺焦点没实现。
 //! F1 原版是打开教学视频链接，这里指向本端口自建的「快捷键一览」窗口。
 //! Escape 在原版只有三处：键位重设框取消（`control_draw.gml:87`）、首选项关窗
 //! （`draw_window_preferences.gml:596`，取松开沿）、设置速度关窗
@@ -148,13 +147,22 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
                     out.push(Command::ShowWindow(WindowKind::Preferences));
                 }
                 if p(Key::Num0) {
-                    out.push(Command::ZoomReset);
+                    out.push(Command::WindowScaleReset);
                 }
                 if p(Key::Plus) || p(Key::Equals) {
-                    out.push(Command::ZoomIn);
+                    out.push(Command::WindowScaleUp);
                 }
                 if p(Key::Minus) {
-                    out.push(Command::ZoomOut);
+                    out.push(Command::WindowScaleDown);
+                }
+                // 原版把滚轮和 187/189（+ / -）写在同一个条件里：`mouse_wheel_up()` 也算放大。
+                if ctrl {
+                    let wheel = i.raw_scroll_delta.y;
+                    if wheel > 0.0 {
+                        out.push(Command::WindowScaleUp);
+                    } else if wheel < 0.0 {
+                        out.push(Command::WindowScaleDown);
+                    }
                 }
 
                 // `mode_action(1..4)`：E / D 走大步，R / F 走 ±1。音高模式的大步是一个
@@ -270,7 +278,7 @@ pub const SHORTCUT_HELP: &[(&str, &str)] = &[
     ("中键拖动", "平移画布"),
     ("Alt + 框选", "复制框选，不摘出原音符"),
     ("Ctrl + 单击", "单点加选"),
-    ("Ctrl + 滚轮", "缩放网格"),
+    ("Ctrl + 滚轮", "整窗口缩放（原版档位 0.5..4）"),
     ("滚轮", "平移视口 / 悬停音符时改属性"),
     ("Shift + 滚轮", "横向平移"),
     ("Ctrl+N/O/S", "新建 / 打开 / 保存"),
@@ -286,7 +294,7 @@ pub const SHORTCUT_HELP: &[(&str, &str)] = &[
     ("Ctrl+Shift+P", "片段编辑器"),
     ("Ctrl+Shift+R / T / Y", "批量设置力度 / 声像 / 微调"),
     ("Ctrl+Shift+A / S", "颤音 / 立体声宏窗口"),
-    ("Ctrl+0 / Ctrl+±", "重置 / 调整网格缩放"),
+    ("Ctrl+0 / Ctrl+±", "重置 / 调整整窗口缩放"),
     ("Delete", "删除选区（停止播放时）"),
     ("Space / Enter", "播放暂停 / 停止并回到开头"),
     ("按住 ← / →", "向左 / 向右滚动（同底部快退 / 快进按钮）"),
