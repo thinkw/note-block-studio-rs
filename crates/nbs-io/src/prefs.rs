@@ -73,9 +73,9 @@ pub struct Preferences {
     pub sounds_dir: Option<String>,
     /// 原版 `show_oldwarning`（出厂为 1）：打开旧版本存的文件时弹不弹警告。
     pub show_old_warning: bool,
-    /// 原版 `songfolder`：打开 / 保存歌曲对话框的起始目录，`None` = 出厂的 `工作目录\Songs\`。
+    /// 原版 `songfolder`：打开 / 保存歌曲对话框的起始目录，`None` = 出厂的 `<用户配置目录>\songs\`。
     pub song_folder: Option<String>,
-    /// 原版 `patternfolder`：导入 / 导出片段的起始目录，`None` = 出厂的 `工作目录\Patterns\`。
+    /// 原版 `patternfolder`：导入 / 导出片段的起始目录，`None` = 出厂的 `<用户配置目录>\patterns\`。
     pub pattern_folder: Option<String>,
     pub export_sample_rate: u32,
     pub export_channels: u16,
@@ -251,22 +251,18 @@ impl Preferences {
         self.sounds_dir.as_ref().map(PathBuf::from).filter(|p| p.is_dir())
     }
 
-    /// 原版宏的 `working_directory`：可执行文件所在目录。
-    fn program_dir() -> PathBuf {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .unwrap_or_else(|| PathBuf::from("."))
-    }
-
-    /// 原版 `macros.gml:25`：`songs_directory = working_directory + "Songs\\"`。
+    /// 原版 `macros.gml:35`：`songs_directory = file_directory + "songs\\"`，而
+    /// `file_directory = game_save_id`，在 Windows 上就是 `%APPDATA%\Minecraft_Note_Block_Studio\`
+    /// （装机版实测该目录里就有 `songs`、`patterns`、`data`、`settings_dev.ini`）。
+    /// 所以默认目录跟着用户配置目录走，不是可执行文件旁边——那只是原版的
+    /// `bundled_songs_directory`（随程序附带的示例曲），两者不能混。
     pub fn default_song_folder() -> PathBuf {
-        Self::program_dir().join("Songs")
+        Self::config_dir().join("songs")
     }
 
-    /// 原版 `macros.gml:26`：`pattern_directory = working_directory + "Patterns\\"`。
+    /// 原版 `macros.gml:36`：`pattern_directory = file_directory + "patterns\\"`。
     pub fn default_pattern_folder() -> PathBuf {
-        Self::program_dir().join("Patterns")
+        Self::config_dir().join("patterns")
     }
 
     /// 原版 `load_song.gml:11` / `save_song.gml:13`：目录已经不在了就用出厂目录。
@@ -436,7 +432,7 @@ mod tests {
     /// 原版 `load_song.gml:11` / `save_song.gml:13`：没配过就用出厂目录，
     /// 配过但目录已经没了同样退回出厂目录。
     #[test]
-    fn song_folder_falls_back_to_program_dir() {
+    fn song_folder_falls_back_to_default_dir() {
         let tmp = std::env::temp_dir();
         let mut p = Preferences::default();
         assert_eq!(p.song_folder_path(), Preferences::default_song_folder());

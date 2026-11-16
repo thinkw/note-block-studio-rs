@@ -186,12 +186,6 @@ pub fn find_sounds_dir(extra: Option<&Path>) -> Option<PathBuf> {
         candidates.push(cwd.join("../NoteBlockStudio/datafiles/Data/Sounds"));
         candidates.push(cwd.join("../../NoteBlockStudio/datafiles/Data/Sounds"));
     }
-    if let Some(manifest) = option_env!("CARGO_MANIFEST_DIR") {
-        let m = PathBuf::from(manifest);
-        candidates.push(m.join("../../assets/Sounds"));
-        candidates.push(m.join("../../NoteBlockStudio/datafiles/Data/Sounds"));
-        candidates.push(m.join("../../../NoteBlockStudio/datafiles/Data/Sounds"));
-    }
     for c in candidates {
         if c.join("harp.ogg").is_file() {
             return Some(c.canonicalize().unwrap_or(c));

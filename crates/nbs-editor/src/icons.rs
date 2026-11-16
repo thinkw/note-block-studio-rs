@@ -828,7 +828,8 @@ impl Icons {
     }
 }
 
-/// 与 `nbs-audio` 找采样同样的搜索顺序：可执行文件旁 → 工作目录 → cargo 清单目录。
+/// 与 `nbs-audio` 找采样同样的搜索顺序：可执行文件旁 → 工作目录。两边都按相对层级往上找，
+/// 不把编译期的绝对路径写进二进制，换台机器/换个目录放 exe 也还能找到资源。
 fn asset_root() -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
@@ -843,8 +844,6 @@ fn asset_root() -> Option<PathBuf> {
             candidates.push(cwd.join(up).join("assets/icons"));
         }
     }
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    candidates.push(manifest.join("../../assets/icons"));
     candidates.into_iter().find(|p| p.join("icons_classic").is_dir())
 }
 
