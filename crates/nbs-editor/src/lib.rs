@@ -854,6 +854,16 @@ mod gui_piano_tests {
         ctx.run(inp, |ctx| crate::show(ctx, state))
     }
 
+    /// `EditorState::new()` 会把本机 prefs 拷进 flags，而这几条用例断言的是原版默认视图。
+    /// 用户把钢琴键盘关掉时也必须照样跑，所以在这里把相关开关钉回出厂值。
+    fn piano_state() -> EditorState {
+        let mut state = EditorState::new();
+        state.flags.show_piano = true;
+        state.flags.show_keyboard = true;
+        state.prefs.keys_to_show = 30;
+        state
+    }
+
     /// 琴键现在是 `spr_piano` 贴图，egui 0.31 把贴图统一走 `Shape::Mesh`，一帧 40×121、按键步进 39。
     fn images(out: &egui::FullOutput) -> Vec<egui::Rect> {
         out.shapes
@@ -880,7 +890,7 @@ mod gui_piano_tests {
     #[test]
     fn piano_uses_the_original_fixed_key_geometry() {
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = piano_state();
         run(&mut state, &ctx, input());
         let out = run(&mut state, &ctx, input());
         let quads = images(&out);
@@ -921,7 +931,7 @@ mod gui_piano_tests {
     #[test]
     fn pressing_a_key_selects_it_and_resets_the_note_properties() {
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = piano_state();
         state.current.velocity = 42;
         state.current.panning = 7;
         state.current.pitch = 30;
@@ -946,7 +956,7 @@ mod gui_piano_tests {
     #[test]
     fn hovering_an_edge_key_shifts_the_keyboard() {
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = piano_state();
         run(&mut state, &ctx, input());
         let start = state.piano_start;
         assert_eq!(start, 12, "默认 startkey = 27 - keysshow/2");
@@ -962,7 +972,7 @@ mod gui_piano_tests {
             state.piano_start
         );
 
-        let mut state = EditorState::new();
+        let mut state = piano_state();
         run(&mut state, &ctx, input());
         let start = state.piano_start;
         let mut hover = input();

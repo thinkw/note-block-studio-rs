@@ -3,3 +3,5 @@
 *.pdb
 .DS_Store
 __pycache__/
+# export_sprites.py 用 git archive 解出来的参照精灵，只用于比对/导出，不入库
+assets/target/

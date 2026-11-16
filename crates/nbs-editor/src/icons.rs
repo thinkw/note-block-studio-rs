@@ -33,43 +33,42 @@ pub mod frame {
     pub const RECORD: usize = 9;
     /// 同上：拖条手柄用的就是录音图标那一帧。
     pub const DRAG_KNOB: usize = 9;
-    pub const LOOP_INACTIVE: usize = 49;
-    pub const LOOP: usize = 50;
-    pub const METRONOME_INACTIVE: usize = 51;
-    pub const METRONOME_1: usize = 52;
-    pub const METRONOME_2: usize = 53;
-    pub const EDITMODE_KEY: usize = 54;
-    pub const EDITMODE_VEL: usize = 55;
-    pub const EDITMODE_PAN: usize = 56;
-    pub const EDITMODE_PIT: usize = 57;
-    pub const INSBOX_EXPAND: usize = 58;
-    pub const INSBOX_COLLAPSE: usize = 59;
+    pub const LOOP_INACTIVE: usize = 53;
+    pub const LOOP: usize = 54;
+    pub const METRONOME_INACTIVE: usize = 55;
+    pub const METRONOME_1: usize = 56;
+    pub const METRONOME_2: usize = 57;
+    pub const EDITMODE_KEY: usize = 58;
+    pub const EDITMODE_VEL: usize = 59;
+    pub const EDITMODE_PAN: usize = 60;
+    pub const EDITMODE_PIT: usize = 61;
+    pub const INSBOX_EXPAND: usize = 62;
+    pub const INSBOX_COLLAPSE: usize = 63;
     /// 菜单里的勾（`icons.CHECK`，`check()` 在 Dark 主题会取 +2 的 `CHECK_INACTIVE` 帧，
     /// 那帧是白字蒙版而不是「灰掉」）。
-    pub const CHECK: usize = 46;
-    pub const CHECK_DARK: usize = 48;
+    pub const CHECK: usize = 50;
+    pub const CHECK_DARK: usize = 52;
     /// 子菜单箭头（`icons.SUB_MENU`），同样是白字蒙版，靠染色出黑/白/灰。
-    pub const SUB_MENU: usize = 47;
+    pub const SUB_MENU: usize = 51;
     /// 自定义音色的角标底。
-    pub const CUSTOM_INS_OVERLAY: usize = 27;
+    pub const CUSTOM_INS_OVERLAY: usize = 31;
     /// 原版给「没有专属图标的乐器」用的通用音色图标（`icons.INS_1 + first_custom_index`）。
-    pub const CUSTOM_INS_BASE: usize = 26;
+    pub const CUSTOM_INS_BASE: usize = 30;
     pub const INS_1: usize = 10;
-    /// 本仓库贴图表里内置乐器图标的个数：`spr_icons` 帧 10..25。装机版 3.12 的表已经有
-    /// 20 帧（10..29 是铜块一族），我们没有那 4 帧，所以只能退回通用图标。
-    pub const BUILTIN_ICON_FRAMES: usize = 16;
-    // 原版 28/30/32/34/36/38 是同一批图标的灰态；`icon(..., locked = true)` 会减 1 取到它们。
-    pub const UNDO: usize = 29;
-    pub const REDO: usize = 31;
-    pub const COPY: usize = 33;
-    pub const CUT: usize = 35;
-    pub const PASTE: usize = 37;
-    pub const DELETE: usize = 39;
-    pub const INFORMATION: usize = 40;
-    pub const PROPERTIES: usize = 41;
-    pub const INSTRUMENTS: usize = 42;
-    pub const HELP: usize = 44;
-    pub const INTERNET: usize = 45;
+    /// 装机版 3.12 的内置乐器图标：`spr_icons` 帧 10..29 共 20 帧（铜块一族占了 26..29）。
+    pub const BUILTIN_ICON_FRAMES: usize = 20;
+    // 原版 32/34/36/38/40/42 是同一批图标的灰态；`icon(..., locked = true)` 会减 1 取到它们。
+    pub const UNDO: usize = 33;
+    pub const REDO: usize = 35;
+    pub const COPY: usize = 37;
+    pub const CUT: usize = 39;
+    pub const PASTE: usize = 41;
+    pub const DELETE: usize = 43;
+    pub const INFORMATION: usize = 44;
+    pub const PROPERTIES: usize = 45;
+    pub const INSTRUMENTS: usize = 46;
+    pub const HELP: usize = 48;
+    pub const INTERNET: usize = 49;
 }
 
 /// 原版 `spr_layericons` 的帧号（7 个图层按钮 + 全屏两态）。
@@ -298,12 +297,10 @@ fn glyph_tint(th: &Theme, alpha: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(r, g, b, (a as f32 * alpha) as u8)
 }
 
-/// 乐器格子用哪一帧图标：原版 `icons.INS_1 + min(i, first_custom_index)`，
-/// 即「内置乐器按序号、自定义乐器一律用通用图标」。我们的贴图表只有 16 帧内置图标
-/// （装机版 3.12 有 20 帧，多出的 4 帧是铜块一族），所以再夹一次到 `BUILTIN_ICON_FRAMES`，
-/// 让 16..19 和自定义乐器一样用通用图标，而不是画到无关的 UI 帧上。
+/// 乐器格子用哪一帧图标：原版 `draw_icon_insbox.gml:26` 的
+/// `icons.INS_1 + min(i, first_custom_index)`，内置乐器按序号取，自定义乐器一律用通用图标。
 fn instrument_frame(list_index: usize, first_custom: usize) -> usize {
-    frame::INS_1 + list_index.min(first_custom).min(frame::BUILTIN_ICON_FRAMES)
+    frame::INS_1 + list_index.min(first_custom)
 }
 
 impl Bank {
@@ -753,18 +750,6 @@ impl Bank {
     pub fn block_size(&self) -> Vec2 {
         Vec2::new(self.block_color.fw, self.block_color.fh)
     }
-
-    /// 原版 `spr_block_color` 只有 34 帧；装机版 20 种内置乐器 + 自定义乐器的
-    /// `frame = (index - first_custom) % 18 + first_custom` 可能算到 34 以上，
-    /// 这里报告实际可用的帧数，调用方据此判断有没有画过头。
-    pub fn block_frames(&self, set: BlockSet) -> usize {
-        match set {
-            BlockSet::Color => self.block_color.count,
-            BlockSet::ColorShape => self.block_color_shape.count,
-            BlockSet::Shape => self.block_shape.count,
-            BlockSet::Plain => self.block.count,
-        }
-    }
 }
 
 /// 原版 `draw_sprite_ext(..., -1, alpha)`：不染色，只乘透明度。
@@ -862,22 +847,21 @@ pub fn load_window_icon(name: &str) -> Option<egui::IconData> {
 mod tests {
     use super::*;
 
-    /// 图标帧只能指到「16 帧内置乐器图标 + 通用图标」，不能滑到 26..29 那些无关的 UI 帧。
+    /// 装机版 3.12 的内置乐器图标是 `spr_icons` 帧 10..29（铜块一族占 26..29），
+    /// 第 20 号往后一律用通用图标帧，不能滑到 UNDO/COPY 那些 UI 帧上。
     #[test]
     fn instrument_frames_never_point_at_unrelated_icons() {
-        for i in 0..16 {
+        for i in 0..frame::BUILTIN_ICON_FRAMES {
             assert_eq!(instrument_frame(i, 20), frame::INS_1 + i, "内置乐器 {i}");
         }
-        // 铜块一族和自定义乐器一样：通用图标帧，不借用 UNDO/COPY 的帧。
-        for i in 16..40 {
-            assert_eq!(instrument_frame(i, 20), frame::INS_1 + frame::BUILTIN_ICON_FRAMES, "索引 {i}");
+        for i in 20..40 {
+            assert_eq!(
+                instrument_frame(i, 20),
+                frame::CUSTOM_INS_BASE,
+                "索引 {i} 应退回通用图标帧"
+            );
         }
-        assert_eq!(
-            instrument_frame(16, 16),
-            frame::INS_1 + 16,
-            "旧格式（first_custom = 16）仍然是通用图标"
-        );
-        // 用到的帧必须真的在贴图表里（00..59）。
+        // 用到的帧必须真的在贴图表里（00..63）。
         for i in 0..=255u8 {
             let f = instrument_frame(i as usize, 20);
             assert!(f <= frame::INSBOX_COLLAPSE, "索引 {i} 取到不存在的帧 {f}");

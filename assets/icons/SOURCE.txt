@@ -1,7 +1,9 @@
 帧顺序取自原版 GameMaker 工程 sprites/<name>/<name>.yy 里 "frames" 数组的书写顺序，
 文件名 <序号>.png 即 draw_sprite(sprite, <序号>, ...) 的 subimg。
 来源仓库：OpenNBS/OpenNoteBlockStudio（GPL-3.0-or-later）。
-icons_classic/ = spr_icons（经典主题的 UI 字形），icons_light/ = spr_icons_f（Fluent 浅色主题的深字），icons_d/ = spr_icons_d（Fluent 深色 / 选中态的浅字），icons_accent/ = spr_icons_col（叠在字形上的强调色层）；都是 60 帧 25x25，帧号就是原版 `enum icons` 的下标（scripts/icons_init/icons_init.gml）。目录名是导出后改的，所以和精灵名不完全一致。
+全部贴图锁定在装机版对应的 tag v3.12.0-rc.1 上导出（tools/export_sprites.py 里的 OPENNBS_REF），
+不是工作树当前检出的提交；`python tools/export_sprites.py --check` 会逐帧比对，不一致就报错。
+icons_classic/ = spr_icons（经典主题的 UI 字形），icons_light/ = spr_icons_f（Fluent 浅色主题的深字），icons_d/ = spr_icons_d（Fluent 深色 / 选中态的浅字），icons_accent/ = spr_icons_col（叠在字形上的强调色层）；都是 64 帧 25x25（3.12 在铜块一族上多了 4 帧，后面的字形整体后移 4），帧号就是原版 `enum icons` 的下标（scripts/icons_init/icons_init.gml）。目录名是导出后改的，所以和精灵名不完全一致。
 iconbar/ 只用到 00-02（原版 draw_sprite(spr_iconbar, 0/1/2) 的左端帽、可拉伸中段、右端帽），每帧 2x30；03-08 是原版工程里存在但从未被引用的帧，一并导出以保持序号一致。
 back/ = spr_back，4 帧，序号 = fdark + 2 * 按下（draw_window_preferences.gml:58 的首选项返回按钮），每帧 16x16，原版画在 x1+14, y1+42。
 button_arrow/ = spr_button_arrow，15 帧，序号 = m + 3 * theme + 3 * (fdark && theme = 3)，其中 m = 0 未悬停 / 1 悬停 / 2 悬停且按下（draw_abutton.gml:6-9），每帧 17x18。
@@ -11,3 +13,5 @@ window/ 不是精灵图，是首选项「界面 → 图标 → 旧图标」换�
 yesno/ = spr_yesno，3 帧 32x32，原点 (16,16)（精灵画在中心）：0 红叉、1 绿勾、2 橙勾 + 警告三角。原版兼容性窗口每条检查前面的图标，draw_window_minecraft.gml 里 `draw_sprite(spr_yesno, 状态, x1 + 25, yy + 8)`。
 yesno_f/ = spr_yesno_f，9 帧 32x32，原点 (16,16)：0-2 浅色底图、3-5 深色（fdark）底图、6-8 白色蒙版。Fluent 主题先画 `状态 + 3 * fdark`，再叠 `状态 + 6` 并染 accent[6 - 2 * !fdark]，所以勾/叉/三角本身是强调色，底图只有深灰描边。
 ../extranotes.zip = 装机版 D:\software\NBS\Data\extranotes.zip 原样拷贝（462095 字节，md5 152915fa5ddf5d53610b2b6f4e686e6e），不是我们生成的。原版 datapack_getextranotes.gml 就是 `file_copy(data_directory + "extranotes.zip", fn)`，nbs-io 用 include_bytes! 内嵌同一份字节。
+block_color/ = spr_block_color、block_shape/ = spr_block_shape、block_color_shape/ = spr_block_color_shape，都是 38 帧 32x32、原点左上；网格里的音符盒按 (use_colors, use_shapes) 从这三套里选一套，内置乐器 0..19 直接用帧号，自定义乐器用 (序号 - 20) % 18 + 20 循环取 20..37。block/ = spr_block 只有 1 帧（两套开关都关时用它，原版传的帧号 1 越界，画的就是这一帧）。block_sel/ = spr_block_sel，选中叠层。
+instrumenticons/ = spr_instrumenticons，21 帧 16x16：0..19 是 20 个内置乐器的方块贴图，20 是自定义乐器的通用底图（draw_icon_customins 会把它染成 make_color_hsv((ins * 16) % 256, 192, 255) 再叠两位 MC 数字）。
