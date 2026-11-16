@@ -21,6 +21,9 @@ pub struct Voice {
     pub alive: bool,
     /// 创建序号，用于「淘汰最老」。
     pub serial: u64,
+    /// 发声来源的层号（1 基，0 = 预览/节拍器等无层来源）。
+    /// 消音器按它掐 voice（原版 `remove_emitters_all` 的 `soundlayer`）。
+    pub layer: u32,
 }
 
 impl Voice {
@@ -131,12 +134,15 @@ impl Mixer {
     }
 
     /// 派发一个音符。voice 池满时淘汰最老的（对齐 GM 引擎行为）。
+    /// `layer` 为 1 基层号；预览/节拍器传 0 —— 原版预览 `play_sound` 不带层号参数，
+    /// emitter 的 soundlayer 默认 0，区间消音掐不到它（只有 pitch<=0 的全消音能掐到）。
     pub fn spawn(
         &mut self,
         note: &Note,
         layer_volume: u8,
         layer_stereo: u8,
         bank: &SoundBank,
+        layer: u32,
     ) {
         let idx = note.instrument as usize;
         let Some(sample) = bank.get(idx) else { return };
@@ -156,6 +162,21 @@ impl Mixer {
             gain_r: gr,
             alive: true,
             serial: self.serial,
+            layer,
+        });
+    }
+
+    /// 原版 `remove_emitters_all(layerid, layerto)`（control_step.gml:286 消音器派发）：
+    /// 掐掉 1 基层号在 `[layerid, layerto]` 闭区间内的 voice。
+    /// `layerid <= 0`（pitch 非正）全部掐掉；`layerto < layerid` 且 `layerid > 0`
+    /// 是「停用」消音器，什么都不动（GML 开头的空区间提前返回）。
+    pub fn stop_range(&mut self, layerid: i32, layerto: u32) {
+        if layerid > 0 && (layerto as i64) < layerid as i64 {
+            return;
+        }
+        let first = layerid.max(0) as u32;
+        self.voices.retain(|v| {
+            first > 0 && ((v.layer as u32) < first || (v.layer as u32) > layerto)
         });
     }
 
@@ -249,10 +270,66 @@ mod tests {
         let mut mixer = Mixer::new(44100);
         mixer.set_max_voices(16);
         let n = Note::new(0, 45);
-        for _ in 0..17 {
-            mixer.spawn(&n, 100, 100, &bank);
+        for i in 0..17 {
+            mixer.spawn(&n, 100, 100, &bank, (i % 5) as u32 + 1);
         }
         assert_eq!(mixer.voices.len(), 16);
         assert_eq!(mixer.voices[0].serial, 2, "应淘汰创建最早的 voice");
+    }
+
+    /// 消音器掐区间：voice 的层号是 1 基，[first, last] 闭区间。
+    #[test]
+    fn stop_range_kills_layer_span_inclusive() {
+        let mut bank = SoundBank::empty();
+        bank.samples.push(crate::samples::Sample {
+            pcm: vec![0.5; 44100],
+            base_key: 45,
+            name: "test".into(),
+        });
+        let mut mixer = Mixer::new(44100);
+        let n = Note::new(0, 45);
+        for layer in 1..=5u32 {
+            mixer.spawn(&n, 100, 100, &bank, layer);
+        }
+        mixer.stop_range(2, 4);
+        let alive: Vec<u32> = mixer.voices.iter().map(|v| v.layer).collect();
+        assert_eq!(alive, vec![1, 5], "闭区间 [2,4] 应只掐 2/3/4 层，实测 {alive:?}");
+    }
+
+    #[test]
+    fn stop_range_zero_stops_everything() {
+        let mut bank = SoundBank::empty();
+        bank.samples.push(crate::samples::Sample {
+            pcm: vec![0.5; 1000],
+            base_key: 45,
+            name: "test".into(),
+        });
+        let mut mixer = Mixer::new(44100);
+        let n = Note::new(0, 45);
+        for layer in [0u32, 1, 7, 40] {
+            mixer.spawn(&n, 100, 100, &bank, layer);
+        }
+        mixer.stop_range(0, 0);
+        assert!(mixer.voices.is_empty(), "pitch<=0 是全消音，预览（层 0）也掐");
+    }
+
+    #[test]
+    fn stop_range_inverted_is_disabled_stopper() {
+        let mut bank = SoundBank::empty();
+        bank.samples.push(crate::samples::Sample {
+            pcm: vec![0.5; 1000],
+            base_key: 45,
+            name: "test".into(),
+        });
+        let mut mixer = Mixer::new(44100);
+        let n = Note::new(0, 45);
+        for layer in 1..=3u32 {
+            mixer.spawn(&n, 100, 100, &bank, layer);
+        }
+        mixer.stop_range(4, 2);
+        assert_eq!(mixer.voices.len(), 3, "end<start 的「停用」消音器不动任何 voice");
+        // 负 pitch：GML floor(负数) 为负 → layerid 夹到 0 → 全消音
+        mixer.stop_range(-5, 0);
+        assert!(mixer.voices.is_empty(), "负 pitch 也走全消音（layerid<0 → 0）");
     }
 }

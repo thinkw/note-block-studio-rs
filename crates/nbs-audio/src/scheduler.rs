@@ -15,6 +15,20 @@ use nbs_core::model::{Note, Song, FIRST_CUSTOM_INDEX};
 use crate::mixer::{Mixer, DEFAULT_MAX_VOICES};
 use crate::samples::SoundBank;
 
+/// 播放到该列时要做的事。事件乐器不发声音——原版 control_step.gml:283-291
+/// 的 else-if 链在 `play_sound` 之前就把它们拦截了。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventKind {
+    Note,
+    /// Tempo Changer：pitch 即 BPM。派发时 `tempo = floor(|pitch|)/15`
+    /// （control_step.gml:284；0.25 t/s 下限来自 control_draw.gml:427）。
+    Tempo(i16),
+    /// Sound Stopper：`floor(pitch)` 起、`panning_velocity_to_short(pan, vel)` 止的
+    /// 1 基层号闭区间消音（control_step.gml:286）。pitch<=0 全部消音；
+    /// end<start 是「停用」消音器，不动任何发声。
+    Stopper(i32, u32),
+}
+
 #[derive(Clone, Debug)]
 pub struct NoteEvent {
     pub tick: u32,
@@ -22,8 +36,7 @@ pub struct NoteEvent {
     pub note: Note,
     pub layer_volume: u8,
     pub layer_stereo: u8,
-    /// Tempo Changer 自定义乐器：pitch 字段即 BPM，播放到此处改速度。
-    pub tempo_change_bpm: Option<f32>,
+    pub kind: EventKind,
 }
 
 #[derive(Clone, Debug)]
@@ -70,31 +83,49 @@ impl Default for PlayParams {
     }
 }
 
+/// 事件乐器识别：只有自定义乐器（索引 >= 20）才可能是它，原版按名字精确比较
+/// （control_step.gml:283-291）。这里必须用 checked_sub：saturating_sub 会把内置的
+/// 0..19 全夹成 0 号自定义，于是每个普通音符都来变速，pitch=0 时 tempo 直接被
+/// 钉死在 0.25 t/s（整首歌慢到听不出来）。
+fn event_kind(song: &Song, note: &Note) -> EventKind {
+    note.instrument
+        .checked_sub(FIRST_CUSTOM_INDEX)
+        .and_then(|i| song.custom_instruments.get(i as usize))
+        .map_or(EventKind::Note, |ci| {
+            if ci.name == nbs_core::TEMPO_CHANGER_NAME {
+                EventKind::Tempo(note.pitch)
+            } else if ci.name == nbs_core::SOUND_STOPPER_NAME {
+                EventKind::Stopper(
+                    i32::from(note.pitch),
+                    nbs_core::model::panning_velocity_to_short(note.panning, note.velocity),
+                )
+            } else {
+                EventKind::Note
+            }
+        })
+}
+
 /// 把整首歌展开成按 tick 排序的事件表（实时与离线共用）。
-/// 锁定/独奏屏蔽的层默认排除（对齐原版 `control_draw.gml:480-495`）。
+/// 锁定/独奏屏蔽的层默认排除，但**事件乐器例外**：原版只有最后的
+/// `play_sound` 被 a 闸住（control_step.gml:249-281），变速/消音分支在链上
+/// 先于它，锁定层的 Tempo Changer / Sound Stopper 照样生效。
 pub fn build_event_table(song: &Song, include_locked: bool) -> Vec<NoteEvent> {
     let locked = song.locked_layers();
     let mut events: Vec<NoteEvent> = song
         .iter_notes()
-        .filter(|(_, layer, _)| include_locked || !locked.get(*layer as usize).copied().unwrap_or(false))
+        .filter(|&(_, layer, note)| {
+            include_locked
+                || !locked.get(layer as usize).copied().unwrap_or(false)
+                || event_kind(song, &note) != EventKind::Note
+        })
         .map(|(tick, layer, note)| {
             let (layer_volume, layer_stereo) = song
                 .layers
                 .get(layer as usize)
                 .map(|l| (l.volume, l.stereo))
                 .unwrap_or((100, 100));
-            // Tempo Changer：只有自定义乐器（索引 >= 20）才可能是它，
-            // 原版 control_step.gml:284 按名字匹配。这里必须用 checked_sub：
-            // saturating_sub 会把内置的 0..19 全夹成 0 号自定义，于是每个普通音符都来变速，
-            // pitch=0 时 tempo 直接被钉死在 0.25 t/s（整首歌慢到听不出来）。
-            // 0.25 t/s 下限来自原版 control_draw.gml:427。
-            let tempo_change_bpm = note
-                .instrument
-                .checked_sub(FIRST_CUSTOM_INDEX)
-                .and_then(|i| song.custom_instruments.get(i as usize))
-                .filter(|ci| ci.name == nbs_core::TEMPO_CHANGER_NAME)
-                .map(|_| note.pitch as f32);
-            NoteEvent { tick, layer, note, layer_volume, layer_stereo, tempo_change_bpm }
+            let kind = event_kind(song, &note);
+            NoteEvent { tick, layer, note, layer_volume, layer_stereo, kind }
         })
         .collect();
     events.sort_by_key(|e| (e.tick, e.layer));
@@ -179,15 +210,28 @@ impl SharedState {
             // 卡顿/跳转跨过 >3 列时，只补播最后一列（原版行为）
             let should_play = (diff <= 3 && t >= from) || (diff > 3 && t == to);
             if should_play {
-                if let Some(bpm) = ev.tempo_change_bpm {
-                    self.params.tempo = (bpm.abs() / 15.0).max(0.25);
-                }
                 self.mixer.max_voices = self.params.max_voices;
                 self.mixer.master = self.params.master;
                 self.mixer.mono = self.params.mono;
                 self.mixer.output_rate = self.sample_rate;
-                self.mixer
-                    .spawn(&ev.note, ev.layer_volume, ev.layer_stereo, &self.bank);
+                match ev.kind {
+                    EventKind::Tempo(pitch) => {
+                        // pitch 是整数，floor(|pitch|)/15 就是 |pitch|/15
+                        self.params.tempo =
+                            (pitch.unsigned_abs() as f32 / 15.0).max(0.25);
+                    }
+                    EventKind::Stopper(first, last) => self.mixer.stop_range(first, last),
+                    EventKind::Note => {
+                        // voice 层号 1 基（原版 play_sound(..., b + 1)）
+                        self.mixer.spawn(
+                            &ev.note,
+                            ev.layer_volume,
+                            ev.layer_stereo,
+                            &self.bank,
+                            ev.layer + 1,
+                        );
+                    }
+                }
             }
             self.cursor += 1;
         }
@@ -203,7 +247,7 @@ impl SharedState {
             let mut click = Note::new(4, 45);
             click.velocity = 60;
             self.mixer.master = self.params.master;
-            self.mixer.spawn(&click, 100, 100, &self.bank);
+            self.mixer.spawn(&click, 100, 100, &self.bank, 0);
             self.metronome_played = pos + 1;
         }
     }
@@ -535,7 +579,6 @@ mod tests {
     }
 
     /// 带一个「Tempo Changer」自定义乐器的歌：内置那 20 个音符绝不能被当成它。
-    /// 原版 `control_draw.gml:505` 是先按索引取乐器对象再比名字，索引 16..19 是内置的铜块一族。
     fn song_with_tempo_changer() -> Song {
         let mut song = Song::new();
         song.meta.tempo = 41.33;
@@ -561,11 +604,86 @@ mod tests {
         let events = build_event_table(&song_with_tempo_changer(), false);
         let tc: Vec<u32> = events
             .iter()
-            .filter(|e| e.tempo_change_bpm.is_some())
+            .filter(|e| e.kind == EventKind::Tempo(600))
             .map(|e| e.tick)
             .collect();
         assert_eq!(tc, vec![5], "只有索引 20 起的自定义 0 号才是 Tempo Changer，实测 {tc:?}");
-        assert_eq!(events.iter().find(|e| e.tick == 5).unwrap().tempo_change_bpm, Some(600.0));
+    }
+
+    /// 「Sound Stopper」自定义乐器：pitch/pan/vel 解码成层区间。
+    /// pan=157, vel=100 编码出 end=57（ Living Millennium 第一枚消音器的真实编码）。
+    #[test]
+    fn sound_stopper_notes_decode_to_layer_range() {
+        let mut song = Song::new();
+        song.custom_instruments.push(nbs_core::model::CustomInstrument {
+            name: "Sound Stopper".into(),
+            filename: String::new(),
+            key: 45,
+            press: false,
+        });
+        // start=39（pitch），end=57（pan/vel 编码）
+        song.set(10, 3, Note { instrument: 20, key: 45, velocity: 100, panning: 157, pitch: 39 });
+        song.set(20, 4, Note { instrument: 20, key: 45, velocity: 100, panning: 100, pitch: -1 });
+        song.recalculate();
+        let events = build_event_table(&song, false);
+        assert_eq!(events[0].kind, EventKind::Stopper(39, 57));
+        assert_eq!(events[1].kind, EventKind::Stopper(-1, 0), "负 pitch → layerid<0 → 全消音");
+    }
+
+    /// 原版只有 play_sound 被 a 闸住：锁定层上的消音器/变速器照样进事件表。
+    #[test]
+    fn locked_layer_event_instruments_still_fire() {
+        let mut song = Song::new();
+        song.custom_instruments.push(nbs_core::model::CustomInstrument {
+            name: "Sound Stopper".into(),
+            filename: String::new(),
+            key: 45,
+            press: false,
+        });
+        song.set(10, 0, Note::new(0, 45));
+        song.set(20, 0, Note { instrument: 20, key: 45, velocity: 100, panning: 157, pitch: 39 });
+        song.recalculate();
+        song.layers[0].lock = nbs_core::model::LockMode::Locked;
+        let events = build_event_table(&song, false);
+        assert_eq!(events.len(), 1, "锁定层普通音符被剔除");
+        assert_eq!(events[0].kind, EventKind::Stopper(39, 57), "锁定层消音器保留");
+        // include_locked 时全部保留
+        assert_eq!(build_event_table(&song, true).len(), 2);
+    }
+
+    /// 端到端：播放跨过消音器列后，区间内更早发声的 voice 被掐，
+    /// 区间外的 voice 保留。
+    #[test]
+    fn stopper_silences_spawned_voices_when_playhead_crosses() {
+        let mut bank = SoundBank::empty();
+        bank.samples.push(crate::samples::Sample {
+            pcm: vec![0.5; 44100],
+            base_key: 45,
+            name: "test".into(),
+        });
+        let mut song = Song::new();
+        song.custom_instruments.push(nbs_core::model::CustomInstrument {
+            name: "Sound Stopper".into(),
+            filename: String::new(),
+            key: 45,
+            press: false,
+        });
+        // 层 0/1/2 在 tick 1 发声（voice 层号 1/2/3），tick 5 层 1 上消音器掐 [2,57]。
+        // 注：调度窗口从 floor(prev)+1 起，tick 0 不会派发（起始列偏差，另案）。
+        song.set(1, 0, Note::new(0, 45));
+        song.set(1, 1, Note::new(0, 45));
+        song.set(1, 2, Note::new(0, 45));
+        song.set(5, 1, Note { instrument: 20, key: 45, velocity: 100, panning: 157, pitch: 2 });
+        song.recalculate();
+        let mut st = SharedState::new(Arc::new(bank.clone()), 44100);
+        st.prepare(&song, Arc::new(bank));
+        st.params.playing = true;
+        st.params.song_length = 100_000.0;
+        // tempo=44100 → 每采样 1 tick：6 个采样跨过 tick 1（发声）和 tick 5（消音）
+        st.params.tempo = 44100.0;
+        drive(&mut st, 6);
+        let alive: Vec<u32> = st.mixer.voices.iter().map(|v| v.layer).collect();
+        assert_eq!(alive, vec![1], "消音器只掐 voice 层 2/3，层 1 保留，实测 {alive:?}");
     }
 
     /// 回归：这行曾经把内置音符的 pitch=0 当 BPM 用，tempo 被钉在 0.25 t/s，

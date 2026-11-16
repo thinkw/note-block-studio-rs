@@ -100,8 +100,12 @@ fn main() {
         let tcs: Vec<String> = st
             .events
             .iter()
-            .filter(|e| e.tempo_change_bpm.is_some())
-            .map(|e| format!("tick {} bpm {:?}", e.tick, e.tempo_change_bpm))
+            .filter_map(|e| match e.kind {
+                nbs_audio::scheduler::EventKind::Tempo(bpm) => {
+                    Some(format!("tick {} bpm {}", e.tick, bpm))
+                }
+                _ => None,
+            })
             .collect();
         println!("  事件表里的变速音符：{}", tcs.join(" | "));
     }

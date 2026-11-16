@@ -206,7 +206,9 @@ impl AudioEngine for CpalEngine {
         let mut st = self.shared.lock();
         let bank = st.bank.clone();
         // 试听固定按图层音量 100 / 平衡 100，跟原版 `play_sound(ins, key, 100, 100, 0)` 一致。
-        st.mixer.spawn(note, 100, 100, &bank);
+        // 层号 0：原版预览调用不带层号，emitter 的 soundlayer 默认 0，
+        // 区间消音掐不到它（只有 pitch<=0 的全消音能掐到）。
+        st.mixer.spawn(note, 100, 100, &bank, 0);
     }
     fn start(&mut self, from_tick: f64) {
         self.clock.seek(from_tick);

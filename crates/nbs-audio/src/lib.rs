@@ -30,5 +30,6 @@ pub use samples::{
     decode_ogg, find_sounds_dir, resample_linear, SoundBank, BASE_KEY, BUILTIN_FILES, SAMPLE_RATE,
 };
 pub use scheduler::{
-    build_event_table, make_shared, NoteEvent, PlayParams, Shared, SharedState, TransportClock,
+    build_event_table, make_shared, EventKind, NoteEvent, PlayParams, Shared, SharedState,
+    TransportClock,
 };
