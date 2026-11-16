@@ -781,6 +781,8 @@ pub struct EditorState {
     /// 同上，页 1「帧率限制」的下拉框。原版的 `wmenu` 一次只允许开一个，
     /// 菜单自带的整屏拦截区会先收掉已开的那个，所以两个开关不会同时为真。
     pub prefs_rate_menu: bool,
+    /// 同上，页 1「语言」的下拉框（draw_window_preferences.gml:412-421）。
+    pub prefs_language_menu: bool,
     /// 原版 `w_dragvalue`：`draw_dragvalue` 的亚步进累加器。
     pub prefs_drag: f32,
     pub png_options: ImageOptions,
@@ -970,6 +972,7 @@ impl EditorState {
             prefs_tab: 0,
             prefs_theme_menu: false,
             prefs_rate_menu: false,
+            prefs_language_menu: false,
             prefs_drag: 0.0,
             png_options: ImageOptions { dark: png_dark, ..ImageOptions::default() },
             export_status: None,
@@ -1033,8 +1036,14 @@ impl EditorState {
         if status == 1 && !self.update_question {
             self.update_question = true;
             self.modals = ModalQueue::question(
-                "更新可用！",
-                &format!("版本 {ver} 可用！是否现在下载？"),
+                crate::tr("Update available!", "更新可用！"),
+                &format!(
+                    "{}",
+                    crate::tr(
+                        &format!("Version {ver} is available! Do you want to download it?"),
+                        &format!("版本 {ver} 可用！是否现在下载？"),
+                    )
+                ),
                 Command::OpenUrl(crate::RELEASES_PAGE.to_string()),
             );
         }

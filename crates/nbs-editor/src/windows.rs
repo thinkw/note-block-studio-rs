@@ -13,6 +13,7 @@ use crate::commands::Command;
 use crate::shortcuts::SHORTCUT_HELP;
 use crate::state::{DialogAction, EditorState, Flag, ModalQueue, PrefsFolder, WindowKind};
 use crate::theme::{Theme, ThemeKind};
+use crate::tr;
 
 pub fn show_windows(state: &mut EditorState, ctx: &Context) {
     show_modal(state, ctx);
@@ -265,10 +266,34 @@ fn greet_link(
     }
 }
 
-/// 原版 `seconds_to_str`（中文分支）：最近歌曲的相对时间。
+/// 原版 `seconds_to_str`：最近歌曲的相对时间。阈值两语言完全一样，只是文案不同；
+/// 英文的复数按整除之后的值判（原版先 `c = floor(c / n)` 再拼 `condstr(c != 1, "s")`）。
 fn seconds_to_str(secs: i64) -> String {
     let c = secs;
-    if c < 60 {
+    if crate::lang() != 1 {
+        let unit = |c: i64, word: &str| {
+            if c == 1 {
+                format!("{c} {word} ago")
+            } else {
+                format!("{c} {word}s ago")
+            }
+        };
+        if c < 60 {
+            unit(c, "second")
+        } else if c < 60 * 60 {
+            unit(c / 60, "minute")
+        } else if c < 60 * 60 * 24 {
+            unit(c / (60 * 60), "hour")
+        } else if c < 60 * 60 * 24 * 7 {
+            unit(c / (60 * 60 * 24), "day")
+        } else if c < 60 * 60 * 24 * 31 {
+            unit(c / (60 * 60 * 24 * 7), "week")
+        } else if c < 60 * 60 * 24 * 31 * 12 {
+            unit(c / (60 * 60 * 24 * 31), "month")
+        } else {
+            unit(c / (60 * 60 * 24 * 31 * 12), "year")
+        }
+    } else if c < 60 {
         format!("{c} 秒前")
     } else if c < 60 * 60 {
         format!("{} 分钟前", c / 60)
@@ -318,14 +343,14 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
     let status = state.update_check.lock().unwrap().status;
     let (line, color) = if state.prefs.check_update {
         if state.update_success {
-            ("更新成功！", Color32::from_rgb(0, 255, 0))
+            (tr("Successfully updated!", "更新成功！"), Color32::from_rgb(0, 255, 0))
         } else {
             match status {
-                -1 => ("检查更新失败", Color32::from_rgb(255, 0, 0)),
-                0 => ("正在检查更新……", th.text),
-                1 => ("有新版本！", Color32::from_rgb(255, 128, 0)),
+                -1 => (tr("Could not check for updates", "检查更新失败"), Color32::from_rgb(255, 0, 0)),
+                0 => (tr("Checking for updates...", "正在检查更新……"), th.text),
+                1 => (tr("There is an update available!", "有新版本！"), Color32::from_rgb(255, 128, 0)),
                 _ => (
-                    "已为最新版本！",
+                    tr("You are using the latest version!", "已为最新版本！"),
                     if th.kind == ThemeKind::Dark {
                         Color32::from_rgb(0, 255, 0)
                     } else {
@@ -335,37 +360,52 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
             }
         }
     } else {
-        ("检查更新未开启", Color32::from_rgb(255, 0, 0))
+        (tr("Update checking disabled by user.", "检查更新未开启"), Color32::from_rgb(255, 0, 0))
     };
     greet_text_center(&p, x(132.0), y(248.0), line, PREFS_FONT, color, true);
     // :107-108 版本行（font_main_bold）。
+    let ver_line = format!(
+        "{} {} - {} {}",
+        tr("Version", "版本"),
+        crate::VERSION,
+        tr("Released", "发布于"),
+        crate::VERSION_DATE
+    );
+    greet_text_center(&p, x(132.0), y(233.0), &ver_line, PREFS_FONT, th.text, true);
+    // :114-115 宣传语。
     greet_text_center(
         &p,
         x(132.0),
-        y(233.0),
-        &format!("版本 {} - 发布于 {}", crate::VERSION, crate::VERSION_DATE),
+        y(280.0),
+        tr("An open-source Minecraft music maker", "一个开源的 Minecraft 音乐制作软件"),
         PREFS_FONT,
         th.text,
-        true,
+        false,
     );
-    // :114-115 宣传语。
-    greet_text_center(&p, x(132.0), y(280.0), "一个开源的 Minecraft 音乐制作软件", PREFS_FONT, th.text, false);
     // :117 官网链接。
     greet_link(state, ui, &p, &th, x(132.0), y(296.0), "noteblock.studio", crate::LINK_WEBSITE);
-    // :122-136 社区链接两行。竖线是 draw_text_dynamic（左对齐），
-    // x 按中文分支（GitHub 88 / QQ 群 133 / 捐赠 171）。
-    greet_text_center(&p, x(132.0), y(340.0), "关注 OpenNBS：", PREFS_FONT, th.text, false);
+    // :122-136 社区链接两行。竖线是 draw_text_dynamic（左对齐）。第二行两种语言
+    // 布的点不一样：英文 GitHub 108 / 竖线 131 / Donate 156，中文 GitHub 88 /
+    // 竖线 109 / QQ 群 133 / 竖线 153 / 捐赠 171，全部照原式
+    // `108-(language=1)*20`、`131-(language=1)*22`、`156+15*(language=1)` 拆开写。
+    greet_text_center(&p, x(132.0), y(340.0), tr("Follow OpenNBS:", "关注 OpenNBS："), PREFS_FONT, th.text, false);
     let off = if th.kind == ThemeKind::Fluent { 0.0 } else { 2.0 };
     greet_link(state, ui, &p, &th, x(80.0), y(356.0), "Discord", crate::LINK_DISCORD);
     greet_text_left(&p, egui::pos2(x(104.0 - off), y(356.0)), "|", PREFS_FONT, th.text, false);
     greet_link(state, ui, &p, &th, x(128.0), y(356.0), "Twitter", crate::LINK_TWITTER);
     greet_text_left(&p, egui::pos2(x(150.0 - off), y(356.0)), "|", PREFS_FONT, th.text, false);
     greet_link(state, ui, &p, &th, x(180.0), y(356.0), "YouTube", crate::LINK_YOUTUBE);
-    greet_link(state, ui, &p, &th, x(88.0), y(372.0), "GitHub", crate::LINK_GITHUB);
-    greet_text_left(&p, egui::pos2(x(109.0 - off), y(372.0)), "|", PREFS_FONT, th.text, false);
-    greet_link(state, ui, &p, &th, x(133.0), y(372.0), "QQ 群", crate::LINK_QQ_GROUP);
-    greet_text_left(&p, egui::pos2(x(153.0 - off), y(372.0)), "|", PREFS_FONT, th.text, false);
-    greet_link(state, ui, &p, &th, x(171.0), y(372.0), "捐赠", crate::LINK_DONATE);
+    if crate::lang() == 1 {
+        greet_link(state, ui, &p, &th, x(88.0), y(372.0), "GitHub", crate::LINK_GITHUB);
+        greet_text_left(&p, egui::pos2(x(109.0 - off), y(372.0)), "|", PREFS_FONT, th.text, false);
+        greet_link(state, ui, &p, &th, x(133.0), y(372.0), "QQ 群", crate::LINK_QQ_GROUP);
+        greet_text_left(&p, egui::pos2(x(153.0 - off), y(372.0)), "|", PREFS_FONT, th.text, false);
+        greet_link(state, ui, &p, &th, x(171.0), y(372.0), "捐赠", crate::LINK_DONATE);
+    } else {
+        greet_link(state, ui, &p, &th, x(108.0), y(372.0), "GitHub", crate::LINK_GITHUB);
+        greet_text_left(&p, egui::pos2(x(131.0 - off), y(372.0)), "|", PREFS_FONT, th.text, false);
+        greet_link(state, ui, &p, &th, x(156.0), y(372.0), "Donate", crate::LINK_DONATE);
+    }
     // :139-146 分隔线：先一条 1px 白线（Fluent 深色换黑），再一条 25% 主题色线。
     let line1 = if th.fdark && th.kind == ThemeKind::Fluent {
         Color32::BLACK
@@ -382,7 +422,7 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
         Stroke::new(1.0_f32, line2),
     );
     // :148-149 右栏标题。
-    greet_text_left(&p, egui::pos2(x(290.0), y(20.0)), "要做什么？", PREFS_FONT, th.text, false);
+    greet_text_left(&p, egui::pos2(x(290.0), y(20.0)), tr("What do you want to do?", "要做什么？"), PREFS_FONT, th.text, false);
 
     // :152-175 创建歌曲。
     let mut c = 48.0;
@@ -395,7 +435,7 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
             bk.big_icon(&p, at, &th, 0, pressed);
         }
         let push = if pressed { 1.0 } else { 0.0 };
-        greet_text_left(&p, at + Vec2::new(48.0 + push, 9.0 + push), "创建歌曲", PREFS_FONT, th.text, false);
+        greet_text_left(&p, at + Vec2::new(48.0 + push, 9.0 + push), tr("Create a new song", "创建歌曲"), PREFS_FONT, th.text, false);
         if resp.clicked() {
             state.emit(Command::CloseWindow);
         }
@@ -411,7 +451,7 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
             bk.big_icon(&p, at, &th, 1, pressed);
         }
         let push = if pressed { 1.0 } else { 0.0 };
-        greet_text_left(&p, at + Vec2::new(48.0 + push, 9.0 + push), "打开歌曲", PREFS_FONT, th.text, false);
+        greet_text_left(&p, at + Vec2::new(48.0 + push, 9.0 + push), tr("Load a song", "打开歌曲"), PREFS_FONT, th.text, false);
         if resp.clicked() {
             state.emit(Command::OpenDialog(DialogAction::OpenSong));
         }
@@ -421,7 +461,7 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
     for (i, r) in state.recent_files.clone().iter().enumerate() {
         if i == 0 {
             c += 36.0;
-            greet_text_left(&p, egui::pos2(x(b - 20.0), y(c)), "最近歌曲：", PREFS_FONT, th.text, false);
+            greet_text_left(&p, egui::pos2(x(b - 20.0), y(c)), tr("Recent songs:", "最近歌曲："), PREFS_FONT, th.text, false);
             c += 16.0;
         }
         let at = egui::pos2(x(b), y(c));
@@ -454,8 +494,8 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
                 state.emit(Command::OpenPath(r.path.clone()));
             } else {
                 state.modals = ModalQueue::message(
-                    "错误",
-                    &format!("找不到文件：\n{}", r.path.display()),
+                    tr("Error", "错误"),
+                    &format!("{}\n{}", tr("Could not find file:", "找不到文件："), r.path.display()),
                 );
                 state.remove_recent(&r.path);
                 state.emit(Command::SavePreferences);
@@ -480,7 +520,7 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
         greet_text_left(
             &p,
             at + Vec2::new(48.0 + push, 9.0 + push - 7.0),
-            "浏览社区制作的歌曲",
+            tr("Browse songs made by the community", "浏览社区制作的歌曲"),
             PREFS_FONT,
             th.text,
             false,
@@ -496,7 +536,7 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
         greet_text_left(
             &p,
             at + Vec2::new(48.0 + push, 9.0 + push + 7.0),
-            "前往 noteblock.world",
+            tr("Go to noteblock.world", "前往 noteblock.world"),
             PREFS_FONT,
             ggray(128),
             false,
@@ -516,7 +556,7 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
             bk.big_icon(&p, at, &th, 2, pressed);
         }
         let push = if pressed { 1.0 } else { 0.0 };
-        greet_text_left(&p, at + Vec2::new(48.0 + push, 9.0 + push), "从 MIDI 文件生成", PREFS_FONT, th.text, false);
+        greet_text_left(&p, at + Vec2::new(48.0 + push, 9.0 + push), tr("Generate song out of MIDI file", "从 MIDI 文件生成"), PREFS_FONT, th.text, false);
         if resp.clicked() {
             state.emit(Command::OpenDialog(DialogAction::ImportMidi));
         }
@@ -552,7 +592,7 @@ fn donate_banner_window(state: &mut EditorState, ctx: &Context) {
             let rx = rx.on_hover_cursor(CursorIcon::PointingHand);
             let rb = rb.on_hover_cursor(CursorIcon::PointingHand);
             if let Some(bk) = state.icons.bank() {
-                bk.donate_banner(&p, o, rx.hovered(), true);
+                bk.donate_banner(&p, o, rx.hovered(), crate::lang() == 1);
             }
             // 原版 :29：横幅上抬手、悬停不在 X 区、按下起点也不在 X 区才开捐赠页。
             let press_in_x = ui
@@ -565,7 +605,10 @@ fn donate_banner_window(state: &mut EditorState, ctx: &Context) {
     if close {
         state.modals = ModalQueue::message(
             "Note Block Studio",
-            "开发Note Block Studio完全基于我们用爱发电。如果情况允许，请考虑在以后小小的支持我们一下！(～￣▽￣)～\n\n（您可以随时在帮助 > 捐赠中找到该选项。）",
+            tr(
+                "Developing Note Block Studio takes a lot of unpaid volunteering time. If you can, please consider supporting us in the future! =)\n\n(You can find that option at any time in Help > Donate.)",
+                "开发Note Block Studio完全基于我们用爱发电。如果情况允许，请考虑在以后小小的支持我们一下！(～￣▽￣)～\n\n（您可以随时在帮助 > 捐赠中找到该选项。）",
+            ),
         );
         state.prefs.donate_banner_time = nbs_io::prefs::inc_month(nbs_io::prefs::unix_now());
         state.donate_banner = false;
@@ -768,6 +811,7 @@ fn preferences(state: &mut EditorState, ui: &mut Ui) {
 
     let mut menu_at = Pos2::ZERO;
     let mut rate_at = Pos2::ZERO;
+    let mut lang_at = Pos2::ZERO;
     {
         let mut pg = Page {
             ui: &mut *ui,
@@ -790,7 +834,7 @@ fn preferences(state: &mut EditorState, ui: &mut Ui) {
         state.prefs_tab = tab;
         match tab {
             0 => prefs_general(state, &mut pg),
-            1 => prefs_interface(state, &mut pg, &mut menu_at, &mut rate_at),
+            1 => prefs_interface(state, &mut pg, &mut menu_at, &mut rate_at, &mut lang_at),
             2 => prefs_appearance(state, &mut pg),
             3 => prefs_usability(state, &mut pg),
             _ => prefs_playback(state, &mut pg),
@@ -821,6 +865,9 @@ fn preferences(state: &mut EditorState, ui: &mut Ui) {
     }
     if state.prefs_rate_menu {
         rate_menu(state, ui, rate_at);
+    }
+    if state.prefs_language_menu {
+        language_menu(state, ui, lang_at);
     }
 }
 
@@ -951,10 +998,16 @@ fn folder_row(state: &mut EditorState, pg: &mut Page, which: PrefsFolder, text_n
     }
 }
 
-/// 原版页 1「界面」：主题下拉 + 暗色 / 全黑两个开关 + 帧率限制 + 窗口缩放 + 旧图标。
-/// 同页的取色器（`w_setaccent`）、「为高分辨率优化」（要 `*_hires` 那套纹理）、
-/// 语言（还没做多语言）都没有对应实现，整行不画。
-fn prefs_interface(state: &mut EditorState, pg: &mut Page, menu_at: &mut Pos2, rate_at: &mut Pos2) {
+/// 原版页 1「界面」：主题下拉 + 暗色 / 全黑两个开关 + 帧率限制 + 窗口缩放 + 旧图标
+/// + 语言下拉。同页的取色器（`w_setaccent`）、「为高分辨率优化」（要 `*_hires`
+/// 那套纹理）没有对应实现，整行不画。
+fn prefs_interface(
+    state: &mut EditorState,
+    pg: &mut Page,
+    menu_at: &mut Pos2,
+    rate_at: &mut Pos2,
+    lang_at: &mut Pos2,
+) {
     pg.header(22.0, 74.0, 218.0, 140.0, "主题");
     pg.frame_box(40.0, 95.0, 140.0, 115.0);
     let name = state.theme.kind.name().to_string();
@@ -987,6 +1040,22 @@ fn prefs_interface(state: &mut EditorState, pg: &mut Page, menu_at: &mut Pos2, r
         false,
     ) {
         state.emit(Command::ToggleFlag(Flag::Blackout));
+    }
+
+    // 原版 `draw_window_preferences.gml:412-421`：左列下方的语言下拉。
+    // 组标题跟着语言切换（"Language" / "语言"），但框里的值和菜单两项是
+    // 语言本身的专名（"English" / "简体中文"），两种界面语言下都原样印。
+    pg.header(22.0, 239.0, 220.0, 65.0, tr("Language", "语言"));
+    pg.frame_box(40.0, 260.0, 140.0, 280.0);
+    pg.text(
+        pg.row(43.0, 263.0),
+        LANGUAGE_ITEMS[state.prefs.language as usize % LANGUAGE_ITEMS.len()],
+        PREFS_FONT,
+        pg.ink(),
+    );
+    *lang_at = pg.row(40.0, 281.0);
+    if pg.arrow(&state.icons, 123.0, 261.0) && !state.prefs_language_menu {
+        state.prefs_language_menu = true;
     }
 
     // 原版 `draw_areaheader(x1 + 258, y1 + 74, 220, 60, "帧率限制")`。
@@ -1291,6 +1360,32 @@ fn rate_menu(state: &mut EditorState, ui: &Ui, at: Pos2) {
     }
     if picked.is_some() || dismissed {
         state.prefs_rate_menu = false;
+    }
+}
+
+/// 原版 `show_menu_ext("language", …)`（draw_window_preferences.gml:421）：
+/// `"English|简体中文"` 两项，当前语言那项打勾。切换走 prefs.language，
+/// 下一帧 app::show 同步进 tr() 的全局开关，全界面跟着换。
+const LANGUAGE_ITEMS: [&str; 2] = ["English", "简体中文"];
+fn language_menu(state: &mut EditorState, ui: &Ui, at: Pos2) {
+    let th = state.theme.clone();
+    let bank = state.icons.bank();
+    let sel = state.prefs.language as usize;
+    let (picked, dismissed) = popup_list(
+        ui,
+        "prefs_language_menu",
+        at,
+        &LANGUAGE_ITEMS,
+        sel,
+        &th,
+        bank.as_deref(),
+    );
+    if let Some(i) = picked {
+        state.prefs.language = i as u8;
+        state.emit(Command::SavePreferences);
+    }
+    if picked.is_some() || dismissed {
+        state.prefs_language_menu = false;
     }
 }
 
@@ -4682,9 +4777,11 @@ mod tests {
         assert_eq!(hz_label(192000), "192,000 Hz");
     }
 
-    /// 原版 seconds_to_str 中文分支的 7 档阈值，边界值各测一次。
+    /// 原版 seconds_to_str 两语言各自的 7 档阈值，边界值各测一次；
+    /// 英文复数按整除后的值判（`1 second ago` / `2 seconds ago`）。
     #[test]
     fn seconds_to_str_matches_the_original_thresholds() {
+        let _cn = crate::LangGuard::set(1);
         assert_eq!(seconds_to_str(0), "0 秒前");
         assert_eq!(seconds_to_str(30), "30 秒前");
         assert_eq!(seconds_to_str(59), "59 秒前");
@@ -4699,5 +4796,16 @@ mod tests {
         assert_eq!(seconds_to_str(2678400), "1 月前");
         assert_eq!(seconds_to_str(32140799), "11 月前");
         assert_eq!(seconds_to_str(32140800), "1 年前");
+        let _en = crate::LangGuard::set(0);
+        assert_eq!(seconds_to_str(0), "0 seconds ago");
+        assert_eq!(seconds_to_str(1), "1 second ago");
+        assert_eq!(seconds_to_str(2), "2 seconds ago");
+        assert_eq!(seconds_to_str(60), "1 minute ago");
+        assert_eq!(seconds_to_str(120), "2 minutes ago");
+        assert_eq!(seconds_to_str(3600), "1 hour ago");
+        assert_eq!(seconds_to_str(86400), "1 day ago");
+        assert_eq!(seconds_to_str(604800), "1 week ago");
+        assert_eq!(seconds_to_str(2678400), "1 month ago");
+        assert_eq!(seconds_to_str(32140800), "1 year ago");
     }
 }

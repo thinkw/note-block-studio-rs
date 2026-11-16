@@ -12,3 +12,7 @@ serde_json = { workspace = true }
 flate2 = { workspace = true }
 crc32fast = { workspace = true }
 image = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# 出厂语言自动检测用 GetUserDefaultLocaleName（prefs.rs 的 detect_language）。
+winapi = { version = "0.3", features = ["winnls"] }

@@ -57,6 +57,54 @@ pub const LINK_YOUTUBE: &str = "https://youtube.com/@OpenNBS";
 pub const LINK_GITHUB: &str = "https://github.com/OpenNBS/OpenNoteBlockStudio";
 pub const LINK_QQ_GROUP: &str = "http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=9iT2JIMOPWcrhzVpOROtlv7PJ1jSGEu0&authKey=VmmwRR7507A9fEVxraPmXn224vhbHXc4xs4QmwkveFZBriU%2Fq2NCj9fbYE5QCaLJ&noverify=0&group_code=218993157";
 
+// ---- 多语言。原版只有 0 = English / 1 = 简体中文两种，全部文案都是
+// `if (language != 1) { 英文 } else { 中文 }`（condstr 的封装）。
+// 这里用一个进程级原子量做同一个开关：app::show 每帧把 prefs.language
+// 同步进来，文案侧统一写 tr(英文, 中文)。
+
+use std::sync::atomic::{AtomicU8, Ordering};
+
+static LANGUAGE: AtomicU8 = AtomicU8::new(0);
+
+/// 等价原版读 `language` 全局变量：0 = English，1 = 简体中文。
+pub fn lang() -> u8 {
+    LANGUAGE.load(Ordering::Relaxed)
+}
+
+/// 等价原版 `condstr(language != 1, 英文, 中文)`：两种文案按当前语言二选一。
+/// 原版 GML 里文案逐条手写这个判定，这里统一成函数，调用点写法一一对应。
+pub fn tr<'a>(en: &'a str, zh: &'a str) -> &'a str {
+    if lang() == 1 {
+        zh
+    } else {
+        en
+    }
+}
+
+/// app::show 每帧从 prefs 同步；原版 language 只在设置菜单和读档时赋值，
+/// 效果等价（开关在下一帧生效，帧内不跳变）。
+pub fn set_language(l: u8) {
+    LANGUAGE.store(l, Ordering::Relaxed);
+}
+
+/// 测试里改语言后要还原，避免并行测试互相污染。
+#[cfg(test)]
+pub(crate) struct LangGuard(u8);
+#[cfg(test)]
+impl LangGuard {
+    pub fn set(l: u8) -> LangGuard {
+        let prev = lang();
+        set_language(l);
+        LangGuard(prev)
+    }
+}
+#[cfg(test)]
+impl Drop for LangGuard {
+    fn drop(&mut self) {
+        set_language(self.0);
+    }
+}
+
 /// 出厂值断言 / 不该写用户配置的测试都用它：指向一个空的配置目录，
 /// 调试界实时改过缩放 / 音量、或测试期间真的落盘过偏好，单测都会莫名其妙变红。
 /// 目录里旧一轮跑剩的 prefs.json 也要清掉，否则上次测试写下的开关值
@@ -879,6 +927,9 @@ mod gui_window_tests {
         isolate_prefs();
         let ctx = egui::Context::default();
         let mut state = EditorState::new();
+        // 工厂默认跟系统语言走，测试里显式钉中文（英文分支有单独用例）。
+        state.prefs.language = 1;
+        let _cn = crate::LangGuard::set(1);
         state.theme.apply(&ctx);
         state.window = Some(WindowKind::Greeting);
         frame(&mut state, &ctx);
@@ -919,6 +970,61 @@ mod gui_window_tests {
         assert_eq!(state.window, None, "创建歌曲应当关掉欢迎窗");
     }
 
+    /// 语言切到英文（原版 language=0 分支）后欢迎窗整套文案与行位切换：
+    /// 第二行社区链接只剩 GitHub / Donate（中文还有 QQ 群 / 捐赠），各字符串
+    /// 全部照 draw_window_greeting.gml 的 `if (language != 1)` 分支。
+    #[test]
+    fn greeting_renders_english_when_language_zero() {
+        isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.prefs.language = 0;
+        let _en = crate::LangGuard::set(0);
+        state.theme.apply(&ctx);
+        state.window = Some(WindowKind::Greeting);
+        frame(&mut state, &ctx);
+        let out = frame_out(&mut state, &ctx, base_input());
+        let texts: Vec<&str> = out
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text()),
+                _ => None,
+            })
+            .collect();
+        for t in [
+            "What do you want to do?",
+            "Create a new song",
+            "Load a song",
+            "Generate song out of MIDI file",
+            "Browse songs made by the community",
+            "Go to noteblock.world",
+            "Follow OpenNBS:",
+            "Donate",
+            "An open-source Minecraft music maker",
+            "Version 0.1.0 - Released 2026-11-16",
+            "Checking for updates...",
+        ] {
+            assert!(texts.iter().any(|s| *s == t), "英文欢迎窗缺少「{t}」，当前文本：{}", texts.join(" | "));
+        }
+        // 中文专属的行和文案在英文分支不存在。
+        for t in ["要做什么？", "创建歌曲", "QQ 群", "捐赠", "版本 0.1.0 - 发布于 2026-11-16"] {
+            assert!(!texts.iter().any(|s| *s == t), "英文分支不该出现「{t}」");
+        }
+        // 检查失败一行（-1）：英文原文没有句号，别改成带句号的形式。
+        state.update_check.lock().unwrap().status = -1;
+        let out = frame_out(&mut state, &ctx, base_input());
+        let texts: Vec<&str> = out
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|s| *s == "Could not check for updates"));
+    }
+
     /// 欢迎窗最近歌曲点开一个不存在的文件：弹「找不到文件」并把同路径条目清掉
     /// （draw_window_greeting.gml:219-231）。
     #[test]
@@ -926,6 +1032,8 @@ mod gui_window_tests {
         isolate_prefs();
         let ctx = egui::Context::default();
         let mut state = EditorState::new();
+        state.prefs.language = 1;
+        let _cn = crate::LangGuard::set(1);
         state.theme.apply(&ctx);
         state.window = Some(WindowKind::Greeting);
         let missing = PathBuf::from("Z:/definitely-not-here/ghost song.nbs");
@@ -971,6 +1079,54 @@ mod gui_window_tests {
         assert!(!state.prefs.check_prerelease, "答之前不能先改值");
         click_text(&mut state, &ctx, "是");
         assert!(state.prefs.check_prerelease, "答「是」要真的打开");
+    }
+
+    /// 原版 draw_window_preferences.gml:412-421：界面页的语言下拉。
+    /// 标题跟着语言切换，框里的值始终是两种语言的专名；菜单里选中文要写回
+    /// prefs.language 并收起菜单，下一帧 app::show 把全局开关同步成中文。
+    #[test]
+    fn preferences_language_row_switches_interface_language() {
+        isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        state.window = Some(WindowKind::Preferences);
+        state.prefs_tab = 1;
+        state.prefs.language = 0;
+        // 窗口要暖一帧才真正铺开（既有 GUI 用例同款前置）。
+        frame(&mut state, &ctx);
+        let texts = |out: &egui::FullOutput| -> Vec<String> {
+            out.shapes
+                .iter()
+                .filter_map(|cs| match &cs.shape {
+                    egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let out = frame_out(&mut state, &ctx, base_input());
+        let t = texts(&out);
+        assert!(t.iter().any(|s| s == "Language"), "英文界面标题应是 Language: {}", t.join(" | "));
+        assert!(t.iter().any(|s| s == "English"), "当前值行印的是语言专名");
+
+        // 箭头是图标按钮，主题 / 帧率下拉的既有路径同样直接置位开菜单。
+        // egui 的 Area 首帧是 sizing pass（不落形状），下一帧才真正画出来。
+        state.prefs_language_menu = true;
+        frame_out(&mut state, &ctx, base_input());
+        let out = frame_out(&mut state, &ctx, base_input());
+        let t = texts(&out);
+        for s in ["English", "简体中文"] {
+            assert!(t.iter().any(|x| x == s), "菜单缺少「{s}」: {}", t.join(" | "));
+        }
+        click_text(&mut state, &ctx, "简体中文");
+        assert_eq!(state.prefs.language, 1, "选中要写回偏好");
+        assert!(!state.prefs_language_menu, "选完菜单要收起");
+        let out = frame_out(&mut state, &ctx, base_input());
+        let t = texts(&out);
+        assert!(t.iter().any(|s| s == "语言"), "切到中文后标题应是「语言」: {}", t.join(" | "));
+        // 还原全局开关（测试并行跑，别把其它用例的语言污染成中文）。
+        state.prefs.language = 0;
+        frame_out(&mut state, &ctx, base_input());
     }
 }
 

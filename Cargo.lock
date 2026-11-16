@@ -1326,6 +1326,7 @@ dependencies = [
  "nbs-core",
  "serde",
  "serde_json",
+ "winapi",
 ]
 
 [[package]]

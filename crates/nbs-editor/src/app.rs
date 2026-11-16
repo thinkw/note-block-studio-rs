@@ -29,6 +29,9 @@ fn flush_all(state: &mut EditorState, ctx: &Context) {
 }
 
 pub fn show(ctx: &Context, state: &mut EditorState) {
+    // 界面语言每帧跟 prefs 对齐；原版 language 只在设置菜单和读档时赋值，
+    // 下拉切换后下一帧生效，这里的语义相同。
+    crate::set_language(state.prefs.language);
     // 原版是 GameMaker 的像素绘制：1px 的网格线就是结结实实一个像素。
     // egui 默认把每条边羽化成渐变，1px 竖线会变成三列淡色，深度只有原版的一半，所以关掉。
     ctx.tessellation_options_mut(|o| o.feathering = false);

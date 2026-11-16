@@ -258,7 +258,7 @@ impl Default for Preferences {
             export_sample_rate: 44100,
             export_channels: 2,
             export_format: "MP3".into(),
-            language: 0,
+            language: detect_language(),
             auto_save_minutes: 10,
             schematic: crate::schematic::SchematicOptions::default(),
             midi_gm: None,
@@ -274,6 +274,36 @@ impl Default for Preferences {
             last_version: None,
             recent_files: Vec::new(),
         }
+    }
+}
+
+/// 原版 `control_create.gml:198`：
+/// `language = 1 * (os_get_language() = "zh" && os_get_region() = "CN")`
+/// ——首次开机按系统语言自动决定界面用英文还是简体中文。这里用
+/// GetUserDefaultLocaleName 拿 BCP-47 语言标签，交给 parse_language 判定。
+fn detect_language() -> u8 {
+    #[cfg(windows)]
+    {
+        use winapi::um::winnls::GetUserDefaultLocaleName;
+        // LOCALE_NAME_MAX_LENGTH = 85。
+        let mut buf = [0u16; 85];
+        let len = unsafe { GetUserDefaultLocaleName(buf.as_mut_ptr(), buf.len() as i32) };
+        if len > 0 {
+            let s = String::from_utf16_lossy(&buf[..len as usize]);
+            return parse_language(&s);
+        }
+    }
+    0
+}
+
+/// 判定一个语言标签是不是「中文（中国大陆）」：`zh-cn`、`zh-hans-cn` 都算，
+/// `zh-tw` / `zh` / 英文标签不算——原版要求语言 zh 且地区 CN 两者同时成立。
+pub fn parse_language(locale: &str) -> u8 {
+    let s = locale.trim().to_ascii_lowercase();
+    if s.starts_with("zh-") && s.ends_with("-cn") {
+        1
+    } else {
+        0
     }
 }
 
@@ -453,6 +483,23 @@ pub fn list_autosaves() -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use nbs_core::model::Note;
+
+    /// 原版 `os_get_language() = "zh" && os_get_region() = "CN"`：
+    /// 语言 zh 且地区 CN 同时成立才算中文，zh-tw / 裸 zh / 英文都不算。
+    #[test]
+    fn parse_language_requires_zh_and_cn_region() {
+        assert_eq!(parse_language("zh-CN"), 1);
+        assert_eq!(parse_language("zh-cn"), 1);
+        assert_eq!(parse_language("zh-Hans-CN"), 1);
+        assert_eq!(parse_language(" zh-CN "), 1);
+        assert_eq!(parse_language("zh-TW"), 0);
+        assert_eq!(parse_language("zh-Hant-TW"), 0);
+        assert_eq!(parse_language("zh"), 0);
+        assert_eq!(parse_language("zh-Hans"), 0);
+        assert_eq!(parse_language("en-US"), 0);
+        assert_eq!(parse_language(""), 0);
+        assert_eq!(parse_language("cn-zh"), 0);
+    }
 
     #[test]
     fn prefs_roundtrip() {
