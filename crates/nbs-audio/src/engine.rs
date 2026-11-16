@@ -1,8 +1,9 @@
 //! 音频引擎：cpal 实时输出 + 离线导出。
 //!
 //! 实时路径：`cpal` 回调 → `SharedState::render_interleaved` → 同一套 Mixer。
-//! 离线路径：同一套 `Voice`/`playback_ratio`/`gains` 公式，按音符分片多线程混音。
-//! 因此「听到的」与「导出的 WAV」音色完全一致。
+//! 离线路径：同一套 `Voice`/`playback_ratio` 公式，按音符分片多线程混音；
+//! 时间轴/限幅/声像按打包版 nbswave 0.4.0 的语义来（`tempo_segments` 定位、
+//! 仅峰值超 1 时整轨归一），因此导出的 WAV 与原版「导出音频」一致。
 
 use std::path::Path;
 use std::sync::Arc;
@@ -13,7 +14,7 @@ use nbs_core::model::{Note, Song};
 use crate::mixer::Voice;
 use crate::samples::{SoundBank, BUILTIN_FILES, SAMPLE_RATE};
 use crate::scheduler::{
-    build_event_table, make_shared, NoteEvent, Shared, TransportClock,
+    build_event_table, make_shared, EventKind, NoteEvent, Shared, TransportClock,
 };
 
 // 注意：cpal 在 Windows/WASAPI 后端的 `Stream` 不是 Send（内部持有线程亲和的
@@ -350,8 +351,6 @@ pub struct ExportOptions {
     pub channels: u16,
     /// 是否包含锁定层（原版默认排除）。
     pub include_locked: bool,
-    /// 末尾留白秒数，让长采样完整衰减。
-    pub tail_seconds: f32,
 }
 
 impl Default for ExportOptions {
@@ -360,7 +359,6 @@ impl Default for ExportOptions {
             sample_rate: SAMPLE_RATE,
             channels: 2,
             include_locked: false,
-            tail_seconds: 2.0,
         }
     }
 }
@@ -387,6 +385,44 @@ pub fn export_wav(
     Ok(stats)
 }
 
+/// nbswave `tempo_segments`：第 t 项 = tick t 发声的时间点（秒）。
+/// 从 0 起每跨一列累加 1/当时速度；自定义乐器名恰为 "Tempo Changer" 的音符
+/// 把后续步长换成 pitch/15（同列多枚时最后一枚生效，nbswave 相同）。
+/// 注意 `segments[0] = 1/tempo`：导出的第 0 列比实时播放晚一整步——这是
+/// nbswave 的既有行为，照搬（实时调度仍走 GML 语义，不受影响）。
+fn tempo_segments(song: &Song, events: &[NoteEvent]) -> Vec<f64> {
+    let last_tick = song.song_length() as usize;
+    let mut seg = Vec::with_capacity(last_tick + 1);
+    let mut t_cur = 0usize;
+    let mut tempo = (song.meta.tempo as f64).max(0.01);
+    let mut secs = 0.0f64;
+    let changers = events.iter().filter_map(|ev| match ev.kind {
+        EventKind::Tempo(pitch) => Some((ev.tick as usize, pitch)),
+        _ => None,
+    });
+    for (tick, pitch) in changers {
+        while t_cur < tick.min(last_tick + 1) {
+            secs += 1.0 / tempo;
+            seg.push(secs);
+            t_cur += 1;
+        }
+        if tick <= last_tick {
+            // pitch<=0 的病态值按实时播放的下限 0.25 t/s 兜底（nbswave 对
+            // 0 直接除零崩溃；正常文件由编辑窗校验 >0）。
+            tempo = if pitch > 0 { pitch as f64 / 15.0 } else { 0.25 };
+        }
+        if t_cur < tick {
+            t_cur = tick;
+        }
+    }
+    while t_cur <= last_tick {
+        secs += 1.0 / tempo;
+        seg.push(secs);
+        t_cur += 1;
+    }
+    seg
+}
+
 /// 渲染成交错 f32 PCM（可复用于其它容器编码）。
 pub fn render_offline(
     song: &Song,
@@ -396,10 +432,30 @@ pub fn render_offline(
 ) -> (Vec<f32>, ExportStats) {
     let rate = opts.sample_rate.max(8000);
     let channels = opts.channels.clamp(1, 2) as usize;
-    let tempo = song.meta.tempo.max(0.01) as f64;
-    let song_seconds = song.song_length() as f64 / tempo;
-    let total_seconds = song_seconds + opts.tail_seconds as f64;
-    let frames = (total_seconds * rate as f64).ceil() as usize;
+    let segs = tempo_segments(song, events);
+
+    // 原版 get_length：长度 = 最后一个停止发声的音符（缺采样/事件乐器只
+    // 贡献自己的起点位置），没有外加尾巴；锁定层的音符**参与定长**——
+    // nbswave 的 get_length 永远遍历 weighted_notes（全部音符），排除锁定层
+    // 只影响混音本身。整歌没有音符时兜底为整首歌长（原版此处直接崩溃）。
+    let all_notes = build_event_table(song, true);
+    let mut frames = if all_notes.is_empty() {
+        (segs[segs.len() - 1] * rate as f64) as usize
+    } else {
+        0
+    };
+    for ev in &all_notes {
+        let Some(&pos) = segs.get(ev.tick as usize) else { continue };
+        let start = pos * rate as f64;
+        let end = match bank.get(ev.note.instrument as usize) {
+            Some(sample) if !sample.is_empty() => {
+                let ratio = Voice::playback_ratio(&ev.note, sample.base_key, rate);
+                start + sample.pcm.len() as f64 / ratio
+            }
+            _ => start,
+        };
+        frames = frames.max(end as usize);
+    }
 
     let thread_count = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -409,12 +465,13 @@ pub fn render_offline(
     let chunk = events.len().div_ceil(thread_count).max(1);
     let mut partials: Vec<Vec<f32>> = Vec::with_capacity(thread_count);
     let bank_ref = &bank;
+    let segs_ref = &segs;
     std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(thread_count);
         for group in events.chunks(chunk) {
             let handle = scope.spawn(move || {
                 let mut buf = vec![0.0f32; frames * channels];
-                render_event_group(group, bank_ref, &mut buf, frames, channels, rate, tempo);
+                render_event_group(group, bank_ref, segs_ref, &mut buf, frames, channels, rate);
                 buf
             });
             handles.push(handle);
@@ -451,7 +508,7 @@ pub fn render_offline(
         ExportStats {
             frames,
             notes: events.len(),
-            duration_seconds: total_seconds,
+            duration_seconds: frames as f64 / rate as f64,
             peak,
             threads: thread_count,
         },
@@ -461,18 +518,19 @@ pub fn render_offline(
 fn render_event_group(
     events: &[NoteEvent],
     bank: &SoundBank,
+    segs: &[f64],
     buf: &mut [f32],
     frames: usize,
     channels: usize,
     rate: u32,
-    tempo: f64,
 ) {
     for ev in events {
         let Some(sample) = bank.get(ev.note.instrument as usize) else { continue };
         if sample.is_empty() {
             continue;
         }
-        let start = ((ev.tick as f64 / tempo) * rate as f64) as usize;
+        let Some(&pos) = segs.get(ev.tick as usize) else { continue };
+        let start = (pos * rate as f64) as usize;
         if start >= frames {
             continue;
         }
@@ -558,8 +616,7 @@ mod tests {
         }
         let song = Song::demo();
         let events = build_event_table(&song, false);
-        let opts = ExportOptions { tail_seconds: 0.5, ..Default::default() };
-        let (pcm, stats) = render_offline(&song, &bank, &events, &opts);
+        let (pcm, stats) = render_offline(&song, &bank, &events, &Default::default());
         assert!(stats.frames > 44100);
         assert_eq!(stats.notes, song.total_blocks);
         assert!(pcm.iter().any(|&s| s.abs() > 0.001), "应有实际声音");
@@ -596,7 +653,76 @@ mod tests {
         let events = build_event_table(&quiet, false);
         let (pcm, stats) = render_offline(&quiet, &bank, &events, &Default::default());
         assert!((stats.peak - 0.9).abs() < 1e-5, "未削顶不应缩放，实测 {}", stats.peak);
-        assert!((pcm[0] - 0.9).abs() < 1e-4, "首样本应原样 0.9，实测 {}", pcm[0]);
+        // nbswave 时间轴：tick 0 落在 1/tempo = 0.1s（交错立体声 ×2）
+        let start = (0.1 * 44100.0) as usize * 2;
+        assert!((pcm[start] - 0.9).abs() < 1e-4, "首样本应原样 0.9，实测 {}", pcm[start]);
+    }
+
+    /// nbswave tempo_segments 的移植对照：10 t/s，tick 4 一枚变速器
+    /// （pitch=600 → 40 t/s）。变速列自身的步长用新速度；第 0 列在 1/tempo。
+    #[test]
+    fn tempo_segments_match_nbswave() {
+        let mut song = Song::new();
+        song.meta.tempo = 10.0;
+        song.custom_instruments.push(nbs_core::model::CustomInstrument {
+            name: "Tempo Changer".into(),
+            filename: String::new(),
+            key: 45,
+            press: false,
+        });
+        song.set(0, 0, Note::new(0, 45));
+        song.set(4, 0, Note { instrument: 20, key: 45, velocity: 100, panning: 100, pitch: 600 });
+        song.set(8, 0, Note::new(0, 45));
+        song.recalculate();
+        let events = build_event_table(&song, false);
+        let segs = tempo_segments(&song, &events);
+        assert_eq!(segs.len(), 10, "歌长 9 → 覆盖 tick 0..=9");
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(near(segs[0], 0.1), "segments[0] = 1/tempo，实测 {}", segs[0]);
+        assert!(near(segs[3], 0.4), "{}", segs[3]);
+        assert!(
+            near(segs[4], 0.4 + 1.0 / 40.0),
+            "进入变速列的那一步用新速度，实测 {}",
+            segs[4]
+        );
+        assert!(near(segs[8], 0.4 + 5.0 / 40.0), "{}", segs[8]);
+    }
+
+    /// 导出落点按 tempo_segments：变速后的音符从新位置发声，长度 = 采样
+    /// 放完为止（没有 2 秒尾巴）。
+    #[test]
+    fn offline_render_places_notes_on_tempo_segments() {
+        let mut bank = SoundBank::empty();
+        bank.samples.push(crate::samples::Sample {
+            pcm: vec![1.0; 1000],
+            base_key: 45,
+            name: "test".into(),
+        });
+        let mut song = Song::new();
+        song.meta.tempo = 10.0;
+        song.custom_instruments.push(nbs_core::model::CustomInstrument {
+            name: "Tempo Changer".into(),
+            filename: String::new(),
+            key: 45,
+            press: false,
+        });
+        song.set(8, 0, Note::new(0, 45));
+        song.set(4, 1, Note { instrument: 20, key: 45, velocity: 100, panning: 100, pitch: 600 });
+        song.recalculate();
+        let events = build_event_table(&song, false);
+        let (pcm, stats) = render_offline(&song, &bank, &events, &Default::default());
+        let expect = (0.4 + 5.0 / 40.0) * 44100.0;
+        let first = pcm.iter().position(|&s| s != 0.0).expect("应有声音");
+        let first_frame = (first / 2) as f64;
+        assert!(
+            (first_frame - expect).abs() < 2.0,
+            "起点应在 {} 帧，实测 {}",
+            expect,
+            first_frame
+        );
+        // 长度 = 起点 + 采样本身（1000 帧，ratio=1），无尾巴
+        let start = (expect) as usize;
+        assert_eq!(stats.frames, start + 1000);
     }
 
     /// 20 种内置乐器都得真的出声：逐个渲染单音符歌曲，检查峰值不为零。
