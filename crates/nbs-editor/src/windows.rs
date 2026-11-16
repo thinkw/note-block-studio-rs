@@ -4781,6 +4781,8 @@ mod tests {
     /// 英文复数按整除后的值判（`1 second ago` / `2 seconds ago`）。
     #[test]
     fn seconds_to_str_matches_the_original_thresholds() {
+        // 直接读全局 lang()，要和跑帧的测试互斥，防止别处一帧把语言翻走。
+        let _lock = crate::frame_lock();
         let _cn = crate::LangGuard::set(1);
         assert_eq!(seconds_to_str(0), "0 秒前");
         assert_eq!(seconds_to_str(30), "30 秒前");

@@ -87,7 +87,12 @@ pub fn set_language(l: u8) {
     LANGUAGE.store(l, Ordering::Relaxed);
 }
 
-/// 测试里改语言后要还原，避免并行测试互相污染。
+/// 跑帧的测试互相串行：show() 每帧开头把全局语言对齐到 prefs，两个测试并发
+/// 跑帧会互相翻转对方正在绘制的语言；直接读 lang() 的纯函数测试也拿这把锁。
+/// 可重入场景不存在——帧入口内部不再嵌套拿锁。
+#[cfg(test)]
+static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 pub(crate) struct LangGuard(u8);
 #[cfg(test)]
@@ -103,6 +108,11 @@ impl Drop for LangGuard {
     fn drop(&mut self) {
         set_language(self.0);
     }
+}
+
+#[cfg(test)]
+pub(crate) fn frame_lock() -> std::sync::MutexGuard<'static, ()> {
+    TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// 出厂值断言 / 不该写用户配置的测试都用它：指向一个空的配置目录，
@@ -143,6 +153,7 @@ mod tests {
             ..Default::default()
         };
         let out = ctx.run(input, |ctx| {
+            let _lock = frame_lock();
             crate::show(ctx, &mut state);
         });
         assert!(!out.shapes.is_empty(), "一帧应当产生绘制形状");
@@ -172,7 +183,10 @@ mod tests {
             )),
             ..Default::default()
         };
-        let _ = ctx.run(input, |ctx| crate::show(ctx, &mut state));
+        let _ = ctx.run(input, |ctx| {
+            let _lock = frame_lock();
+            crate::show(ctx, &mut state)
+        });
 
         let drawn = state.interaction.visible_notes;
         println!("  大曲子共 {total} 音符，一帧只绘制 {drawn} 个");
@@ -265,7 +279,10 @@ mod gui_export_tests {
             )),
             ..Default::default()
         };
-        let out = ctx.run(input, |ctx| crate::show(ctx, state));
+        let out = ctx.run(input, |ctx| {
+            let _lock = frame_lock();
+            crate::show(ctx, state)
+        });
         assert!(!out.shapes.is_empty(), "窗口应当真的画出内容");
     }
 
@@ -357,6 +374,7 @@ mod gui_window_tests {
         ctx: &egui::Context,
         input: egui::RawInput,
     ) -> egui::FullOutput {
+        let _lock = frame_lock();
         ctx.run(input, |ctx| crate::show(ctx, state))
     }
 
@@ -741,10 +759,13 @@ mod gui_window_tests {
     #[test]
     fn clicking_through_the_schematic_export_window() {
         let ctx = egui::Context::default();
+        isolate_prefs();
         let mut state = EditorState::new();
         state.theme.apply(&ctx);
         // 原版第一次会写 settings.ini 记住「警告已看过」，测试预置成已看过，不碰用户配置。
         state.prefs.warning_schematic = true;
+        // 菜单文案跟着界面语言走，钉成中文，免得跟着本机 locale 变。
+        state.prefs.language = 1;
 
         click_text(&mut state, &ctx, "文件");
         click_text(&mut state, &ctx, "导出");
@@ -807,6 +828,7 @@ mod gui_window_tests {
     #[test]
     fn gui_imports_a_schematic_through_the_dialog_and_the_open_route() {
         let ctx = egui::Context::default();
+        isolate_prefs();
         let dir = scratch("schematic-import");
         let file = dir.join("demo.schematic");
         nbs_io::schematic::export_schematic(
@@ -818,6 +840,8 @@ mod gui_window_tests {
 
         let mut state = EditorState::new();
         state.theme.apply(&ctx);
+        // 菜单文案跟着界面语言走，钉成中文，免得跟着本机 locale 变。
+        state.prefs.language = 1;
         let recents = state.recent_files.len();
         // 真点菜单：文件 → 导入 → 从 Schematic 导入…
         click_text(&mut state, &ctx, "文件");
@@ -841,6 +865,7 @@ mod gui_window_tests {
         // 打开分流：.schematic 走导入，不会被当成 NBS 解析。
         let mut s2 = EditorState::new();
         s2.theme.apply(&ctx);
+        s2.prefs.language = 1;
         let recents2 = s2.recent_files.len();
         s2.doc.replace_song(nbs_core::Song::new());
         dispatch(&mut s2, commands::Command::OpenPath(file), &ctx);
@@ -1188,6 +1213,7 @@ mod gui_piano_tests {
     }
 
     fn run(state: &mut EditorState, ctx: &egui::Context, inp: egui::RawInput) -> egui::FullOutput {
+        let _lock = frame_lock();
         ctx.run(inp, |ctx| crate::show(ctx, state))
     }
 
