@@ -885,6 +885,16 @@ mod gui_piano_tests {
             .collect()
     }
 
+    fn lines(out: &egui::FullOutput) -> Vec<([egui::Pos2; 2], egui::Stroke)> {
+        out.shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::LineSegment { points, stroke } => Some((*points, *stroke)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// 原版：白键步进 39、顶边在 `rh - 154`，整排居中；黑键画在左边 19px、上边 7px 处。
     /// 1440 宽时 `keysshow = min(30, floor((1440-32)/39)) = 30`，左边留 (1440-1170)/2 = 135。
     #[test]
@@ -985,6 +995,89 @@ mod gui_piano_tests {
             state.piano_start > start,
             "停在最右白键上应当往高音平移，实际 startkey = {}",
             state.piano_start
+        );
+    }
+
+    /// 开「在琴键上时显示五线谱对应音符」并悬停最左白键（key 20，列号 startkey + a = 12）：
+    /// 面板 / 指针 / 谱号 / 音符贴图和五线谱横线、括号、加线都按 draw_notechart.gml
+    /// 的坐标出现在琴键上方（y0 = 746，yy = 714，x1 = 153，xx = median(0, 121, 1120) = 121）。
+    #[test]
+    fn notechart_draws_over_the_hovered_key() {
+        let ctx = egui::Context::default();
+        let mut state = piano_state();
+        state.flags.show_notechart = true;
+        run(&mut state, &ctx, input());
+        let mut hover = input();
+        hover.events.push(egui::Event::PointerMoved(egui::pos2(150.0, 800.0)));
+        let out = run(&mut state, &ctx, hover);
+
+        let quads = images(&out);
+        let at = |x: f32, y: f32, w: f32, h: f32| {
+            quads.iter().any(|r| {
+                (r.min.x - x).abs() < 0.6
+                    && (r.min.y - y).abs() < 0.6
+                    && (r.width() - w).abs() < 0.6
+                    && (r.height() - h).abs() < 0.6
+            })
+        };
+        assert!(at(121.0, 395.0, 320.0, 320.0), "面板画在 (xx, yy-319)");
+        assert!(at(153.0, 714.0, 20.0, 20.0), "指针画在 (x1, yy)");
+        assert!(at(161.0, 462.0, 30.0, 82.0), "G 谱号（原点 18,50）");
+        assert!(at(161.0, 563.0, 40.0, 44.0), "F 谱号（原点 8,13）");
+        assert!(at(243.0, 558.0, 49.0, 150.0), "音符（原点 30,74）");
+
+        let ls = lines(&out);
+        // 10 条五线谱横线跳过第 5 条：y = yy-250+16a，x 从 xx+32 到 xx+288。
+        for a in 0..11i32 {
+            let y = 464.0 + 16.0 * a as f32;
+            let hit = ls.iter().any(|(p, _)| {
+                (p[0].y - y).abs() < 0.6
+                    && (p[0].x - 153.0).abs() < 0.6
+                    && (p[1].x - 409.0).abs() < 0.6
+                    && (p[1].y - y).abs() < 0.6
+            });
+            assert_eq!(hit, a != 5, "五线谱横线 a={a} 应当{}", if a == 5 { "被跳过" } else { "存在" });
+        }
+        // 左括号两条实线：y 464..528 与 560..624（中缝留给中加线）。
+        for (y0, y1) in [(464.0, 528.0), (560.0, 624.0)] {
+            assert!(
+                ls.iter().any(|(p, _)| {
+                    (p[0].x - 153.0).abs() < 0.6
+                        && (p[0].y - y0).abs() < 0.6
+                        && (p[1].x - 153.0).abs() < 0.6
+                        && (p[1].y - y1).abs() < 0.6
+                }),
+                "左括号竖线 {y0}..{y1} 缺失"
+            );
+        }
+        // key = 12：没有中加线 / 上加线，只有 1 条下加线（y = 640，x 243..301）。
+        assert!(
+            ls.iter().any(|(p, _)| {
+                (p[0].y - 640.0).abs() < 0.6
+                    && (p[0].x - 243.0).abs() < 0.6
+                    && (p[1].x - 301.0).abs() < 0.6
+            }),
+            "下加线缺失"
+        );
+        assert!(
+            !ls.iter().any(|(p, _)| (p[0].y - 544.0).abs() < 0.6),
+            "第 5 条线必须空出来"
+        );
+    }
+
+    /// 首选项开关关闭时，五线谱一个形状都不该有（原版 show_notechart 门）。
+    #[test]
+    fn notechart_is_gated_by_the_flag() {
+        let ctx = egui::Context::default();
+        let mut state = piano_state();
+        assert!(!state.flags.show_notechart, "出厂默认应当是关");
+        run(&mut state, &ctx, input());
+        let mut hover = input();
+        hover.events.push(egui::Event::PointerMoved(egui::pos2(150.0, 800.0)));
+        let out = run(&mut state, &ctx, hover);
+        assert!(
+            !images(&out).iter().any(|r| (r.width() - 320.0).abs() < 0.6),
+            "开关关闭时不应出现五线谱面板"
         );
     }
 }

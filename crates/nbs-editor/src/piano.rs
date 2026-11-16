@@ -4,7 +4,7 @@
 //! （原版 `d` + `delay`）。`spr_piano` 资源缺失时整排不画 —— 原版没有「无贴图键盘」，
 //! 所以这里也不画一个假的出来。
 
-use egui::{pos2, Align2, Color32, FontId, Painter, Pos2, Rect, Sense, Ui, Vec2};
+use egui::{pos2, Align2, Color32, FontId, Painter, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use nbs_core::model::{key_name, KEY_MAX, MC_KEY_MAX, MC_KEY_MIN};
 
 use crate::commands::Command;
@@ -200,6 +200,7 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
         flats: state.flags.flats,
     };
     let inside = |r: Rect| pointer.map_or(false, |p| r.contains(p));
+    let show_chart = state.flags.show_notechart;
     // 键盘绑定当前按住的键（`collect_keybind_presses` 每帧刷新）。
     let keys_held = state.keys_held;
     let held = |k: u8| keys_held.get(k as usize).copied().unwrap_or(false);
@@ -227,17 +228,25 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
             let left = with_black && inside(hit(x + BLACK_HIT_X));
             let right_exists = a + 1 < keysshow && c != 1 && c != 4;
             let right = right_exists && inside(hit(x + RIGHT_BLACK_HIT_X));
-            let clickable = !left && !right;
+            let hovering = !left && !right && inside(white_hit);
             // 原版 `down = 0.75`：鼠标按住（key_click）或键盘绑定被按下（key_press）都算。
-            let down = if (clickable && inside(white_hit) && holding) || held(key) {
+            let down = if (hovering && holding) || held(key) {
                 PRESS_DOWN
             } else {
                 0.0
             };
+            // 原版在画这根键之前先画五线谱：门是 `c2 > 6 && c2 < 69 && playing = 0`
+            // （C/F 分支用 c1，值相同），键号参数是列号 `startkey + a`。没有播放器模式，
+            // `!isplayer` 恒真，C/F 分支少的那一个门可以合并。
+            if hovering && show_chart && !opts.playing && white > 6 && white < 69 {
+                if let Some(bank) = bank.as_deref() {
+                    draw_notechart(ui, bank, &th, rw, x + 18.0, y0, (startkey + a) as i32, false, opts.flats);
+                }
+            }
             if let Some(bank) = bank.as_deref() {
                 draw_white_key(bank, p, &th, &frames, pos2(x, y0 + down), key, alpha, &opts);
             }
-            if clickable && inside(white_hit) {
+            if hovering {
                 if a == 0 {
                     edge = -1;
                 }
@@ -254,6 +263,20 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
             let key = (white - 1) as u8;
             let black_hit = hit(x + BLACK_HIT_X);
             let down = if (inside(black_hit) && holding) || held(key) { PRESS_DOWN } else { 0.0 };
+            // 原版黑键五线谱：升号门 `c1 > 6 && c1 < 70`、降号门 `c1 > 5 && c1 < 69`，
+            // 键号参数升号写 `startkey + a - 1`、降号写 `startkey + a`（同为列号空间）。
+            if inside(black_hit) && show_chart && !opts.playing {
+                let (ok, chart_key) = if opts.flats {
+                    (key > 5 && key < 69, (startkey + a) as i32)
+                } else {
+                    (key > 6 && key < 70, (startkey + a) as i32 - 1)
+                };
+                if ok {
+                    if let Some(bank) = bank.as_deref() {
+                        draw_notechart(ui, bank, &th, rw, x, y0, chart_key, true, opts.flats);
+                    }
+                }
+            }
             // 原版：白键先画，黑键压在它上面。
             if let Some(bank) = bank.as_deref() {
                 draw_black_key(
@@ -440,6 +463,93 @@ fn draw_black_key(
     }
 }
 
+/// 原版 `draw_notechart(x1, yy, key, accidental)`：悬停琴键上的五线谱面板。
+/// 画在与琴键同层、剪辑区向上扩展的 painter 里：面板 / 指针 / 音符都在这根键的
+/// 精灵之前出队（原版同序），而整层钢琴晚于网格，所以面板叠在网格之上。
+/// 原版传入的 `key` 是列号 `startkey + a`（黑键升号再 -1），不是实际悬停键号，
+/// 音符位置因此与键名差 `sharpkeys + b` —— 原版如此，逐字复刻。
+fn draw_notechart(
+    ui: &Ui,
+    bank: &Bank,
+    th: &Theme,
+    rw: f32,
+    x1: f32,
+    y0: f32,
+    key: i32,
+    accidental: bool,
+    flats: bool,
+) {
+    let yy = y0 - 32.0;
+    let xx = chart_left(x1, rw);
+    // 剪辑区向上扩到最高键位（startkey + keysshow ≤ 51）的上加线 / 音符顶，
+    // 向下盖过白键命中区（越界部分会被之后画的琴键压住，与原版一致）。
+    let p = Painter::new(
+        ui.ctx().clone(),
+        ui.layer_id(),
+        Rect::from_min_max(pos2(0.0, y0 - 660.0), pos2(rw, y0 + WHITE_HIT_H)),
+    );
+    let right = x1 > rw - 250.0;
+    bank.notechart_panel(&p, pos2(xx, yy - 319.0), th.kind);
+    bank.notechart_pointer(&p, pos2(x1 - 16.0 * right as u8 as f32, yy), th.kind, right);
+
+    // 五线谱横线（跳过第 5 条给中加线留位）与左括号两条竖线。
+    let fade = Stroke::new(1.0_f32, Color32::from_black_alpha(64));
+    let solid = Stroke::new(1.0_f32, Color32::BLACK);
+    for a in 0..11i32 {
+        if a != 5 {
+            let y = yy - 250.0 + 16.0 * a as f32;
+            p.line_segment([pos2(xx + 32.0, y), pos2(xx + 288.0, y)], fade);
+        }
+    }
+    p.line_segment(
+        [pos2(xx + 32.0, yy - 250.0), pos2(xx + 32.0, yy - 250.0 + 64.0)],
+        solid,
+    );
+    p.line_segment(
+        [pos2(xx + 32.0, yy - 250.0 + 96.0), pos2(xx + 32.0, yy - 250.0 + 160.0)],
+        solid,
+    );
+    bank.gclef(&p, pos2(xx + 58.0, yy - 250.0 + 48.0));
+    bank.fclef(&p, pos2(xx + 48.0, yy - 250.0 + 112.0));
+    bank.note_accidental(
+        &p,
+        pos2(xx + 152.0, yy - 250.0 - 8.0 * (key - 33) as f32),
+        flats,
+        accidental,
+        key > 22,
+    );
+    // 中加线（键 23/24 一条）与上 / 下加线，都是 0.25 黑线。
+    if key > 22 && key < 25 {
+        let y = yy - 250.0 + 80.0;
+        p.line_segment([pos2(xx + 122.0, y), pos2(xx + 180.0, y)], fade);
+    }
+    for a in 1..upper_ledger_bound(key) {
+        let y = yy - 250.0 - 16.0 * a as f32;
+        p.line_segment([pos2(xx + 122.0, y), pos2(xx + 180.0, y)], fade);
+    }
+    for a in 0..lower_ledger_bound(key) {
+        let y = yy - 250.0 + 176.0 + 16.0 * a as f32;
+        p.line_segment([pos2(xx + 122.0, y), pos2(xx + 180.0, y)], fade);
+    }
+}
+
+/// 原版 `median(0, x1 - 32, rw - 320)`：三数取中，面板左缘。
+fn chart_left(x1: f32, rw: f32) -> f32 {
+    let mut v = [0.0, x1 - 32.0, rw - 320.0];
+    v.sort_by(|a, b| a.total_cmp(b));
+    v[1]
+}
+
+/// 原版上加线循环上界 `floor((key - 31) / 2)`（`for a = 1; a < bound`）。
+fn upper_ledger_bound(key: i32) -> i32 {
+    ((key - 31) as f32 / 2.0).floor() as i32
+}
+
+/// 原版下加线循环上界 `7 - ceil(key / 2)`（`for a = 0; a < bound`）。
+fn lower_ledger_bound(key: i32) -> i32 {
+    (7.0 - (key as f32 / 2.0).ceil()) as i32
+}
+
 /// 原版 `- 4 * showkeybind - 4 * (showkeybind && showclicks) - 6 * showclicks`。
 fn lift(keybind: bool, clicks: bool) -> f32 {
     4.0 * keybind as u8 as f32
@@ -486,5 +596,24 @@ mod tests {
         let fd = FrameMap::new(&dark);
         assert_eq!(fd.key(piano_frame::BLACK_BACK), 14);
         assert_eq!(fd.fade(piano_frame::BLACK_BACK_FADE), 11);
+    }
+
+    /// 原版 `median(0, x1 - 32, rw - 320)` 与上 / 下加线循环上界。
+    #[test]
+    fn notechart_geometry() {
+        assert_eq!(chart_left(500.0, 800.0), 468.0);
+        assert_eq!(chart_left(10.0, 800.0), 0.0);
+        assert_eq!(chart_left(2000.0, 800.0), 480.0);
+        // 上加线：key ≤ 34 循环空转，35 起每 2 个键多一条。
+        assert_eq!(upper_ledger_bound(33), 1);
+        assert_eq!(upper_ledger_bound(34), 1);
+        assert_eq!(upper_ledger_bound(35), 2);
+        assert_eq!(upper_ledger_bound(51), 10);
+        // 下加线：key ≥ 13 就没有；key 0 画满 7 条。
+        assert_eq!(lower_ledger_bound(0), 7);
+        assert_eq!(lower_ledger_bound(11), 1);
+        assert_eq!(lower_ledger_bound(12), 1);
+        assert_eq!(lower_ledger_bound(13), 0);
+        assert_eq!(lower_ledger_bound(33), -10);
     }
 }

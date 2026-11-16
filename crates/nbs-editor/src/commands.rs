@@ -837,6 +837,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 Flag::Flats => f.flats = !f.flats,
                 Flag::Blackout => f.blackout = !f.blackout,
                 Flag::RemoveEffect => f.remove_effect = !f.remove_effect,
+                Flag::ShowNoteChart => f.show_notechart = !f.show_notechart,
             }
         }
         Command::Transpose(semi) => state.doc.transpose(semi),

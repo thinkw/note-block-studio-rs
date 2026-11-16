@@ -250,6 +250,18 @@ pub struct Bank {
     marker: Strip,
     back: Strip,
     button_arrow: Strip,
+    /// 悬停琴键的五线谱（draw_notechart）拆成两条（整条 3840px 超出纹理上限）：
+    /// 面板 320x320、每主题 1 帧（原版帧号 0/3/6/9 = 3*theme）。
+    notechart: Strip,
+    /// 指针 20x20（原版 320 帧裁掉全透明边）、每主题 2 帧
+    /// （原版帧号 1/2 + 3*theme，导出后帧 = 2*主题序号 + 右缘）。
+    notechart_pointer: Strip,
+    /// G/F 谱号（各带原版原点，绘制封装里减掉）。
+    gclef: Strip,
+    fclef: Strip,
+    /// 升 / 降号音符（49x150、原点 (30,74)，帧 = accidental + 2 * (key > 22)）。
+    note_sharp: Strip,
+    note_flat: Strip,
 }
 
 /// 三态：0 常态、1 悬停、2 悬停且按住。
@@ -364,6 +376,12 @@ impl Bank {
             marker: strip("marker", 16, 15)?,
             back: strip("back", 16, 16)?,
             button_arrow: strip("button_arrow", 17, 18)?,
+            notechart: strip("notechart", 320, 320)?,
+            notechart_pointer: strip("notechart_pointer", 20, 20)?,
+            gclef: strip("gclef", 30, 82)?,
+            fclef: strip("fclef", 40, 44)?,
+            note_sharp: strip("note_sharp", 49, 150)?,
+            note_flat: strip("note_flat", 49, 150)?,
         })
     }
 
@@ -816,6 +834,53 @@ impl Bank {
         self.marker.blit(p, at, index, size, tint);
     }
 
+    /// 原版 `draw_sprite(spr_notechart, 0 + 3*theme, xx, yy-320+1)`：
+    /// 五线谱面板，原点 (0,0)，`at` 就是面板左上角；导出只留了 4 个面板帧，
+    /// 帧号 = 主题序号。
+    pub fn notechart_panel(&self, p: &egui::Painter, at: Pos2, kind: ThemeKind) {
+        self.notechart.draw(p, at, theme_index(kind), Color32::WHITE);
+    }
+
+    /// 原版 `draw_sprite(spr_notechart, 1 + (x1 > rw-250) + 3*theme, x1 - 16*(右缘), yy)`：
+    /// 指针帧裁成 20x20（内容贴左上角，画法不变），帧 = 2 * 主题序号 + 右缘。
+    pub fn notechart_pointer(&self, p: &egui::Painter, at: Pos2, kind: ThemeKind, right: bool) {
+        self.notechart_pointer
+            .draw(p, at, 2 * theme_index(kind) + right as usize, Color32::WHITE);
+    }
+
+    /// 原版 `draw_sprite(spr_Gclef, 0, xx+58, yy-250+48)`：原点 (18,50)。
+    pub fn gclef(&self, p: &egui::Painter, anchor: Pos2) {
+        self.gclef
+            .draw(p, pos2(anchor.x - 18.0, anchor.y - 50.0), 0, Color32::WHITE);
+    }
+
+    /// 原版 `draw_sprite(spr_Fclef, 0, xx+48, yy-250+112)`：原点 (8,13)。
+    pub fn fclef(&self, p: &egui::Painter, anchor: Pos2) {
+        self.fclef
+            .draw(p, pos2(anchor.x - 8.0, anchor.y - 13.0), 0, Color32::WHITE);
+    }
+
+    /// 原版 `draw_sprite(spr_note_sharp/flat, accidental + 2*(key>22), xx+152, yy-250-8*(key-33))`：
+    /// 原点 (30,74)。`flat_sprite` 按 keynames_flat 选 spr_note_flat / spr_note_sharp；
+    /// `accidental`（悬停黑键时为真）选变化音贴图帧；`upper` = `key > 22` 选上段音区帧。
+    pub fn note_accidental(
+        &self,
+        p: &egui::Painter,
+        anchor: Pos2,
+        flat_sprite: bool,
+        accidental: bool,
+        upper: bool,
+    ) {
+        let index = if accidental { 1 } else { 0 } + if upper { 2 } else { 0 };
+        let strip = if flat_sprite { &self.note_flat } else { &self.note_sharp };
+        strip.draw(
+            p,
+            pos2(anchor.x - 30.0, anchor.y - 74.0),
+            index,
+            Color32::WHITE,
+        );
+    }
+
     /// 方块精灵的原生边长（32）。
     pub fn block_size(&self) -> Vec2 {
         Vec2::new(self.block_color.fw, self.block_color.fh)
@@ -951,6 +1016,12 @@ mod tests {
             ("block", 1),
             ("block_sel", 1),
             ("instrumenticons", 21),
+            ("notechart", 4),
+            ("notechart_pointer", 8),
+            ("gclef", 2),
+            ("fclef", 1),
+            ("note_sharp", 4),
+            ("note_flat", 4),
         ] {
             let got = std::fs::read_dir(root.join(dir))
                 .unwrap_or_else(|e| panic!("{dir} 目录读不到：{e}"))

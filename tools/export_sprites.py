@@ -48,7 +48,22 @@ ALL_SPRITES = [
     # 标尺 BPM 盒的边框（2x2、每主题 8 帧，先角后边）。此前窗口边框一直用主题描边近似，
     # 这里是唯一像素级还原的地方，一并导出。
     "spr_interface1",
+    # 悬停琴键的五线谱（draw_notechart）：面板 320x320 每主题 3 帧（面板/指针/右缘指针），
+    # G/F 谱号与升/降号音符（49x150、原点 (30,74)，帧 = accidental + 2 * (key > 22)）。
+    "spr_notechart", "spr_Gclef", "spr_Fclef", "spr_note_sharp", "spr_note_flat",
 ]
+
+
+# 一个精灵拆到多个目录（见 export_split）。spr_notechart 12 帧合成一条是 3840px，
+# 超出 egui 默认纹理边长 2048：面板帧（0/3/6/9）整幅进 notechart/，
+# 指针帧（1/2/4/5/7/8/10/11）内容只在左上 17x15，裁成 20x20 进 notechart_pointer/，
+# 文件名沿用原帧号（排序即帧序），画出的像素不变。
+SPLITS = {
+    "spr_notechart": [
+        ("notechart", [0, 3, 6, 9], 320, 320),
+        ("notechart_pointer", [1, 2, 4, 5, 7, 8, 10, 11], 20, 20),
+    ],
+}
 
 
 # 精灵名 -> assets/icons/ 下的目录名。多数就是去掉 spr_ 前缀，
@@ -64,6 +79,8 @@ DIRS = {
     "spr_minecraft_f": "minecraft_fluent",
     "spr_stereo_f": "stereo_fluent",
     "spr_volume_f": "volume_fluent",
+    "spr_Gclef": "gclef",
+    "spr_Fclef": "fclef",
 }
 
 
@@ -202,8 +219,67 @@ def frame_png(src, name, fr):
     return p if os.path.exists(p) else None
 
 
+def frame_rgba(src, name, width, height, fr):
+    """一帧的整幅 RGBA 画布；旧布局（帧里带 images）自己按图层顺序叠加。"""
+    p = frame_png(src, name, fr)
+    if p is None:
+        layers = []
+        for im in reversed(fr["images"]):
+            q = os.path.join(src, "sprites", name, "layers", fr["name"],
+                             im["LayerId"]["name"] + ".png")
+            if os.path.exists(q):
+                lw, lh, buf = png_decode(q)
+                layers.append((0, 0, lw, lh, buf))
+        if not layers:
+            return width, height, bytearray(width * height * 4)
+        return width, height, composite(width, height, layers)
+    lw, lh, buf = png_decode(p)
+    assert (lw, lh) == (width, height), f"{name} 帧尺寸 {lw}x{lh}，精灵是 {width}x{height}"
+    return lw, lh, buf
+
+
+def export_split(name, src, frames, width, height, check):
+    """SPLITS 里的精灵：每个 (目录, 帧号, 裁剪宽, 裁剪高) 一组，文件名沿用原帧号。"""
+    ok = True
+    for (dst_name, indices, cw, ch) in SPLITS[name]:
+        dst = os.path.join(DST, dst_name)
+        if not check:
+            os.makedirs(dst, exist_ok=True)
+        stale = []
+        for i in indices:
+            fw, fh, rgba = frame_rgba(src, name, width, height, frames[i])
+            assert (cw, ch) <= (fw, fh), f"{name} 帧 {i} 裁剪 {cw}x{ch} 超出 {fw}x{fh}"
+            for y in range(ch):
+                row = rgba[y * fw * 4 + cw * 4:y * fw * 4 + fw * 4]
+                assert not any(row[o + 3] for o in range(0, len(row), 4)), \
+                    f"{name} 帧 {i} 裁剪框 ({cw}x{ch}) 右侧还有不透明像素"
+            for y in range(ch, fh):
+                assert not any(rgba[y * fw * 4 + o + 3] for o in range(0, fw * 4, 4)), \
+                    f"{name} 帧 {i} 裁剪框 ({cw}x{ch}) 下方还有不透明像素"
+            crop = bytearray(cw * ch * 4)
+            for y in range(ch):
+                crop[y * cw * 4:(y + 1) * cw * 4] = rgba[y * fw * 4:y * fw * 4 + cw * 4]
+            fn = os.path.join(dst, f"{i:02d}.png")
+            if check:
+                if not os.path.exists(fn):
+                    stale.append(i)
+                else:
+                    ow, oh, obuf = png_decode(fn)
+                    if (ow, oh) != (cw, ch) or bytes(obuf) != bytes(crop):
+                        stale.append(i)
+                continue
+            open(fn, "wb").write(png_encode(None, cw, ch, crop))
+        extra = len(os.listdir(dst)) - len(indices) if os.path.isdir(dst) else 0
+        bad = stale + (["多出 %d 帧" % extra] if extra > 0 else [])
+        print("%-24s %s" % ("%s[%s]" % (name, dst_name), "一致" if not bad else "需要重导：%s" % (bad,)))
+        ok = ok and not bad
+    return ok
+
+
 def export(name, src, check=False):
     yy = load_yy(os.path.join(src, "sprites", name, name + ".yy"))
+    if name in SPLITS:
+        return export_split(name, src, yy["frames"], yy["width"], yy["height"], check)
     width, height = yy["width"], yy["height"]
     frames = yy["frames"]
     dst = os.path.join(DST, DIRS.get(name, name.replace("spr_", "")))
@@ -211,22 +287,8 @@ def export(name, src, check=False):
         os.makedirs(dst, exist_ok=True)
     stale = []
     for i, fr in enumerate(frames):
-        p = frame_png(src, name, fr)
-        if p is None:
-            layers = []
-            for im in reversed(fr["images"]):
-                q = os.path.join(src, "sprites", name, "layers", fr["name"],
-                                 im["LayerId"]["name"] + ".png")
-                if os.path.exists(q):
-                    lw, lh, buf = png_decode(q)
-                    layers.append((0, 0, lw, lh, buf))
-            rgba = composite(width, height, layers) if layers else bytearray(width * height * 4)
-            out = png_encode(None, width, height, rgba)
-        else:
-            lw, lh, buf = png_decode(p)
-            assert (lw, lh) == (width, height), f"{name} 帧 {i} 尺寸 {lw}x{lh}，精灵是 {width}x{height}"
-            rgba = buf
-            out = png_encode(None, width, height, rgba)
+        fw, fh, rgba = frame_rgba(src, name, width, height, fr)
+        out = png_encode(None, fw, fh, rgba)
         fn = os.path.join(dst, f"{i:02d}.png")
         if check:
             # 只比像素：重新压缩出来的字节和已提交的文件未必逐字节相同，那不是版本差异。

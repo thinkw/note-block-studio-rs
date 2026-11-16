@@ -71,6 +71,8 @@ pub struct Preferences {
     /// `settings.ini [preferences] selection_alpha`）：浮动选区精灵的透明度，
     /// 首选项里按百分数拖拽（10%..80%）。
     pub selection_alpha: f32,
+    /// 原版 `show_notechart`（出厂 0，`control_create.gml:461`）：悬停琴键显示五线谱。
+    pub show_notechart: bool,
     /// 原版 `refreshrate`（出厂 0，`control_create.gml:130`）：帧数上限档位。
     pub refresh_rate: u8,
     /// 原版 `window_scale`：界面缩放倍率。`None` = 跟随系统 DPI，
@@ -150,6 +152,7 @@ impl Default for Preferences {
             blackout: false,
             remove_effect: true,
             selection_alpha: 0.8,
+            show_notechart: false,
             // 原版 `control_create.gml:130`：refreshrate = 0，即 30 帧。
             refresh_rate: 0,
             window_scale: None,
@@ -368,6 +371,7 @@ mod tests {
         assert_eq!(back.window_scale, Some(1.25));
         assert!(back.window_icon, "旧图标开关要落盘（原版 save_settings.gml:73）");
         assert!(back.remove_effect, "删除效果出厂打开（control_create.gml:225）");
+        assert!(!back.show_notechart, "五线谱出厂关闭（control_create.gml:461）");
         assert!(
             (back.selection_alpha - 0.8).abs() < 1e-6,
             "选区高亮强度出厂 0.8（control_create.gml:444）"
@@ -380,6 +384,7 @@ mod tests {
         assert!(!back.window_icon, "出厂用程序自带的图标");
         assert_eq!(back.accent, [0, 120, 212], "强调色基色出厂 0,120,212");
         assert!(back.remove_effect, "旧配置缺键时退回出厂打开");
+        assert!(!back.show_notechart, "旧配置缺键时五线谱退回关闭");
         assert!(
             (back.selection_alpha - 0.8).abs() < 1e-6,
             "旧配置缺键时选区强度退回 0.8"
@@ -387,9 +392,11 @@ mod tests {
         let mut p = Preferences::default();
         p.remove_effect = false;
         p.selection_alpha = 0.35;
+        p.show_notechart = true;
         let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert!(!back.remove_effect, "删除效果开关要落盘");
         assert!((back.selection_alpha - 0.35).abs() < 1e-6, "选区强度要落盘");
+        assert!(back.show_notechart, "五线谱开关要落盘");
         let mut p = Preferences::default();
         p.accent = [10, 20, 30];
         let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();

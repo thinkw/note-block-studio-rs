@@ -294,7 +294,7 @@ fn statistics(state: &mut EditorState, ui: &mut Ui) {
 ///
 /// 只画真实接线的行。原版有、我们还没有对应行为的选项（启动页 / 检查更新 / Discord
 /// 富在位 / 界面音效 / 透明效果 / 取色器 / 高分辨率纹理 / 语言 / 程序图标 /
-/// 五线谱 / 任务栏进度 / 重置键位 / 在区间起止播放）
+/// 任务栏进度 / 重置键位 / 在区间起止播放）
 /// 整行不出现，免得留下点了没反应的假控件。
 fn preferences(state: &mut EditorState, ui: &mut Ui) {
     let th = state.theme.clone();
@@ -557,8 +557,6 @@ fn prefs_interface(state: &mut EditorState, pg: &mut Page, menu_at: &mut Pos2, r
 }
 
 /// 原版页 2「外观」：音符盒与琴键。
-/// 源码里的「在琴键上时显示五线谱对应音符」(410) 我们还没有对应行为
-/// （要另做一份 notechart 渲染），整行不画。
 fn prefs_appearance(state: &mut EditorState, pg: &mut Page) {
     pg.header(22.0, 74.0, 456.0, 208.0, "音符盒");
     let blocks = [
@@ -607,6 +605,7 @@ fn prefs_appearance(state: &mut EditorState, pg: &mut Page) {
         (350.0, Flag::ShowKeyNames, "显示键名", "显示琴键所对应音的名称。"),
         (370.0, Flag::ShowKeyNumbers, "显示音符序号", "在 2 八度内的琴键上显示需要按右键次数。"),
         (390.0, Flag::ShowKeyboard, "显示键盘键位", "在琴键上显示绑定的键盘键位。"),
+        (410.0, Flag::ShowNoteChart, "在琴键上时显示五线谱对应音符", "在鼠标停留在琴键上时是否显示五线谱。"),
         (430.0, Flag::ShowOutOfRange, "标记超范围琴键", "是否为在 2 八度之外的琴键上标红。"),
         (450.0, Flag::Flats, "使用降记号", "是否为键名使用降记号（b）而不是升记号（#）。"),
     ];

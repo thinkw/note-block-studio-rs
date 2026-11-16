@@ -59,6 +59,7 @@ pub enum Flag {
     Flats,
     Blackout,
     RemoveEffect,
+    ShowNoteChart,
 }
 
 impl Flag {
@@ -83,6 +84,7 @@ impl Flag {
             Self::Flats => "使用降记号",
             Self::Blackout => "全黑模式",
             Self::RemoveEffect => "显示删除效果",
+            Self::ShowNoteChart => "在琴键上时显示五线谱对应音符",
         }
     }
     pub fn get(self, f: &UiFlags) -> bool {
@@ -104,6 +106,7 @@ impl Flag {
             Self::Flats => f.flats,
             Self::Blackout => f.blackout,
             Self::RemoveEffect => f.remove_effect,
+            Self::ShowNoteChart => f.show_notechart,
         }
     }
 }
@@ -133,6 +136,9 @@ pub struct UiFlags {
     /// 原版 `remove_effect`（`control_create.gml:225` 出厂 = 1）：
     /// 删除音符时在格子上画一个淡出扩大的圆角边框（theme 3 才生效）。
     pub remove_effect: bool,
+    /// 原版 `show_notechart`（`control_create.gml:461` 出厂 = 0）：
+    /// 悬停琴键时在其上方画五线谱面板（draw_notechart）。
+    pub show_notechart: bool,
 }
 
 impl Default for UiFlags {
@@ -159,6 +165,7 @@ impl Default for UiFlags {
             flats: false,
             blackout: false,
             remove_effect: true,
+            show_notechart: false,
         }
     }
 }
@@ -847,6 +854,7 @@ impl EditorState {
         flags.flats = prefs.flats;
         flags.blackout = prefs.blackout;
         flags.remove_effect = prefs.remove_effect;
+        flags.show_notechart = prefs.show_notechart;
 
         let viewport = Viewport::default();
         let recent_files = prefs.recent_files.iter().map(PathBuf::from).collect();
@@ -1387,6 +1395,7 @@ impl EditorState {
         self.prefs.flats = self.flags.flats;
         self.prefs.blackout = self.flags.blackout;
         self.prefs.remove_effect = self.flags.remove_effect;
+        self.prefs.show_notechart = self.flags.show_notechart;
         // 原版把整份 sch_exp_* 无条件写进 settings.ini，「记住我的更改」并不门控它。
         self.prefs.schematic = self.schematic_options.clone();
         // MIDI 导入同理：`import_midi()` 结尾的 `save_settings()` 每次都把
