@@ -36,17 +36,42 @@ pub use state::{EditorState, EditMode, Flag, UiFlags, WindowKind};
 pub use theme::{Theme, ThemeKind};
 pub use viewport::Viewport;
 
+/// 本构建的版本号（欢迎窗「版本 x.y.z - 发布于 …」行 + 更新检查的被比较方）。
+/// 发布时随 Cargo.toml 一起改；上次运行版本存在 prefs.last_version 里，
+/// 不同则开机走「更新成功」流程（原版 control_create.gml:747-753）。
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// 发布日期，原版 `version_date`（macros.gml）。欢迎窗里以「版本 … - 发布于 …」显示。
+pub const VERSION_DATE: &str = "2026-11-16";
+/// 更新检查的对象是本仓库的 releases 页。原版查 OpenNBS 官方源
+/// （link_releases / link_latest，macros.gml:11-12）；我们是独立重写版，
+/// 不能把用户引去官方安装包——已记录的偏差。API 地址在 nbs-app 的 update 模块。
+pub const RELEASES_PAGE: &str = "https://github.com/thinkw/note-block-studio-rs/releases";
+
+/// 欢迎窗的链接组（macros.gml:9-20）。这些是 OpenNBS 社区的入口，重写版照原样
+/// 指向官方页面；只有更新检查指向本仓库（见 RELEASES_PAGE 的偏差说明）。
+pub const LINK_WEBSITE: &str = "https://opennbs.org/";
+pub const LINK_DONATE: &str = "https://opencollective.com/OpenNBS/donate";
+pub const LINK_DISCORD: &str = "https://discord.gg/sKPGjyVcyy";
+pub const LINK_TWITTER: &str = "https://twitter.com/OpenNBS";
+pub const LINK_YOUTUBE: &str = "https://youtube.com/@OpenNBS";
+pub const LINK_GITHUB: &str = "https://github.com/OpenNBS/OpenNoteBlockStudio";
+pub const LINK_QQ_GROUP: &str = "http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=9iT2JIMOPWcrhzVpOROtlv7PJ1jSGEu0&authKey=VmmwRR7507A9fEVxraPmXn224vhbHXc4xs4QmwkveFZBriU%2Fq2NCj9fbYE5QCaLJ&noverify=0&group_code=218993157";
+
+/// 出厂值断言 / 不该写用户配置的测试都用它：指向一个空的配置目录，
+/// 调试界实时改过缩放 / 音量、或测试期间真的落盘过偏好，单测都会莫名其妙变红。
+/// 目录里旧一轮跑剩的 prefs.json 也要清掉，否则上次测试写下的开关值
+/// 会污染这一轮的「出厂值」断言。
+#[cfg(test)]
+pub(crate) fn isolate_prefs() {
+    let dir = std::env::temp_dir().join("nbs-rust-test-prefs");
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::remove_file(dir.join("prefs.json"));
+    std::env::set_var("NBS_RUST_CONFIG_DIR", &dir);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 这条断言检查的是出厂值，不能读到人手上那份 `prefs.json`：
-    /// 调试界实时改过缩放 / 音量，单测就会莫名其妙变红。指向一个空的配置目录。
-    fn isolate_prefs() {
-        let dir = std::env::temp_dir().join("nbs-rust-test-prefs");
-        let _ = std::fs::create_dir_all(&dir);
-        std::env::set_var("NBS_RUST_CONFIG_DIR", &dir);
-    }
 
     #[test]
     fn editor_state_defaults() {
@@ -121,6 +146,59 @@ mod tests {
         assert!(t1 - t0 < 100, "可见区间不得随歌曲长度增长");
         // 只查询可见区，不能把 2000 个音符全捞出来
         assert!(s.doc.song.notes_in_view(t0, t1, 0, 20).len() < 100);
+    }
+
+    /// 原版 control_create.gml 结尾的开机流程：出厂状态横幅亮 + 欢迎窗开。
+    #[test]
+    fn enter_startup_factory_defaults_show_greeting_and_banner() {
+        isolate_prefs();
+        let s = EditorState::new();
+        // donate_banner_time 出厂 0（= 原版 −1），now > 0 → 横幅亮
+        assert!(s.donate_banner, "出厂应亮捐赠横幅");
+        assert_eq!(s.window, Some(WindowKind::Greeting), "show_welcome 出厂为真");
+        assert!(!s.update_success, "首次运行不算「更新成功」");
+    }
+
+    /// :747-753 的版本变化分支：上次版本与本版不同 → update_success + 强制横幅。
+    #[test]
+    fn enter_startup_flags_update_success_on_version_change() {
+        isolate_prefs();
+        let mut s = EditorState::new();
+        s.prefs.last_version = Some("0.0.1".into());
+        s.prefs.show_welcome = false;
+        // 模拟全新一次开机：原版 create 时 window 还没有任何值。
+        s.window = None;
+        s.enter_startup();
+        assert!(s.update_success, "版本变了要亮「更新成功！」");
+        assert!(s.donate_banner, "版本变化强制亮横幅");
+        assert_eq!(s.window, None, "show_welcome 关着就不开欢迎窗");
+        // 同版本再启动（退出时 save_prefs 已把 last_version 写成本版）→ 不算更新成功
+        s.prefs.last_version = Some(crate::VERSION.to_string());
+        s.update_success = false;
+        s.window = None;
+        s.enter_startup();
+        assert!(!s.update_success);
+    }
+
+    /// check_updates.gml 回调的 UI 侧：后台写 1 → 弹一次问句；不重复弹；其他状态不弹。
+    #[test]
+    fn poll_update_check_asks_once_per_new_version() {
+        isolate_prefs();
+        let mut s = EditorState::new();
+        s.poll_update_check();
+        assert!(s.modals.is_empty(), "检查中不应弹窗");
+        s.update_check.lock().unwrap().status = 1;
+        s.update_check.lock().unwrap().new_version = "9.9.9".into();
+        s.poll_update_check();
+        assert_eq!(s.modals.items.len(), 1, "有新版本要弹一次问句");
+        assert!(s.modals.items.front().unwrap().text.contains("9.9.9"));
+        assert!(s.update_question, "问过一次后不再重复弹");
+        let n1 = s.modals.items.len();
+        s.poll_update_check();
+        assert_eq!(s.modals.items.len(), n1, "同一版本不重复弹");
+        s.update_check.lock().unwrap().status = 2;
+        s.poll_update_check();
+        assert_eq!(s.modals.items.len(), n1, "已最新不弹窗");
     }
 }
 
@@ -240,6 +318,8 @@ mod gui_window_tests {
     fn ctrl_p_opens_preferences_and_stays_open() {
         let ctx = egui::Context::default();
         let mut state = EditorState::new();
+        // 开机流程会开欢迎窗（窗口开着快捷键全被门槛拦掉）；Ctrl+P 的靶子是裸编辑器。
+        state.window = None;
         let ctrl = egui::Modifiers { ctrl: true, ..Default::default() };
         let tap = |events: Vec<egui::Event>| egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -791,6 +871,107 @@ mod gui_window_tests {
             "底部说明要跟着 v6 的边界走"
         );
     }
+
+    /// 欢迎窗真的按原版 700×430 布局渲染：文案齐全，点「创建歌曲」真的关窗。
+    /// 出厂 show_welcome=true 时欢迎窗就是开机默认窗，这里显式打开避免读到人手 prefs。
+    #[test]
+    fn greeting_window_renders_and_create_button_closes_it() {
+        isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        state.window = Some(WindowKind::Greeting);
+        frame(&mut state, &ctx);
+        let out = frame_out(&mut state, &ctx, base_input());
+        let texts: Vec<&str> = out
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text()),
+                _ => None,
+            })
+            .collect();
+        for t in [
+            "Note Block Studio",
+            "要做什么？",
+            "创建歌曲",
+            "打开歌曲",
+            "从 MIDI 文件生成",
+            "浏览社区制作的歌曲",
+            "NEW!",
+            "关注 OpenNBS：",
+            "Discord",
+            "Twitter",
+            "YouTube",
+            "GitHub",
+            "QQ 群",
+            "捐赠",
+            "noteblock.studio",
+            "一个开源的 Minecraft 音乐制作软件",
+            "版本 0.1.0 - 发布于 2026-11-16",
+        ] {
+            assert!(texts.iter().any(|s| *s == t), "欢迎窗缺少「{t}」，当前文本：{}", texts.join(" | "));
+        }
+        // 更新状态行：出厂 check_update=true、还没查完 → 正在检查更新……
+        assert!(texts.iter().any(|s| *s == "正在检查更新……"), "更新状态行缺失");
+        // 真点「创建歌曲」→ 关窗（原版 windowclose=1）。
+        click_text(&mut state, &ctx, "创建歌曲");
+        assert_eq!(state.window, None, "创建歌曲应当关掉欢迎窗");
+    }
+
+    /// 欢迎窗最近歌曲点开一个不存在的文件：弹「找不到文件」并把同路径条目清掉
+    /// （draw_window_greeting.gml:219-231）。
+    #[test]
+    fn greeting_missing_recent_reports_and_clears_entries() {
+        isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        state.window = Some(WindowKind::Greeting);
+        let missing = PathBuf::from("Z:/definitely-not-here/ghost song.nbs");
+        state.add_recent(missing.clone());
+        state.add_recent(missing.clone()); // 重复条目也要一起清掉
+        frame(&mut state, &ctx);
+        click_text(&mut state, &ctx, "ghost song.nbs");
+        assert_eq!(state.modals.items.len(), 1, "要弹错误框");
+        assert_eq!(state.modals.items[0].title, "错误");
+        assert!(state.modals.items[0].text.contains("找不到文件"));
+        assert!(
+            state.recent_files.iter().all(|r| r.path != missing),
+            "同路径条目（含重复）要整串移走"
+        );
+    }
+
+    /// 首选项「启动」组三行真实渲染 + 开发版本警告问句。
+    #[test]
+    fn preferences_startup_group_renders_and_warns_on_prerelease() {
+        isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        state.window = Some(WindowKind::Preferences);
+        frame(&mut state, &ctx);
+        let out = frame_out(&mut state, &ctx, base_input());
+        let texts: Vec<String> = out
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        for t in ["启动", "显示欢迎界面", "检查更新", "检查开发版本"] {
+            assert!(texts.iter().any(|s| s == t), "启动组缺少「{t}」，当前文本：{}", texts.join(" | "));
+        }
+        // 出厂 check_update=true：勾「检查开发版本」先弹原版警告问句，答「是」才真正打开。
+        assert!(!state.prefs.check_prerelease);
+        click_text(&mut state, &ctx, "检查开发版本");
+        assert_eq!(state.modals.items.len(), 1, "开启开发版检查要先弹警告");
+        assert!(state.modals.items[0].yes_no);
+        assert!(!state.prefs.check_prerelease, "答之前不能先改值");
+        click_text(&mut state, &ctx, "是");
+        assert!(state.prefs.check_prerelease, "答「是」要真的打开");
+    }
 }
 
 #[cfg(test)]
@@ -861,6 +1042,9 @@ mod gui_piano_tests {
         state.flags.show_piano = true;
         state.flags.show_keyboard = true;
         state.prefs.keys_to_show = 30;
+        // 开机流程会开欢迎窗；钢琴测试断言整帧的形状/贴图，欢迎窗和它最近的
+        // 歌曲行（frame5 是 320×16 贴图）会混进来，靶子必须是裸编辑器。
+        state.window = None;
         state
     }
 

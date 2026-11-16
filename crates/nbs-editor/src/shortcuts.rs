@@ -336,9 +336,17 @@ mod tests {
         matches!(c, Command::ShowWindow(WindowKind::Preferences))
     }
 
+    /// 出厂开机流程会打开欢迎窗，而窗口开着快捷键全被门槛拦掉；
+    /// 快捷键测试的靶子是裸编辑器，这里把欢迎窗关掉。
+    fn fresh_state() -> EditorState {
+        let mut s = EditorState::new();
+        s.window = None;
+        s
+    }
+
     fn cmds(events: Vec<Event>) -> Vec<Command> {
         let ctx = Context::default();
-        let state = EditorState::new();
+        let state = fresh_state();
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -406,7 +414,7 @@ mod tests {
     #[test]
     fn ctrl_shift_macro_keys_require_a_selection() {
         let both = egui::Modifiers { ctrl: true, shift: true, ..Default::default() };
-        let empty = EditorState::new();
+        let empty = fresh_state();
         let got = cmds_with(
             vec![
                 key(Key::R, true, both),
@@ -438,7 +446,7 @@ mod tests {
         );
 
         // 框一个有音符的矩形后，同一批按键全部放行。
-        let mut sel = EditorState::new();
+        let mut sel = fresh_state();
         sel.doc.place_note(0, 0, nbs_core::model::Note::new(0, 45));
         sel.doc.place_note(1, 0, nbs_core::model::Note::new(0, 47));
         sel.doc.select_rect(0, 0, 1, 0, false, false, false);
@@ -495,7 +503,7 @@ mod tests {
             "Fluent（出厂主题）下应触发: {got:?}"
         );
 
-        let mut state = EditorState::new();
+        let mut state = fresh_state();
         state.theme = crate::theme::Theme::new(crate::theme::ThemeKind::Dark);
         let got = cmds_with(vec![key(Key::F5, true, both)], &state);
         assert!(

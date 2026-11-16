@@ -107,7 +107,99 @@ pub struct Preferences {
     pub midi_import: Option<crate::midi::MidiImportPrefs>,
     /// 原版 `[warnings] schematics`：经典格式只兼容 1.12 以下的一次性警告是否已看过。
     pub warning_schematic: bool,
-    pub recent_files: Vec<String>,
+    /// 原版 `show_welcome`（出厂 1，`control_create.gml:175`）：开机显示欢迎窗。
+    pub show_welcome: bool,
+    /// 原版 `check_update`（Windows 直装出厂 1，`control_create.gml:172`）：开机检查更新。
+    pub check_update: bool,
+    /// 原版 `check_prerelease`（出厂 = is_prerelease，`control_create.gml:173`）：
+    /// 除稳定版之外也检查开发版。我们的构建按稳定版算，出厂关。
+    pub check_prerelease: bool,
+    /// 原版 `[warnings] donate_banner_time`（出厂 −1，`control_create.gml:113`）：
+    /// 捐赠横幅的静音到期日（unix 秒）。0 = 没静音过；当前日期晚于它才重新显示
+    /// （`control_create.gml:728-733` 的 `date_compare_date(now, time) > 0`）。
+    pub donate_banner_time: i64,
+    /// 原版 `[preferences] last_version`（`save_settings.gml:8-9` 同段）：
+    /// 上次运行时的版本号。与当前版本不同 → 开机走「更新成功」流程
+    /// （`control_create.gml:747-753`），欢迎窗显示「更新成功！」并重新亮出捐赠横幅。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_version: Option<String>,
+    /// 原版 `[recent]` 段的 11 条最近歌曲（`recent_song_N_path` / `recent_song_N_time`）。
+    #[serde(default, deserialize_with = "recent_files_deser")]
+    pub recent_files: Vec<RecentFile>,
+}
+
+/// 最近歌曲一条：路径 + 上次打开的时间（unix 秒，原版 `date_current_datetime()`）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecentFile {
+    pub path: String,
+    pub time: i64,
+}
+
+/// 旧配置里 `recent_files` 是 `Vec<String>`（没时间戳）：照读，时间记 0
+/// （欢迎窗会显示「0 秒前」，和原版 ini 读旧档的行为同级）。
+fn recent_files_deser<'de, D>(d: D) -> Result<Vec<RecentFile>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Paths(Vec<String>),
+        Entries(Vec<RecentFile>),
+    }
+    Ok(match Raw::deserialize(d)? {
+        Raw::Paths(v) => v.into_iter().map(|path| RecentFile { path, time: 0 }).collect(),
+        Raw::Entries(v) => v,
+    })
+}
+
+/// 当前时间的 unix 秒。原版的 `date_current_datetime()` 是天数浮点，我们统一用秒。
+pub fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// 原版 `date_inc_month(now, 1)`：同一天下个月的今天，时间部分保持不变；
+/// 目标月没有这一天时截到月末（1-31 → 2-28/29）。
+pub fn inc_month(unix: i64) -> i64 {
+    let days = unix.div_euclid(86400);
+    let secs = unix.rem_euclid(86400);
+    // 天序号 → 公历年月日（Howard Hinnant 的 civil_from_days）。
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    let (ny, nm) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+    let d = d.min(month_len(ny, nm));
+    // 公历年月日 → 天序号（civil_from_days 的逆）。
+    let yy = if nm <= 2 { ny - 1 } else { ny };
+    let era = yy.div_euclid(400);
+    let yoe = yy - era * 400;
+    let doy = (153 * (if nm > 2 { nm - 3 } else { nm + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era * 146097 + doe - 719468) * 86400 + secs
+}
+
+fn month_len(y: i64, m: i64) -> i64 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ => {
+            if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+                29
+            } else {
+                28
+            }
+        }
+    }
 }
 
 impl Default for Preferences {
@@ -172,6 +264,14 @@ impl Default for Preferences {
             midi_gm: None,
             midi_import: None,
             warning_schematic: false,
+            // 原版 `control_create.gml:172-175`：check_update = 1（Windows）、
+            // check_prerelease = is_prerelease（我们的构建按稳定版算 = 0）、
+            // show_welcome = 1；donate_banner = 1、donate_banner_time = −1（:112-113）。
+            show_welcome: true,
+            check_update: true,
+            check_prerelease: false,
+            donate_banner_time: 0,
+            last_version: None,
             recent_files: Vec::new(),
         }
     }
@@ -253,10 +353,11 @@ impl Preferences {
             .map_err(|e| format!("替换配置失败: {e}"))
     }
 
+    /// 原版 `add_to_recent.gml`：去重挪到最前，时间戳记打开时刻，11 条封顶。
     pub fn add_recent(&mut self, path: &Path) {
         let s = path.to_string_lossy().into_owned();
-        self.recent_files.retain(|p| p != &s);
-        self.recent_files.insert(0, s);
+        self.recent_files.retain(|p| p.path != s);
+        self.recent_files.insert(0, RecentFile { path: s, time: unix_now() });
         self.recent_files.truncate(11);
     }
 
@@ -361,12 +462,22 @@ mod tests {
         p.refresh_rate = 3;
         p.window_scale = Some(1.25);
         p.window_icon = true;
-        p.recent_files.push("C:/songs/demo.nbs".into());
+        p.show_welcome = false;
+        p.check_update = false;
+        p.check_prerelease = true;
+        p.donate_banner_time = 1760000000;
+        p.last_version = Some("0.1.0".into());
+        p.recent_files.push(crate::prefs::RecentFile {
+            path: "C:/songs/demo.nbs".into(),
+            time: 1760000001,
+        });
         let s = serde_json::to_string(&p).unwrap();
         let back: Preferences = serde_json::from_str(&s).unwrap();
         assert_eq!(back.theme, 2);
         assert!((back.master_volume - 0.42).abs() < 1e-6);
         assert_eq!(back.recent_files.len(), 1);
+        assert_eq!(back.recent_files[0].path, "C:/songs/demo.nbs");
+        assert_eq!(back.recent_files[0].time, 1760000001);
         assert_eq!(back.refresh_rate, 3);
         assert_eq!(back.window_scale, Some(1.25));
         assert!(back.window_icon, "旧图标开关要落盘（原版 save_settings.gml:73）");
@@ -376,6 +487,11 @@ mod tests {
             (back.selection_alpha - 0.8).abs() < 1e-6,
             "选区高亮强度出厂 0.8（control_create.gml:444）"
         );
+        assert!(!back.show_welcome, "欢迎窗开关要落盘");
+        assert!(!back.check_update, "检查更新开关要落盘");
+        assert!(back.check_prerelease, "开发版检查要落盘");
+        assert_eq!(back.donate_banner_time, 1760000000, "横幅静音到期日要落盘");
+        assert_eq!(back.last_version.as_deref(), Some("0.1.0"), "上次版本号要落盘");
         // 旧配置文件里没有这几项时必须退回默认值，不能整个文件读不出来。
         let old = r#"{"version":1,"theme":3}"#;
         let back: Preferences = serde_json::from_str(old).unwrap();
@@ -389,6 +505,19 @@ mod tests {
             (back.selection_alpha - 0.8).abs() < 1e-6,
             "旧配置缺键时选区强度退回 0.8"
         );
+        // 启动组出厂值（control_create.gml:172-175）。
+        let fresh = Preferences::default();
+        assert!(fresh.show_welcome, "出厂显示欢迎窗");
+        assert!(fresh.check_update, "Windows 直装出厂检查更新");
+        assert!(!fresh.check_prerelease, "稳定版出厂不查开发版");
+        assert_eq!(fresh.donate_banner_time, 0, "出厂没静音过横幅（原版 −1）");
+        assert_eq!(fresh.last_version, None);
+        // 旧格式的 recent_files（纯字符串数组）也要能读回来，时间记 0。
+        let legacy = r#"{"recent_files":["C:/a.nbs","C:/b.nbs"]}"#;
+        let back: Preferences = serde_json::from_str(legacy).unwrap();
+        assert_eq!(back.recent_files.len(), 2);
+        assert_eq!(back.recent_files[0].path, "C:/a.nbs");
+        assert_eq!(back.recent_files[0].time, 0, "旧格式没有时间戳");
         let mut p = Preferences::default();
         p.remove_effect = false;
         p.selection_alpha = 0.35;
@@ -464,7 +593,31 @@ mod tests {
         p.add_recent(Path::new("b.nbs"));
         p.add_recent(Path::new("a.nbs"));
         assert_eq!(p.recent_files.len(), 2);
-        assert_eq!(p.recent_files[0], "a.nbs");
+        assert_eq!(p.recent_files[0].path, "a.nbs", "重复打开要挪到最前");
+        assert!(p.recent_files[0].time > 0, "时间戳记打开时刻（原版 add_to_recent.gml:18）");
+        assert!(p.recent_files[0].time >= p.recent_files[1].time);
+    }
+
+    /// 原版 `date_inc_month(now, 1)`：同日下月，月末截断，闰年单独看 2 月。
+    #[test]
+    fn inc_month_clamps_to_month_end() {
+        /// 当月第 d 天 01:00:00Z 的 unix 秒（2024 闰年 / 2025、2026 平年）。
+        let day = |days_since_epoch: i64| days_since_epoch * 86400 + 3600;
+        let (d2026_01_01, d2024_01_01) = (20454, 19723);
+        // 1-15 → 2-15。
+        assert_eq!(
+            inc_month(day(d2026_01_01 + 14)) / 86400,
+            d2026_01_01 + 31 + 14,
+            "2026-01-15 → 2026-02-15"
+        );
+        // 月末截断：2026-01-31 → 2026-02-28；2024-01-31 → 2024-02-29（闰年）。
+        assert_eq!(inc_month(day(d2026_01_01 + 30)) / 86400, d2026_01_01 + 31 + 27);
+        assert_eq!(inc_month(day(d2024_01_01 + 30)) / 86400, d2024_01_01 + 31 + 28);
+        // 12 月滚下一年；时间部分（这里 1 小时）保持。
+        let dec = 1767193261i64; // 2025-12-31T15:01:01Z
+        let next = inc_month(dec);
+        assert_eq!(next / 86400, 20484, "2025-12-31 → 2026-01-31");
+        assert_eq!(next.rem_euclid(86400), dec.rem_euclid(86400), "时间部分不变");
     }
 
     /// 原版 `load_song.gml:11` / `save_song.gml:13`：没配过就用出厂目录，

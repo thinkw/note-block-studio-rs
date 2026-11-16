@@ -37,6 +37,8 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
     // 独立播放时钟（不绑 UI 帧率）+ 快捷键 + 偏好定时持久化
     state.tick_transport(ctx);
     state.maybe_save_prefs();
+    // 原版 create 事件发起 HTTP 请求，Draw 事件里轮询结果更新欢迎窗的状态行。
+    state.poll_update_check();
     for cmd in collect_shortcuts(state, ctx) {
         state.emit(cmd);
     }

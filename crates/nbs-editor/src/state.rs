@@ -11,7 +11,7 @@ use nbs_core::{Document, Macro, TremoloFade};
 use nbs_io::datapack::DatapackOptions;
 use nbs_io::image_export::ImageOptions;
 use nbs_io::midi::MidiImportOptions;
-use nbs_io::prefs::Preferences;
+use nbs_io::prefs::{Preferences, RecentFile};
 use nbs_io::schematic::SchematicOptions;
 
 use crate::commands::Command;
@@ -223,6 +223,9 @@ pub enum WindowKind {
     EditTempoChanger(u32, u32),
     /// 原版 `w_edit_sound_stopper`：落消音器时弹出，参数同上。
     EditSoundStopper(u32, u32),
+    /// 原版 `w_greeting`（`macros.gml:105`）：开机欢迎窗（`show_welcome` 时打开）。
+    /// 原版 `draw_window` 没有标题文字，这里也画成无标题栏的 700x430 窗。
+    Greeting,
 }
 
 impl WindowKind {
@@ -261,6 +264,8 @@ impl WindowKind {
             // 原版两个编辑窗在标题带写的文字（语言 1 = 中文分支）。
             Self::EditTempoChanger(..) => "设置速度",
             Self::EditSoundStopper(..) => "设置抑制范围",
+            // 原版欢迎窗没有标题文字（draw_window 只画边框），这里仅供窗口 id 用。
+            Self::Greeting => "Note Block Studio",
         }
     }
 }
@@ -294,6 +299,25 @@ pub struct ModalQueue {
     pub items: std::collections::VecDeque<Modal>,
     pub then: Option<Command>,
 }
+
+/// 最近歌曲一条（原版 `recent_song[a]` + `recent_song_time[a]`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecentPath {
+    pub path: PathBuf,
+    /// 上次打开时间的 unix 秒（原版 `date_current_datetime()`），欢迎窗显示相对时间。
+    pub time: i64,
+}
+
+/// 开机更新检查的共享结果：后台线程写，UI 线程读。`status` 语义同原版
+/// 全局变量 `update`（check_updates.gml）：-1 检查失败 / 0 检查中 / 1 有新版本 / 2 已是最新。
+#[derive(Clone, Debug, Default)]
+pub struct UpdateCheck {
+    pub status: i8,
+    /// `status == 1` 时的远端版本号（原版 `new_version`，用于询问框文案）。
+    pub new_version: String,
+}
+
+pub type SharedUpdateCheck = std::sync::Arc<std::sync::Mutex<UpdateCheck>>;
 
 impl ModalQueue {
     pub fn is_empty(&self) -> bool {
@@ -692,7 +716,17 @@ pub struct EditorState {
     /// 等着被原生选择器处理的请求。在帧外（`raw_input_hook`）取走，避免在 egui 帧内
     /// 起一个会泵消息的模态框。
     pub pending_dialog: Option<FileDialog>,
-    pub recent_files: Vec<PathBuf>,
+    /// 原版 `recent_song[0..10]`（路径 + 打开时间）。
+    pub recent_files: Vec<RecentPath>,
+    /// 开机更新检查的共享结果。没开「检查更新」时状态一直是 0（原版 `update_http = -1`）。
+    pub update_check: SharedUpdateCheck,
+    /// 原版在 check_updates 的回调里 `question(下载？)` 只问一次：这里就是那道闸。
+    pub update_question: bool,
+    /// 原版 `update_success`（`control_create.gml:747-753`）：上次运行版本和当前不同时
+    /// 置 1，欢迎窗显示「更新成功！」并重新亮出捐赠横幅。
+    pub update_success: bool,
+    /// 原版 `donate_banner`：捐赠横幅是否显示（跟着欢迎窗走）。
+    pub donate_banner: bool,
     pub editing_layer_name: Option<(u32, String)>,
     /// 事件乐器编辑窗的输入草稿（见 [`EventEditDraft`]），开窗时由落格逻辑回填。
     pub event_edit: EventEditDraft,
@@ -857,7 +891,11 @@ impl EditorState {
         flags.show_notechart = prefs.show_notechart;
 
         let viewport = Viewport::default();
-        let recent_files = prefs.recent_files.iter().map(PathBuf::from).collect();
+        let recent_files = prefs
+            .recent_files
+            .iter()
+            .map(|r| RecentPath { path: PathBuf::from(&r.path), time: r.time })
+            .collect();
         let follow_marker = prefs.follow_marker;
         let follow_mode = prefs.follow_mode;
         let png_dark = theme.kind.is_dark();
@@ -876,7 +914,7 @@ impl EditorState {
             .map(nbs_io::MidiGmTable::from_persist)
             .unwrap_or_default();
 
-        Self {
+        let mut state = Self {
             doc: Document::with_song(song),
             viewport,
             interaction: Interaction::default(),
@@ -900,6 +938,10 @@ impl EditorState {
             picker: None,
             pending_dialog: None,
             recent_files,
+            update_check: std::sync::Arc::new(std::sync::Mutex::new(UpdateCheck::default())),
+            update_question: false,
+            update_success: false,
+            donate_banner: false,
             editing_layer_name: None,
             event_edit: EventEditDraft::default(),
             layer_drag: None,
@@ -953,6 +995,48 @@ impl EditorState {
             rainbow: false,
             rainbow_hue: 0.0,
             background_accent: false,
+        };
+        state.enter_startup();
+        state
+    }
+
+    /// 原版 `control_create.gml` 结尾的开机流程：捐赠横幅按静音到期日重新亮出、
+    /// 版本变化走「更新成功」、`show_welcome` 时打开欢迎窗。
+    pub fn enter_startup(&mut self) {
+        // `date_compare_date(date_current_datetime(), donate_banner_time) > 0`（:728-733）：
+        // 当前日期晚于静音到期日才显示。donate_banner_time = 0 等价原版出厂的 −1（没静音过）。
+        self.donate_banner = nbs_io::prefs::unix_now() > self.prefs.donate_banner_time;
+        // :747-753 的 `vers_tmp != version` 分支：置 update_success 并强制亮横幅。
+        // 原版还会切回 Fluent 主题并打开 w_update 窗口——我们没有更新历史文本，
+        // 状态行放进欢迎窗（已记录的偏差）。
+        let last = self.prefs.last_version.clone();
+        if last.is_some() && last.as_deref() != Some(crate::VERSION) {
+            self.update_success = true;
+            self.donate_banner = true;
+        }
+        // :707 的 `if (show_welcome) window = w_greeting`。
+        // 原版在版本变化时会用 w_update 顶掉欢迎窗；这里没有 w_update，欢迎窗保留。
+        if self.prefs.show_welcome {
+            self.window = Some(WindowKind::Greeting);
+        }
+    }
+
+    /// 原版 `check_updates.gml` 回调里「有新版本 → question(下载？)」的那一步：
+    /// 后台线程把结果写进共享结构，UI 线程在帧首轮询，问一次就不再问。
+    /// 答「是」执行 `Command::OpenUrl`——原版此处直接 `http_get_file` 下载安装包，
+    /// 我们改成打开 releases 页（已记录的偏差）。
+    pub fn poll_update_check(&mut self) {
+        let (status, ver) = {
+            let g = self.update_check.lock().unwrap();
+            (g.status, g.new_version.clone())
+        };
+        if status == 1 && !self.update_question {
+            self.update_question = true;
+            self.modals = ModalQueue::question(
+                "更新可用！",
+                &format!("版本 {ver} 可用！是否现在下载？"),
+                Command::OpenUrl(crate::RELEASES_PAGE.to_string()),
+            );
         }
     }
 
@@ -1349,10 +1433,18 @@ impl EditorState {
         rows
     }
 
-    pub fn add_recent(&mut self, path: PathBuf) {        self.recent_files.retain(|p| p != &path);
-        self.recent_files.insert(0, path.clone());
+    pub fn add_recent(&mut self, path: PathBuf) {
+        self.recent_files.retain(|p| p.path != path);
+        self.recent_files.insert(0, RecentPath { path: path.clone(), time: nbs_io::prefs::unix_now() });
         self.recent_files.truncate(11);
         self.prefs.add_recent(&path);
+    }
+
+    /// 原版 draw_window_greeting.gml:219-231：点开最近歌曲时文件不在了，
+    /// 弹「找不到文件」并把同一路径的条目整串移走（含重复项）。
+    /// 落盘跟着 SavePreferences 走（sync_prefs 会把 recent_files 一起写）。
+    pub fn remove_recent(&mut self, path: &Path) {
+        self.recent_files.retain(|p| p.path != path);
     }
 
     /// 把偏好推给音频引擎（主音量、速度、节拍器、voice 上限、单声道、锁定层）。
@@ -1402,7 +1494,14 @@ impl EditorState {
         // 14 个 w_midi_* 和 128 组 ins_N / drum_N 全量写盘。
         self.prefs.midi_import = Some(nbs_io::MidiImportPrefs::from_options(&self.midi_options));
         self.prefs.midi_gm = Some(self.midi_gm.to_persist());
-        self.prefs.recent_files = self.recent_files.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        // 原版 save_settings.gml 每次都写 last_version（save_settings.gml:8 附近的
+        // `[preferences] last_version`），下次开机据此判断是不是刚更新过。
+        self.prefs.last_version = Some(crate::VERSION.to_string());
+        self.prefs.recent_files = self
+            .recent_files
+            .iter()
+            .map(|r| RecentFile { path: r.path.to_string_lossy().into_owned(), time: r.time })
+            .collect();
     }
 
     pub fn save_prefs(&mut self) {
@@ -1594,6 +1693,8 @@ mod tests {
         let picker = std::sync::Arc::new(FakePicker { answer, seen: std::sync::Mutex::new(Vec::new()) });
         let mut st = EditorState::new();
         st.picker = Some(picker.clone());
+        // 开机流程会开欢迎窗；选框测试的靶子是「欢迎窗已关」的裸编辑器。
+        st.window = None;
         (st, picker)
     }
 

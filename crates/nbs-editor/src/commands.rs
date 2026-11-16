@@ -163,6 +163,10 @@ pub enum Command {
     ReloadSamples,
     SavePreferences,
     RestoreAutosave(PathBuf),
+    /// 原版 `open_url(url)`：欢迎窗链接、捐赠横幅、更新弹窗的「去 releases 页」。
+    OpenUrl(String),
+    /// 首选项「检查开发版本」确认框答「是」之后的落盘开关。
+    SetCheckPrerelease(bool),
 }
 
 /// 原版 `selection_delete.gml:24-28`：删除选区前按当前视口收集格子，
@@ -1302,6 +1306,27 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.set_message("偏好设置已保存");
         }
         Command::RestoreAutosave(path) => dispatch(state, Command::OpenPath(path), ctx),
+        // 原版 `open_url(url)`：欢迎窗 / 更新弹窗里所有跳浏览器的链接都走这里。
+        Command::OpenUrl(url) => open_url(&url),
+        // 原版开发版确认框答「是」后的 `check_prerelease = !check_prerelease` +
+        // 隐式落盘（原版在退出时统一 save_settings）。
+        Command::SetCheckPrerelease(on) => {
+            state.prefs.check_prerelease = on;
+            dispatch(state, Command::SavePreferences, ctx);
+        }
+    }
+}
+
+/// 原版 `open_url(url)`（macros.gml:1-3）：用系统默认方式打开链接。
+/// Windows 的 `start` 第一个带引号参数是窗口标题，所以要垫一个空串。
+fn open_url(url: &str) {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
     }
 }
 
@@ -1505,6 +1530,8 @@ mod tests {
         // 原版第一次走到这里会写 settings.ini；测试预先当作「已经提示过」，不碰用户配置。
         s.prefs.warning_schematic = true;
         s.doc.replace_song(song);
+        // 开机流程会开欢迎窗，命令测试的靶子是「欢迎窗已经关掉」的裸编辑器。
+        s.window = None;
         s
     }
 

@@ -72,9 +72,9 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                 }
                 let recent = state.recent_files.clone();
                 for path in recent {
-                    let text = path.to_string_lossy().into_owned();
+                    let text = path.path.to_string_lossy().into_owned();
                     if ui.button(&text).clicked() {
-                        state.emit(Command::OpenPath(path));
+                        state.emit(Command::OpenPath(path.path));
                         ui.close_menu();
                     }
                 }

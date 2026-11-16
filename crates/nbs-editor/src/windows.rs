@@ -11,12 +11,30 @@ use nbs_core::Macro;
 
 use crate::commands::Command;
 use crate::shortcuts::SHORTCUT_HELP;
-use crate::state::{EditorState, Flag, ModalQueue, PrefsFolder, WindowKind};
+use crate::state::{DialogAction, EditorState, Flag, ModalQueue, PrefsFolder, WindowKind};
 use crate::theme::{Theme, ThemeKind};
 
 pub fn show_windows(state: &mut EditorState, ctx: &Context) {
     show_modal(state, ctx);
     let Some(kind) = state.window.clone() else { return; };
+    if kind == WindowKind::Greeting {
+        // 原版 `draw_window(x1, y1, x1 + 700, y1 + 430)`（draw_window_greeting.gml:38）
+        // 只画边框不写标题，欢迎窗不要标题栏。
+        egui::Window::new("Note Block Studio")
+            .id(egui::Id::new("nbs_win_Greeting"))
+            .title_bar(false)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(700.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| greeting(state, ui));
+        // 捐赠横幅在欢迎窗右侧窗外（原版 :10-36），egui 窗口内容裁剪到自己的矩形，
+        // 只能再用一张无边框小窗承载；精灵缺失时不画——没有图的横幅只剩看不见的热点。
+        if state.donate_banner && state.icons.bank().is_some() {
+            donate_banner_window(state, ctx);
+        }
+        return;
+    }
     let mut open = true;
     let title = match &kind {
         // 原版在标题带左边写「导入MIDI」、右边右对齐写文件名
@@ -90,6 +108,8 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::EditSoundStopper(tick, layer) => {
                 event_stopper_window(state, ui, *tick, *layer)
             }
+            // Greeting 在上面已提前 return，这个分支实际到不了。
+            WindowKind::Greeting => {}
         });
     if !open {
         state.window = None;
@@ -137,6 +157,422 @@ fn footer(state: &mut EditorState, ui: &mut Ui) {
     ui.separator();
     if ui.button("关闭").clicked() {
         state.emit(Command::CloseWindow);
+    }
+}
+
+/// 原版 `mouse_rectangle` + `m += mouse_check_button(左)`：0 = 不在、1 = 悬停、
+/// 2 = 悬停且按住。与 `Page::hit` 同一套，只是欢迎窗不走 Page。
+fn greet_hit(ui: &mut Ui, rect: Rect, id: Id) -> (egui::Response, usize) {
+    let resp = ui.interact(rect, id, Sense::click());
+    let held = resp.hovered() && ui.input(|i| i.pointer.any_down());
+    let m = if held {
+        2
+    } else if resp.hovered() {
+        1
+    } else {
+        0
+    };
+    (resp, m)
+}
+
+/// 原版 `draw_text_center`（x 为中心）。重写版没有粗体字型，原版的
+/// `font_main_bold` / `font_info_med_bold` 用 0.5px 重叠双绘近似。
+fn greet_text_center(p: &egui::Painter, center_x: f32, y: f32, s: &str, font: f32, color: Color32, bold: bool) {
+    let g = p.layout_no_wrap(s.to_string(), FontId::proportional(font), color);
+    let px = center_x - g.size().x / 2.0;
+    p.galley(egui::pos2(px, y), g.clone(), Color32::BLACK);
+    if bold {
+        p.galley(egui::pos2(px + 0.5, y), g, Color32::BLACK);
+    }
+}
+
+/// 原版 `draw_text_dynamic`（左上角对齐）。
+fn greet_text_left(p: &egui::Painter, at: Pos2, s: &str, font: f32, color: Color32, bold: bool) {
+    let g = p.layout_no_wrap(s.to_string(), FontId::proportional(font), color);
+    p.galley(at, g.clone(), Color32::BLACK);
+    if bold {
+        p.galley(at + Vec2::new(0.5, 0.0), g, Color32::BLACK);
+    }
+}
+
+/// 原版 `string_truncate(str, maxwidth)`：逐字累加宽度，放不下补 `...`。
+fn greet_truncate(p: &egui::Painter, s: &str, max_w: f32, font: f32) -> String {
+    let width =
+        |t: &str| p.layout_no_wrap(t.to_string(), FontId::proportional(font), Color32::WHITE).size().x;
+    if width(s) <= max_w {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut w = 0.0;
+    for c in s.chars() {
+        let cw = width(&c.to_string());
+        if w + cw > max_w {
+            break;
+        }
+        w += cw;
+        out.push(c);
+    }
+    out.push_str("...");
+    out
+}
+
+/// 原版 `draw_text_url(x, y, text, url)`：文字以 x 为中心，y+12 处画同色下划线，
+/// 点击打开链接。Fluent 用 accent[6]（悬停 (137,137,137)、按下 (181,181,181)），
+/// 其余主题固定 rgb(62,144,255)。
+fn greet_link(
+    state: &mut EditorState,
+    ui: &mut Ui,
+    p: &egui::Painter,
+    th: &Theme,
+    center_x: f32,
+    y: f32,
+    s: &str,
+    url: &str,
+) {
+    let w = p
+        .layout_no_wrap(s.to_string(), FontId::proportional(PREFS_FONT), Color32::WHITE)
+        .size()
+        .x;
+    // 原版 `mouse_rectangle(xx - width/2, yy, width, 12)`：命中区以 x 为中心、高 12。
+    let rect = Rect::from_min_size(egui::pos2(center_x - w / 2.0, y), Vec2::new(w, 12.0));
+    let resp = ui.interact(rect, Id::new(("greet-link", center_x as i32, y as i32)), Sense::click());
+    let color = if th.kind == ThemeKind::Fluent {
+        if resp.is_pointer_button_down_on() {
+            ggray(181)
+        } else if resp.hovered() {
+            ggray(137)
+        } else {
+            th.accent(6)
+        }
+    } else {
+        Color32::from_rgb(62, 144, 255)
+    };
+    let g = p.layout_no_wrap(s.to_string(), FontId::proportional(PREFS_FONT), color);
+    let w = g.size().x;
+    let px = center_x - w / 2.0;
+    p.galley(egui::pos2(px, y), g, Color32::BLACK);
+    // 原版 `draw_line(xx - floor(width/2) - 1, yy + 12, xx + ceil(width/2) - 1, yy + 12)`。
+    p.line_segment(
+        [
+            egui::pos2(center_x - w / 2.0 - 1.0, y + 12.0),
+            egui::pos2(center_x + (w / 2.0).ceil() - 1.0, y + 12.0),
+        ],
+        Stroke::new(1.0_f32, color),
+    );
+    let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
+    if resp.clicked() {
+        state.emit(Command::OpenUrl(url.to_string()));
+    }
+}
+
+/// 原版 `seconds_to_str`（中文分支）：最近歌曲的相对时间。
+fn seconds_to_str(secs: i64) -> String {
+    let c = secs;
+    if c < 60 {
+        format!("{c} 秒前")
+    } else if c < 60 * 60 {
+        format!("{} 分钟前", c / 60)
+    } else if c < 60 * 60 * 24 {
+        format!("{} 小时前", c / (60 * 60))
+    } else if c < 60 * 60 * 24 * 7 {
+        format!("{} 天前", c / (60 * 60 * 24))
+    } else if c < 60 * 60 * 24 * 31 {
+        format!("{} 星期前", c / (60 * 60 * 24 * 7))
+    } else if c < 60 * 60 * 24 * 31 * 12 {
+        format!("{} 月前", c / (60 * 60 * 24 * 31))
+    } else {
+        format!("{} 年前", c / (60 * 60 * 24 * 31 * 12))
+    }
+}
+
+/// 原版 `draw_window_greeting.gml`。窗口 700×430 无标题栏，内容原点 o = 原版 (x1, y1)。
+/// 语言取中文分支（多语言在 T2e 接线）；is_prerelease 恒为假 → dev_label_offset = 0、
+/// 开发版本行不画；程序图标选项未接线 → window_icon 恒为假；播放器模式按钮没有对应
+/// 功能，不画（原版 :323-329）。
+fn greeting(state: &mut EditorState, ui: &mut Ui) {
+    let th = state.theme.clone();
+    let margin = ui.spacing().window_margin;
+    let (ml, mr, mt, mb) = (
+        margin.left as f32,
+        margin.right as f32,
+        margin.top as f32,
+        margin.bottom as f32,
+    );
+    let body = ui.allocate_exact_size(
+        egui::vec2(700.0 - ml - mr, 430.0 - mt - mb),
+        egui::Sense::hover(),
+    );
+    let o = body.0.min - egui::vec2(ml, mt);
+    let p = ui.painter().clone();
+    let bank = state.icons.bank();
+    let x = |dx: f32| o.x + dx;
+    let y = |dy: f32| o.y + dy;
+
+    // :39-41 logo：帧 = window_icon + (window_icon && fdark)，window_icon 恒假。
+    if let Some(bk) = &bank {
+        bk.greeting_logo(&p, egui::pos2(x(64.0), y(50.0)), false, th.fdark);
+    }
+    // :43 标题（font_info_med_bold）。
+    greet_text_center(&p, x(132.0), y(213.0), "Note Block Studio", PREFS_FONT_MED, th.text, true);
+    // :68-100 更新状态行（font_main_bold）。update=0 那支原版没设颜色，用主题色。
+    let status = state.update_check.lock().unwrap().status;
+    let (line, color) = if state.prefs.check_update {
+        if state.update_success {
+            ("更新成功！", Color32::from_rgb(0, 255, 0))
+        } else {
+            match status {
+                -1 => ("检查更新失败", Color32::from_rgb(255, 0, 0)),
+                0 => ("正在检查更新……", th.text),
+                1 => ("有新版本！", Color32::from_rgb(255, 128, 0)),
+                _ => (
+                    "已为最新版本！",
+                    if th.kind == ThemeKind::Dark {
+                        Color32::from_rgb(0, 255, 0)
+                    } else {
+                        Color32::from_rgb(0, 128, 0)
+                    },
+                ),
+            }
+        }
+    } else {
+        ("检查更新未开启", Color32::from_rgb(255, 0, 0))
+    };
+    greet_text_center(&p, x(132.0), y(248.0), line, PREFS_FONT, color, true);
+    // :107-108 版本行（font_main_bold）。
+    greet_text_center(
+        &p,
+        x(132.0),
+        y(233.0),
+        &format!("版本 {} - 发布于 {}", crate::VERSION, crate::VERSION_DATE),
+        PREFS_FONT,
+        th.text,
+        true,
+    );
+    // :114-115 宣传语。
+    greet_text_center(&p, x(132.0), y(280.0), "一个开源的 Minecraft 音乐制作软件", PREFS_FONT, th.text, false);
+    // :117 官网链接。
+    greet_link(state, ui, &p, &th, x(132.0), y(296.0), "noteblock.studio", crate::LINK_WEBSITE);
+    // :122-136 社区链接两行。竖线是 draw_text_dynamic（左对齐），
+    // x 按中文分支（GitHub 88 / QQ 群 133 / 捐赠 171）。
+    greet_text_center(&p, x(132.0), y(340.0), "关注 OpenNBS：", PREFS_FONT, th.text, false);
+    let off = if th.kind == ThemeKind::Fluent { 0.0 } else { 2.0 };
+    greet_link(state, ui, &p, &th, x(80.0), y(356.0), "Discord", crate::LINK_DISCORD);
+    greet_text_left(&p, egui::pos2(x(104.0 - off), y(356.0)), "|", PREFS_FONT, th.text, false);
+    greet_link(state, ui, &p, &th, x(128.0), y(356.0), "Twitter", crate::LINK_TWITTER);
+    greet_text_left(&p, egui::pos2(x(150.0 - off), y(356.0)), "|", PREFS_FONT, th.text, false);
+    greet_link(state, ui, &p, &th, x(180.0), y(356.0), "YouTube", crate::LINK_YOUTUBE);
+    greet_link(state, ui, &p, &th, x(88.0), y(372.0), "GitHub", crate::LINK_GITHUB);
+    greet_text_left(&p, egui::pos2(x(109.0 - off), y(372.0)), "|", PREFS_FONT, th.text, false);
+    greet_link(state, ui, &p, &th, x(133.0), y(372.0), "QQ 群", crate::LINK_QQ_GROUP);
+    greet_text_left(&p, egui::pos2(x(153.0 - off), y(372.0)), "|", PREFS_FONT, th.text, false);
+    greet_link(state, ui, &p, &th, x(171.0), y(372.0), "捐赠", crate::LINK_DONATE);
+    // :139-146 分隔线：先一条 1px 白线（Fluent 深色换黑），再一条 25% 主题色线。
+    let line1 = if th.fdark && th.kind == ThemeKind::Fluent {
+        Color32::BLACK
+    } else {
+        Color32::WHITE
+    };
+    p.line_segment(
+        [egui::pos2(x(270.0), y(24.0)), egui::pos2(x(270.0), y(396.0))],
+        Stroke::new(1.0_f32, line1),
+    );
+    let line2 = Color32::from_rgba_unmultiplied(th.text.r(), th.text.g(), th.text.b(), 64);
+    p.line_segment(
+        [egui::pos2(x(269.0), y(24.0)), egui::pos2(x(269.0), y(396.0))],
+        Stroke::new(1.0_f32, line2),
+    );
+    // :148-149 右栏标题。
+    greet_text_left(&p, egui::pos2(x(290.0), y(20.0)), "要做什么？", PREFS_FONT, th.text, false);
+
+    // :152-175 创建歌曲。
+    let mut c = 48.0;
+    {
+        let at = egui::pos2(x(300.0), y(c));
+        let (resp, m) = greet_hit(ui, Rect::from_min_size(at, Vec2::new(224.0, 32.0)), Id::new("greet-create"));
+        let pressed = m == 2;
+        if let Some(bk) = &bank {
+            bk.frame2_button(&p, at, &th, m);
+            bk.big_icon(&p, at, &th, 0, pressed);
+        }
+        let push = if pressed { 1.0 } else { 0.0 };
+        greet_text_left(&p, at + Vec2::new(48.0 + push, 9.0 + push), "创建歌曲", PREFS_FONT, th.text, false);
+        if resp.clicked() {
+            state.emit(Command::CloseWindow);
+        }
+    }
+    c += 44.0;
+    // :178-203 打开歌曲（load_song("", 0, 1) = 系统选框）。
+    {
+        let at = egui::pos2(x(300.0), y(c));
+        let (resp, m) = greet_hit(ui, Rect::from_min_size(at, Vec2::new(224.0, 32.0)), Id::new("greet-open"));
+        let pressed = m == 2;
+        if let Some(bk) = &bank {
+            bk.frame2_button(&p, at, &th, m);
+            bk.big_icon(&p, at, &th, 1, pressed);
+        }
+        let push = if pressed { 1.0 } else { 0.0 };
+        greet_text_left(&p, at + Vec2::new(48.0 + push, 9.0 + push), "打开歌曲", PREFS_FONT, th.text, false);
+        if resp.clicked() {
+            state.emit(Command::OpenDialog(DialogAction::OpenSong));
+        }
+    }
+    // :204-249 最近歌曲。b 换到 x1+320，行高 16，表头只随第一行画一次。
+    let b = 320.0;
+    for (i, r) in state.recent_files.clone().iter().enumerate() {
+        if i == 0 {
+            c += 36.0;
+            greet_text_left(&p, egui::pos2(x(b - 20.0), y(c)), "最近歌曲：", PREFS_FONT, th.text, false);
+            c += 16.0;
+        }
+        let at = egui::pos2(x(b), y(c));
+        let (resp, m) = greet_hit(ui, Rect::from_min_size(at, Vec2::new(320.0, 16.0)), Id::new(("greet-recent", i)));
+        let pressed = m == 2;
+        if let Some(bk) = &bank {
+            bk.frame5_row(&p, at, &th, m);
+        }
+        let push = if pressed { 1.0 } else { 0.0 };
+        let name = r
+            .path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let name = greet_truncate(&p, &name, 220.0, PREFS_FONT);
+        greet_text_left(&p, at + Vec2::new(2.0 + push, 1.0 + push), &name, PREFS_FONT, th.text, false);
+        let ago = seconds_to_str(nbs_io::prefs::unix_now() - r.time);
+        let tw = p.layout_no_wrap(ago.clone(), FontId::proportional(PREFS_FONT), th.text).size().x;
+        // 原版 `draw_set_halign(fa_right)`：x 是右缘。
+        greet_text_left(
+            &p,
+            egui::pos2(at.x + 316.0 - tw + push, at.y + 1.0 + push),
+            &ago,
+            PREFS_FONT,
+            th.text,
+            false,
+        );
+        if resp.clicked() {
+            if r.path.is_file() {
+                state.emit(Command::OpenPath(r.path.clone()));
+            } else {
+                state.modals = ModalQueue::message(
+                    "错误",
+                    &format!("找不到文件：\n{}", r.path.display()),
+                );
+                state.remove_recent(&r.path);
+                state.emit(Command::SavePreferences);
+            }
+        }
+        c += 16.0;
+    }
+    c += 10.0;
+    if state.recent_files.is_empty() {
+        c += 34.0;
+    }
+    // :250-291 Note Block World：底图横向拉伸 1.5 倍，NEW! 徽标和灰字都按原版坐标。
+    {
+        let at = egui::pos2(x(300.0), y(c));
+        let (resp, m) = greet_hit(ui, Rect::from_min_size(at, Vec2::new(336.0, 32.0)), Id::new("greet-world"));
+        let pressed = m == 2;
+        if let Some(bk) = &bank {
+            bk.frame2_button_wide(&p, at, &th, m);
+            bk.big_icon(&p, at, &th, 6, pressed);
+        }
+        let push = if pressed { 1.0 } else { 0.0 };
+        greet_text_left(
+            &p,
+            at + Vec2::new(48.0 + push, 9.0 + push - 7.0),
+            "浏览社区制作的歌曲",
+            PREFS_FONT,
+            th.text,
+            false,
+        );
+        // :271-281 NEW! 徽标：accent[4] 圆角胶囊（(566, c+1)-(604, c+16)，r=15）+ 白字。
+        p.rect_filled(
+            Rect::from_min_max(egui::pos2(x(566.0), y(c + 1.0)), egui::pos2(x(604.0), y(c + 16.0))),
+            15.0,
+            th.accent(4),
+        );
+        greet_text_left(&p, egui::pos2(x(570.0), y(c + 2.0)), "NEW!", PREFS_FONT, Color32::WHITE, true);
+        // :283-285 灰字。
+        greet_text_left(
+            &p,
+            at + Vec2::new(48.0 + push, 9.0 + push + 7.0),
+            "前往 noteblock.world",
+            PREFS_FONT,
+            ggray(128),
+            false,
+        );
+        if resp.clicked() {
+            state.emit(Command::OpenUrl("https://noteblock.world/".to_string()));
+        }
+    }
+    c += 44.0;
+    // :294-317 从 MIDI 文件生成（open_midi("", 1) = 系统选框）。
+    {
+        let at = egui::pos2(x(300.0), y(c));
+        let (resp, m) = greet_hit(ui, Rect::from_min_size(at, Vec2::new(224.0, 32.0)), Id::new("greet-midi"));
+        let pressed = m == 2;
+        if let Some(bk) = &bank {
+            bk.frame2_button(&p, at, &th, m);
+            bk.big_icon(&p, at, &th, 2, pressed);
+        }
+        let push = if pressed { 1.0 } else { 0.0 };
+        greet_text_left(&p, at + Vec2::new(48.0 + push, 9.0 + push), "从 MIDI 文件生成", PREFS_FONT, th.text, false);
+        if resp.clicked() {
+            state.emit(Command::OpenDialog(DialogAction::ImportMidi));
+        }
+    }
+    // Escape 关窗（原版 windowclose 默认值）。
+    if ui.input(|i| i.key_released(egui::Key::Escape)) {
+        state.emit(Command::CloseWindow);
+    }
+}
+
+/// 原版 draw_window_greeting.gml:10-36 的捐赠横幅：画在欢迎窗右侧窗外
+/// （(x1+700, y1+110) = 屏幕中心 + (350, −100)）。文字/X 都在贴图里，
+/// 这张窗不画任何边框和底色，透明处透出的就是原版的「直接画在屏幕上」。
+fn donate_banner_window(state: &mut EditorState, ctx: &Context) {
+    let mut close = false;
+    let mut open_page = false;
+    egui::Window::new("donate")
+        .id(egui::Id::new("nbs_donate_banner"))
+        .title_bar(false)
+        .collapsible(false)
+        .resizable(false)
+        .frame(egui::Frame::NONE)
+        .fixed_size(egui::vec2(150.0, 120.0))
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(350.0, -100.0))
+        .show(ctx, |ui| {
+            let o = ui.cursor().min;
+            ui.allocate_exact_size(egui::vec2(150.0, 120.0), egui::Sense::hover());
+            let p = ui.painter().clone();
+            let x_rect = Rect::from_min_size(o + Vec2::new(120.0, 3.0), Vec2::new(16.0, 16.0));
+            let banner = Rect::from_min_size(o, Vec2::new(150.0, 120.0));
+            let (rx, _) = greet_hit(ui, x_rect, Id::new("donate_x"));
+            let (rb, _) = greet_hit(ui, banner, Id::new("donate_badge"));
+            let rx = rx.on_hover_cursor(CursorIcon::PointingHand);
+            let rb = rb.on_hover_cursor(CursorIcon::PointingHand);
+            if let Some(bk) = state.icons.bank() {
+                bk.donate_banner(&p, o, rx.hovered(), true);
+            }
+            // 原版 :29：横幅上抬手、悬停不在 X 区、按下起点也不在 X 区才开捐赠页。
+            let press_in_x = ui
+                .input(|i| i.pointer.press_origin())
+                .map(|po| x_rect.contains(po))
+                .unwrap_or(false);
+            close = rx.clicked();
+            open_page = rb.clicked() && !rx.hovered() && !press_in_x;
+        });
+    if close {
+        state.modals = ModalQueue::message(
+            "Note Block Studio",
+            "开发Note Block Studio完全基于我们用爱发电。如果情况允许，请考虑在以后小小的支持我们一下！(～￣▽￣)～\n\n（您可以随时在帮助 > 捐赠中找到该选项。）",
+        );
+        state.prefs.donate_banner_time = nbs_io::prefs::inc_month(nbs_io::prefs::unix_now());
+        state.donate_banner = false;
+        state.emit(Command::SavePreferences);
+    }
+    if open_page {
+        state.emit(Command::OpenUrl(crate::LINK_DONATE.to_string()));
     }
 }
 
@@ -292,8 +728,8 @@ fn statistics(state: &mut EditorState, ui: &mut Ui) {
 /// `y1 + N + (theme = 3) * 22` 的行，Fluent 落在 `N - 8`、另外三套落在 `N - 26`，
 /// 差的那 4 像素是原版页签条比 Fluent 高的部分，归 egui 的标题栏。
 ///
-/// 只画真实接线的行。原版有、我们还没有对应行为的选项（启动页 / 检查更新 / Discord
-/// 富在位 / 界面音效 / 透明效果 / 取色器 / 高分辨率纹理 / 语言 / 程序图标 /
+/// 只画真实接线的行。原版有、我们还没有对应行为的选项（Discord 富在位 / 界面音效 /
+/// 透明效果 / 取色器 / 高分辨率纹理 / 语言 / 程序图标 /
 /// 任务栏进度 / 重置键位 / 在区间起止播放）
 /// 整行不出现，免得留下点了没反应的假控件。
 fn preferences(state: &mut EditorState, ui: &mut Ui) {
@@ -388,9 +824,59 @@ fn preferences(state: &mut EditorState, ui: &mut Ui) {
     }
 }
 
-/// 原版页 0「通用」。源码这一页还有「启动」「Discord」两组，
-/// 我们没有欢迎页 / 更新检查 / Discord 富在位，整组不画。
+/// 原版页 0「通用」。源码这一页还有「Discord」组，没有对应行为，整组不画。
 fn prefs_general(state: &mut EditorState, pg: &mut Page) {
+    // 原版 draw_window_preferences.gml:101-138 的「启动」组。macOS 渠道闸
+    // （:109）在 Windows 恒为真，不搬。
+    pg.header(22.0, 74.0, 243.0, 85.0, "启动");
+    if pg.check(
+        40.0,
+        90.0,
+        state.prefs.show_welcome,
+        "显示欢迎界面",
+        "打开软件时是否显示欢迎界面。",
+        true,
+        false,
+    ) {
+        state.prefs.show_welcome = !state.prefs.show_welcome;
+        state.emit(Command::SavePreferences);
+    }
+    if pg.check(
+        40.0,
+        110.0,
+        state.prefs.check_update,
+        "检查更新",
+        "打开软件时是否检查更新。",
+        true,
+        false,
+    ) {
+        state.prefs.check_update = !state.prefs.check_update;
+        state.emit(Command::SavePreferences);
+    }
+    // 原版 :112-137：翻转后按运行版分支弹警告，答否/取消就翻回去。重写版不是
+    // 开发版（is_prerelease 恒为假），只有开启方向的警告分支。
+    if pg.check(
+        60.0,
+        130.0,
+        state.prefs.check_prerelease,
+        "检查开发版本",
+        "是否在稳定版之外额外检测开发版。\n开发版本包含最新的内容，但可能不稳定。",
+        false,
+        !state.prefs.check_update,
+    ) {
+        let enable = !state.prefs.check_prerelease;
+        if enable {
+            state.modals = ModalQueue::question(
+                "警告",
+                "开发版本仍在测试中，可能会不稳定。为了防止数据损坏，强烈建议您在开启该选项前将 Note Block Studio 安装到一个单独的目录。\n\n继续吗？",
+                Command::SetCheckPrerelease(true),
+            );
+        } else {
+            state.prefs.check_prerelease = false;
+            state.emit(Command::SavePreferences);
+        }
+    }
+
     pg.header(278.0, 74.0, 200.0, 85.0, "自动保存");
     if pg.check(
         296.0,
@@ -4194,5 +4680,24 @@ mod tests {
         assert_eq!(hz_label(8000), "8,000 Hz");
         assert_eq!(hz_label(384000), "384,000 Hz");
         assert_eq!(hz_label(192000), "192,000 Hz");
+    }
+
+    /// 原版 seconds_to_str 中文分支的 7 档阈值，边界值各测一次。
+    #[test]
+    fn seconds_to_str_matches_the_original_thresholds() {
+        assert_eq!(seconds_to_str(0), "0 秒前");
+        assert_eq!(seconds_to_str(30), "30 秒前");
+        assert_eq!(seconds_to_str(59), "59 秒前");
+        assert_eq!(seconds_to_str(60), "1 分钟前");
+        assert_eq!(seconds_to_str(3599), "59 分钟前");
+        assert_eq!(seconds_to_str(3600), "1 小时前");
+        assert_eq!(seconds_to_str(86399), "23 小时前");
+        assert_eq!(seconds_to_str(86400), "1 天前");
+        assert_eq!(seconds_to_str(604799), "6 天前");
+        assert_eq!(seconds_to_str(604800), "1 星期前");
+        assert_eq!(seconds_to_str(2678399), "4 星期前");
+        assert_eq!(seconds_to_str(2678400), "1 月前");
+        assert_eq!(seconds_to_str(32140799), "11 月前");
+        assert_eq!(seconds_to_str(32140800), "1 年前");
     }
 }

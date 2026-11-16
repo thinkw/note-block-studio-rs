@@ -27,6 +27,8 @@ use nbs_editor::EditorState;
 mod window_icon;
 #[cfg(windows)]
 mod native_dialog;
+#[cfg(windows)]
+mod update;
 
 struct NbsApp {
     state: EditorState,
@@ -51,6 +53,17 @@ impl NbsApp {
         // egui 自带字体没有中文字形，不装系统字体整个界面会是一排空框。
         if nbs_editor::fonts::install(&cc.egui_ctx).is_none() {
             eprintln!("警告: 未找到可用的系统中文字体，界面中文会显示成空框");
+        }
+
+        // 原版 create 事件的更新检查（control_create.gml:593-616）：开关开着才发请求，
+        // check_prerelease 决定拉预发布列表还是正式版；后台线程写共享态，UI 帧轮询。
+        #[cfg(windows)]
+        if state.prefs.check_update {
+            update::spawn(
+                state.prefs.check_prerelease,
+                nbs_editor::VERSION.to_string(),
+                state.update_check.clone(),
+            );
         }
 
         if let Some(arg) = std::env::args().nth(1) {

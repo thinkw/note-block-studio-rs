@@ -51,6 +51,14 @@ ALL_SPRITES = [
     # 悬停琴键的五线谱（draw_notechart）：面板 320x320 每主题 3 帧（面板/指针/右缘指针），
     # G/F 谱号与升/降号音符（49x150、原点 (30,74)，帧 = accidental + 2 * (key > 22)）。
     "spr_notechart", "spr_Gclef", "spr_Fclef", "spr_note_sharp", "spr_note_flat",
+    # 欢迎窗（draw_window_greeting）：logo 330x330 原点 (28,32) 按 0.5 缩放画，
+    # 帧 = window_icon + (window_icon && fdark)；捐赠横幅 150x120 四帧
+    # （0/1 = 叉常/悬停，2 = 英文文案，3 = 中文文案）。
+    "spr_logo", "spr_donate",
+    # 欢迎窗右侧的动作按钮 224x32（帧 = 按下态 + 3*主题 + 3*(主题 3 且 fdark)，15 帧）
+    # 和最近歌曲行 320x16（帧 = 按下态 + 3*主题 + 3*(主题 3 且 fdark)，同 15 帧），
+    # 以及 32x32 的动作图标 bigicons（0 创建 / 1 打开 / 2 MIDI / 6 社区，Fluent 另有 _f/_d）。
+    "spr_frame2", "spr_frame5", "spr_bigicons", "spr_bigicons_f", "spr_bigicons_d",
 ]
 
 
@@ -62,6 +70,22 @@ SPLITS = {
     "spr_notechart": [
         ("notechart", [0, 3, 6, 9], 320, 320),
         ("notechart_pointer", [1, 2, 4, 5, 7, 8, 10, 11], 20, 20),
+    ],
+    # frame2/frame5 各 15 帧，横排 224/320 一乘就超 egui 的 2048 纹理边长：
+    # 按主题方言拆五条（Aqua/Retro/Dark/Fluent 亮/Fluent 暗），每条 3 帧。
+    "spr_frame2": [
+        ("frame2", [0, 1, 2], 224, 32),
+        ("frame2_retro", [3, 4, 5], 224, 32),
+        ("frame2_dark", [6, 7, 8], 224, 32),
+        ("frame2_fluent", [9, 10, 11], 224, 32),
+        ("frame2_fluent_d", [12, 13, 14], 224, 32),
+    ],
+    "spr_frame5": [
+        ("frame5", [0, 1, 2], 320, 16),
+        ("frame5_retro", [3, 4, 5], 320, 16),
+        ("frame5_dark", [6, 7, 8], 320, 16),
+        ("frame5_fluent", [9, 10, 11], 320, 16),
+        ("frame5_fluent_d", [12, 13, 14], 320, 16),
     ],
 }
 

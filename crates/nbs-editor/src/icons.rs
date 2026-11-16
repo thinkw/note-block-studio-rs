@@ -262,6 +262,25 @@ pub struct Bank {
     /// 升 / 降号音符（49x150、原点 (30,74)，帧 = accidental + 2 * (key > 22)）。
     note_sharp: Strip,
     note_flat: Strip,
+    /// 欢迎窗（draw_window_greeting）：logo（3 帧）、捐赠横幅（4 帧）、动作图标
+    /// bigicons（Fluent 另有 _f/_d 两套）。原点 (28,32) 的 logo 在绘制封装里换算成左上角。
+    logo: Strip,
+    donate: Strip,
+    bigicons: Strip,
+    bigicons_f: Strip,
+    bigicons_d: Strip,
+    /// 动作按钮底图 spr_frame2 / 最近歌曲行 spr_frame5：15 帧横排会超纹理上限，
+    /// 按主题方言拆成五条（每条 3 帧：常态 / 悬停 / 按下）。
+    frame2: Strip,
+    frame2_retro: Strip,
+    frame2_dark: Strip,
+    frame2_fluent: Strip,
+    frame2_fluent_d: Strip,
+    frame5: Strip,
+    frame5_retro: Strip,
+    frame5_dark: Strip,
+    frame5_fluent: Strip,
+    frame5_fluent_d: Strip,
 }
 
 /// 三态：0 常态、1 悬停、2 悬停且按住。
@@ -382,6 +401,21 @@ impl Bank {
             fclef: strip("fclef", 40, 44)?,
             note_sharp: strip("note_sharp", 49, 150)?,
             note_flat: strip("note_flat", 49, 150)?,
+            logo: strip("logo", 330, 330)?,
+            donate: strip("donate", 150, 120)?,
+            bigicons: strip("bigicons", 32, 32)?,
+            bigicons_f: strip("bigicons_f", 32, 32)?,
+            bigicons_d: strip("bigicons_d", 32, 32)?,
+            frame2: strip("frame2", 224, 32)?,
+            frame2_retro: strip("frame2_retro", 224, 32)?,
+            frame2_dark: strip("frame2_dark", 224, 32)?,
+            frame2_fluent: strip("frame2_fluent", 224, 32)?,
+            frame2_fluent_d: strip("frame2_fluent_d", 224, 32)?,
+            frame5: strip("frame5", 320, 16)?,
+            frame5_retro: strip("frame5_retro", 320, 16)?,
+            frame5_dark: strip("frame5_dark", 320, 16)?,
+            frame5_fluent: strip("frame5_fluent", 320, 16)?,
+            frame5_fluent_d: strip("frame5_fluent_d", 320, 16)?,
         })
     }
 
@@ -885,6 +919,76 @@ impl Bank {
     pub fn block_size(&self) -> Vec2 {
         Vec2::new(self.block_color.fw, self.block_color.fh)
     }
+
+    /// 欢迎窗动作按钮底图 spr_frame2 按主题方言取哪条：原版帧号
+    /// `m + 3*theme + 3*(fdark && theme=3)`，拆条后每条 3 帧，m 直接当帧号。
+    fn frame2_strip(&self, th: &Theme) -> &Strip {
+        if th.kind == ThemeKind::Fluent {
+            return if th.fdark { &self.frame2_fluent_d } else { &self.frame2_fluent };
+        }
+        match th.kind {
+            ThemeKind::Aqua => &self.frame2,
+            ThemeKind::Retro => &self.frame2_retro,
+            ThemeKind::Dark => &self.frame2_dark,
+            ThemeKind::Fluent => unreachable!(),
+        }
+    }
+
+    /// 最近歌曲行底图 spr_frame5，同 frame2 的方言规则。
+    fn frame5_strip(&self, th: &Theme) -> &Strip {
+        if th.kind == ThemeKind::Fluent {
+            return if th.fdark { &self.frame5_fluent_d } else { &self.frame5_fluent };
+        }
+        match th.kind {
+            ThemeKind::Aqua => &self.frame5,
+            ThemeKind::Retro => &self.frame5_retro,
+            ThemeKind::Dark => &self.frame5_dark,
+            ThemeKind::Fluent => unreachable!(),
+        }
+    }
+
+    /// 原版 `draw_sprite_ext(spr_logo, icon_index, x1+64, y1+50, 0.5, 0.5, …)`：
+    /// 原点 (28,32) 缩半后对齐锚点。`icon_index = window_icon + (window_icon && fdark)`。
+    pub fn greeting_logo(&self, p: &egui::Painter, anchor: Pos2, custom_icon: bool, fdark: bool) {
+        let frame = usize::from(custom_icon) + usize::from(custom_icon && fdark);
+        let size = Vec2::new(self.logo.fw * 0.5, self.logo.fh * 0.5);
+        self.logo
+            .blit(p, pos2(anchor.x - 14.0, anchor.y - 16.0), frame, size, Color32::WHITE);
+    }
+
+    /// 原版 draw_window_greeting.gml:16-17：先画 X 覆盖层（帧 = 悬停 ? 1 : 0），再画
+    /// 文字层（中文帧 3 / 英文帧 2）盖在上面；两层都画在横幅左上角，X 位于帧内 (120,3)。
+    pub fn donate_banner(&self, p: &egui::Painter, at: Pos2, hover_x: bool, lang_cn: bool) {
+        self.donate.draw(p, at, hover_x as usize, Color32::WHITE);
+        self.donate.draw(p, at, if lang_cn { 3 } else { 2 }, Color32::WHITE);
+    }
+
+    /// 欢迎窗动作按钮的图标：普通主题用 spr_bigicons，Fluent 按深浅用 _f/_d；
+    /// 按下时整体右移 1px（原版 `b + (a > 1)`）。
+    pub fn big_icon(&self, p: &egui::Painter, at: Pos2, th: &Theme, index: usize, pressed: bool) {
+        let strip = if th.kind == ThemeKind::Fluent {
+            if th.fdark { &self.bigicons_d } else { &self.bigicons_f }
+        } else {
+            &self.bigicons
+        };
+        strip.draw(p, at + if pressed { Vec2::splat(1.0) } else { Vec2::ZERO }, index, Color32::WHITE);
+    }
+
+    /// 欢迎窗动作按钮底图（224x32，m = 0 常态 / 1 悬停 / 2 按下）。
+    pub fn frame2_button(&self, p: &egui::Painter, at: Pos2, th: &Theme, m: usize) {
+        self.frame2_strip(th).draw(p, at, m, Color32::WHITE);
+    }
+
+    /// Note Block World 按钮：底图横向拉伸 1.5 倍（336x32），高度不变。
+    pub fn frame2_button_wide(&self, p: &egui::Painter, at: Pos2, th: &Theme, m: usize) {
+        let s = self.frame2_strip(th);
+        s.blit(p, at, m, Vec2::new(s.fw * 1.5, s.fh), Color32::WHITE);
+    }
+
+    /// 最近歌曲行底图（320x16，m 同上）。
+    pub fn frame5_row(&self, p: &egui::Painter, at: Pos2, th: &Theme, m: usize) {
+        self.frame5_strip(th).draw(p, at, m, Color32::WHITE);
+    }
 }
 
 /// 原版 `draw_sprite_ext(..., -1, alpha)`：不染色，只乘透明度。
@@ -1022,6 +1126,21 @@ mod tests {
             ("fclef", 1),
             ("note_sharp", 4),
             ("note_flat", 4),
+            ("logo", 3),
+            ("donate", 4),
+            ("bigicons", 8),
+            ("bigicons_f", 8),
+            ("bigicons_d", 8),
+            ("frame2", 3),
+            ("frame2_retro", 3),
+            ("frame2_dark", 3),
+            ("frame2_fluent", 3),
+            ("frame2_fluent_d", 3),
+            ("frame5", 3),
+            ("frame5_retro", 3),
+            ("frame5_dark", 3),
+            ("frame5_fluent", 3),
+            ("frame5_fluent_d", 3),
         ] {
             let got = std::fs::read_dir(root.join(dir))
                 .unwrap_or_else(|e| panic!("{dir} 目录读不到：{e}"))

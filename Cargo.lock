@@ -1282,6 +1282,7 @@ dependencies = [
  "nbs-core",
  "nbs-editor",
  "nbs-io",
+ "serde_json",
  "winapi",
 ]
 
