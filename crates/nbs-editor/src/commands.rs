@@ -531,7 +531,10 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 if state.record_armed {
                     state.record_armed = false;
                     state.prepare_audio();
-                    state.audio.clock_mut().play();
+                    // 原版 draw_piano.gml:147：录音待命下按第一个键也是 toggle_playing，
+                    // 落点列（变速器/消音器/音符）同样要立刻派发。
+                    let pos = state.audio.clock().position();
+                    state.audio.start(pos);
                 }
                 record_note(state, k);
             } else {
@@ -606,7 +609,10 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             if playing {
                 state.audio.clock_mut().pause();
             } else {
-                state.audio.clock_mut().play();
+                // 原版 toggle_playing：起播取落点列速度并整列派发（变速器/消音器
+                // /音符立刻生效），AudioEngine::start 就是这条语义。
+                let pos = state.audio.clock().position();
+                state.audio.start(pos);
             }
         }
         Command::Stop => {

@@ -214,6 +214,10 @@ impl AudioEngine for CpalEngine {
     fn start(&mut self, from_tick: f64) {
         self.clock.seek(from_tick);
         self.clock.play();
+        // 原版 toggle_playing：按播放键先取落点列速度（get_tempo_from_tick），
+        // 再把该列整列派发。只 seek 不派发会让落点列的变速器/消音器
+        // 拖到下一列跨过时才生效。
+        self.shared.lock().dispatch_landing_column(from_tick);
     }
     fn stop(&mut self) {
         self.clock.pause();

@@ -195,6 +195,65 @@ impl SharedState {
         self.seek(self.position);
     }
 
+    /// 原版 `get_tempo_from_tick`：变速点表里 ≤ tick 的最后一个速度。
+    /// 表 = 初始速度 + 每枚 Tempo Changer（同 tick 最后一枚生效），
+    /// 每枚速度 = max(0.25, |pitch|/15)。锁定层的变速器照常参与
+    /// （update_tempo_changes 不看层锁）。
+    pub fn tempo_at_tick(&self, tick: i64) -> f32 {
+        let mut tempo = self.params.tempo.max(0.25);
+        for ev in &self.events {
+            if ev.tick as i64 > tick {
+                break;
+            }
+            if let EventKind::Tempo(pitch) = ev.kind {
+                tempo = (pitch.unsigned_abs() as f32 / 15.0).max(0.25);
+            }
+        }
+        tempo
+    }
+
+    /// 原版 `toggle_playing` 的 PLAY COL：按播放键取落点列的速度，再把该列
+    /// 整列派发一遍（变速器 / 消音器 / 音符）。播放中途大幅跳转或循环回绕时
+    /// control_step 的 diff 分支（diff<0 或 diff>3）补播的也是这个列。
+    /// 调用方需已 [`Self::seek`] 到落点；这里不改 cursor，后续跨列照常。
+    pub fn dispatch_landing_column(&mut self, tick: f64) {
+        let t = tick.floor();
+        if t < 0.0 {
+            return;
+        }
+        self.params.tempo = self.tempo_at_tick(t as i64);
+        self.dispatch_column(t as i64);
+    }
+
+    /// 派发单列全部事件（共享 [`Self::trigger`] 的分流与闸门语义）。
+    fn dispatch_column(&mut self, column: i64) {
+        for index in 0..self.events.len() {
+            let ev = &self.events[index];
+            if ev.tick as i64 != column {
+                continue;
+            }
+            self.mixer.max_voices = self.params.max_voices;
+            self.mixer.master = self.params.master;
+            self.mixer.mono = self.params.mono;
+            self.mixer.output_rate = self.sample_rate;
+            match ev.kind {
+                EventKind::Tempo(pitch) => {
+                    self.params.tempo = (pitch.unsigned_abs() as f32 / 15.0).max(0.25);
+                }
+                EventKind::Stopper(first, last) => self.mixer.stop_range(first, last),
+                EventKind::Note => {
+                    self.mixer.spawn(
+                        &ev.note,
+                        ev.layer_volume,
+                        ev.layer_stereo,
+                        &self.bank,
+                        ev.layer + 1,
+                    );
+                }
+            }
+        }
+    }
+
     /// 处理 tick 跨越时的事件派发。
     fn trigger(&mut self, from: i64, to: i64) {
         if to < from {
@@ -280,6 +339,8 @@ impl SharedState {
                         self.position = self.params.loop_start;
                         self.seek(self.position);
                         self.metronome_played = -1;
+                        // 原版回绕后 diff<0，control_step 补播落点列
+                        self.dispatch_landing_column(self.position);
                     }
                 }
             } else if self.position > self.params.song_length + 16.0 {
@@ -684,6 +745,110 @@ mod tests {
         drive(&mut st, 6);
         let alive: Vec<u32> = st.mixer.voices.iter().map(|v| v.layer).collect();
         assert_eq!(alive, vec![1], "消音器只掐 voice 层 2/3，层 1 保留，实测 {alive:?}");
+    }
+
+    /// 原版 toggle_playing：按播放键取落点列速度并整列派发——落点列的
+    /// 变速器立刻生效、音符立刻发声，不必等跨过下一列。
+    #[test]
+    fn pressing_play_dispatches_landing_column() {
+        let mut bank = SoundBank::empty();
+        bank.samples.push(crate::samples::Sample {
+            pcm: vec![0.5; 44100],
+            base_key: 45,
+            name: "test".into(),
+        });
+        let mut song = Song::new();
+        song.custom_instruments.push(nbs_core::model::CustomInstrument {
+            name: "Tempo Changer".into(),
+            filename: String::new(),
+            key: 45,
+            press: false,
+        });
+        song.set(3, 0, Note { instrument: 20, key: 45, velocity: 100, panning: 100, pitch: 600 });
+        song.set(3, 1, Note::new(0, 45));
+        song.set(4, 0, Note::new(0, 45));
+        song.recalculate();
+        let mut st = SharedState::new(Arc::new(bank.clone()), 44100);
+        st.prepare(&song, Arc::new(bank));
+        st.seek(3.0);
+        st.dispatch_landing_column(3.0);
+        assert!(
+            (st.params.tempo - 40.0).abs() < 1e-3,
+            "落点列的变速器要立刻生效，实测 {}",
+            st.params.tempo
+        );
+        assert_eq!(st.mixer.active(), 1, "落点列的音符要立刻发声");
+        // 落点之后的列不能被误派发
+        let layers: Vec<u32> = st.mixer.voices.iter().map(|v| v.layer).collect();
+        assert_eq!(layers, vec![2], "只派发落点列（voice 层号 1 基）");
+    }
+
+    /// get_tempo_from_tick：变速点表里 ≤ tick 的最后一枚生效（同 tick 末枚
+    /// 覆盖），锁定层变速器照常参与。
+    #[test]
+    fn tempo_at_tick_walks_the_changer_table() {
+        let mut song = Song::new();
+        song.meta.tempo = 41.33;
+        song.custom_instruments.push(nbs_core::model::CustomInstrument {
+            name: "Tempo Changer".into(),
+            filename: String::new(),
+            key: 45,
+            press: false,
+        });
+        song.set(2, 0, Note { instrument: 20, key: 45, velocity: 100, panning: 100, pitch: 600 });
+        song.set(5, 0, Note { instrument: 20, key: 45, velocity: 100, panning: 100, pitch: 300 });
+        song.layers.push(nbs_core::model::Layer::default());
+        song.set(7, 1, Note { instrument: 20, key: 45, velocity: 100, panning: 100, pitch: 150 });
+        song.recalculate();
+        song.layers[1].lock = nbs_core::model::LockMode::Locked;
+        let mut st = SharedState::new(Arc::new(SoundBank::default()), 44100);
+        st.prepare(&song, Arc::new(SoundBank::default()));
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        assert!(near(st.tempo_at_tick(1), 41.33), "初始速度，实测 {}", st.tempo_at_tick(1));
+        assert!(near(st.tempo_at_tick(2), 40.0), "{}", st.tempo_at_tick(2));
+        assert!(near(st.tempo_at_tick(4), 40.0), "{}", st.tempo_at_tick(4));
+        assert!(near(st.tempo_at_tick(5), 20.0), "{}", st.tempo_at_tick(5));
+        assert!(near(st.tempo_at_tick(7), 10.0), "锁定层变速器也进表，实测 {}", st.tempo_at_tick(7));
+        assert!(near(st.tempo_at_tick(100), 10.0), "{}", st.tempo_at_tick(100));
+    }
+
+    /// 循环回绕后 control_step 的 diff<0 分支补播落点列：回绕列上的
+    /// 消音器要把上一轮残留的 voice 掐掉。
+    #[test]
+    fn loop_wrap_redispatches_landing_column() {
+        let mut bank = SoundBank::empty();
+        bank.samples.push(crate::samples::Sample {
+            pcm: vec![0.5; 44100],
+            base_key: 45,
+            name: "test".into(),
+        });
+        let mut song = Song::new();
+        song.custom_instruments.push(nbs_core::model::CustomInstrument {
+            name: "Sound Stopper".into(),
+            filename: String::new(),
+            key: 45,
+            press: false,
+        });
+        song.set(0, 0, Note { instrument: 20, key: 45, velocity: 100, panning: 157, pitch: 1 });
+        song.set(1, 0, Note::new(0, 45));
+        song.set(1, 1, Note::new(0, 45));
+        song.recalculate();
+        let mut st = SharedState::new(Arc::new(bank.clone()), 44100);
+        st.prepare(&song, Arc::new(bank));
+        st.params.playing = true;
+        st.params.song_length = 100_000.0;
+        st.params.tempo = 44100.0;
+        st.params.loop_enabled = true;
+        st.params.loop_start = 0.0;
+        st.params.loop_end = 2.0;
+        // 1 tick/采样：跨 tick 1 发声 2 枚 → 回绕到 0 → 落点列消音器掐光
+        // （第 3 帧与第 6 帧各回绕一次，第 6 帧后应全灭）
+        drive(&mut st, 6);
+        assert_eq!(
+            st.mixer.active(),
+            0,
+            "回绕后落点列的消音器必须掐掉残留 voice"
+        );
     }
 
     /// 回归：这行曾经把内置音符的 pitch=0 当 BPM 用，tempo 被钉在 0.25 t/s，
