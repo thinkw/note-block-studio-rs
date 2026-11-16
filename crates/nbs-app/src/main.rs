@@ -237,7 +237,8 @@ fn run_cli(args: &[String]) -> Result<(), String> {
     let song = nbs_core::nbs::load(input).map_err(|e| e.to_string())?;
     match cmd {
         "--export-wav" => {
-            let bank = nbs_audio::SoundBank::discover();
+            let mut bank = nbs_audio::SoundBank::discover();
+            bank.extend_for_song(&song);
             let st = nbs_audio::export_wav(
                 &song,
                 &bank,
@@ -269,7 +270,9 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                 return Err(format!("采样率 {} 不在原版列表中", opts.sample_rate));
             }
             let tmp = output.with_extension("nbs-tmp.wav");
-            let st = nbs_audio::export_wav(&song, &nbs_audio::SoundBank::discover(), &tmp, &opts)?;
+            let mut bank = nbs_audio::SoundBank::discover();
+            bank.extend_for_song(&song);
+            let st = nbs_audio::export_wav(&song, &bank, &tmp, &opts)?;
             let enc = nbs_io::audio_export::EncodeOptions {
                 format,
                 sample_rate: opts.sample_rate,
