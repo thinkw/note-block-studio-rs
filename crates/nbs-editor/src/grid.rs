@@ -663,7 +663,7 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
     if let Some(bank) = state.icons.bank() {
         if mx >= rect.min.x - 8.0 && mx <= rect.max.x + 8.0 {
             let tint = if th.kind == ThemeKind::Fluent {
-                Theme::accent_at(3)
+                th.accent(3)
             } else {
                 Color32::WHITE
             };
@@ -850,7 +850,7 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
             + (state.marker().fract() as f32) * cell;
         if mx >= rect.min.x && mx <= rect.max.x {
             let tint = if th.kind == ThemeKind::Fluent {
-                Theme::accent_at(3)
+                th.accent(3)
             } else {
                 Color32::WHITE
             };

@@ -52,6 +52,9 @@ pub struct Preferences {
     pub show_outofrange: bool,
     /// 原版 `fdark`（默认关）：Fluent 主题的深色变体，只对 theme 3 生效。
     pub fdark: bool,
+    /// 原版 accent1/2/3（`settings.ini [preferences]` 持久化，出厂 0,120,212，
+    /// `load/save_settings.gml:63-67`）：界面强调色基色。改色乐器 / 彩虹不写这里。
+    pub accent: [u8; 3],
     /// 原版 `keysmax` / `keys_to_show`：钢琴最多画几根白键，20..50。
     pub keys_to_show: u8,
     pub show_incompatible: bool,
@@ -132,6 +135,7 @@ impl Default for Preferences {
             show_keyboard: true,
             show_outofrange: true,
             fdark: false,
+            accent: [0, 120, 212],
             keys_to_show: 30,
             show_incompatible: true,
             fade: false,
@@ -361,6 +365,11 @@ mod tests {
         assert_eq!(back.refresh_rate, 0, "出厂就是 30 帧");
         assert_eq!(back.window_scale, None, "出厂跟随系统 DPI");
         assert!(!back.window_icon, "出厂用程序自带的图标");
+        assert_eq!(back.accent, [0, 120, 212], "强调色基色出厂 0,120,212");
+        let mut p = Preferences::default();
+        p.accent = [10, 20, 30];
+        let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.accent, [10, 20, 30], "accent1/2/3 要落盘（save_settings.gml:65-67）");
     }
 
     /// `[schematic_export]` 段：整份选项 + 「警告已看过」都要能落盘，

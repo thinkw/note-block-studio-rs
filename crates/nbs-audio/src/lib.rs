@@ -31,5 +31,5 @@ pub use samples::{
 };
 pub use scheduler::{
     build_event_table, make_shared, EventKind, NoteEvent, PlayParams, Shared, SharedState,
-    TransportClock,
+    TransportClock, VisualEvent,
 };

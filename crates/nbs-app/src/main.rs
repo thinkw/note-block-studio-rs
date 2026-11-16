@@ -99,8 +99,15 @@ impl eframe::App for NbsApp {
 
     /// 原版 `control_draw.gml:153` 的 `draw_clear(window_background)`。
     /// eframe 默认清成透明，glow 后端下就是一整片黑，凡是自己没重绘的面板都露黑底。
+    /// theme 3 开了背景强调时先铺一整窗 `accent[3]`（`control_draw.gml:69`）。
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        let c = self.state.theme.window_bg;
+        let c = if self.state.background_accent
+            && self.state.theme.kind == nbs_editor::ThemeKind::Fluent
+        {
+            self.state.theme.accent(3)
+        } else {
+            self.state.theme.window_bg
+        };
         [
             c.r() as f32 / 255.0,
             c.g() as f32 / 255.0,

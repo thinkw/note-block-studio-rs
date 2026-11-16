@@ -139,7 +139,7 @@ fn key_color(key: u8, o: &DrawOpts, th: &Theme) -> (Color32, bool) {
     }
     if !o.playing && o.current == key {
         col = if th.kind == ThemeKind::Fluent {
-            Theme::accent_at(7)
+            th.accent(7)
         } else {
             SELECTED
         };

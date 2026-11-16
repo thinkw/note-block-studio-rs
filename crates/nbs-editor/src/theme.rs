@@ -67,7 +67,13 @@ pub struct Theme {
     pub grid_bar: Color32,
     pub text: Color32,
     pub text_dim: Color32,
-    /// 原版 `accent[4]` —— Fluent 界面（图标染色、按下划线、按钮）实际用的那一档。
+    /// 原版 `accent1/2/3`：出厂 (0,120,212)，settings.ini [preferences] 持久化。
+    /// 改色乐器只重算 9 档表，不碰这里。
+    pub accent_base: [u8; 3],
+    /// 原版 `accent[0..8]`：当前生效的 9 档强调色表。`draw_set_accent` /
+    /// 彩虹循环 / Change Color 乐器都会重算它。
+    pub accent_table: [Color32; 9],
+    /// 界面实际用的那档（= `accent_table[4]`，Fluent 图标染色 / 按下划线）。
     pub accent: Color32,
     pub accent_soft: Color32,
     pub selection: Color32,
@@ -88,25 +94,94 @@ impl Theme {
     const BAR_A: u8 = 77;
 
     /// 原版 `control_create.gml:143-145` 的 accent1/2/3 出厂值（RGB 0,120,212）。
-    const ACCENT: [f32; 3] = [0.0, 120.0, 212.0];
+    const FACTORY_ACCENT: [u8; 3] = [0, 120, 212];
 
-    /// 原版 `draw_accent_init()`：由 accent1/2/3 和其中的最大值 `hiacc` 推 9 档强调色。
-    /// 逐条照抄，包括原稿 `accent[6]` 中间项只乘 `0.1 * 2` 的写法。
-    pub fn accent_at(i: usize) -> Color32 {
-        let [a, b, c] = Self::ACCENT;
+    /// 原版 `draw_accent_init()` / `draw_set_accent()`：由一组 RGB 和其中的最大值
+    /// `hiacc` 推 9 档强调色。逐条照抄，包括原稿 `accent[6]` 中间项只乘
+    /// `0.1 * 2` 的写法。
+    fn build_accent_table(rgb: [u8; 3]) -> [Color32; 9] {
+        let [a, b, c] = [rgb[0] as f32, rgb[1] as f32, rgb[2] as f32];
         let hi = a.max(b).max(c);
-        let rgb = match i {
-            0 => (a * 0.7, b * 0.7, c * 0.7),
-            1 => (a * 0.8, b * 0.8, c * 0.8),
-            2 => (a * 0.9, b * 0.9, c * 0.9),
-            3 => (a, b, c),
-            4 => (a + (hi - a) * 0.1, b + (hi - b) * 0.1, c + (hi - c) * 0.1),
-            5 => (a + (hi - a) * 0.2, b + (hi - b) * 0.2, c + (hi - c) * 0.2),
-            6 => (a + (hi - a) * 0.3, b + (hi - b) * 0.2, c + (hi - c) * 0.3),
-            7 => (a + (hi - a) * 0.5, b + (hi - b) * 0.5, c + (hi - c) * 0.5),
-            _ => (a * 0.5, b * 0.5, c * 0.5),
+        let at = |t: (f32, f32, f32)| {
+            Color32::from_rgb(t.0 as u8, t.1 as u8, t.2 as u8)
         };
-        Color32::from_rgb(rgb.0 as u8, rgb.1 as u8, rgb.2 as u8)
+        [
+            at((a * 0.7, b * 0.7, c * 0.7)),
+            at((a * 0.8, b * 0.8, c * 0.8)),
+            at((a * 0.9, b * 0.9, c * 0.9)),
+            at((a, b, c)),
+            at((a + (hi - a) * 0.1, b + (hi - b) * 0.1, c + (hi - c) * 0.1)),
+            at((a + (hi - a) * 0.2, b + (hi - b) * 0.2, c + (hi - c) * 0.2)),
+            at((a + (hi - a) * 0.3, b + (hi - b) * 0.2, c + (hi - c) * 0.3)),
+            at((a + (hi - a) * 0.5, b + (hi - b) * 0.5, c + (hi - c) * 0.5)),
+            at((a * 0.5, b * 0.5, c * 0.5)),
+        ]
+    }
+
+    /// 原版 `scr_HSBtoRGB`（h 0..360，s/b 0..100）的逐行移植。
+    /// 彩虹循环每帧喂 `hsb_to_rgb(hue, 100, 100)`（draw_accent_rainbow）。
+    pub fn hsb_to_rgb(h: f32, s: f32, b: f32) -> [u8; 3] {
+        let s = s / 100.0;
+        let b = b / 100.0;
+        let fl = |x: f32| (x * 255.0).floor() as u8;
+        if s == 0.0 {
+            let v = fl(b);
+            return [v, v, v];
+        }
+        let mut temp_h = h / 360.0 * 6.0;
+        if temp_h == 6.0 {
+            temp_h = 0.0;
+        }
+        let i = temp_h.floor();
+        let temp1 = b * (1.0 - s);
+        let temp2 = b * (1.0 - s * (temp_h - i));
+        let temp3 = b * (1.0 - s * (1.0 - (temp_h - i)));
+        let rgb = match i as i32 {
+            0 => [b, temp3, temp1],
+            1 => [temp2, b, temp1],
+            2 => [temp1, b, temp3],
+            3 => [temp1, temp2, b],
+            4 => [temp3, temp1, b],
+            _ => [b, temp1, temp2],
+        };
+        [fl(rgb[0]), fl(rgb[1]), fl(rgb[2])]
+    }
+
+    /// 第 i 档强调色（原版界面各处直接读 `accent[i]`）。
+    pub fn accent(&self, i: usize) -> Color32 {
+        self.accent_table[i.min(8)]
+    }
+
+    /// 原版 `draw_accent_init()`：把表重置回持久化基色 accent1/2/3 推出的 9 档
+    /// （彩虹关闭、事件乐器改色后复位都走它）。改完顺手同步派生色。
+    pub fn accent_init(&mut self) {
+        self.set_accent_table(self.accent_base);
+    }
+
+    /// 原版 `draw_set_accent(rgb)`：只重算表，不写回基色，也不持久化
+    /// （改色乐器 / 彩虹每帧的入口；下次启动仍从 settings.ini 的基色起步）。
+    pub fn set_accent_table(&mut self, rgb: [u8; 3]) {
+        self.accent_table = Self::build_accent_table(rgb);
+        self.sync_accent();
+    }
+
+    /// 载入持久化基色（settings.ini 的 accent1/2/3）：先写回 base 再重算表。
+    pub fn set_accent_base(&mut self, rgb: [u8; 3]) {
+        self.accent_base = rgb;
+        self.accent_init();
+    }
+
+    /// accent 相关的派生色都从表第 4 档来，重算表后必须跟着刷新。
+    fn sync_accent(&mut self) {
+        self.accent = self.accent_table[4];
+        self.accent_soft = mix(self.window_bg, self.accent, 0.12);
+        self.selection = self.accent;
+    }
+
+    /// 原版 `accent[6 - 2 * !fdark]`：Fluent 图标染色 / 按下划线用的那一档，
+    /// 浅色是 `accent[4]`，`fdark` 打开后升到 `accent[6]`。
+    pub fn accent_icon(&self) -> Color32 {
+        self.accent_table[if self.fdark { 6 } else { 4 }]
     }
 
     pub fn new(kind: ThemeKind) -> Self {
@@ -129,7 +204,8 @@ impl Theme {
             _ => (window_bg, window_bg, window_bg),
         };
         // 装机版 Fluent 界面实测 (21,129,212)，正是原版 `accent[4]`（图标染色、按下划线用的那档）。
-        let accent = Self::accent_at(4);
+        let accent_table = Self::build_accent_table(Self::FACTORY_ACCENT);
+        let accent = accent_table[4];
         Self {
             kind,
             fdark: false,
@@ -151,6 +227,8 @@ impl Theme {
             } else {
                 Color32::from_gray(120)
             },
+            accent_base: Self::FACTORY_ACCENT,
+            accent_table,
             accent,
             // 以下都是上面几个原版常量的混合，没有新配的颜色：选中/悬停 = 主色或文字
             // 按 12%~24% 压到底色上，未选中按钮 = 底色提亮。
@@ -165,12 +243,6 @@ impl Theme {
             note_text: Color32::WHITE,
             dark,
         }
-    }
-
-    /// 原版 `accent[6 - 2 * !fdark]`：Fluent 图标染色 / 按下划线用的那一档，
-    /// 浅色是 `accent[4]`，`fdark` 打开后升到 `accent[6]`。
-    pub fn accent_icon(&self) -> Color32 {
-        Self::accent_at(if self.fdark { 6 } else { 4 })
     }
 
     /// 让 egui 原生控件（菜单、按钮、输入框）也跟随主题。
@@ -199,5 +271,56 @@ impl Theme {
         visuals.selection.bg_fill = self.accent_soft;
         visuals.window_stroke.color = self.border;
         ctx.set_visuals(visuals);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 装机版 Fluent 界面实测 (21,129,212) = 出厂基色推出的 accent[4]。
+    #[test]
+    fn factory_table_matches_measured_fluent_accent() {
+        let t = Theme::new(ThemeKind::Fluent);
+        assert_eq!(t.accent_table[3], Color32::from_rgb(0, 120, 212), "accent[3] = 基色");
+        assert_eq!(t.accent_table[4], Color32::from_rgb(21, 129, 212));
+        assert_eq!(t.accent_table[0], Color32::from_rgb(0, 84, 148), "0.7 倍截断档");
+        assert_eq!(t.accent_table[6], Color32::from_rgb(63, 138, 212), "原稿 0.1*2 的怪癖档");
+        assert_eq!(t.accent, t.accent_table[4]);
+        assert_eq!(t.selection, t.accent);
+    }
+
+    /// 原版 draw_set_accent：改表不改基色；draw_accent_init：表回基色。
+    #[test]
+    fn accent_table_resets_only_from_base() {
+        let mut t = Theme::new(ThemeKind::Fluent);
+        t.set_accent_table([255, 0, 0]);
+        assert_eq!(t.accent_table[3], Color32::from_rgb(255, 0, 0));
+        assert_eq!(t.accent, t.accent_table[4]);
+        assert_eq!(t.selection, t.accent);
+        assert_eq!(t.accent_soft, mix(t.window_bg, t.accent, 0.12));
+        assert_eq!(t.accent_base, [0, 120, 212], "改色乐器不写基色");
+        t.accent_init();
+        assert_eq!(t.accent_table[3], Color32::from_rgb(0, 120, 212), "accent_init 回基色");
+        t.set_accent_base([10, 20, 30]);
+        assert_eq!(t.accent_table[3], Color32::from_rgb(10, 20, 30));
+        assert_eq!(t.accent_base, [10, 20, 30], "set_accent_base 才写基色");
+    }
+
+    /// 原版 `scr_HSBtoRGB` 的整档抽样（避开浮点敏感的中间值）。
+    #[test]
+    fn hsb_to_rgb_matches_original_samples() {
+        assert_eq!(Theme::hsb_to_rgb(0.0, 100.0, 100.0), [255, 0, 0], "hue 0 红");
+        assert_eq!(Theme::hsb_to_rgb(60.0, 100.0, 100.0), [255, 255, 0]);
+        assert_eq!(Theme::hsb_to_rgb(120.0, 100.0, 100.0), [0, 255, 0]);
+        assert_eq!(Theme::hsb_to_rgb(240.0, 100.0, 100.0), [0, 0, 255]);
+        assert_eq!(Theme::hsb_to_rgb(359.0, 100.0, 100.0), [255, 0, 4], "i=5 档");
+        assert_eq!(
+            Theme::hsb_to_rgb(360.0, 100.0, 100.0),
+            [255, 0, 0],
+            "tempH==6 要折回 0（原版第 15 行）"
+        );
+        assert_eq!(Theme::hsb_to_rgb(200.0, 0.0, 100.0), [255, 255, 255], "S=0 全灰");
+        assert_eq!(Theme::hsb_to_rgb(90.0, 100.0, 50.0), [63, 127, 0], "b 折半，floor(127.5)=127");
     }
 }

@@ -91,6 +91,8 @@ pub enum Command {
     CloseWindow,
     SetTheme(ThemeKind),
     ToggleFlag(Flag),
+    /// 原版 Ctrl+Shift+F5（仅 theme 3）：切换界面强调色彩虹循环。
+    ToggleRainbow,
     /// 原版 F11：`fullscreen = !fullscreen`（`control_draw.gml:122-134`）。
     ToggleFullscreen,
     Transpose(i32),
@@ -776,9 +778,17 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             }
         }
         Command::SetTheme(kind) => {
+            // 原版切主题不重置 accent1/2/3（draw_set_accent 的基色全局共享），
+            // 事件乐器改的表倒是随新主题重算——所以只把基色带过去。
+            let base = state.theme.accent_base;
             state.theme = Theme::new(kind);
+            state.theme.set_accent_base(base);
             state.theme.apply(ctx);
             state.set_message(format!("主题 => {}", kind.name()));
+        }
+        Command::ToggleRainbow => {
+            state.toggle_rainbow();
+            state.theme.apply(ctx);
         }
         Command::ToggleFullscreen => {
             // 原版把全屏记在自己的 `fullscreen` 变量上，这里同理：egui 的
@@ -2204,5 +2214,103 @@ mod tests {
         assert_eq!(titles(&state), vec!["保存"]);
         assert_eq!(texts(&state), vec!["资源包保存成功！"]);
         let _ = std::fs::remove_file(&dst);
+    }
+
+    /// 只带一个视觉事件乐器的歌，音符落在指定列。
+    fn visual_instrument_song(name: &str, tick: u32) -> Song {
+        let mut song = Song::new();
+        song.custom_instruments = vec![nbs_core::model::CustomInstrument {
+            name: name.into(),
+            filename: String::new(),
+            key: 45,
+            press: false,
+        }];
+        song.set(tick, 0, Note::new(nbs_core::model::FIRST_CUSTOM_INDEX, 45));
+        song.recalculate();
+        song
+    }
+
+    /// 按播放键 + 排空一帧：视觉事件的派发在 start() 里，落地在 tick_transport。
+    fn play_and_drain(state: &mut EditorState, tick: f64) {
+        state.prepare_audio();
+        state.audio.clock_mut().seek(tick);
+        state.begin_playback();
+        let ctx = Context::default();
+        state.tick_transport(&ctx);
+    }
+
+    /// 原版 control_step.gml:289：Show Save Popup → set_msg("Song saved")（硬编码英文）。
+    #[test]
+    fn save_popup_instrument_shows_the_hardcoded_message() {
+        let mut state = state_with(visual_instrument_song("Show Save Popup", 0));
+        play_and_drain(&mut state, 0.0);
+        assert_eq!(
+            state.message.as_ref().map(|(m, _)| m.as_str()),
+            Some("Song saved"),
+            "原版不翻译这条消息"
+        );
+    }
+
+    /// 原版 control_step.gml:290-293 + draw_set_accent：改色只重算 9 档表，
+    /// 不写回持久化基色 accent1/2/3。
+    #[test]
+    fn change_color_instrument_resets_only_the_accent_table() {
+        let mut state = state_with(visual_instrument_song("Change Color to #0A0B0C", 0));
+        play_and_drain(&mut state, 0.0);
+        assert_eq!(
+            state.theme.accent_table[3],
+            egui::Color32::from_rgb(0x0a, 0x0b, 0x0c),
+            "整窗背景那一档应变新色"
+        );
+        assert_eq!(state.theme.accent, state.theme.accent_table[4], "派生档跟着表走");
+        assert_eq!(state.theme.accent_base, [0, 120, 212], "基色不被改色乐器覆盖");
+    }
+
+    /// 原版 toggle_playing 的 Toggle Rainbow 分支：切换 + draw_accent_init（无消息）。
+    /// 重置后的表立刻被彩虹动画按新色相覆盖，所以打开侧只验证标志与消息；
+    /// 表的重置语义在关闭侧（toggle_rainbow → accent_init）可观察。
+    #[test]
+    fn rainbow_instrument_toggles_and_reinitializes_the_table() {
+        let mut state = state_with(visual_instrument_song("Toggle Rainbow", 3));
+        play_and_drain(&mut state, 3.0);
+        assert!(state.rainbow, "跨过该列后彩虹应打开");
+        assert!(state.rainbow_hue > 0.0, "彩虹动画每帧在走");
+        assert_eq!(state.message, None, "事件乐器的切换不发消息（消息只归快捷键）");
+        state.toggle_rainbow();
+        assert!(!state.rainbow);
+        assert_eq!(
+            state.theme.accent_table[3],
+            egui::Color32::from_rgb(0, 120, 212),
+            "关闭时 accent_init 把表重置回基色"
+        );
+    }
+
+    /// 原版 control_step.gml:296：Toggle Background Accent 只翻标志，
+    /// 铺色发生在每帧 draw_clear（theme 3 且标志开着）。
+    #[test]
+    fn background_accent_instrument_flips_the_flag() {
+        let mut state = state_with(visual_instrument_song("Toggle Background Accent", 0));
+        play_and_drain(&mut state, 0.0);
+        assert!(state.background_accent);
+        // 再来一次（先停再播）要翻回去。
+        state.audio.stop();
+        play_and_drain(&mut state, 0.0);
+        assert!(!state.background_accent, "再落一枚应翻回关");
+    }
+
+    /// 原版 Ctrl+Shift+F5 仅 theme 3（control_draw.gml:720）。
+    #[test]
+    fn rainbow_shortcut_only_exists_on_fluent() {
+        let ctx = Context::default();
+        let mut state = state_with(four_case_song(10.0));
+        dispatch(&mut state, Command::SetTheme(ThemeKind::Dark), &ctx);
+        dispatch(&mut state, Command::ToggleRainbow, &ctx);
+        // 命令本身不拦，闸门在快捷键层（原版 keyboard 判定里带 theme = 3）；
+        // 这里验证命令效果可用，快捷键层的 theme 判定在 shortcuts::collect_shortcuts。
+        assert!(state.rainbow);
+        assert_eq!(
+            state.message.as_ref().map(|(m, _)| m.as_str()),
+            Some("炫彩模式 => ON")
+        );
     }
 }

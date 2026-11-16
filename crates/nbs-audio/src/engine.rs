@@ -14,7 +14,7 @@ use nbs_core::model::{Note, PAN_CENTER, Song};
 use crate::mixer::Voice;
 use crate::samples::{SoundBank, BUILTIN_FILES, SAMPLE_RATE};
 use crate::scheduler::{
-    build_event_table, make_shared, EventKind, NoteEvent, Shared, TransportClock,
+    build_event_table, make_shared, EventKind, NoteEvent, Shared, TransportClock, VisualEvent,
 };
 
 // 注意：cpal 在 Windows/WASAPI 后端的 `Stream` 不是 Send（内部持有线程亲和的
@@ -40,6 +40,11 @@ pub trait AudioEngine {
     fn device_info(&self) -> String;
     fn bank(&self) -> Arc<SoundBank>;
     fn sample_status(&self) -> String;
+    /// 取走改界面的事件乐器副作用（彩虹 / 改色 / 存档弹窗 / 背景强调）。
+    /// 没有调度器的实现永远为空。
+    fn take_visual_events(&mut self) -> Vec<VisualEvent> {
+        Vec::new()
+    }
     /// 重新扫描采样目录（首选项改路径后调用）。
     fn reload_bank(&mut self, _dir: Option<&Path>) {}
 }
@@ -265,6 +270,9 @@ impl AudioEngine for CpalEngine {
             "未找到内置采样目录".into()
         }
     }
+    fn take_visual_events(&mut self) -> Vec<VisualEvent> {
+        self.shared.lock().take_visual_events()
+    }
     fn reload_bank(&mut self, dir: Option<&Path>) {
         CpalEngine::reload_bank(self, dir);
     }
@@ -275,7 +283,9 @@ impl AudioEngine for CpalEngine {
 pub struct SilentEngine {
     clock: TransportClock,
     bank: Arc<SoundBank>,
-    events: usize,
+    events: Vec<NoteEvent>,
+    /// 无混音器也要发「改界面」的事件乐器副作用（原版 else-if 链与设备无关）。
+    visual: Vec<VisualEvent>,
 }
 
 impl SilentEngine {
@@ -288,8 +298,40 @@ impl SilentEngine {
     pub fn clock_mut(&mut self) -> &mut TransportClock {
         &mut self.clock
     }
-    pub fn event_count(&self) -> usize {
-        self.events
+    /// [from, to] 列内改界面的事件乐器入队；时钟速度同步取 ≤to 的最后一个
+    /// 变速点（原版 get_tempo_from_tick 语义）。发声/消音没有混音器可去，跳过。
+    fn dispatch_visual_columns(&mut self, from: i64, to: i64) {
+        if to < from {
+            return;
+        }
+        let mut tempo = self.clock.tempo().max(0.25);
+        for ev in &self.events {
+            if ev.tick as i64 > to {
+                break;
+            }
+            if let EventKind::Tempo(pitch) = ev.kind {
+                tempo = (pitch.unsigned_abs() as f32 / 15.0).max(0.25);
+            }
+        }
+        for ev in &self.events {
+            let t = ev.tick as i64;
+            if t > to {
+                break;
+            }
+            if t < from {
+                continue;
+            }
+            match ev.kind {
+                EventKind::Rainbow => self.visual.push(VisualEvent::RainbowToggle),
+                EventKind::SavePopup => self.visual.push(VisualEvent::SavePopup),
+                EventKind::AccentColor(rgb) => self.visual.push(VisualEvent::AccentColor(rgb)),
+                EventKind::BackgroundAccent => {
+                    self.visual.push(VisualEvent::BackgroundAccentToggle)
+                }
+                _ => {}
+            }
+        }
+        self.clock.set_tempo(tempo);
     }
 }
 
@@ -298,7 +340,7 @@ impl AudioEngine for SilentEngine {
         "静音时钟"
     }
     fn prepare(&mut self, song: &Song) {
-        self.events = build_event_table(song, false).len();
+        self.events = build_event_table(song, false);
         self.clock.set_tempo(song.meta.tempo);
         self.clock.set_loop(
             song.meta.loop_enabled,
@@ -313,6 +355,10 @@ impl AudioEngine for SilentEngine {
     fn start(&mut self, from_tick: f64) {
         self.clock.seek(from_tick);
         self.clock.play();
+        let column = from_tick.floor() as i64;
+        if column >= 0 {
+            self.dispatch_visual_columns(column, column);
+        }
     }
     fn stop(&mut self) {
         self.clock.pause();
@@ -324,7 +370,12 @@ impl AudioEngine for SilentEngine {
         self.clock.position()
     }
     fn advance(&mut self, _dt: f64) {
+        let prev = self.clock.position().floor() as i64;
         self.clock.update();
+        let now = self.clock.position().floor() as i64;
+        if now > prev {
+            self.dispatch_visual_columns(prev + 1, now);
+        }
     }
     fn active_voices(&self) -> usize {
         0
@@ -343,6 +394,9 @@ impl AudioEngine for SilentEngine {
     }
     fn sample_status(&self) -> String {
         "未加载采样".into()
+    }
+    fn take_visual_events(&mut self) -> Vec<VisualEvent> {
+        std::mem::take(&mut self.visual)
     }
 }
 

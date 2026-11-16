@@ -753,6 +753,14 @@ pub struct EditorState {
     /// 和 `compat` 同一次遍历算出、同一个 `compat_rev` 缓存。
     pub compat_outside: usize,
     pub compat_custom: usize,
+    /// 原版 `rainbowtoggle`：界面强调色的彩虹循环。开关只有两处——
+    /// theme 3 的 Ctrl+Shift+F5（发消息）和 Toggle Rainbow 事件乐器（不发）。
+    pub rainbow: bool,
+    /// 原版 `rainbow`：色相 0..360（`control_create.gml:154` 初值 0，回绕归 1）。
+    pub rainbow_hue: f32,
+    /// 原版 `backgroundaccent`：Fluent 主题把整窗先铺一层 `accent[3]`
+    /// （`control_draw.gml:69`），只有事件乐器能切，原版没有快捷键也不持久化。
+    pub background_accent: bool,
 }
 
 impl Default for EditorState {
@@ -792,6 +800,8 @@ impl EditorState {
         });
         // 原版 `fdark` 只对 theme 3 生效（`control_create.gml:614` 在切到 theme 2 时也会置 1）。
         theme.fdark = prefs.fdark && theme.kind == ThemeKind::Fluent;
+        // 原版 load_settings 读回 accent1/2/3 后走 draw_accent_init 推 9 档表。
+        theme.set_accent_base(prefs.accent);
         let mut flags = UiFlags::default();
         flags.show_layers = prefs.show_layers;
         flags.show_piano = prefs.show_piano;
@@ -903,6 +913,9 @@ impl EditorState {
             compat: 1,
             compat_outside: 0,
             compat_custom: 0,
+            rainbow: false,
+            rainbow_hue: 0.0,
+            background_accent: false,
         }
     }
 
@@ -1062,12 +1075,46 @@ impl EditorState {
         self.applied_window_icon = Some(want);
     }
 
+    /// 原版 Ctrl+Shift+F5（仅 theme 3，`control_draw.gml:710-740`）：手动切换彩虹。
+    /// 与 Toggle Rainbow 事件乐器的差异：这里要发消息，且只在关掉时重置表
+    /// （原版 `rainbowtoggle = !rainbowtoggle` → 开：只 set_msg，关：set_msg + draw_accent_init）。
+    pub fn toggle_rainbow(&mut self) {
+        self.rainbow = !self.rainbow;
+        if self.rainbow {
+            self.set_message("炫彩模式 => ON");
+        } else {
+            self.set_message("炫彩模式 => OFF");
+            self.theme.accent_init();
+        }
+    }
+
     /// 每帧同步独立播放时钟。真实播放时位置由音频回调的采样计数推进，
     /// UI 只读；无音频设备时才由内部 `Instant` 时钟代理。
     /// **绝不在这里写 tempo/loop** —— 否则会覆盖 Tempo Changer 的运行时变速。
     pub fn tick_transport(&mut self, ctx: &Context) {
         self.apply_ui_scale(ctx);
         self.apply_window_icon(ctx);
+        // 原版 else-if 链里「改界面」的事件乐器副作用（control_step.gml:283-296）
+        // 由音频调度发回来，这里统一落地。彩虹开/关都重置表且不发消息，照抄原版。
+        let mut accent_changed = false;
+        for ev in self.audio.take_visual_events() {
+            match ev {
+                nbs_audio::VisualEvent::RainbowToggle => {
+                    self.rainbow = !self.rainbow;
+                    self.theme.accent_init();
+                    accent_changed = true;
+                }
+                nbs_audio::VisualEvent::SavePopup => self.set_message("Song saved"),
+                nbs_audio::VisualEvent::AccentColor(rgb) => {
+                    // 原版 draw_set_accent：只重算 9 档表，不写基色、不落盘。
+                    self.theme.set_accent_table(rgb);
+                    accent_changed = true;
+                }
+                nbs_audio::VisualEvent::BackgroundAccentToggle => {
+                    self.background_accent = !self.background_accent;
+                }
+            }
+        }
         let _crossed = self.audio.clock_mut().update();
         let playing = self.audio.clock().is_playing();
         // 原版 `if (playing = 0) record = 0`：播放一停，录音自动退出。
@@ -1087,6 +1134,25 @@ impl EditorState {
             // 播放画面就是靠它推进的。这里对应改成定时重绘，而不是每帧立即重绘。
             let frame = std::time::Duration::from_secs_f64(1.0 / self.prefs.refresh_limit());
             ctx.request_repaint_after(frame);
+        }
+        // 原版 `control_draw.gml:2585`：彩虹开着就每帧 draw_accent_rainbow()。
+        // hue 每帧走 `4°×(30/room_speed)×(1/currspeed)`，currspeed = targetspeed/delta_time
+        // 做帧率补偿，净效果恒为 120°/秒；回绕判定里的 `- refreshrate` 是原稿手误
+        // （最多 4° 相位差，肉眼不可见），不复刻。
+        if self.rainbow {
+            let dt = ctx.input(|i| i.stable_dt).clamp(0.0, 0.1) as f32;
+            let advanced = self.rainbow_hue + 120.0 * dt;
+            self.rainbow_hue = if advanced < 360.0 { advanced } else { 1.0 };
+            self.theme.set_accent_table(Theme::hsb_to_rgb(self.rainbow_hue, 100.0, 100.0));
+            accent_changed = true;
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                1.0 / self.prefs.refresh_limit(),
+            ));
+        }
+        if accent_changed {
+            // egui 原生控件（菜单 / 按钮 / 选中色）读的是 apply 时的快照，
+            // accent 表每帧在变时必须跟着刷新，否则只有自绘面板在变色。
+            self.theme.apply(ctx);
         }
         // 原版快退 / 快进：按住时按歌曲速度滚动；播放中倒退是双倍速
         // （`forward - (forward < 0 && playing = 1)`）。
@@ -1236,6 +1302,9 @@ impl EditorState {
             ThemeKind::Fluent => 3,
         };
         self.prefs.fdark = self.theme.fdark;
+        // 原版 accent1/2/3 落 settings.ini（save_settings.gml:65-67）；改色乐器
+        // 只改表不改基色，所以这里同步出去的永远是基色。
+        self.prefs.accent = self.theme.accent_base;
         self.prefs.follow_marker = self.marker_follow;
         self.prefs.follow_mode = self.follow_mode;
         self.prefs.show_layers = self.flags.show_layers;

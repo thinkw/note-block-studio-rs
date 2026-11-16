@@ -15,7 +15,7 @@ use nbs_core::model::{Note, Song, FIRST_CUSTOM_INDEX};
 use crate::mixer::{Mixer, DEFAULT_MAX_VOICES};
 use crate::samples::SoundBank;
 
-/// 播放到该列时要做的事。事件乐器不发声音——原版 control_step.gml:283-291
+/// 播放到该列时要做的事。事件乐器不发声音——原版 control_step.gml:283-296
 /// 的 else-if 链在 `play_sound` 之前就把它们拦截了。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventKind {
@@ -27,6 +27,14 @@ pub enum EventKind {
     /// 1 基层号闭区间消音（control_step.gml:286）。pitch<=0 全部消音；
     /// end<start 是「停用」消音器，不动任何发声。
     Stopper(i32, u32),
+    /// Toggle Rainbow：切换界面强调色彩虹循环（control_step.gml:288）。
+    Rainbow,
+    /// Show Save Popup：弹「Song saved」消息（control_step.gml:289）。
+    SavePopup,
+    /// Change Color to #RRGGBB：重设界面强调色表（control_step.gml:290-293）。
+    AccentColor([u8; 3]),
+    /// Toggle Background Accent：切换窗口背景强调色（control_step.gml:296）。
+    BackgroundAccent,
 }
 
 #[derive(Clone, Debug)]
@@ -88,7 +96,7 @@ impl Default for PlayParams {
 pub const END_STOP_MARGIN_TICKS: f64 = 16.0;
 
 /// 事件乐器识别：只有自定义乐器（索引 >= 20）才可能是它，原版按名字精确比较
-/// （control_step.gml:283-291）。这里必须用 checked_sub：saturating_sub 会把内置的
+/// （control_step.gml:283-296）。这里必须用 checked_sub：saturating_sub 会把内置的
 /// 0..19 全夹成 0 号自定义，于是每个普通音符都来变速，pitch=0 时 tempo 直接被
 /// 钉死在 0.25 t/s（整首歌慢到听不出来）。
 fn event_kind(song: &Song, note: &Note) -> EventKind {
@@ -96,18 +104,66 @@ fn event_kind(song: &Song, note: &Note) -> EventKind {
         .checked_sub(FIRST_CUSTOM_INDEX)
         .and_then(|i| song.custom_instruments.get(i as usize))
         .map_or(EventKind::Note, |ci| {
-            if ci.name == nbs_core::TEMPO_CHANGER_NAME {
+            // 链的顺序照抄原版：精确名在前，「Change Color to #」按小写包含
+            // 且恰好一次才算（string_count(...) = 1），都未命中就是普通音符。
+            if ci.name == TEMPO_CHANGER_NAME {
                 EventKind::Tempo(note.pitch)
-            } else if ci.name == nbs_core::SOUND_STOPPER_NAME {
+            } else if ci.name == RAINBOW_TOGGLE_NAME {
+                EventKind::Rainbow
+            } else if ci.name == SOUND_STOPPER_NAME {
                 EventKind::Stopper(
                     i32::from(note.pitch),
                     nbs_core::model::panning_velocity_to_short(note.panning, note.velocity),
                 )
+            } else if ci.name == SAVE_POPUP_NAME {
+                EventKind::SavePopup
+            } else if let Some(rgb) = accent_change_rgb(&ci.name) {
+                EventKind::AccentColor(rgb)
+            } else if ci.name == BACKGROUND_ACCENT_NAME {
+                EventKind::BackgroundAccent
             } else {
                 EventKind::Note
             }
         })
 }
+
+/// 原版 `toggle_playing` / `control_step` else-if 链上的精确名（区分大小写）。
+const TEMPO_CHANGER_NAME: &str = nbs_core::TEMPO_CHANGER_NAME;
+const SOUND_STOPPER_NAME: &str = nbs_core::SOUND_STOPPER_NAME;
+const RAINBOW_TOGGLE_NAME: &str = "Toggle Rainbow";
+const SAVE_POPUP_NAME: &str = "Show Save Popup";
+const BACKGROUND_ACCENT_NAME: &str = "Toggle Background Accent";
+
+/// 「Change Color to #RRGGBB」变奏名：原版判定是
+/// `string_count(string_lower("Change Color to #"), string_lower(name)) = 1`，
+/// RGB 取原名的第 18/20/22 个字符起各两位（string_copy 1 基），按十六进制
+/// `real("0x"+..)` 解析。这里缺位或非法按 0 处理（原版 real() 会报错，
+/// 但报错对话框不是可移植行为）。
+fn accent_change_rgb(name: &str) -> Option<[u8; 3]> {
+    const PREFIX: &str = "change color to #";
+    if name.to_lowercase().matches(PREFIX).count() != 1 {
+        return None;
+    }
+    let chars: Vec<char> = name.chars().collect();
+    let hex = |at: usize| -> u8 {
+        let s: String = chars.get(at..at + 2).map(|c| c.iter().collect()).unwrap_or_default();
+        u8::from_str_radix(&s, 16).unwrap_or(0)
+    };
+    Some([hex(17), hex(19), hex(21)])
+}
+
+/// 事件乐器里「不改声部、只改界面」的四种：原版在游戏进程里直接改全局变量，
+/// 这里由音频调度发回 UI 线程转成消息（见 [`SharedState::take_visual_events`]）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VisualEvent {
+    RainbowToggle,
+    SavePopup,
+    AccentColor([u8; 3]),
+    BackgroundAccentToggle,
+}
+
+/// 防爆队列上限：正常人手写不出一秒几千枚事件乐器，超了就丢弃最旧的副作用。
+const VISUAL_EVENT_CAP: usize = 4096;
 
 /// 把整首歌展开成按 tick 排序的事件表（实时与离线共用）。
 /// 锁定/独奏屏蔽的层默认排除，但**事件乐器例外**：原版只有最后的
@@ -148,6 +204,8 @@ pub struct SharedState {
     /// 是否由真实音频回调推进（false 时 UI 侧内部时钟代理）。
     pub audio_active: bool,
     pub frames_rendered: u64,
+    /// 改界面的事件乐器副作用，等 UI 线程每帧取走。
+    pub visual_events: Vec<VisualEvent>,
     metronome_played: i64,
 }
 
@@ -165,6 +223,7 @@ impl SharedState {
             sample_rate,
             audio_active: false,
             frames_rendered: 0,
+            visual_events: Vec::new(),
             metronome_played: -1,
         }
     }
@@ -232,30 +291,54 @@ impl SharedState {
     /// 派发单列全部事件（共享 [`Self::trigger`] 的分流与闸门语义）。
     fn dispatch_column(&mut self, column: i64) {
         for index in 0..self.events.len() {
-            let ev = &self.events[index];
+            let ev = self.events[index].clone();
             if ev.tick as i64 != column {
                 continue;
             }
-            self.mixer.max_voices = self.params.max_voices;
-            self.mixer.master = self.params.master;
-            self.mixer.mono = self.params.mono;
-            self.mixer.output_rate = self.sample_rate;
-            match ev.kind {
-                EventKind::Tempo(pitch) => {
-                    self.params.tempo = (pitch.unsigned_abs() as f32 / 15.0).max(0.25);
-                }
-                EventKind::Stopper(first, last) => self.mixer.stop_range(first, last),
-                EventKind::Note => {
-                    self.mixer.spawn(
-                        &ev.note,
-                        ev.layer_volume,
-                        ev.layer_stereo,
-                        &self.bank,
-                        ev.layer + 1,
-                    );
-                }
+            self.apply_event(&ev);
+        }
+    }
+
+    /// else-if 链的公共尾（control_step.gml:283-296）：改参数 / 消音 / 发声 /
+    /// 发视觉事件。`trigger` 与落点列派发都走这里，语义只此一份。
+    fn apply_event(&mut self, ev: &NoteEvent) {
+        self.mixer.max_voices = self.params.max_voices;
+        self.mixer.master = self.params.master;
+        self.mixer.mono = self.params.mono;
+        self.mixer.output_rate = self.sample_rate;
+        match ev.kind {
+            EventKind::Tempo(pitch) => {
+                // pitch 是整数，floor(|pitch|)/15 就是 |pitch|/15
+                self.params.tempo = (pitch.unsigned_abs() as f32 / 15.0).max(0.25);
+            }
+            EventKind::Stopper(first, last) => self.mixer.stop_range(first, last),
+            EventKind::Rainbow => self.push_visual(VisualEvent::RainbowToggle),
+            EventKind::SavePopup => self.push_visual(VisualEvent::SavePopup),
+            EventKind::AccentColor(rgb) => self.push_visual(VisualEvent::AccentColor(rgb)),
+            EventKind::BackgroundAccent => self.push_visual(VisualEvent::BackgroundAccentToggle),
+            EventKind::Note => {
+                // voice 层号 1 基（原版 play_sound(..., b + 1)）
+                self.mixer.spawn(
+                    &ev.note,
+                    ev.layer_volume,
+                    ev.layer_stereo,
+                    &self.bank,
+                    ev.layer + 1,
+                );
             }
         }
+    }
+
+    /// 界面副作用入队；超上限丢新事件（不阻塞音频回调）。
+    fn push_visual(&mut self, ev: VisualEvent) {
+        if self.visual_events.len() < VISUAL_EVENT_CAP {
+            self.visual_events.push(ev);
+        }
+    }
+
+    /// UI 每帧取走积累的视觉事件（改色 / 彩虹 / 存档弹窗 / 背景强调）。
+    pub fn take_visual_events(&mut self) -> Vec<VisualEvent> {
+        std::mem::take(&mut self.visual_events)
     }
 
     /// 处理 tick 跨越时的事件派发。
@@ -265,7 +348,7 @@ impl SharedState {
         }
         let diff = to - from;
         while self.cursor < self.events.len() {
-            let ev = &self.events[self.cursor];
+            let ev = self.events[self.cursor].clone();
             let t = ev.tick as i64;
             if t > to {
                 break;
@@ -273,28 +356,7 @@ impl SharedState {
             // 卡顿/跳转跨过 >3 列时，只补播最后一列（原版行为）
             let should_play = (diff <= 3 && t >= from) || (diff > 3 && t == to);
             if should_play {
-                self.mixer.max_voices = self.params.max_voices;
-                self.mixer.master = self.params.master;
-                self.mixer.mono = self.params.mono;
-                self.mixer.output_rate = self.sample_rate;
-                match ev.kind {
-                    EventKind::Tempo(pitch) => {
-                        // pitch 是整数，floor(|pitch|)/15 就是 |pitch|/15
-                        self.params.tempo =
-                            (pitch.unsigned_abs() as f32 / 15.0).max(0.25);
-                    }
-                    EventKind::Stopper(first, last) => self.mixer.stop_range(first, last),
-                    EventKind::Note => {
-                        // voice 层号 1 基（原版 play_sound(..., b + 1)）
-                        self.mixer.spawn(
-                            &ev.note,
-                            ev.layer_volume,
-                            ev.layer_stereo,
-                            &self.bank,
-                            ev.layer + 1,
-                        );
-                    }
-                }
+                self.apply_event(&ev);
             }
             self.cursor += 1;
         }
@@ -872,5 +934,125 @@ mod tests {
             "只允许 tick 5 那枚真正的 Tempo Changer 把 tempo 从 41.33 改成 600/15=40，实测 {:.2}",
             st.params.tempo
         );
+    }
+
+    /// 四种改界面的事件乐器要按 else-if 链识别成对应 kind，且锁定层照常保留
+    /// （原版只有 play_sound 被 a 闸住）。
+    #[test]
+    fn visual_instrument_names_parse_to_visual_kinds() {
+        let mut song = Song::new();
+        for name in [
+            "Toggle Rainbow",
+            "Show Save Popup",
+            "Change Color to #FF8000",
+            "TOGGLE RAINBOW",
+            "Toggle Background Accent",
+        ] {
+            song.custom_instruments.push(nbs_core::model::CustomInstrument {
+                name: name.into(),
+                filename: String::new(),
+                key: 45,
+                press: false,
+            });
+        }
+        song.set(0, 0, Note { instrument: 20, key: 45, velocity: 100, panning: 100, pitch: 0 });
+        song.set(1, 1, Note { instrument: 21, key: 45, velocity: 100, panning: 100, pitch: 0 });
+        song.set(2, 2, Note { instrument: 22, key: 45, velocity: 100, panning: 100, pitch: 0 });
+        song.set(3, 3, Note { instrument: 23, key: 45, velocity: 100, panning: 100, pitch: 0 });
+        song.set(4, 4, Note { instrument: 24, key: 45, velocity: 100, panning: 100, pitch: 0 });
+        while song.layers.len() < 5 {
+            song.layers.push(nbs_core::model::Layer::default());
+        }
+        // 锁定层：只有「原版不被 a 闸住」的 kind 保留，普通音符（含变奏名）被滤掉。
+        song.layers[1].lock = nbs_core::model::LockMode::Locked;
+        song.layers[2].lock = nbs_core::model::LockMode::Locked;
+        song.layers[3].lock = nbs_core::model::LockMode::Locked;
+        song.recalculate();
+        let events = build_event_table(&song, false);
+        assert_eq!(events.len(), 4, "锁定层上的视觉事件乐器保留，锁定层的普通音符滤掉");
+        assert_eq!(events[0].kind, EventKind::Rainbow);
+        assert_eq!(events[1].kind, EventKind::SavePopup);
+        assert_eq!(events[2].kind, EventKind::AccentColor([255, 128, 0]));
+        assert_eq!(events[3].kind, EventKind::BackgroundAccent);
+        assert!(
+            events.iter().all(|e| e.kind != EventKind::Note),
+            "TOGGLE RAINBOW 是变奏名不是精确名，按普通音符被锁定层闸门滤掉"
+        );
+    }
+
+    /// 「Change Color to #」判定：小写包含且恰好一次；十六进制按**原名固定**
+    /// 第 18/20/22 个字符起各取两位（string_copy 不看前缀在哪）；非法或缺位按 0。
+    #[test]
+    fn accent_change_rgb_parsing_rules() {
+        assert_eq!(accent_change_rgb("Change Color to #FF8000"), Some([255, 128, 0]));
+        // 前缀不在开头时照旧取固定位置——「please CHANGE…」的 18..24 字符是
+        // 「OR TO 」，原版 real() 会报错，这里按 0 兜底。
+        assert_eq!(accent_change_rgb("please CHANGE COLOR TO #ab12 now"), Some([0, 0, 0]));
+        assert_eq!(
+            accent_change_rgb("Change Color to #FF8000 and Change Color to #000000"),
+            None,
+            "包含两次不算"
+        );
+        assert_eq!(accent_change_rgb("Change Color to #zzzzzz"), Some([0, 0, 0]));
+        assert_eq!(accent_change_rgb("Change Color to #"), Some([0, 0, 0]), "缺位按 0");
+        assert_eq!(accent_change_rgb("Toggle Rainbow"), None);
+    }
+
+    /// 播放头跨过视觉事件乐器所在列 → 副作用进共享队列，UI 侧 take 走后清空。
+    #[test]
+    fn visual_events_reach_the_queue_when_crossed() {
+        let mut song = Song::new();
+        song.custom_instruments.push(nbs_core::model::CustomInstrument {
+            name: "Show Save Popup".into(),
+            filename: String::new(),
+            key: 45,
+            press: false,
+        });
+        song.custom_instruments.push(nbs_core::model::CustomInstrument {
+            name: "Toggle Rainbow".into(),
+            filename: String::new(),
+            key: 45,
+            press: false,
+        });
+        song.set(0, 0, Note { instrument: 20, key: 45, velocity: 100, panning: 100, pitch: 0 });
+        song.set(10, 0, Note { instrument: 21, key: 45, velocity: 100, panning: 100, pitch: 0 });
+        song.recalculate();
+        let mut st = SharedState::new(Arc::new(SoundBank::default()), 44100);
+        st.prepare(&song, Arc::new(SoundBank::default()));
+        // 按播放键：落点列 tick 0 整列过链（播放中 tick 0 永远不会被「跨过」）。
+        st.dispatch_landing_column(0.0);
+        st.params.playing = true;
+        st.params.song_length = 100_000.0;
+        st.params.tempo = 44100.0; // 1 tick/采样，快速跨列
+        drive(&mut st, 15);
+        assert_eq!(
+            st.take_visual_events(),
+            vec![
+                VisualEvent::SavePopup,
+                VisualEvent::RainbowToggle,
+            ],
+            "跨过 tick 0 与 tick 10 各发一次"
+        );
+        assert!(st.take_visual_events().is_empty(), "take 之后必须清空");
+    }
+
+    /// 落点列（按播放键 / 循环回绕）的视觉事件乐器也要派发——原版 PLAY COL
+    /// 把整列重新过一遍 else-if 链。
+    #[test]
+    fn landing_column_dispatches_visual_events() {
+        let mut song = Song::new();
+        song.custom_instruments.push(nbs_core::model::CustomInstrument {
+            name: "Change Color to #0A0B0C".into(),
+            filename: String::new(),
+            key: 45,
+            press: false,
+        });
+        song.set(7, 0, Note { instrument: 20, key: 45, velocity: 100, panning: 100, pitch: 0 });
+        song.recalculate();
+        let mut st = SharedState::new(Arc::new(SoundBank::default()), 44100);
+        st.prepare(&song, Arc::new(SoundBank::default()));
+        st.seek(7.0);
+        st.dispatch_landing_column(7.0);
+        assert_eq!(st.take_visual_events(), vec![VisualEvent::AccentColor([0x0a, 0x0b, 0x0c])]);
     }
 }

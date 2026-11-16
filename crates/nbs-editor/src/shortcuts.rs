@@ -16,6 +16,7 @@ use egui::{Context, Event, Key};
 use crate::commands::Command;
 use crate::state::{EditMode, Flag, WindowKind};
 use crate::state::EditorState;
+use crate::theme::ThemeKind;
 
 /// 原版 `control_draw.gml:822-843` 的数字快捷键只覆盖前 16 个乐器：
 /// Ctrl+1..9 → 0..8，Ctrl+Shift+1..7 → 9..15。v6 新增的铜块一族（16..19）
@@ -91,6 +92,12 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
         }
         if p(Key::F11) {
             out.push(Command::ToggleFullscreen);
+        }
+        // 原版 720 行：Ctrl+Shift+F5 仅 theme 3，开/关彩虹。开只发消息，
+        // 关再 draw_accent_init（消息在 toggle_rainbow 里，原版 language=0 的
+        // 英文文案是 "Rainbow mode => ON/OFF"，界面沿用中文分支）。
+        if p(Key::F5) && ctrl && shift && state.theme.kind == ThemeKind::Fluent {
+            out.push(Command::ToggleRainbow);
         }
 
         // ---- 以下要求停止播放（原版 709 行 `if (playing = 0)`）----
@@ -300,6 +307,7 @@ pub const SHORTCUT_HELP: &[(&str, &str)] = &[
     ("按住 ← / →", "向左 / 向右滚动（同底部快退 / 快进按钮）"),
     ("Home / End", "播放头到开头 / 结尾"),
     ("F10 / F11", "全黑模式 / 全屏"),
+    ("Ctrl+Shift+F5", "炫彩模式开关（仅 Fluent 主题）"),
     ("F1", "打开本页"),
     ("窗口内 ← / →", "切换页签"),
     ("Escape", "关闭首选项窗口 / 取消选择"),
@@ -382,5 +390,45 @@ mod tests {
             "Ctrl+Shift+P 应开片段编辑器: {got:?}"
         );
         assert!(!got.iter().any(prefs_open_cmd), "Ctrl+Shift+P 不该开首选项: {got:?}");
+    }
+
+    /// 自带状态的 cmds 变体（theme 闸门要切主题才能测）。
+    fn cmds_with(events: Vec<Event>, state: &EditorState) -> Vec<Command> {
+        let ctx = Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            predicted_dt: 0.0,
+            events,
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        let _ = ctx.run(raw, |c| out = collect_shortcuts(state, c));
+        out
+    }
+
+    /// 原版 `control_draw.gml:720`：Ctrl+Shift+F5 的判定里带 `theme = 3`，
+    /// 非 Fluent 主题这个组合必须无效。
+    #[test]
+    fn ctrl_shift_f5_toggles_rainbow_only_on_fluent() {
+        let both = egui::Modifiers { ctrl: true, shift: true, ..Default::default() };
+        let got = cmds(vec![key(Key::F5, true, both)]);
+        assert!(
+            got.iter().any(|c| matches!(c, Command::ToggleRainbow)),
+            "Fluent（出厂主题）下应触发: {got:?}"
+        );
+
+        let mut state = EditorState::new();
+        state.theme = crate::theme::Theme::new(crate::theme::ThemeKind::Dark);
+        let got = cmds_with(vec![key(Key::F5, true, both)], &state);
+        assert!(
+            !got.iter().any(|c| matches!(c, Command::ToggleRainbow)),
+            "暗黑主题不该触发: {got:?}"
+        );
+        // 裸 F5 不算（原版要求 Ctrl+Shift 都按住）。
+        let got = cmds(vec![key(Key::F5, true, egui::Modifiers::NONE)]);
+        assert!(!got.iter().any(|c| matches!(c, Command::ToggleRainbow)), "{got:?}");
     }
 }

@@ -1126,7 +1126,7 @@ impl<'a> Page<'a> {
         let at = self.row(x, n);
         let (resp, m) = self.hit(Rect::from_min_size(at, Vec2::new(26.0 + tw + 8.0, 13.0)), id, lock);
         let fdark = self.th.fdark;
-        let acc = Theme::accent_at(5 + if m == 1 { 2 } else { 0 } + if m == 2 { 3 } else { 0 });
+        let acc = self.th.accent(5 + if m == 1 { 2 } else { 0 } + if m == 2 { 3 } else { 0 });
         let fill = if on && !lock {
             acc
         } else if on {
@@ -1238,7 +1238,7 @@ impl<'a> Page<'a> {
         let c = at + Vec2::new(5.0, 6.0);
         let p = self.ui.painter().clone();
         let fill = match (lock, on) {
-            (false, true) => Theme::accent_at(5),
+            (false, true) => self.th.accent(5),
             (false, false) if fdark => ggray([32, 42, 42][m]),
             (false, false) => ggray([243, 229, 229][m]),
             (true, true) if fdark => ggray(119),
@@ -1329,8 +1329,8 @@ impl<'a> Page<'a> {
             }
         } else {
             (
-                Theme::accent_at(5 - m),
-                Theme::accent_at([4, 5, 3][m]),
+                self.th.accent(5 - m),
+                self.th.accent([4, 5, 3][m]),
             )
         };
         p.rect_filled(body, 4.0, fill);
@@ -3198,7 +3198,7 @@ fn midi_menu_rows(
     let fluent = th.kind == ThemeKind::Fluent;
     // 原版选中底色：Fluent 用 `accent[5]`，其余是 `16684072` = rgb(40,148,254)。
     let sel_bg = if fluent {
-        Theme::accent_at(5)
+        th.accent(5)
     } else {
         Color32::from_rgb(40, 148, 254)
     };
