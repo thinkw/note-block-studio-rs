@@ -20,6 +20,7 @@ use crate::icons::BlockSet;
 use crate::interaction::{DragMode, InputSnapshot};
 use crate::layers_panel::time_str;
 use crate::state::{ContextKind, ContextMenu, EditMode, EditorState};
+use crate::tr;
 use crate::theme::{Theme, ThemeKind};
 use crate::viewport::{SCROLLBAR_SIZE, TIMELINE_HEIGHT};
 
@@ -1010,9 +1011,8 @@ fn note_label(state: &EditorState, note: Note) -> String {
         // 原版：起始层存在 pitch 里，结束层用声像 + 力度两个字节编码。
         let end = panning_velocity_to_short(note.panning, note.velocity);
         if note.pitch > 0 && end < note.pitch as u32 {
-            // 原版 `condstr(language != 1, "Off", "停用")`，language 只在系统区域是 zh-CN 时取 1；
-            // 我们的界面整体是中文，所以走「停用」这一支。
-            return "停用".to_string();
+            // 原版 `condstr(language != 1, "Off", "停用")`。
+            return tr("Off", "停用").to_string();
         }
         return format!("{}-{}", note.pitch.abs(), end);
     }
@@ -1073,18 +1073,18 @@ fn draw_context_menu(state: &mut EditorState, ui: &Ui) {
             let item = |ui: &mut Ui, label: &str| -> bool { ui.button(label).clicked() };
             match menu.kind {
                 ContextKind::Grid => {
-                    if item(ui, "复制  Ctrl+C") { cmds.push(Command::Copy); close = true; }
-                    if item(ui, "剪切  Ctrl+X") { cmds.push(Command::Cut); close = true; }
-                    if item(ui, "粘贴  Ctrl+V") { cmds.push(Command::Paste); close = true; }
-                    if item(ui, "删除  Delete") { cmds.push(Command::Delete); close = true; }
+                    if item(ui, tr("Copy  Ctrl+C", "复制  Ctrl+C")) { cmds.push(Command::Copy); close = true; }
+                    if item(ui, tr("Cut  Ctrl+X", "剪切  Ctrl+X")) { cmds.push(Command::Cut); close = true; }
+                    if item(ui, tr("Paste  Ctrl+V", "粘贴  Ctrl+V")) { cmds.push(Command::Paste); close = true; }
+                    if item(ui, tr("Delete  Delete", "删除  Delete")) { cmds.push(Command::Delete); close = true; }
                     ui.separator();
-                    if item(ui, "全选  Ctrl+A") { cmds.push(Command::SelectAll); close = true; }
-                    if item(ui, "反选  Ctrl+I") { cmds.push(Command::InvertSelection); close = true; }
-                    if item(ui, "取消选择") { cmds.push(Command::Deselect); close = true; }
+                    if item(ui, tr("Select all  Ctrl+A", "全选  Ctrl+A")) { cmds.push(Command::SelectAll); close = true; }
+                    if item(ui, tr("Invert selection  Ctrl+I", "反选  Ctrl+I")) { cmds.push(Command::InvertSelection); close = true; }
+                    if item(ui, tr("Deselect all", "取消选择")) { cmds.push(Command::Deselect); close = true; }
                     ui.separator();
-                    if item(ui, "升八度  +12") { cmds.push(Command::Transpose(12)); close = true; }
-                    if item(ui, "降八度  -12") { cmds.push(Command::Transpose(-12)); close = true; }
-                    if item(ui, "在此粘贴到此处") {
+                    if item(ui, &format!("{}  +12", tr("Transpose one octave up", "升八度"))) { cmds.push(Command::Transpose(12)); close = true; }
+                    if item(ui, &format!("{}  -12", tr("Transpose one octave down", "降八度"))) { cmds.push(Command::Transpose(-12)); close = true; }
+                    if item(ui, tr("Paste here", "在此粘贴到此处")) {
                         cmds.push(Command::Paste);
                         state.hover_cell = Some(menu.cell);
                         close = true;
@@ -1093,46 +1093,46 @@ fn draw_context_menu(state: &mut EditorState, ui: &Ui) {
                     crate::toolbar::instrument_menus(state, ui);
                 }
                 ContextKind::Timeline => {
-                    if item(ui, "跳到播放头") {
+                    if item(ui, tr("Jump to playhead", "跳到播放头")) {
                         state.viewport.start_tick = state.marker().floor().max(0.0) as u32;
                         close = true;
                     }
-                    if item(ui, "设为循环起点") {
-                        state.doc.edit_meta("设置循环起点", |m| {
+                    if item(ui, tr("Set as loop start", "设为循环起点")) {
+                        state.doc.edit_meta(tr("Set loop start", "设置循环起点"), |m| {
                             m.loop_start = menu.cell.0.min(u16::MAX as u32) as u16;
                             m.loop_enabled = true;
                         });
                         close = true;
                     }
-                    if item(ui, "定位到此处") {
+                    if item(ui, tr("Seek here", "定位到此处")) {
                         state.set_marker(menu.cell.0 as f64);
                         close = true;
                     }
-                    if item(ui, "全选到此处") {
+                    if item(ui, tr("Select all up to here", "全选到此处")) {
                         state.doc.select_rect(0, 0, menu.cell.0, state.doc.song.endb, false, false, true);
                         close = true;
                     }
                 }
                 ContextKind::Layer(layer) => {
-                    if item(ui, "重命名图层") {
+                    if item(ui, tr("Rename layer", "重命名图层")) {
                         cmds.push(Command::ShowWindow(crate::state::WindowKind::LayerRename(layer)));
                         close = true;
                     }
-                    if item(ui, "选中整层") { cmds.push(Command::SelectLayer(layer)); close = true; }
-                    if item(ui, "在上方插入图层") { cmds.push(Command::InsertLayer(layer)); close = true; }
-                    if item(ui, "在末尾添加图层") { cmds.push(Command::AddLayer); close = true; }
-                    if item(ui, "上移图层") { cmds.push(Command::MoveLayerUp(layer)); close = true; }
-                    if item(ui, "下移图层") { cmds.push(Command::MoveLayerDown(layer)); close = true; }
-                    if item(ui, "删除图层") { cmds.push(Command::RemoveLayer(layer)); close = true; }
+                    if item(ui, tr("Select whole layer", "选中整层")) { cmds.push(Command::SelectLayer(layer)); close = true; }
+                    if item(ui, tr("Insert layer above", "在上方插入图层")) { cmds.push(Command::InsertLayer(layer)); close = true; }
+                    if item(ui, tr("Add layer at end", "在末尾添加图层")) { cmds.push(Command::AddLayer); close = true; }
+                    if item(ui, tr("Move layer up", "上移图层")) { cmds.push(Command::MoveLayerUp(layer)); close = true; }
+                    if item(ui, tr("Move layer down", "下移图层")) { cmds.push(Command::MoveLayerDown(layer)); close = true; }
+                    if item(ui, tr("Remove layer", "删除图层")) { cmds.push(Command::RemoveLayer(layer)); close = true; }
                 }
                 ContextKind::Tempo => {
                     let bpm_on = state.prefs.use_bpm;
-                    if ui.selectable_label(!bpm_on, "红石刻/秒 (t/s)").clicked() {
+                    if ui.selectable_label(!bpm_on, tr("Ticks per second (t/s)", "红石刻/秒 (t/s)")).clicked() {
                         state.prefs.use_bpm = false;
                         cmds.push(Command::SavePreferences);
                         close = true;
                     }
-                    if ui.selectable_label(bpm_on, "拍数/分钟 (BPM)").clicked() {
+                    if ui.selectable_label(bpm_on, tr("Beats per minute (BPM)", "拍数/分钟 (BPM)")).clicked() {
                         state.prefs.use_bpm = true;
                         cmds.push(Command::SavePreferences);
                         close = true;
@@ -1149,7 +1149,7 @@ fn draw_context_menu(state: &mut EditorState, ui: &Ui) {
                 }
             }
             ui.separator();
-            if item(ui, "关闭菜单") { close = true; }
+            if item(ui, tr("Close menu", "关闭菜单")) { close = true; }
         });
     });
 

@@ -9,6 +9,7 @@ use egui::{pos2, vec2, Align2, Color32, FontId, Painter, Rect, Ui};
 use crate::icons::Bank;
 use crate::state::EditorState;
 use crate::theme::{Theme, ThemeKind};
+use crate::tr;
 
 /// 原版文本顶边在 `rh - 18`，本条高 24 → 条内 y = 6。
 const TEXT_Y: f32 = 6.0;
@@ -69,22 +70,22 @@ pub fn show_status_bar(state: &EditorState, ui: &mut Ui) {
 
     let mut f = Fields { p: &p, th: &th, x: area.min.x + 4.0, y: area.min.y + TEXT_Y };
     let cur = &state.current;
-    f.text(th.text, format!("音色: {}", instrument_label(state, cur.instrument)), 180.0);
-    f.text(th.text, format!("音: {}", key_name(state, cur.key)), 75.0);
+    f.text(th.text, format!("{}{}", tr("Instrument: ", "音色: "), instrument_label(state, cur.instrument)), 180.0);
+    f.text(th.text, format!("{}{}", tr("Key: ", "音: "), key_name(state, cur.key)), 75.0);
     // 原版只在画笔属性被改过之后才显示这三格。
     if cur.velocity != 100 || cur.panning != 100 || cur.pitch != 0 {
-        f.text(th.text, format!("音量: {}", cur.velocity), 100.0);
-        f.text(th.text, format!("声道: {}", cur.panning as i32 - 100), 95.0);
-        f.text(th.text, format!("音高: {}", cur.pitch), 85.0);
+        f.text(th.text, format!("{}{}", tr("Velocity: ", "音量: "), cur.velocity), 100.0);
+        f.text(th.text, format!("{}{}", tr("Panning: ", "声道: "), cur.panning as i32 - 100), 95.0);
+        f.text(th.text, format!("{}{}", tr("Pitch: ", "音高: "), cur.pitch), 85.0);
     }
 
     let hover = state.hover_cell;
-    f.text(th.text, format!("位置: {}", hover.map_or("无".to_string(), |(t, _)| t.to_string())), 90.0);
-    f.text(th.text, format!("层: {}", hover.map_or("无".to_string(), |(_, l)| (l + 1).to_string())), 90.0);
+    f.text(th.text, format!("{}{}", tr("Tick: ", "位置: "), hover.map_or(tr("None", "无").to_string(), |(t, _)| t.to_string())), 90.0);
+    f.text(th.text, format!("{}{}", tr("Layer: ", "层: "), hover.map_or(tr("None", "无").to_string(), |(_, l)| (l + 1).to_string())), 90.0);
     let selected = state.doc.selection.notes.len();
     f.text(
         th.text,
-        format!("已选择: {selected} / {}", state.doc.song.total_blocks + selected),
+        format!("{}{selected} / {}", tr("Selected: ", "已选择: "), state.doc.song.total_blocks + selected),
         160.0,
     );
 
@@ -92,14 +93,20 @@ pub fn show_status_bar(state: &EditorState, ui: &mut Ui) {
     // 选中的音符已从歌曲里摘出，所以此时悬停格读不到东西，和原版一致。
     let hovered = hover.and_then(|(t, l)| state.doc.song.get(t, l));
     if let Some(n) = hovered {
-        f.text(th.text, format!("音: {}", key_name(state, n.key)), 90.0);
-        f.text(th.text, format!("音量: {}", n.velocity), 110.0);
-        f.text(th.text, format!("声道: {}", pan_text(n.panning)), 120.0);
+        f.text(th.text, format!("{}{}", tr("Key: ", "音: "), key_name(state, n.key)), 90.0);
+        f.text(th.text, format!("{}{}", tr("Velocity: ", "音量: "), n.velocity), 110.0);
+        f.text(th.text, format!("{}{}", tr("Panning: ", "声道: "), pan_text(n.panning)), 120.0);
         let sign = if n.pitch > 0 { "+" } else { "" };
-        f.last(th.text, format!("音高: {sign}{}微分", n.pitch));
+        f.last(th.text, format!("{}{sign}{}", tr("Pitch: ", "音高: "), if crate::lang() == 1 { format!("{}微分", n.pitch) } else { format!("{} cents", n.pitch) }));
     } else {
         if let Some(m) = autosave_in(state) {
-            f.text(th.text, format!("下次自动保存: {m} 分钟"), 210.0);
+            // 英文复数按整除后的值判（原版 `condstr(ceil(tonextsave)<>1, "s")`）。
+            let word = tr("minute", "分钟");
+            f.text(
+                th.text,
+                format!("{}{m} {}{}", tr("Next auto-save: ", "下次自动保存: "), word, if crate::lang() == 0 && m != 1 { "s" } else { "" }),
+                210.0,
+            );
         }
         if state.prefs.show_sound_count {
             let channels = if state.prefs.extended_voices { 1024 } else { 256 };
@@ -109,7 +116,7 @@ pub fn show_status_bar(state: &EditorState, ui: &mut Ui) {
             } else {
                 th.text
             };
-            f.last(color, format!("声音数: {sounds} / {channels}"));
+            f.last(color, format!("{}{sounds} / {channels}", tr("Sounds: ", "声音数: ")));
         }
     }
 
@@ -132,14 +139,15 @@ fn key_name(state: &EditorState, key: u8) -> String {
 /// 原版 `condstr(pan < 100, "L ", "R ") + " " + abs(pan - 100)`，100 写中央。
 fn pan_text(pan: u8) -> String {
     if pan == 100 {
-        "中央".to_string()
+        tr("Center", "中央").to_string()
     } else {
         let side = if pan < 100 { "L" } else { "R" };
         format!("{side}  {}", (pan as i32 - 100).abs())
     }
 }
 
-/// 原版 `instrument.name`：自定义乐器要用歌里的名字，空名字回落编号。
+/// 原版 `instrument.name`：自定义乐器要用歌里的名字，空名字回落编号
+/// （编号样式取自原版新增自定义乐器的默认名 "Custom instrument #N"）。
 fn instrument_label(state: &EditorState, idx: u8) -> String {
     if let Some(ins) = nbs_core::instruments::instrument(idx) {
         return ins.name.to_string();
@@ -147,7 +155,7 @@ fn instrument_label(state: &EditorState, idx: u8) -> String {
     let j = idx as usize - nbs_core::model::FIRST_CUSTOM_INDEX as usize;
     match state.doc.song.custom_instruments.get(j) {
         Some(ci) if !ci.name.trim().is_empty() => ci.name.clone(),
-        _ => format!("自定义音色 {}", j + 1),
+        _ => format!("{}{}", tr("Custom instrument #", "自定义音色 "), j + 1),
     }
 }
 
