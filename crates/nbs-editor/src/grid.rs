@@ -10,7 +10,10 @@ use egui::{
     pos2, Align2, Color32, CursorIcon, FontId, Painter, Pos2, Rect, Sense, Shape, Stroke,
     StrokeKind, Ui, Vec2,
 };
-use nbs_core::model::{key_name, Note, FIRST_CUSTOM_INDEX, MC_KEY_MAX, MC_KEY_MIN, PAN_CENTER};
+use nbs_core::model::{
+    key_name, panning_velocity_to_short, Note, FIRST_CUSTOM_INDEX, MC_KEY_MAX, MC_KEY_MIN,
+    PAN_CENTER, SOUND_STOPPER_NAME, TEMPO_CHANGER_NAME,
+};
 
 use crate::commands::Command;
 use crate::icons::BlockSet;
@@ -22,6 +25,8 @@ use crate::viewport::{SCROLLBAR_SIZE, TIMELINE_HEIGHT};
 
 /// 原版标尺用的 `font_small`（fnt_small / fnt_wslui_small 的 size 都是 8）。
 const RULER_FONT: FontId = FontId::proportional(8.0);
+/// 原版 `font_main`，音符数值和标尺上的 BPM 盒都是它。
+const MAIN_FONT: FontId = FontId::proportional(9.0);
 /// 原版标尺刻度线的 `draw_set_alpha(0.6)`。
 const RULER_A: u8 = 153;
 
@@ -600,6 +605,57 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
     }
     p.extend(shapes);
 
+    // 原版 control_draw.gml:1147-1167：标尺上的「BPM = N」速度盒。队列是从最后一枚
+    // （最靠下的）往回画的，后面的（更靠上的）过不了 `yy > last_tc_y`，
+    // 所以每个 tick 列最终只留下最靠下的一枚 Tempo Changer。
+    if let Some(bank) = state.icons.bank() {
+        for a in 0..=vp.columns() {
+            let tick = vp.start_tick + a;
+            let Some(col) = state.doc.song.column(tick) else { continue };
+            let Some((_, n)) = col
+                .notes
+                .iter()
+                .rev()
+                .find(|(_, n)| state.doc.song.instrument_name(n.instrument) == TEMPO_CHANGER_NAME)
+            else {
+                continue;
+            };
+            let xx = vp.tick_x(tick as i64);
+            let galley = p.layout_no_wrap(format!("BPM = {}", n.pitch.abs()), MAIN_FONT, th.text);
+            let w = galley.size().x;
+            let fill = if th.kind == ThemeKind::Dark {
+                Color32::from_gray(54)
+            } else if th.kind == ThemeKind::Fluent {
+                if th.fdark { Color32::from_gray(45) } else { Color32::from_gray(252) }
+            } else {
+                Color32::WHITE
+            };
+            p.rect_filled(
+                Rect::from_min_max(pos2(xx + 10.0, rect.min.y + 4.0), pos2(xx + 10.0 + w, rect.min.y + 16.0)),
+                0.0,
+                fill,
+            );
+            bank.area(
+                &p,
+                Rect::from_min_max(pos2(xx + 9.0, rect.min.y + 3.0), pos2(xx + 11.0 + w, rect.min.y + 17.0)),
+                th,
+            );
+            let dark_marker = th.kind == ThemeKind::Dark
+                || state.flags.blackout
+                || (th.kind == ThemeKind::Fluent && th.fdark);
+            let f = 8 * dark_marker as usize;
+            let at = pos2(xx, rect.min.y + 2.0);
+            bank.marker(&p, at, f, Vec2::new(16.0, 15.0), Color32::WHITE);
+            bank.marker(&p, pos2(xx, rect.min.y + 17.0), f + 1, Vec2::new(16.0, 15.0), Color32::WHITE);
+            // 原版 `draw_text(xx + 10, y1 + 2 + (theme != 3), …)`，对齐当时是 fa_left。
+            p.galley(
+                pos2(xx + 10.0, rect.min.y + if th.kind == ThemeKind::Fluent { 2.0 } else { 3.0 }),
+                galley,
+                th.text,
+            );
+        }
+    }
+
     // 播放头：原版在时间轴顶端画 spr_marker 的箭头帧，细身帧一路拉满整个网格；
     // 精灵 xorigin = 8，贴图横坐标就是线所在的 x。网格那半截见 draw_grid。
     let mx = vp.tick_x(state.marker().floor() as i64)
@@ -712,6 +768,40 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
         }
         let at = vp.cell_rect(tick, layer).min;
         push_note(state, &p, at, note, c, if in_box { 0.8 } else { 0.0 });
+    }
+
+    // 消音器导引带：原版 `control_draw.gml:352-366` 也是逐列扫完整列（不限可见层），
+    // 再交给 `draw_sound_stopper_guide` 裁到可见范围；闸门同样是「显示音符盒数值」。
+    // 逐列画完再画下一列，等价于在这里一次性补上：带子只有 16px 宽，最多多压到
+    // 前一列的右边缘 2px，而前一列的音符在原版里也是先画的。
+    if state.flags.show_numbers {
+        if let Some(bank) = state.icons.bank() {
+            let dark = th.kind == ThemeKind::Dark || (th.kind == ThemeKind::Fluent && th.fdark);
+            let visible_rows = (rect.height() / cell).floor() as i64;
+            let visible_end = l0 as i64 + visible_rows - 1;
+            for tick in t0..t1 {
+                let Some(col) = state.doc.song.column(tick) else { continue };
+                for (_, note) in &col.notes {
+                    if state.doc.song.instrument_name(note.instrument) != SOUND_STOPPER_NAME {
+                        continue;
+                    }
+                    // 原版存的是 1 基的层号（`song_pit = yy + 1`），我们内部一律 0 基。
+                    let start = note.pitch.unsigned_abs() as i64 - 1;
+                    let end = panning_velocity_to_short(note.panning, note.velocity) as i64 - 1;
+                    let (ds, de) = (start.max(l0 as i64), end.min(visible_end));
+                    if ds > de {
+                        continue;
+                    }
+                    bank.stopper_wall(
+                        &p,
+                        vp.tick_x(tick as i64),
+                        vp.layer_y(ds),
+                        cell * (de - ds + 1) as f32,
+                        dark,
+                    );
+                }
+            }
+        }
     }
 
     // 浮动选区：同样先做整体视口剔除，再逐音符裁剪。
@@ -827,7 +917,15 @@ fn push_note(
         let icon_at = pos2(at.x + 16.0, at.y + 16.0);
         let icon_size = Vec2::splat(16.0);
         if iscustom {
-            bank.custom_block_glyph(p, icon_at, index - first_custom, first_custom, icon_size, block_alpha);
+            bank.custom_block_glyph(
+                p,
+                icon_at,
+                index - first_custom,
+                first_custom,
+                state.doc.song.instrument_name(note.instrument),
+                icon_size,
+                block_alpha,
+            );
         } else {
             bank.instrument_glyph(p, icon_at, index, icon_size, block_alpha);
         }
@@ -853,7 +951,7 @@ fn push_note(
         bank.block_sel(p, at, size, salpha);
     }
     let text_alpha = if salpha > 0.0 { 1.0 } else { (block_alpha + 0.25).min(1.0) };
-    let font = FontId::proportional(9.0);
+    let font = MAIN_FONT;
 
     if flags.show_numbers {
         // 原版 `xx + 16 - 8 * use_icons`：勾了图标位就把数值往左挪半格。
@@ -861,7 +959,7 @@ fn push_note(
         p.text(
             pos2(x, at.y + 16.0),
             Align2::CENTER_TOP,
-            note_value(state.tool, note),
+            note_label(state, note),
             font.clone(),
             alpha(Color32::WHITE, (text_alpha * 255.0) as u8),
         );
@@ -875,6 +973,26 @@ fn push_note(
         font,
         alpha(name_color, (text_alpha * 255.0) as u8),
     );
+}
+
+/// 原版 `draw_block` 的 `show_numbers` 分支：两个事件乐器各有专属文字，
+/// 只有其余乐器才按 `editmode` 取那一串数字。
+fn note_label(state: &EditorState, note: Note) -> String {
+    let name = state.doc.song.instrument_name(note.instrument);
+    if name == TEMPO_CHANGER_NAME {
+        return format!("{} BPM", note.pitch.abs());
+    }
+    if name == SOUND_STOPPER_NAME {
+        // 原版：起始层存在 pitch 里，结束层用声像 + 力度两个字节编码。
+        let end = panning_velocity_to_short(note.panning, note.velocity);
+        if note.pitch > 0 && end < note.pitch as u32 {
+            // 原版 `condstr(language != 1, "Off", "停用")`，language 只在系统区域是 zh-CN 时取 1；
+            // 我们的界面整体是中文，所以走「停用」这一支。
+            return "停用".to_string();
+        }
+        return format!("{}-{}", note.pitch.abs(), end);
+    }
+    note_value(state.tool, note)
 }
 
 /// 原版 `draw_block` 里按 `editmode` 选的那串数字。

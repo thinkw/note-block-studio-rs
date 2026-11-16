@@ -421,7 +421,7 @@ fn instrument_box(state: &mut EditorState, ui: &mut Ui, bar: &mut Bar, rw: f32) 
         }
         let tip = format!("更改音色为{}", ins[i].1);
         let pressed = state.current.instrument == ins[i].0;
-        if bank.instrument_icon(ui, pos2(bar.x, bar.y), i, first_custom, &tip, pressed, &th) {
+        if bank.instrument_icon(ui, pos2(bar.x, bar.y), i, first_custom, &ins[i].1, &tip, pressed, &th) {
             state.emit(Command::SetInstrument(ins[i].0));
         }
         bar.x += 25.0;
@@ -480,7 +480,7 @@ fn draw_insbox_open(
                     let pos = rect.min + Vec2::new(2.0 + b as f32 * 25.0, 2.0 + a as f32 * 25.0);
                     let tip = format!("更改音色为{}", ins[i].1);
                     let pressed = state.current.instrument == ins[i].0;
-                    if bank.instrument_icon(ui, pos, i, first_custom, &tip, pressed, th) {
+                    if bank.instrument_icon(ui, pos, i, first_custom, &ins[i].1, &tip, pressed, th) {
                         chosen = Some(i);
                     }
                 }

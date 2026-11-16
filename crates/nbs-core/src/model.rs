@@ -458,9 +458,75 @@ pub fn key_offset(key: u8) -> i32 {
     key as i32 - 33
 }
 
+/// 原版 `draw_block` / `control_step` 都是拿乐器名硬比的两个特殊自定义音色。
+/// 名字由用户自己填，原版用的是 GML 的 `==`，区分大小写，这里也照抄。
+pub const TEMPO_CHANGER_NAME: &str = "Tempo Changer";
+pub const SOUND_STOPPER_NAME: &str = "Sound Stopper";
+
+/// 原版 `panning_velocity_to_short(pan, vel)`：消音器把「结束层」塞进音符的声像 + 力度
+/// 两个字节里 —— `pan` 存低 8 位、`vel` 存高 8 位，各自先加 156 再取模，
+/// 好让默认值 100 落在编码 0 上。
+pub fn panning_velocity_to_short(pan: u8, vel: u8) -> u32 {
+    let lo = (pan as u32 + 156) % 256;
+    let hi = (vel as u32 + 156) % 256;
+    lo + hi * 256
+}
+
+/// 原版 `short_to_panning_velocity(val)`，返回 `[pan, vel]`。与上面严格互逆。
+pub fn short_to_panning_velocity(val: u32) -> (u8, u8) {
+    let hi = (val / 256) % 256;
+    let lo = val % 256;
+    (((lo + 100) % 256) as u8, ((hi + 100) % 256) as u8)
+}
+
+impl Song {
+    /// 原版 `instrument_list[| ds_list_find_index(instrument_list, ins)].name`：
+    /// 内置 0..19 取内置表，>= 20 取自定义表；越界返回空串（原版此时直接报错不画）。
+    pub fn instrument_name(&self, index: u8) -> &str {
+        match index.checked_sub(FIRST_CUSTOM_INDEX) {
+            None => crate::instruments::instrument(index).map_or("", |i| i.name),
+            Some(i) => self.custom_instruments.get(i as usize).map_or("", |c| c.name.as_str()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 消音器的「结束层」是编码在声像 + 力度两个字节里的，编解码必须严格互逆，
+    /// 否则存盘再读回来导引带就跑到别的层上去了。
+    #[test]
+    fn stopper_layer_codec_round_trips() {
+        // 原版 add_block_manual 放一个消音器就写 yy + 1，取回的就是这一层本身。
+        for layer in [1u32, 5, 100, 255, 256, 300, 65535] {
+            let (pan, vel) = short_to_panning_velocity(layer);
+            assert_eq!(panning_velocity_to_short(pan, vel), layer, "层号 {layer}");
+        }
+        // 手算两条原版路径：层 5 -> pan 105 / vel 100，层 300 -> pan 144 / vel 101。
+        assert_eq!(short_to_panning_velocity(5), (105, 100));
+        assert_eq!(short_to_panning_velocity(300), (144, 101));
+        assert_eq!(panning_velocity_to_short(105, 100), 5);
+        // 默认声像 + 满力度（100 / 100）落在编码 0 上，这是原版把偏移选成 156 的原因。
+        assert_eq!(panning_velocity_to_short(PAN_CENTER, 100), 0);
+    }
+
+    #[test]
+    fn instrument_name_splits_builtin_and_custom() {
+        let mut s = Song::new();
+        assert_eq!(s.instrument_name(0), "Harp");
+        assert_eq!(s.instrument_name(19), "Oxidized Trumpet");
+        // 越界不 panic，原版此时取不到乐器直接不画。
+        assert_eq!(s.instrument_name(FIRST_CUSTOM_INDEX), "");
+        s.custom_instruments.push(CustomInstrument {
+            name: SOUND_STOPPER_NAME.into(),
+            filename: String::new(),
+            key: 45,
+            press: false,
+        });
+        assert_eq!(s.instrument_name(FIRST_CUSTOM_INDEX), SOUND_STOPPER_NAME);
+        assert_eq!(s.instrument_name(FIRST_CUSTOM_INDEX + 1), "");
+    }
 
     #[test]
     fn sparse_grid_insert_remove() {

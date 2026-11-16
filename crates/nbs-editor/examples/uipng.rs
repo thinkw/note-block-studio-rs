@@ -13,6 +13,7 @@
 //! 把 MIDI 导入窗口那张表滚到指定行 / 摆成某个下拉正打开的状态。
 //! `NBS_UIPNG_POINTER=x,y` 每帧往该逻辑坐标发一次鼠标移动，用来渲染悬停态；
 //! `NBS_UIPNG_FDARK=1` 打开 Fluent 的暗色模式；
+//! `NBS_UIPNG_SCROLL=<tick>:<layer>` 把网格左上角滚到指定位置，验证可视区外的内容；
 //! `NBS_UIPNG_PREFS_MENU=theme|rate` 把首选项「界面」页的某个下拉摆成打开状态。
 //! ```
 //!
@@ -154,6 +155,13 @@ fn main() -> Result<(), String> {
     state.theme = Theme::new(kind);
     // `NBS_UIPNG_FDARK=1`：Fluent 的「暗色模式」（原版 `fdark`，和 state.rs 一样只对 theme 3 生效）。
     state.theme.fdark = kind == ThemeKind::Fluent && std::env::var("NBS_UIPNG_FDARK").is_ok();
+
+    // `NBS_UIPNG_SCROLL=<tick>:<layer>`：网格左上角（原版 `starta`/`startb`）。
+    if let Ok(spec) = std::env::var("NBS_UIPNG_SCROLL") {
+        let mut it = spec.split(':');
+        state.viewport.start_tick = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        state.viewport.start_layer = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    }
 
     // NBS_UIPNG_WINDOW=preferences:2 —— 直接把某个对话框摆开渲染，用来逐像素对照原版窗口。
     // 冒号后面是页签序号（只有带页签的窗口用它）。

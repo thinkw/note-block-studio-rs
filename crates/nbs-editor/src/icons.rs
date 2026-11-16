@@ -239,6 +239,14 @@ pub struct Bank {
     block_sel: Strip,
     instrumenticons: Strip,
     numbers_mc: Strip,
+    /// 消音器导引带：16x1 的一行渐变，纵向拉伸成一条 8px 宽的竖带，原点 x = 1。
+    wall: Strip,
+    /// 事件乐器角标：`spr_tempo_changer_label`（7x7，乐器格子里）与
+    /// `spr_tempo_changer_label_mc`（11x11，音符格子里），0 = 速度调节器、1 = 消音器。
+    tempo_label: Strip,
+    tempo_label_mc: Strip,
+    /// `spr_interface1`（2x2、每主题 8 帧）：原版 `draw_area` 的四角 + 四边框。
+    interface: Strip,
     marker: Strip,
     back: Strip,
     button_arrow: Strip,
@@ -303,6 +311,19 @@ fn instrument_frame(list_index: usize, first_custom: usize) -> usize {
     frame::INS_1 + list_index.min(first_custom)
 }
 
+/// 原版 `draw_icon_customins` 里按乐器名硬比的两个事件角标帧号：
+/// 0 = Tempo Changer，1 = Sound Stopper；其余自定义乐器走两位数字。
+/// 名字是用户自己填的，原版用 GML 的 `==`，区分大小写。
+fn event_label_frame(name: &str) -> Option<usize> {
+    if name == nbs_core::TEMPO_CHANGER_NAME {
+        Some(0)
+    } else if name == nbs_core::SOUND_STOPPER_NAME {
+        Some(1)
+    } else {
+        None
+    }
+}
+
 impl Bank {
     fn load(ctx: &Context, root: &Path) -> Option<Bank> {
         let strip = |dir: &str, w: u32, h: u32| Strip::load(ctx, &root.join(dir), w, h);
@@ -336,6 +357,10 @@ impl Bank {
             block_sel: strip("block_sel", 32, 32)?,
             instrumenticons: strip("instrumenticons", 16, 16)?,
             numbers_mc: strip("numbers_mc", 5, 7)?,
+            wall: strip("wall", 16, 1)?,
+            tempo_label: strip("tempo_changer_label", 7, 7)?,
+            tempo_label_mc: strip("tempo_changer_label_mc", 11, 11)?,
+            interface: strip("interface1", 2, 2)?,
             marker: strip("marker", 16, 15)?,
             back: strip("back", 16, 16)?,
             button_arrow: strip("button_arrow", 17, 18)?,
@@ -424,13 +449,15 @@ impl Bank {
     }
 
     /// 原版 `draw_icon_insbox()`：音色框里的按钮。自定义音色在原版里是
-    /// 「内置图标（截到第 16 个）+ 角标 + 两位序号」。
+    /// 「内置图标（截到第 16 个）+ 角标 + 两位序号」，两个事件乐器换成专属角标。
+    #[allow(clippy::too_many_arguments)]
     pub fn instrument_icon(
         &self,
         ui: &mut egui::Ui,
         at: Pos2,
         list_index: usize,
         first_custom: u8,
+        name: &str,
         tooltip: &str,
         pressed: bool,
         th: &Theme,
@@ -455,7 +482,7 @@ impl Bank {
             let push = if state == 2 || pressed { Vec2::splat(1.0) } else { Vec2::ZERO };
             self.icons.draw(p, at + push, sprite, Color32::WHITE);
             if list_index >= first_custom as usize {
-                self.custom_badge(p, at + push, list_index - first_custom as usize);
+                self.custom_badge(p, at + push, list_index - first_custom as usize, name);
             }
         }
         if pressed && fluent {
@@ -485,14 +512,20 @@ impl Bank {
         resp.on_hover_text(tooltip).clicked()
     }
 
-    /// 自定义音色角标：`spr_icons[27]` 染色 + 两位数字。
-    fn custom_badge(&self, p: &egui::Painter, at: Pos2, ins: usize) {
-        let digits = (ins + 1) % 100;
-        let (num1, num2) = (digits / 10, digits % 10);
+    /// 自定义音色角标：`spr_icons[CUSTOM_INS_OVERLAY]` 染色，再叠两位数字；
+    /// 两个事件乐器换成 `spr_tempo_changer_label` 的专属角标。
+    fn custom_badge(&self, p: &egui::Painter, at: Pos2, ins: usize, name: &str) {
         let c1 = hsv(((ins * 16) % 256) as u8, 192, 255);
         let c2 = hsv(((ins * 16) % 256) as u8, 255, 128);
         self.icons.draw(p, at, frame::CUSTOM_INS_OVERLAY, c1);
-        for (d, dx) in [(num1, 11.0), (num2, 15.0)] {
+        if let Some(f) = event_label_frame(name) {
+            let size = Vec2::new(self.tempo_label.fw, self.tempo_label.fh);
+            self.tempo_label.blit(p, at + Vec2::new(12.0, 12.0), f, size, c2);
+            self.tempo_label.blit(p, at + Vec2::new(11.0, 11.0), f, size, Color32::WHITE);
+            return;
+        }
+        let digits = (ins + 1) % 100;
+        for (d, dx) in [(digits / 10, 11.0), (digits % 10, 15.0)] {
             self.numbers.draw(p, at + Vec2::new(dx + 1.0, 2.0), d, c2);
             self.numbers.draw(p, at + Vec2::new(dx, 1.0), d, Color32::WHITE);
         }
@@ -718,14 +751,16 @@ impl Bank {
     }
 
     /// 原版 `draw_icon_customins(..., large = true)` 里自定义乐器的方块图标：
-    /// 通用帧（`spr_instrumenticons` 的第 `first_custom` 帧）染色 + 两位 Minecraft 体数字
-    /// （先暗后亮，各偏 1px）。
+    /// 通用帧（`spr_instrumenticons` 的第 `first_custom` 帧）染色，再叠角标 ——
+    /// 普通乐器是两位 Minecraft 体数字（先暗后亮，各偏 1px），
+    /// 两个事件乐器换成 `spr_tempo_changer_label_mc` 的专属角标。
     pub fn custom_block_glyph(
         &self,
         p: &egui::Painter,
         at: Pos2,
         ins: usize,
         first_custom: usize,
+        name: &str,
         size: Vec2,
         alpha: f32,
     ) {
@@ -733,11 +768,46 @@ impl Bank {
         let c1 = hsv(((ins * 16) % 256) as u8, 192, 255);
         let c2 = hsv(((ins * 16) % 256) as u8, 255, 128);
         self.instrumenticons.blit(p, at, first_custom, size, multiply(c1, alpha));
+        // 原版对这两个事件乐器不画两位数字，改画一套专属角标（帧 0 = 速度调节器、1 = 消音器），
+        // 同样是「先染 color2 偏 1px、再不染」的两层阴影写法。
+        if let Some(event) = event_label_frame(name) {
+            let esize = Vec2::new(self.tempo_label_mc.fw, self.tempo_label_mc.fh);
+            self.tempo_label_mc.blit(p, at + Vec2::new(3.0, 3.0), event, esize, multiply(c2, alpha));
+            self.tempo_label_mc.blit(p, at + Vec2::new(2.0, 2.0), event, esize, alpha_tint(alpha));
+            return;
+        }
         let dsize = Vec2::new(self.numbers_mc.fw, self.numbers_mc.fh);
         for (d, dx) in [(display / 10, 3.0), (display % 10, 9.0)] {
             self.numbers_mc.blit(p, at + Vec2::new(dx, 5.0), d, dsize, multiply(c2, alpha));
             self.numbers_mc.blit(p, at + Vec2::new(dx - 1.0, 4.0), d, dsize, alpha_tint(alpha));
         }
+    }
+
+    /// 原版 `draw_sound_stopper_guide`：把 `spr_wall` 那一行渐变纵向拉成一条带子。
+    /// 精灵原点 x = 1，所以贴图横坐标是 `_x - 1 - 1`；原版手工裁 source 矩形来避开编辑器左边界，
+    /// 我们交给 egui 的图层裁剪，画出来的像素一样。
+    pub fn stopper_wall(&self, p: &egui::Painter, cell_left: f32, top: f32, height: f32, dark: bool) {
+        let at = pos2(cell_left - 2.0, top);
+        let size = Vec2::new(self.wall.fw, height);
+        self.wall.blit(p, at, dark as usize, size, Color32::WHITE);
+    }
+
+    /// 原版 `draw_area(x1, y1, x2, y2)` 的非 hires 分支：`spr_interface1` 的
+    /// 0/2/4/6 帧是四个角，1/3/5/7 是左/下/右/上边，每个主题占 8 帧（Fluent 深色再 +8）。
+    pub fn area(&self, p: &egui::Painter, r: Rect, th: &Theme) {
+        let f = 8 * theme_index(th.kind)
+            + 8 * (th.kind == ThemeKind::Fluent && th.fdark) as usize;
+        let corner = Vec2::splat(2.0);
+        self.interface.blit(p, pos2(r.min.x, r.min.y), f, corner, Color32::WHITE);
+        self.interface.blit(p, pos2(r.min.x, r.max.y - 2.0), f + 2, corner, Color32::WHITE);
+        self.interface.blit(p, pos2(r.max.x - 2.0, r.max.y - 2.0), f + 4, corner, Color32::WHITE);
+        self.interface.blit(p, pos2(r.max.x - 2.0, r.min.y), f + 6, corner, Color32::WHITE);
+        let mid_v = Vec2::new(2.0, ((r.height() - 4.0).max(0.0)) / 2.0);
+        self.interface.blit(p, pos2(r.min.x, r.min.y + 2.0), f + 1, mid_v, Color32::WHITE);
+        self.interface.blit(p, pos2(r.max.x - 2.0, r.min.y + 2.0), f + 5, mid_v, Color32::WHITE);
+        let mid_h = Vec2::new(((r.width() - 4.0).max(0.0)) / 2.0, 2.0);
+        self.interface.blit(p, pos2(r.min.x + 2.0, r.max.y - 2.0), f + 3, mid_h, Color32::WHITE);
+        self.interface.blit(p, pos2(r.min.x + 2.0, r.min.y), f + 7, mid_h, Color32::WHITE);
     }
 
     /// 原版 `draw_sprite_ext(spr_marker, 0/1, x, y, 1, (totalrows + 1) * 32 / 15, …)`：

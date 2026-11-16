@@ -43,6 +43,11 @@ ALL_SPRITES = [
     "spr_marker", "spr_minecraft", "spr_minecraft_f", "spr_numbers", "spr_numbers_mc",
     "spr_piano", "spr_stereo", "spr_stereo_f", "spr_tempobox", "spr_volume", "spr_volume_f",
     "spr_yesno", "spr_yesno_f",
+    # 消音器导引带 + 事件乐器的角标：spr_wall 原点 x=1，画的时候要先左移 1px 再裁剪。
+    "spr_tempo_changer_label", "spr_tempo_changer_label_mc", "spr_wall",
+    # 标尺 BPM 盒的边框（2x2、每主题 8 帧，先角后边）。此前窗口边框一直用主题描边近似，
+    # 这里是唯一像素级还原的地方，一并导出。
+    "spr_interface1",
 ]
 
 
