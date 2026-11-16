@@ -8,7 +8,8 @@ use std::fmt;
 use std::path::Path;
 
 use crate::model::{
-    CustomInstrument, Layer, LockMode, Note, Song, SongMeta, FIRST_CUSTOM_INDEX, KEY_MAX,
+    CustomInstrument, Layer, LockMode, Note, PAN_CENTER, Song, SongMeta, FIRST_CUSTOM_INDEX,
+    KEY_MAX,
 };
 
 /// 本程序自身的 NBS 版本（原版 `nbs_version`）：新建曲默认写到这个版本。
@@ -224,6 +225,7 @@ pub fn load_bytes(bytes: &[u8]) -> Result<Song, NbsError> {
     if song.layers.is_empty() {
         song.layers.push(Layer::default());
     }
+    trim_trailing_padding_layers(&mut song);
 
     // 自定义乐器（可选尾部）。
     if !r.eof() {
@@ -248,6 +250,32 @@ pub fn load(path: &Path) -> Result<Song, NbsError> {
     let mut song = load_bytes(&bytes)?;
     song.filename = Some(path.to_path_buf());
     Ok(song)
+}
+
+/// 裁掉尾部「纯空层」：无音符且名字 / 锁 / 音量 / 声像全是默认值。
+/// 原版会把总层数撑到窗口可视行数（control_draw.gml:1287），存出的文件常带
+/// 一串这种空尾层；按拍板不复刻这个副作用，只保留实际需要的层。
+/// 名字、锁、音量、声像任一被改过的层视为有内容，一律保留；至少留一层。
+fn trim_trailing_padding_layers(song: &mut Song) {
+    let mut used = vec![false; song.layers.len()];
+    for (_, layer, _) in song.iter_notes() {
+        if let Some(u) = used.get_mut(layer as usize) {
+            *u = true;
+        }
+    }
+    while song.layers.len() > 1 {
+        let last = song.layers.len() - 1;
+        let l = &song.layers[last];
+        if used[last]
+            || !l.name.is_empty()
+            || l.lock != LockMode::Normal
+            || l.volume != 100
+            || l.stereo != PAN_CENTER
+        {
+            break;
+        }
+        song.layers.pop();
+    }
 }
 
 /// 序列化为 NBS 字节流。
@@ -377,6 +405,43 @@ mod tests {
         for v in 0..=MAX_NBS_VERSION {
             roundtrip(v);
         }
+    }
+
+    /// 原版按窗口可视行数把总层数撑大（control_draw.gml:1287），存出的文件
+    /// 常带一串全默认的空尾层。按拍板不复刻这个副作用：载入时裁掉尾部纯空层，
+    /// 只留实际需要的；名字 / 锁 / 音量 / 声像任一被改过的层不算空，照常保留；
+    /// 中间的空层不动。
+    #[test]
+    fn trailing_padding_layers_are_trimmed_on_load() {
+        let mut song = Song::new();
+        song.set(0, 0, Note::new(0, 45));
+        song.set(4, 2, Note::new(0, 50));
+        while song.layers.len() < 3 {
+            song.layers.push(Layer::default());
+        }
+        // 5 个纯空层：原版窗口撑出来的那种
+        for _ in 0..5 {
+            song.layers.push(Layer::default());
+        }
+        let back = load_bytes(&save_bytes(&song, MAX_NBS_VERSION).unwrap()).unwrap();
+        assert_eq!(back.layers.len(), 3, "空尾层要裁到实际需要，中间空层不动");
+        assert_eq!(back.get(4, 2), Some(Note::new(0, 50)), "音符内容不受影响");
+
+        let mut song = Song::new();
+        song.set(0, 0, Note::new(0, 45));
+        let mut named = Layer::default();
+        named.name = "占位".into();
+        song.layers.push(named);
+        let back = load_bytes(&save_bytes(&song, MAX_NBS_VERSION).unwrap()).unwrap();
+        assert_eq!(back.layers.len(), 2, "有名字的空层保留");
+
+        let mut song = Song::new();
+        song.set(0, 0, Note::new(0, 45));
+        let mut quiet = Layer::default();
+        quiet.volume = 40;
+        song.layers.push(quiet);
+        let back = load_bytes(&save_bytes(&song, MAX_NBS_VERSION).unwrap()).unwrap();
+        assert_eq!(back.layers.len(), 2, "改过音量的空层保留");
     }
 
     /// MIDI 导入算出的速度一般不是两位小数（例：《Whereabouts of the Heart》
