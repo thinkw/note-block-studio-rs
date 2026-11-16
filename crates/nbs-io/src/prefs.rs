@@ -65,6 +65,12 @@ pub struct Preferences {
     pub show_grid_lines: bool,
     pub flats: bool,
     pub blackout: bool,
+    /// 原版 `remove_effect`（出厂 1，`control_create.gml:225`）：删除音符时的淡出边框。
+    pub remove_effect: bool,
+    /// 原版 `selection_alpha`（出厂 0.8，`control_create.gml:444`；落
+    /// `settings.ini [preferences] selection_alpha`）：浮动选区精灵的透明度，
+    /// 首选项里按百分数拖拽（10%..80%）。
+    pub selection_alpha: f32,
     /// 原版 `refreshrate`（出厂 0，`control_create.gml:130`）：帧数上限档位。
     pub refresh_rate: u8,
     /// 原版 `window_scale`：界面缩放倍率。`None` = 跟随系统 DPI，
@@ -142,6 +148,8 @@ impl Default for Preferences {
             show_grid_lines: true,
             flats: false,
             blackout: false,
+            remove_effect: true,
+            selection_alpha: 0.8,
             // 原版 `control_create.gml:130`：refreshrate = 0，即 30 帧。
             refresh_rate: 0,
             window_scale: None,
@@ -359,6 +367,11 @@ mod tests {
         assert_eq!(back.refresh_rate, 3);
         assert_eq!(back.window_scale, Some(1.25));
         assert!(back.window_icon, "旧图标开关要落盘（原版 save_settings.gml:73）");
+        assert!(back.remove_effect, "删除效果出厂打开（control_create.gml:225）");
+        assert!(
+            (back.selection_alpha - 0.8).abs() < 1e-6,
+            "选区高亮强度出厂 0.8（control_create.gml:444）"
+        );
         // 旧配置文件里没有这几项时必须退回默认值，不能整个文件读不出来。
         let old = r#"{"version":1,"theme":3}"#;
         let back: Preferences = serde_json::from_str(old).unwrap();
@@ -366,6 +379,17 @@ mod tests {
         assert_eq!(back.window_scale, None, "出厂跟随系统 DPI");
         assert!(!back.window_icon, "出厂用程序自带的图标");
         assert_eq!(back.accent, [0, 120, 212], "强调色基色出厂 0,120,212");
+        assert!(back.remove_effect, "旧配置缺键时退回出厂打开");
+        assert!(
+            (back.selection_alpha - 0.8).abs() < 1e-6,
+            "旧配置缺键时选区强度退回 0.8"
+        );
+        let mut p = Preferences::default();
+        p.remove_effect = false;
+        p.selection_alpha = 0.35;
+        let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert!(!back.remove_effect, "删除效果开关要落盘");
+        assert!((back.selection_alpha - 0.35).abs() < 1e-6, "选区强度要落盘");
         let mut p = Preferences::default();
         p.accent = [10, 20, 30];
         let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();

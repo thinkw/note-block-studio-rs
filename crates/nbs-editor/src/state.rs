@@ -58,6 +58,7 @@ pub enum Flag {
     ShowGridLines,
     Flats,
     Blackout,
+    RemoveEffect,
 }
 
 impl Flag {
@@ -81,6 +82,7 @@ impl Flag {
             Self::ShowGridLines => "显示网格线",
             Self::Flats => "使用降记号",
             Self::Blackout => "全黑模式",
+            Self::RemoveEffect => "显示删除效果",
         }
     }
     pub fn get(self, f: &UiFlags) -> bool {
@@ -101,6 +103,7 @@ impl Flag {
             Self::ShowGridLines => f.show_grid_lines,
             Self::Flats => f.flats,
             Self::Blackout => f.blackout,
+            Self::RemoveEffect => f.remove_effect,
         }
     }
 }
@@ -127,6 +130,9 @@ pub struct UiFlags {
     pub show_grid_lines: bool,
     pub flats: bool,
     pub blackout: bool,
+    /// 原版 `remove_effect`（`control_create.gml:225` 出厂 = 1）：
+    /// 删除音符时在格子上画一个淡出扩大的圆角边框（theme 3 才生效）。
+    pub remove_effect: bool,
 }
 
 impl Default for UiFlags {
@@ -152,7 +158,25 @@ impl Default for UiFlags {
             show_grid_lines: true,
             flats: false,
             blackout: false,
+            remove_effect: true,
         }
+    }
+}
+
+/// 原版 `obj_removeeff`：删除音符时格子上的淡出边框动画。
+/// 原版 alpha 从 0.5 每帧减 `0.06 * 30 / (room_speed * currspeed)`，
+/// 换算成真实时间寿命恒为 1/3.6 秒（衰减速率 1.8/秒），与播放速度无关。
+#[derive(Clone, Debug)]
+pub struct RemoveFx {
+    /// 相对视口左上格的格坐标（原版 `xn = xx - starta`）。
+    pub rel: (i64, i64),
+    /// 已存活的真实秒数。
+    pub age: f32,
+}
+
+impl RemoveFx {
+    pub fn alpha(&self) -> f32 {
+        (0.5 - 1.8 * self.age).max(0.0)
     }
 }
 
@@ -667,6 +691,9 @@ pub struct EditorState {
     pub event_edit: EventEditDraft,
     /// 图层音量/声像拖拽预览（松开时才提交一条历史，避免拖拽产生几百条）。
     pub layer_drag: Option<LayerDrag>,
+    /// 原版 `obj_removeeff` 实例：删除音符时格子上的淡出边框。
+    /// `rel` 是相对当前视口左上格的格坐标（原版存 `xx - starta`，不随滚动移动）。
+    pub remove_effects: Vec<RemoveFx>,
     pub macro_amount: f32,
     pub macro_index: usize,
     pub macro_pattern: String,
@@ -819,6 +846,7 @@ impl EditorState {
         flags.show_grid_lines = prefs.show_grid_lines;
         flags.flats = prefs.flats;
         flags.blackout = prefs.blackout;
+        flags.remove_effect = prefs.remove_effect;
 
         let viewport = Viewport::default();
         let recent_files = prefs.recent_files.iter().map(PathBuf::from).collect();
@@ -867,6 +895,7 @@ impl EditorState {
             editing_layer_name: None,
             event_edit: EventEditDraft::default(),
             layer_drag: None,
+            remove_effects: Vec::new(),
             macro_amount: 1.0,
             macro_index: 0,
             macro_pattern: "0|4|7|12".into(),
@@ -1088,6 +1117,26 @@ impl EditorState {
         }
     }
 
+    /// 原版删除效果的生成（`remove_block_manual.gml:64-68`、`selection_delete.gml:24-28`）：
+    /// theme 3 且「显示删除效果」开着才生成，批量删除只生成当前视口内的格子。
+    /// rel 记的是生成那一刻相对视口左上格的格坐标 —— 原版对象不跟滚动，
+    /// 动画期间滚动页面时边框会留在屏幕原地，这里照抄。
+    pub fn spawn_remove_effects(&mut self, cells: impl IntoIterator<Item = (i64, i64)>) {
+        if self.theme.kind != ThemeKind::Fluent || !self.flags.remove_effect {
+            return;
+        }
+        let (t0, t1, l0, l1) = self.viewport.visible_range();
+        let (t0, t1, l0, l1) = (t0 as i64, t1 as i64, l0 as i64, l1 as i64);
+        for (tick, layer) in cells {
+            if tick >= t0 && tick < t1 && layer >= l0 && layer < l1 {
+                self.remove_effects.push(RemoveFx {
+                    rel: (tick - t0, layer - l0),
+                    age: 0.0,
+                });
+            }
+        }
+    }
+
     /// 每帧同步独立播放时钟。真实播放时位置由音频回调的采样计数推进，
     /// UI 只读；无音频设备时才由内部 `Instant` 时钟代理。
     /// **绝不在这里写 tempo/loop** —— 否则会覆盖 Tempo Changer 的运行时变速。
@@ -1153,6 +1202,20 @@ impl EditorState {
             // egui 原生控件（菜单 / 按钮 / 选中色）读的是 apply 时的快照，
             // accent 表每帧在变时必须跟着刷新，否则只有自绘面板在变色。
             self.theme.apply(ctx);
+        }
+        // 原版 `obj_removeeff` 每帧 alpha -= 0.06*(30/(room_speed*currspeed))，
+        // 折算成真实时间衰减恒为 1.8/秒（寿命 1/3.6 秒），与播放速度无关。
+        if !self.remove_effects.is_empty() {
+            let dt = ctx.input(|i| i.stable_dt).clamp(0.0, 0.1) as f32;
+            for fx in &mut self.remove_effects {
+                fx.age += dt;
+            }
+            self.remove_effects.retain(|fx| fx.alpha() > 0.0);
+            if !self.remove_effects.is_empty() {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                    1.0 / self.prefs.refresh_limit(),
+                ));
+            }
         }
         // 原版快退 / 快进：按住时按歌曲速度滚动；播放中倒退是双倍速
         // （`forward - (forward < 0 && playing = 1)`）。
@@ -1323,6 +1386,7 @@ impl EditorState {
         self.prefs.show_grid_lines = self.flags.show_grid_lines;
         self.prefs.flats = self.flags.flats;
         self.prefs.blackout = self.flags.blackout;
+        self.prefs.remove_effect = self.flags.remove_effect;
         // 原版把整份 sch_exp_* 无条件写进 settings.ini，「记住我的更改」并不门控它。
         self.prefs.schematic = self.schematic_options.clone();
         // MIDI 导入同理：`import_midi()` 结尾的 `save_settings()` 每次都把

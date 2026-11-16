@@ -7,8 +7,8 @@
 //! （原版 `control_draw` 就是这个顺序：线在下、方块在上）。
 
 use egui::{
-    pos2, Align2, Color32, CursorIcon, FontId, Painter, Pos2, Rect, Sense, Shape, Stroke,
-    StrokeKind, Ui, Vec2,
+    pos2, Align2, Color32, CornerRadius, CursorIcon, FontId, Painter, Pos2, Rect, Sense, Shape,
+    Stroke, StrokeKind, Ui, Vec2,
 };
 use nbs_core::model::{
     key_name, panning_velocity_to_short, Note, FIRST_CUSTOM_INDEX, MC_KEY_MAX, MC_KEY_MIN,
@@ -805,8 +805,11 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
     }
 
     // 浮动选区：同样先做整体视口剔除，再逐音符裁剪。
-    // 原版 selection_draw 用 alpha = 1、salpha = 0.8，鼠标压住那格降到 0.7，减选框内降到 0.5。
+    // 原版 `selection_draw.gml:79-99`：salpha 基值 = `selection_alpha`（首选项
+    // 「选择高亮显示强度」，出厂 0.8）；悬停那格与拖动选区时乘 `0.72`（>0.4 时），
+    // 减选框压住的那格固定 0.5*0.625。低强度（≤0.4）悬停时直接乘 0，照抄。
     let sel = state.doc.selection.clone();
+    let sel_alpha = state.prefs.selection_alpha;
     if !sel.is_empty() {
         if let Some((bx0, by0, bx1, by1)) = sel.bounds() {
             if vp.rect_intersects(bx0, by0, bx1, by1) {
@@ -816,12 +819,12 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
                     if at < t0 as i64 - 1 || at > t1 as i64 || al < l0 as i64 - 1 || al > l1 as i64 {
                         continue;
                     }
-                    let mut salpha = 0.8_f32;
+                    let mut salpha = sel_alpha;
                     if hover == Some((at, al)) {
-                        salpha = 0.7;
+                        salpha = if sel_alpha > 0.4 { sel_alpha * 0.72 } else { 0.0 };
                     }
                     if box_subtract && inside_box(at, al) {
-                        salpha = 0.5;
+                        salpha = 0.3125;
                     }
                     let pos = vp.cell_rect(at, al).min;
                     push_note(state, &p, pos, n.note, 1.0, salpha);
@@ -862,6 +865,27 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
                 tint,
             );
         }
+    }
+
+    // 删除效果：原版 `obj_removeeff`（单独的 GML 对象，画在主界面之上）。
+    // 基框 28×28（格子内缩 2px），随 alpha 淡出同时向外扩、圆角变大：
+    // 左/上 −(0.5−alpha)*20、右 +(0.5−alpha)*18、下 +(0.5−alpha)*20、半径 (0.5−alpha)*20。
+    // 颜色 accent[0]（非暗色）/ accent[6]（暗色），轮廓线宽 1。rel 不跟滚动（照抄原版对象）。
+    for fx in &state.remove_effects {
+        let a = fx.alpha();
+        let e = 0.5 - a;
+        let base = pos2(
+            vp.origin.x + fx.rel.0 as f32 * cell,
+            vp.origin.y + fx.rel.1 as f32 * cell,
+        );
+        let r = Rect::from_min_max(
+            pos2(base.x + 2.0 - e * 20.0, base.y + 2.0 - e * 20.0),
+            pos2(base.x + 30.0 + e * 18.0, base.y + 30.0 + e * 20.0),
+        );
+        let col = th.accent(if th.fdark { 6 } else { 0 });
+        let stroke = Stroke::new(1.0_f32, alpha(col, (a * 255.0) as u8));
+        let radius = CornerRadius::same((e * 20.0).round().max(0.0) as u8);
+        p.rect_stroke(r, radius, stroke, StrokeKind::Inside);
     }
 }
 

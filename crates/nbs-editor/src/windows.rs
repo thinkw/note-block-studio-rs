@@ -294,7 +294,7 @@ fn statistics(state: &mut EditorState, ui: &mut Ui) {
 ///
 /// 只画真实接线的行。原版有、我们还没有对应行为的选项（启动页 / 检查更新 / Discord
 /// 富在位 / 界面音效 / 透明效果 / 取色器 / 高分辨率纹理 / 语言 / 程序图标 /
-/// 音符盒不透明 / 删除淡出 / 五线谱 / 任务栏进度 / 重置键位 / 在区间起止播放）
+/// 五线谱 / 任务栏进度 / 重置键位 / 在区间起止播放）
 /// 整行不出现，免得留下点了没反应的假控件。
 fn preferences(state: &mut EditorState, ui: &mut Ui) {
     let th = state.theme.clone();
@@ -557,10 +557,10 @@ fn prefs_interface(state: &mut EditorState, pg: &mut Page, menu_at: &mut Pos2, r
 }
 
 /// 原版页 2「外观」：音符盒与琴键。
-/// 源码里的「显示删除效果」(250)、「在琴键上时显示五线谱对应音符」(410) 我们没有这两项
-/// 行为（删除淡出边框只在 theme 3 画，五线谱要另做一份 notechart 渲染），整行不画。
+/// 源码里的「在琴键上时显示五线谱对应音符」(410) 我们还没有对应行为
+/// （要另做一份 notechart 渲染），整行不画。
 fn prefs_appearance(state: &mut EditorState, pg: &mut Page) {
-    pg.header(22.0, 74.0, 456.0, 196.0, "音符盒");
+    pg.header(22.0, 74.0, 456.0, 208.0, "音符盒");
     let blocks = [
         (90.0, Flag::UseColors, "彩色音符盒", "用音符盒颜色区分音色。"),
         (110.0, Flag::UseIcons, "显示音色图标", "用音色图标区分音色。"),
@@ -570,11 +570,21 @@ fn prefs_appearance(state: &mut EditorState, pg: &mut Page) {
         (190.0, Flag::ShowIncompatible, "标记不兼容的音符盒", "在自定义音色或超出 2 八度范围的音符盒周围显示红框。"),
         (210.0, Flag::Fade, "音符盒不透明", "关闭音符盒上的透明效果。"),
         (230.0, Flag::ShowLayers, "显示每层操作区", "显示在界面左侧操作每层设定的区域。"),
+        (250.0, Flag::RemoveEffect, "显示删除效果", "删除音符时显示淡出边框效果。"),
     ];
     for (n, flag, label, tip) in blocks {
         if pg.check(40.0, n, flag.get(&state.flags), label, tip, false, false) {
             state.emit(Command::ToggleFlag(flag));
         }
+    }
+
+    // 原版 `draw_window_preferences.gml:492`：强度按百分数拖拽，10%..80%。
+    // 原版这一行没有 popup_set_window，所以不给提示。
+    pg.text(pg.row(60.0, 268.0), "选择高亮显示强度:         %", PREFS_FONT, pg.ink());
+    let strength = (state.prefs.selection_alpha * 100.0).round() as i32;
+    if let Some(v) = pg.drag(172.0, 268.0, strength, 2.0, 10, 80, false, "", &mut state.prefs_drag) {
+        state.prefs.selection_alpha = v as f32 / 100.0;
+        state.emit(Command::SavePreferences);
     }
 
     pg.header(22.0, 294.0, 456.0, 171.0, "琴键");

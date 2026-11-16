@@ -199,7 +199,7 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
                     out.push(step_cmd(-small));
                 }
                 // `mode_action(5)`：按当前模式打开批量设置窗口。原版调用点写死
-                // `editmode != m_key`：音调模式（Key）没有 T/G；微调模式有，
+                // `editmode != m_key`：音高模式（Key）没有 T/G；微调模式有，
                 // 打开的是 w_setpitch（v3.12 的 mode_action 已补齐 m_pit 分支）。
                 let batch_window = match state.tool {
                     EditMode::Key => None,
@@ -300,9 +300,9 @@ pub const SHORTCUT_HELP: &[(&str, &str)] = &[
     ("Ctrl+C/X/V", "复制 / 剪切 / 粘贴"),
     ("Ctrl+Z / Ctrl+Y", "撤销 / 重做"),
     ("Ctrl+A / Ctrl+I", "全选 / 反选"),
-    ("Ctrl+E / D", "按当前模式 ±大步（音调 ±12，其余 ±10）"),
+    ("Ctrl+E / D", "按当前模式 ±大步（音高 ±12，其余 ±10）"),
     ("Ctrl+R / F", "按当前模式 ±1"),
-    ("Ctrl+T / Ctrl+G", "批量设置窗口 / 当前属性回默认（音调模式无，需选区才生效）"),
+    ("Ctrl+T / Ctrl+G", "批量设置窗口 / 当前属性回默认（音高模式无，需选区才生效）"),
     ("Ctrl+P", "首选项"),
     ("Ctrl+1..9", "选前 9 种乐器（力度 / 声像 / 微调复位并试听）"),
     ("Ctrl+Shift+1..7", "选第 10..16 种乐器"),

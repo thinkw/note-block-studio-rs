@@ -165,6 +165,15 @@ pub enum Command {
     RestoreAutosave(PathBuf),
 }
 
+/// 原版 `selection_delete.gml:24-28`：删除选区前按当前视口收集格子，
+/// 交给 `EditorState::spawn_remove_effects` 生成淡出边框（剪切 / 删除共用）。
+fn spawn_selection_effects(state: &mut EditorState) {
+    let sel = &state.doc.selection;
+    let cells: Vec<(i64, i64)> =
+        sel.notes.iter().map(|n| (sel.x + n.dx as i64, sel.y + n.dy as i64)).collect();
+    state.spawn_remove_effects(cells);
+}
+
 /// 原版键盘按下后实际用的那颗音：音色沿用当前的，键是**按下的键**，力度/声像/微调固定 100/100/0。
 /// `select_lastpressed` 只决定选中的音要不要跟着走，不影响这颗音。
 fn pressed_note(state: &EditorState, key: u8) -> Note {
@@ -296,6 +305,8 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.set_message(format!("已复制 {} 个音符", state.doc.clipboard.len()));
         }
         Command::Cut => {
+            // 原版 `action_cut` 就是 `selection_delete(false)`，淡出边框同样要出。
+            spawn_selection_effects(state);
             state.doc.cut_selection();
             ctx.copy_text(state.doc.clipboard_text.clone());
             state.set_message("已剪切");
@@ -320,7 +331,12 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 dispatch(state, Command::Paste, ctx);
             }
         }
-        Command::Delete => state.doc.delete_selection(),
+        Command::Delete => {
+            // 原版 `action_delete` → `selection_delete(false)`：逐格生成删除效果
+            // （theme 3 且开关打开，只生成当前视口内的格子）。
+            spawn_selection_effects(state);
+            state.doc.delete_selection();
+        }
         Command::SelectAll => state.doc.select_all(),
         Command::Deselect => state.doc.deselect(),
         Command::InvertSelection => state.doc.select_invert(),
@@ -412,6 +428,10 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             if state.doc.song.is_locked(layer) {
                 state.set_message("图层已锁定");
                 return;
+            }
+            // 原版 `remove_block_manual.gml:64-68`：右键单删也出淡出边框。
+            if state.doc.song.has(tick, layer) {
+                state.spawn_remove_effects([(tick as i64, layer as i64)]);
             }
             state.doc.remove_note(tick, layer);
         }
@@ -816,6 +836,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 Flag::ShowGridLines => f.show_grid_lines = !f.show_grid_lines,
                 Flag::Flats => f.flats = !f.flats,
                 Flag::Blackout => f.blackout = !f.blackout,
+                Flag::RemoveEffect => f.remove_effect = !f.remove_effect,
             }
         }
         Command::Transpose(semi) => state.doc.transpose(semi),
@@ -2312,5 +2333,83 @@ mod tests {
             state.message.as_ref().map(|(m, _)| m.as_str()),
             Some("炫彩模式 => ON")
         );
+    }
+
+    /// 原版 `selection_delete.gml:24-28`：删除选区时按视口内格子生成删除效果。
+    #[test]
+    fn delete_spawns_remove_effects_for_visible_cells() {
+        let ctx = Context::default();
+        let mut state = state_with(four_case_song(10.0));
+        // 默认视口 800x400 → 26 列 14 行，(0..2, 0) 都在内。
+        state.doc.select_rect(0, 0, 1, 0, false, false, false);
+        dispatch(&mut state, Command::Delete, &ctx);
+        assert_eq!(state.remove_effects.len(), 2, "两个可见音符各一个效果");
+        assert_eq!(state.remove_effects[0].rel, (0, 0));
+        assert_eq!(state.remove_effects[1].rel, (1, 0));
+        assert!(
+            (state.remove_effects[0].alpha() - 0.5).abs() < 1e-6,
+            "刚生成时 alpha = 0.5（obj_removeeff Create）"
+        );
+        // 视口外的格子（tick 50 > 26 列）不生成。
+        let mut state = state_with(four_case_song(10.0));
+        state.doc.select_rect(50, 0, 50, 0, false, false, false);
+        dispatch(&mut state, Command::Delete, &ctx);
+        assert!(
+            state.remove_effects.is_empty(),
+            "视口外的删除不生成效果"
+        );
+    }
+
+    /// 原版闸门：`theme = 3 && remove_effect`（remove_block_manual.gml:64）。
+    #[test]
+    fn remove_effects_gate_on_theme_and_flag() {
+        let ctx = Context::default();
+        let mut state = state_with(four_case_song(10.0));
+        state.flags.remove_effect = false;
+        state.doc.select_rect(0, 0, 0, 0, false, false, false);
+        dispatch(&mut state, Command::Delete, &ctx);
+        assert!(state.remove_effects.is_empty(), "开关关闭不生成");
+
+        let mut state = state_with(four_case_song(10.0));
+        dispatch(&mut state, Command::SetTheme(ThemeKind::Dark), &ctx);
+        state.doc.select_rect(0, 0, 0, 0, false, false, false);
+        dispatch(&mut state, Command::Delete, &ctx);
+        assert!(state.remove_effects.is_empty(), "非 Fluent 主题不生成");
+    }
+
+    /// 原版 `obj_removeeff`：alpha 每秒衰减 1.8（真实寿命 1/3.6 秒），衰减完销毁。
+    #[test]
+    fn remove_effects_decay_in_real_time_and_get_dropped() {
+        let ctx = Context::default();
+        let mut state = state_with(four_case_song(10.0));
+        state.spawn_remove_effects([(0, 0)]);
+        assert_eq!(state.remove_effects.len(), 1);
+        // 刚生成的效果不该被清掉。
+        state.tick_transport(&ctx);
+        assert_eq!(state.remove_effects.len(), 1, "寿命没到不清除");
+        // 已过寿命的效果（0.5/1.8 ≈ 0.278 秒后 alpha 归零）在下一帧被销毁。
+        state.remove_effects[0].age = 1.0;
+        state.tick_transport(&ctx);
+        assert!(state.remove_effects.is_empty(), "寿命到了要销毁");
+    }
+
+    /// 原版 `remove_block_manual.gml:64-68`：右键单删也生成效果；锁定层不删也不生成。
+    #[test]
+    fn remove_note_spawns_effect_and_respects_lock() {
+        let ctx = Context::default();
+        let mut state = state_with(four_case_song(10.0));
+        dispatch(&mut state, Command::RemoveNote { tick: 0, layer: 0 }, &ctx);
+        assert_eq!(state.remove_effects.len(), 1);
+        assert_eq!(state.remove_effects[0].rel, (0, 0));
+        assert!(state.doc.song.get(0, 0).is_none(), "音符确实被删了");
+
+        let mut state = state_with(four_case_song(10.0));
+        state.doc.song.layers[0].lock = nbs_core::model::LockMode::Locked;
+        dispatch(&mut state, Command::RemoveNote { tick: 0, layer: 0 }, &ctx);
+        assert!(
+            state.remove_effects.is_empty(),
+            "锁定层拦截时不生成效果"
+        );
+        assert!(state.doc.song.get(0, 0).is_some(), "音符还在");
     }
 }
