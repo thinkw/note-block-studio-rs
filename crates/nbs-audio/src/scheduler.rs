@@ -84,14 +84,15 @@ pub fn build_event_table(song: &Song, include_locked: bool) -> Vec<NoteEvent> {
                 .map(|l| (l.volume, l.stereo))
                 .unwrap_or((100, 100));
             // Tempo Changer：只有自定义乐器（索引 >= 20）才可能是它，
-            // 原版 `control_draw.gml:505` 是拿乐器对象比名字。这里必须用 checked_sub：
+            // 原版 control_step.gml:284 按名字匹配。这里必须用 checked_sub：
             // saturating_sub 会把内置的 0..19 全夹成 0 号自定义，于是每个普通音符都来变速，
             // pitch=0 时 tempo 直接被钉死在 0.25 t/s（整首歌慢到听不出来）。
+            // 0.25 t/s 下限来自原版 control_draw.gml:427。
             let tempo_change_bpm = note
                 .instrument
                 .checked_sub(FIRST_CUSTOM_INDEX)
                 .and_then(|i| song.custom_instruments.get(i as usize))
-                .filter(|ci| ci.name.eq_ignore_ascii_case("Tempo Changer"))
+                .filter(|ci| ci.name == nbs_core::TEMPO_CHANGER_NAME)
                 .map(|_| note.pitch as f32);
             NoteEvent { tick, layer, note, layer_volume, layer_stereo, tempo_change_bpm }
         })
