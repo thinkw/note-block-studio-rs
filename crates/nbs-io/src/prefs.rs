@@ -79,7 +79,7 @@ pub struct Preferences {
     pub export_sample_rate: u32,
     pub export_channels: u16,
     /// 音频导出容器，对齐原版 `audio_exp_format`：MP3 / WAV / AIFF / FLAC。
-    /// 归一化、尾部留白、余量这些原版没有开关的参数不在这里，用 `ExportOptions` 的默认值。
+    /// 原版没有开关的参数（限幅、时间轴）不在首选项里，直接按 nbswave 的固定行为。
     pub export_format: String,
     /// 0 = English，1 = 简体中文。
     pub language: u8,

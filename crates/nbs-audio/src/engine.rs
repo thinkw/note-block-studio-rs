@@ -352,10 +352,6 @@ pub struct ExportOptions {
     pub include_locked: bool,
     /// 末尾留白秒数，让长采样完整衰减。
     pub tail_seconds: f32,
-    pub normalize: bool,
-    pub master: f32,
-    /// 峰值上限余量（dB）。原版 nbswave 默认 3.0 dB，仅在超出时整体缩小而不是硬削顶。
-    pub headroom_db: f32,
 }
 
 impl Default for ExportOptions {
@@ -365,9 +361,6 @@ impl Default for ExportOptions {
             channels: 2,
             include_locked: false,
             tail_seconds: 2.0,
-            normalize: false,
-            master: 1.0,
-            headroom_db: 3.0,
         }
     }
 }
@@ -416,13 +409,12 @@ pub fn render_offline(
     let chunk = events.len().div_ceil(thread_count).max(1);
     let mut partials: Vec<Vec<f32>> = Vec::with_capacity(thread_count);
     let bank_ref = &bank;
-    let opts_ref = &opts;
     std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(thread_count);
         for group in events.chunks(chunk) {
             let handle = scope.spawn(move || {
                 let mut buf = vec![0.0f32; frames * channels];
-                render_event_group(group, bank_ref, &mut buf, frames, channels, rate, tempo, opts_ref);
+                render_event_group(group, bank_ref, &mut buf, frames, channels, rate, tempo);
                 buf
             });
             handles.push(handle);
@@ -443,20 +435,15 @@ pub fn render_offline(
     for &s in &out {
         peak = peak.max(s.abs());
     }
-    // 归一化目标 0.99；否则按 headroom 余量封顶。两种情况都是整体缩放，
-    // 不做逐样本削顶——原版 nbswave 也是 peak 超限时把整条轨缩小。
-    let ceiling = if opts.normalize {
-        0.99
-    } else {
-            (10f32).powf(-opts.headroom_db.abs() / 20.0)
-        }
-        .clamp(0.05, 1.0);
-    if peak > ceiling {
-        let g = ceiling / peak;
+    // 原版 nbswave（打包的 v0.4.0）没有限幅器，也没有 headroom——混音在 int32
+    // 里自由累加，只在收尾时看峰值：超过 32767 就整轨除以峰值归到 0dBFS，
+    // 否则原样写出。它的 `headroom` 参数从头到尾没被用过；这里照搬同一语义。
+    if peak > 1.0 {
+        let g = 1.0 / peak;
         for s in &mut out {
             *s *= g;
         }
-        peak = ceiling;
+        peak = 1.0;
     }
 
     (
@@ -479,7 +466,6 @@ fn render_event_group(
     channels: usize,
     rate: u32,
     tempo: f64,
-    opts: &ExportOptions,
 ) {
     for ev in events {
         let Some(sample) = bank.get(ev.note.instrument as usize) else { continue };
@@ -491,13 +477,9 @@ fn render_event_group(
             continue;
         }
         let ratio = Voice::playback_ratio(&ev.note, sample.base_key, rate);
-        let (gl, gr) = Voice::gains(
-            &ev.note,
-            ev.layer_volume,
-            ev.layer_stereo,
-            opts.master,
-            channels == 1,
-        );
+        // 导出不用播放主音量：原版 nbswave 没有 master 概念，音符增益
+        // 只由层音量 × 力度决定（mono 时 pydub 会把两声道取平均）。
+        let (gl, gr) = Voice::gains(&ev.note, ev.layer_volume, ev.layer_stereo, 1.0, channels == 1);
         let pcm = &sample.pcm;
         let mut pos = 0.0f64;
         let mut f = start;
@@ -582,6 +564,39 @@ mod tests {
         assert_eq!(stats.notes, song.total_blocks);
         assert!(pcm.iter().any(|&s| s.abs() > 0.001), "应有实际声音");
         assert!(pcm.iter().all(|&s| s.abs() <= 1.0 + 1e-6), "必须限幅");
+    }
+
+    /// 原版 nbswave 没有限幅器：峰值超过 1.0 才整轨除以峰值（0dBFS），
+    /// 未超时必须原样写出（既不归一也不留余量）。
+    #[test]
+    fn export_normalizes_only_when_clipping() {
+        let mut bank = SoundBank::empty();
+        bank.samples.push(crate::samples::Sample {
+            pcm: vec![0.9; 1000],
+            base_key: 45,
+            name: "test".into(),
+        });
+        // 同 tick 两枚满力度音符：峰值 1.8 → 整轨缩到 1.0
+        let mut hot = Song::new();
+        hot.set(0, 0, Note::new(0, 45));
+        hot.set(0, 1, Note::new(0, 45));
+        hot.recalculate();
+        let events = build_event_table(&hot, false);
+        let (pcm, stats) = render_offline(&hot, &bank, &events, &Default::default());
+        assert!(
+            (stats.peak - 1.0).abs() < 1e-5,
+            "削顶必须整轨归一到 1.0，实测 {}",
+            stats.peak
+        );
+        assert!(pcm.iter().all(|&s| s.abs() <= 1.0 + 1e-6));
+        // 单枚音符：峰值 0.9 < 1，一个样本都不许动
+        let mut quiet = Song::new();
+        quiet.set(0, 0, Note::new(0, 45));
+        quiet.recalculate();
+        let events = build_event_table(&quiet, false);
+        let (pcm, stats) = render_offline(&quiet, &bank, &events, &Default::default());
+        assert!((stats.peak - 0.9).abs() < 1e-5, "未削顶不应缩放，实测 {}", stats.peak);
+        assert!((pcm[0] - 0.9).abs() < 1e-4, "首样本应原样 0.9，实测 {}", pcm[0]);
     }
 
     /// 20 种内置乐器都得真的出声：逐个渲染单音符歌曲，检查峰值不为零。

@@ -1341,7 +1341,6 @@ fn export_audio(state: &mut EditorState, path: &std::path::Path) {
         sample_rate: state.prefs.export_sample_rate,
         channels: state.prefs.export_channels,
         include_locked: state.prefs.include_locked_in_export,
-        master: state.prefs.master_volume,
         ..Default::default()
     };
     let tmp_wav = if format.needs_encoder() {
