@@ -531,10 +531,8 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 if state.record_armed {
                     state.record_armed = false;
                     state.prepare_audio();
-                    // 原版 draw_piano.gml:147：录音待命下按第一个键也是 toggle_playing，
-                    // 落点列（变速器/消音器/音符）同样要立刻派发。
-                    let pos = state.audio.clock().position();
-                    state.audio.start(pos);
+                    // 原版 draw_piano.gml:147：录音待命下按第一个键也是 toggle_playing。
+                    state.begin_playback();
                 }
                 record_note(state, k);
             } else {
@@ -609,10 +607,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             if playing {
                 state.audio.clock_mut().pause();
             } else {
-                // 原版 toggle_playing：起播取落点列速度并整列派发（变速器/消音器
-                // /音符立刻生效），AudioEngine::start 就是这条语义。
-                let pos = state.audio.clock().position();
-                state.audio.start(pos);
+                state.begin_playback();
             }
         }
         Command::Stop => {
@@ -2118,6 +2113,29 @@ mod tests {
         assert!(state.doc.selection.is_empty(), "原版 selection_place(0)：选区要落回歌曲");
         assert_eq!(state.doc.song.total_blocks, 4);
         assert_eq!(state.mc_tab, 0, "原版开窗就从 Schematic 页开始");
+    }
+
+    /// 原版 `toggle_playing` 起播第一行：播完停在歌尾（歌长 + 16 刻）再按
+    /// 播放要回到 0 重新起播；中途位置起播原地不动。
+    #[test]
+    fn play_after_reaching_the_end_restarts_from_zero() {
+        let mut state = state_with(four_case_song(10.0));
+        let end_stop = state.doc.song.song_length() as f64
+            + nbs_audio::scheduler::END_STOP_MARGIN_TICKS;
+        state.audio.clock_mut().seek(end_stop);
+        state.begin_playback();
+        assert!(state.is_playing());
+        assert_eq!(
+            state.audio.clock().position(),
+            0.0,
+            "停在结尾再按播放要回到 0（toggle_playing: marker_pos = enda + cols → 0）"
+        );
+        state.audio.clock_mut().pause();
+
+        state.audio.clock_mut().seek(5.0);
+        state.begin_playback();
+        assert!(state.is_playing());
+        assert_eq!(state.audio.clock().position(), 5.0, "中途起播不回 0");
     }
 
     /// 两条速度阶梯都是原版那一串连续 `if`：后面的覆盖前面的，条件一律看改动前的速度。

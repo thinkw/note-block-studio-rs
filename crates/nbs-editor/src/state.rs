@@ -1178,6 +1178,20 @@ impl EditorState {
         self.audio_rev = self.doc.song.rev;
     }
 
+    /// 原版 `toggle_playing` 的起播语义：上一轮播完停在歌尾（非循环的停点 =
+    /// 歌长 + [`nbs_audio::scheduler::END_STOP_MARGIN_TICKS`]）时先回到 0，
+    /// 再按落点列起播（取落点速度并整列派发，见 [`AudioEngine::start`]）。
+    /// 「播放 / 暂停」与录音待命首键两条起播路径都必须走这里。
+    pub fn begin_playback(&mut self) {
+        let end_stop = self.doc.song.song_length() as f64
+            + nbs_audio::scheduler::END_STOP_MARGIN_TICKS;
+        if self.audio.clock().position() >= end_stop {
+            self.audio.clock_mut().seek(0.0);
+        }
+        let pos = self.audio.clock().position();
+        self.audio.start(pos);
+    }
+
     /// 原版 `instrument_list`：内置乐器（v6 起 20 个）+ 当前歌曲的自定义乐器，索引即音符里的
     /// instrument 值。自定义乐器没填名字时回落到「自定义音色 N」。
     pub fn instrument_list(&self) -> Vec<(u8, String)> {

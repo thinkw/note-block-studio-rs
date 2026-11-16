@@ -83,6 +83,10 @@ impl Default for PlayParams {
     }
 }
 
+/// 非循环播放越过歌尾多少刻后自动停（原版停在 `enda + cols`，一屏之后；
+/// 这里取固定余量，停点即「播完」状态，再按播放键应回到 0）。
+pub const END_STOP_MARGIN_TICKS: f64 = 16.0;
+
 /// 事件乐器识别：只有自定义乐器（索引 >= 20）才可能是它，原版按名字精确比较
 /// （control_step.gml:283-291）。这里必须用 checked_sub：saturating_sub 会把内置的
 /// 0..19 全夹成 0 号自定义，于是每个普通音符都来变速，pitch=0 时 tempo 直接被
@@ -343,9 +347,9 @@ impl SharedState {
                         self.dispatch_landing_column(self.position);
                     }
                 }
-            } else if self.position > self.params.song_length + 16.0 {
+            } else if self.position > self.params.song_length + END_STOP_MARGIN_TICKS {
                 self.params.playing = false;
-                self.position = self.params.song_length + 16.0;
+                self.position = self.params.song_length + END_STOP_MARGIN_TICKS;
             }
         }
         self.frames_rendered += 1;
