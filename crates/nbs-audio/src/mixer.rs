@@ -195,19 +195,24 @@ impl Mixer {
         }
         self.voices.retain(|v| v.alive);
         self.peak = self.peak.max(l.abs()).max(r.abs());
-        // 硬限幅，与原版 GM 数字削波一致
-        (soft_limit(l), soft_limit(r))
+        // 原版引擎（GameMaker 底层 SoLoud）主输出走 CLIP_ROUNDOFF 软饱和，
+        // 不是 ±1 硬削波——密集混音时平面硬顶产生刺耳爆音，曲线饱和则平滑。
+        (clip_roundoff(l), clip_roundoff(r))
     }
 }
 
-fn soft_limit(x: f32) -> f32 {
-    if x > 1.0 {
-        1.0
-    } else if x < -1.0 {
-        -1.0
+/// SoLoud `clip_internal` 的 CLIP_ROUNDOFF 分支（逐字移植）：
+/// `|x| >= 1.65` 钉在 ±0.9862875，其余 `0.87x - 0.1x³`，
+/// 输出再乘 `mPostClipScaler = 0.95`（postinit 固定值）。
+fn clip_roundoff(x: f32) -> f32 {
+    let f = if x <= -1.65 {
+        -0.9862875
+    } else if x >= 1.65 {
+        0.9862875
     } else {
-        x
-    }
+        0.87 * x - 0.1 * x * x * x
+    };
+    0.95 * f
 }
 
 #[cfg(test)]
@@ -234,6 +239,20 @@ mod tests {
         // 输出设备 48000 时按比例缩放
         let n = Note::new(0, 45);
         assert!((Voice::playback_ratio(&n, 45, 48000) - 44100.0 / 48000.0).abs() < 1e-9);
+    }
+
+    /// SoLoud CLIP_ROUNDOFF 曲线：墙点连续（0.87·1.65 − 0.1·1.65³ = 0.9862875），
+    /// 全程乘 mPostClipScaler 0.95。
+    #[test]
+    fn clip_roundoff_matches_soloud() {
+        assert!(clip_roundoff(0.0).abs() < 1e-9);
+        assert!((clip_roundoff(1.0) - 0.95 * 0.77).abs() < 1e-9);
+        let wall = 0.95 * 0.9862875;
+        for x in [1.65f32, 2.0, 6.6, 100.0] {
+            assert!((clip_roundoff(x) - wall).abs() < 1e-6);
+            assert!((clip_roundoff(-x) + wall).abs() < 1e-6);
+        }
+        assert!(clip_roundoff(1.5) < clip_roundoff(1.6) && clip_roundoff(1.6) < wall);
     }
 
     #[test]

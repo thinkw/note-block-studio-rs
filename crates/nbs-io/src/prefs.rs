@@ -213,7 +213,8 @@ impl Default for Preferences {
             mono: false,
             show_layer_volumes: true,
             use_bpm: false,
-            extended_voices: false,
+            // 原版 `control_create.gml:163-165`：channelstoggle=1 → audio_channel_num(1024)。
+            extended_voices: true,
             show_sound_count: false,
             include_locked_in_export: false,
             follow_marker: true,

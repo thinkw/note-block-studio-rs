@@ -3212,7 +3212,7 @@ mod tests {
     }
 
     /// 钉住中文文案：串行化语言敏感断言，退出时恢复原语言。
-    struct CnGuard(std::sync::MutexGuard<'static, ()>, u8);
+    struct CnGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>, u8);
     impl Drop for CnGuard {
         fn drop(&mut self) {
             crate::set_language(self.1);
