@@ -191,6 +191,16 @@ fn main() -> Result<(), String> {
             "datapack" => WindowKind::DatapackExport,
             "schematic" => WindowKind::SchematicExport,
             "minecraft-compat" => WindowKind::MinecraftCompat,
+            // 事件乐器编辑窗：草稿值按原版落格默认摆好（tempo=10 t/s → 150；消音器层 2 → 3）。
+            "edit-tempo" => {
+                state.event_edit.tempo = "150".into();
+                WindowKind::EditTempoChanger(8, 0)
+            }
+            "edit-stopper" => {
+                state.event_edit.start = "3".into();
+                state.event_edit.until = "3".into();
+                WindowKind::EditSoundStopper(8, 0)
+            }
             other => return Err(format!("未知窗口 {other}")),
         };
         // 冒号后面的页签序号要落到对应窗口的那个字段上。

@@ -41,13 +41,18 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         WindowKind::MinecraftCompat => 490.0,
         // 原版 `draw_window(x1, y1, x1 + 600, y1 + 400 + navigation_space)`。
         WindowKind::MidiImport => 600.0,
+        // 原版 `draw_window(x1, y1, x1 + 140, y1 + 130)` / `(x1 + 140, y1 + 180)`。
+        WindowKind::EditTempoChanger(..) | WindowKind::EditSoundStopper(..) => 140.0,
         _ => 360.0,
     };
     egui::Window::new(title)
         .id(egui::Id::new(format!("nbs_win_{kind:?}")))
         .open(&mut open)
         .collapsible(false)
-        .resizable(true)
+        .resizable(!matches!(
+            kind,
+            WindowKind::EditTempoChanger(..) | WindowKind::EditSoundStopper(..)
+        ))
         .default_width(default_width)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| match &kind {
@@ -79,6 +84,12 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::MacroEditor => macro_editor_window(state, ui),
             WindowKind::Autosaves => autosaves_window(state, ui),
             WindowKind::MinecraftCompat => minecraft_compat_window(state, ui),
+            WindowKind::EditTempoChanger(tick, layer) => {
+                event_tempo_window(state, ui, *tick, *layer)
+            }
+            WindowKind::EditSoundStopper(tick, layer) => {
+                event_stopper_window(state, ui, *tick, *layer)
+            }
         });
     if !open {
         state.window = None;
@@ -947,6 +958,57 @@ impl<'a> Page<'a> {
             .rect_stroke(rect, r, Stroke::new(1.0_f32, line), StrokeKind::Inside);
     }
 
+    /// 原版 `draw_textarea(focus, x, y, w, h, val, hint)`。先铺一层内衬（默认白，
+    /// 主题 2 是 (54,54,54)，Fluent 用次按钮那组灰阶），再画框：主题 0 是
+    /// `spr_textbox` 九宫格、主题 1/2 是 `draw_area`、Fluent 是 `spr_textbox_f`
+    /// 九宫格（悬停换亮档、聚焦时底边吃强调色）。九宫格都没导出，统一近似成
+    /// 主题描边；文字编辑区在 (x+3, y+3) 大小 (w-6, h-6)，交给 egui 的 TextEdit。
+    fn textarea(&mut self, x: f32, n: f32, w: f32, h: f32, buf: &mut String, hint: &str, salt: &str) {
+        let at = self.row(x, n);
+        let rect = Rect::from_min_size(at, Vec2::new(w, h));
+        let on = self
+            .ui
+            .interact(rect, Id::new(("textarea-hover", salt)), Sense::hover())
+            .hovered();
+        let p = self.ui.painter().clone();
+        let fill = if self.fluent {
+            match (self.th.fdark, on) {
+                (false, false) => ggray(252),
+                (false, true) => ggray(246),
+                (true, false) => ggray(45),
+                (true, true) => ggray(50),
+            }
+        } else if self.th.kind == ThemeKind::Dark {
+            ggray(54)
+        } else {
+            Color32::WHITE
+        };
+        p.rect_filled(rect.shrink(1.0), 0.0, fill);
+        let (line, r) = if self.fluent {
+            (if on { self.th.accent } else { self.th.border }, 4.0)
+        } else {
+            (self.th.border, 0.0)
+        };
+        p.rect_stroke(rect, r, Stroke::new(1.0_f32, line), StrokeKind::Inside);
+        let edit = Rect::from_min_size(at + Vec2::new(3.0, 3.0), Vec2::new(w - 6.0, h - 6.0));
+        let resp = self.ui.put(
+            edit,
+            egui::TextEdit::singleline(buf)
+                .hint_text(hint)
+                .frame(false)
+                .margin(egui::Margin::ZERO)
+                .font(FontId::proportional(PREFS_FONT)),
+        );
+        if self.fluent && resp.has_focus() {
+            // `spr_textbox_f` 聚焦时底边 2 像素换成强调色（`accent[6] * focus`）。
+            p.rect_filled(
+                Rect::from_min_max(at + Vec2::new(2.0, h - 2.0), at + Vec2::new(w - 2.0, h)),
+                0.0,
+                self.th.accent,
+            );
+        }
+    }
+
     /// 非 Fluent 主题那一整块面板：原版
     /// `draw_rectangle(x1+6, y1+46, x1+494, y1+472)` 铺底 + (137,140,149) 描边，
     /// 主题 0 再套一层 (213,223,229) 圆角框。
@@ -1634,6 +1696,112 @@ fn layer_rename(state: &mut EditorState, ui: &mut Ui, layer: u32) {
     }
     if let Some(c) = cmd {
         state.editing_layer_name = None;
+        state.emit(c);
+        state.emit(Command::CloseWindow);
+    }
+}
+
+/// 原版 `draw_window_edit_tempo_changer`：140×130 小窗，落速度变换 / 点已有速度变换
+/// 时由落格逻辑打开。主题 0 才铺那块白面板（`if (theme = 0)`），OK 校验
+/// `int64 > 0 && < 32768`，非法弹「非法数值！」且窗口留着。
+fn event_tempo_window(state: &mut EditorState, ui: &mut Ui, tick: u32, layer: u32) {
+    let th = state.theme.clone();
+    let fluent = th.kind == ThemeKind::Fluent;
+    let margin = ui.spacing().window_margin;
+    let (ml, mr) = (margin.left as f32, margin.right as f32);
+    let body = ui.allocate_exact_size(
+        egui::vec2(140.0 - ml - mr, if fluent { 106.0 } else { 104.0 }),
+        egui::Sense::hover(),
+    );
+    let o = body.0.min - egui::vec2(ml, 0.0);
+    let ry = if fluent { -8.0 } else { -26.0 };
+    let mut cmd = None;
+    {
+        let mut pg = Page { ui, o, ry, th: &th, fluent };
+        if th.kind == ThemeKind::Aqua {
+            let p = pg.ui.painter().clone();
+            let rect = pg.row_rect(6.0, 26.0, 134.0, 92.0);
+            p.rect_filled(rect, 0.0, Color32::WHITE);
+            p.rect_stroke(
+                rect,
+                0.0,
+                Stroke::new(1.0_f32, Color32::from_rgb(137, 140, 149)),
+                StrokeKind::Inside,
+            );
+        }
+        pg.header(10.0, 40.0, 120.0, 35.0, "速度（BPM）");
+        pg.textarea(15.0, 50.0, 113.0, 25.0, &mut state.event_edit.tempo, "必须是一个正整数。", "ev-tempo");
+        if pg.button2(10.0, 98.0, 60.0, "确定", false, false) {
+            cmd = match state.event_edit.tempo.parse::<i64>() {
+                Ok(bpm) if bpm > 0 && bpm < 32768 => {
+                    Some(Command::SetEventTempo { tick, layer, bpm })
+                }
+                _ => {
+                    state.modals = ModalQueue::message("设置速度", "非法数值！");
+                    None
+                }
+            };
+        }
+        if pg.button2(70.0, 98.0, 60.0, "取消", false, true) {
+            cmd = Some(Command::CloseWindow);
+        }
+    }
+    if let Some(c) = cmd {
+        state.emit(c);
+        state.emit(Command::CloseWindow);
+    }
+}
+
+/// 原版 `draw_window_edit_sound_stopper`：140×180，两个层号输入行。
+/// OK 校验 `start/until 都在 0..32768`（0 合法，虽然提示语说正整数——原版如此）。
+fn event_stopper_window(state: &mut EditorState, ui: &mut Ui, tick: u32, layer: u32) {
+    let th = state.theme.clone();
+    let fluent = th.kind == ThemeKind::Fluent;
+    let margin = ui.spacing().window_margin;
+    let (ml, mr) = (margin.left as f32, margin.right as f32);
+    let body = ui.allocate_exact_size(
+        egui::vec2(140.0 - ml - mr, if fluent { 156.0 } else { 154.0 }),
+        egui::Sense::hover(),
+    );
+    let o = body.0.min - egui::vec2(ml, 0.0);
+    let ry = if fluent { -8.0 } else { -26.0 };
+    let mut cmd = None;
+    {
+        let mut pg = Page { ui, o, ry, th: &th, fluent };
+        if th.kind == ThemeKind::Aqua {
+            let p = pg.ui.painter().clone();
+            let rect = pg.row_rect(6.0, 26.0, 134.0, 142.0);
+            p.rect_filled(rect, 0.0, Color32::WHITE);
+            p.rect_stroke(
+                rect,
+                0.0,
+                Stroke::new(1.0_f32, Color32::from_rgb(137, 140, 149)),
+                StrokeKind::Inside,
+            );
+        }
+        pg.header(10.0, 40.0, 120.0, 35.0, "起始层（包含）");
+        pg.textarea(15.0, 50.0, 113.0, 25.0, &mut state.event_edit.start, "必须是一个正整数。", "ev-start");
+        pg.header(10.0, 90.0, 120.0, 35.0, "终止层（包含）");
+        pg.textarea(15.0, 100.0, 113.0, 25.0, &mut state.event_edit.until, "必须是一个正整数。", "ev-until");
+        if pg.button2(10.0, 148.0, 60.0, "确定", false, false) {
+            cmd = match (
+                state.event_edit.start.parse::<i64>(),
+                state.event_edit.until.parse::<i64>(),
+            ) {
+                (Ok(s), Ok(u)) if (0..32768).contains(&s) && (0..32768).contains(&u) => {
+                    Some(Command::SetEventStopper { tick, layer, start: s, until: u as u64 })
+                }
+                _ => {
+                    state.modals = ModalQueue::message("设置抑制范围", "非法数值！");
+                    None
+                }
+            };
+        }
+        if pg.button2(70.0, 148.0, 60.0, "取消", false, true) {
+            cmd = Some(Command::CloseWindow);
+        }
+    }
+    if let Some(c) = cmd {
         state.emit(c);
         state.emit(Command::CloseWindow);
     }

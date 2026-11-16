@@ -5,7 +5,10 @@
 use std::collections::BTreeSet;
 
 use crate::history::{CellDelta, Edit, History, LayerDelta, MetaDelta};
-use crate::model::{Layer, Note, Song, SongMeta, FIRST_CUSTOM_INDEX, MC_KEY_MAX, MC_KEY_MIN};
+use crate::model::{
+    short_to_panning_velocity, Layer, Note, Song, SongMeta, FIRST_CUSTOM_INDEX, MC_KEY_MAX,
+    MC_KEY_MIN,
+};
 use crate::selection::{collect_rect, Selection, SelectionNote, SelectionSnapshot};
 
 pub struct Document {
@@ -180,6 +183,49 @@ impl Document {
         let mut tx = self.begin("修改音符");
         tx.watch(tick, layer);
         tx.song().set(tick, layer, note.clamped());
+        tx.commit();
+    }
+
+    /// 事件乐器（速度变换 / 消音器）落格：pit 直接是 BPM / 起始层号，远超音符
+    /// 微调的 ±1200，不能走 [`Note::clamped`]（原版 `add_block_manual` 就是直接赋值）。
+    pub fn place_note_raw(&mut self, tick: u32, layer: u32, note: Note) {
+        let mut tx = self.begin("放置音符");
+        tx.watch(tick, layer);
+        tx.song().set(tick, layer, note);
+        tx.commit();
+    }
+
+    /// 同 [`Self::place_note_raw`]：覆盖已有事件乐器的属性，历史标签用「修改音符」。
+    pub fn change_note_raw(&mut self, tick: u32, layer: u32, note: Note) {
+        let mut tx = self.begin("修改音符");
+        tx.watch(tick, layer);
+        tx.song().set(tick, layer, note);
+        tx.commit();
+    }
+
+    /// 编辑窗口「确定」（原版 `h_changeblock`）：速度变换只改 pit，
+    /// key / 力度 / 声像保持原样。
+    pub fn set_event_tempo(&mut self, tick: u32, layer: u32, bpm: i64) {
+        let mut tx = self.begin("修改音符");
+        tx.watch(tick, layer);
+        if let Some(mut note) = tx.song().get(tick, layer) {
+            note.pitch = bpm as i16;
+            tx.song().set(tick, layer, note);
+        }
+        tx.commit();
+    }
+
+    /// 编辑窗口「确定」：消音器写起始层（pit）和终止层（pan+vel 短编码）。
+    pub fn set_event_stopper(&mut self, tick: u32, layer: u32, start: i64, until: u64) {
+        let mut tx = self.begin("修改音符");
+        tx.watch(tick, layer);
+        if let Some(mut note) = tx.song().get(tick, layer) {
+            note.pitch = start as i16;
+            let (pan, vel) = short_to_panning_velocity(until as u32);
+            note.panning = pan;
+            note.velocity = vel;
+            tx.song().set(tick, layer, note);
+        }
         tx.commit();
     }
 

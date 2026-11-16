@@ -5,7 +5,10 @@ use std::path::PathBuf;
 
 use egui::Context;
 use nbs_audio::{export_wav, ExportOptions, EXTENDED_MAX_VOICES, DEFAULT_MAX_VOICES};
-use nbs_core::model::{LockMode, Note, Song, SongMeta, KEY_MAX, PAN_MAX, VEL_MAX, PIT_MAX};
+use nbs_core::model::{
+    panning_velocity_to_short, short_to_panning_velocity, LockMode, Note, Song, SongMeta, KEY_MAX,
+    PAN_MAX, VEL_MAX, PIT_MAX,
+};
 use nbs_core::Macro;
 
 use crate::state::{DialogAction, EditMode, EditorState, FileDialog, Flag, Modal, ModalQueue, PrefsFolder, WindowKind};
@@ -32,6 +35,10 @@ pub enum Command {
     InvertSelection,
     SelectByInstrument { instrument: u8, invert: bool },
     PlaceNote { tick: u32, layer: u32 },
+    /// 速度变换编辑窗「确定」：pit = BPM（原版 `h_changeblock`）。
+    SetEventTempo { tick: u32, layer: u32, bpm: i64 },
+    /// 消音器编辑窗「确定」：pit = 起始层，终止层编码进声像 + 力度。
+    SetEventStopper { tick: u32, layer: u32, start: i64, until: u64 },
     RemoveNote { tick: u32, layer: u32 },
     PickNote { tick: u32, layer: u32, all: bool },
     SelectRect {
@@ -324,11 +331,80 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 state.set_message("图层已锁定");
                 return;
             }
-            if state.doc.song.has(tick, layer) {
-                state.doc.change_note(tick, layer, state.current);
-            } else {
-                state.doc.place_note(tick, layer, state.current);
+            // 原版 add/change_block_manual 的结尾：落的是事件乐器就不直接吃画笔值，
+            // 改写事件默认值并弹出编辑窗；落点已有事件乐器时是「再编辑」——草稿
+            // 回填现有值，音符本身不动（原版 is_event 分支）。
+            let brush = state.current;
+            let name = state.doc.song.instrument_name(brush.instrument).to_string();
+            let existing = state.doc.song.get(tick, layer);
+            let existing_is_event = existing
+                .as_ref()
+                .is_some_and(|n| {
+                    let n = state.doc.song.instrument_name(n.instrument);
+                    n == nbs_core::TEMPO_CHANGER_NAME || n == nbs_core::SOUND_STOPPER_NAME
+                });
+            match name.as_str() {
+                nbs_core::TEMPO_CHANGER_NAME => {
+                    let bpm = if existing_is_event {
+                        existing.unwrap().pitch as i64
+                    } else {
+                        // 原版 `int64(song.tempo * 15)`。超过 i16 的值存不进音符模型
+                        // （窗口校验也只收 < 32768），这里截断，普通落格路径不受影响。
+                        let bpm = ((state.doc.song.meta.tempo as f64 * 15.0) as i64)
+                            .clamp(0, i16::MAX as i64) as i16;
+                        let note = Note { pitch: bpm, ..brush };
+                        if existing.is_some() {
+                            state.doc.change_note_raw(tick, layer, note);
+                        } else {
+                            state.doc.place_note_raw(tick, layer, note);
+                        }
+                        bpm as i64
+                    };
+                    state.event_edit.tempo = bpm.to_string();
+                    state.window = Some(WindowKind::EditTempoChanger(tick, layer));
+                }
+                nbs_core::SOUND_STOPPER_NAME => {
+                    let (start, until) = if existing_is_event {
+                        let n = existing.unwrap();
+                        (
+                            n.pitch as i64,
+                            panning_velocity_to_short(n.panning, n.velocity) as i64,
+                        )
+                    } else {
+                        // 原版 `start = until = yy + 1`，终止层编码进声像 + 力度。
+                        let start = (layer as i64 + 1).clamp(0, i16::MAX as i64);
+                        let (pan, vel) = short_to_panning_velocity(layer + 1);
+                        let note = Note {
+                            pitch: start as i16,
+                            panning: pan,
+                            velocity: vel,
+                            ..brush
+                        };
+                        if existing.is_some() {
+                            state.doc.change_note_raw(tick, layer, note);
+                        } else {
+                            state.doc.place_note_raw(tick, layer, note);
+                        }
+                        (start, layer as i64 + 1)
+                    };
+                    state.event_edit.start = start.to_string();
+                    state.event_edit.until = until.to_string();
+                    state.window = Some(WindowKind::EditSoundStopper(tick, layer));
+                }
+                _ => {
+                    if existing.is_some() {
+                        state.doc.change_note(tick, layer, brush);
+                    } else {
+                        state.doc.place_note(tick, layer, brush);
+                    }
+                }
             }
+        }
+        Command::SetEventTempo { tick, layer, bpm } => {
+            state.doc.set_event_tempo(tick, layer, bpm);
+        }
+        Command::SetEventStopper { tick, layer, start, until } => {
+            state.doc.set_event_stopper(tick, layer, start, until);
         }
         Command::RemoveNote { tick, layer } => {
             if state.doc.song.is_locked(layer) {
@@ -1449,6 +1525,156 @@ mod tests {
         assert!(state.modals.is_empty());
         assert_eq!(state.window, Some(WindowKind::SchematicExport));
         assert_eq!(state.schematic_options.tempo_mode, 2, "3.0 t/s 对应 2.5 红石刻档");
+    }
+
+    /// 原版 add_block_manual 结尾：落速度变换写默认 BPM（tempo*15）并弹编辑窗；
+    /// 落消音器写 start = until = 层号 + 1（终止层编码进声像 + 力度）并弹编辑窗。
+    /// 事件乐器的 pit 远超 ±1200，必须绕过 `clamped()`。
+    #[test]
+    fn placing_event_instruments_writes_defaults_and_opens_edit_windows() {
+        let ctx = Context::default();
+        let tempo_ins = nbs_core::model::FIRST_CUSTOM_INDEX;
+        let stopper_ins = nbs_core::model::FIRST_CUSTOM_INDEX + 1;
+        let mut song = Song {
+            layers: vec![Layer::default(); 3],
+            ..Song::new()
+        };
+        song.meta.tempo = 10.0;
+        song.custom_instruments = vec![
+            nbs_core::model::CustomInstrument {
+                name: nbs_core::TEMPO_CHANGER_NAME.into(),
+                filename: String::new(),
+                key: 45,
+                press: true,
+            },
+            nbs_core::model::CustomInstrument {
+                name: nbs_core::SOUND_STOPPER_NAME.into(),
+                filename: String::new(),
+                key: 45,
+                press: true,
+            },
+        ];
+        let mut state = state_with(song);
+
+        state.current = Note::new(tempo_ins, 45);
+        dispatch(&mut state, Command::PlaceNote { tick: 4, layer: 0 }, &ctx);
+        assert_eq!(state.window, Some(WindowKind::EditTempoChanger(4, 0)));
+        assert_eq!(state.event_edit.tempo, "150", "10 t/s * 15 = 150 BPM");
+        let n = state.doc.song.get(4, 0).unwrap();
+        assert_eq!(n.instrument, tempo_ins);
+        assert_eq!(n.pitch, 150);
+
+        state.current = Note::new(stopper_ins, 45);
+        dispatch(&mut state, Command::PlaceNote { tick: 0, layer: 2 }, &ctx);
+        assert_eq!(state.window, Some(WindowKind::EditSoundStopper(0, 2)));
+        assert_eq!(state.event_edit.start, "3");
+        assert_eq!(state.event_edit.until, "3");
+        let n = state.doc.song.get(0, 2).unwrap();
+        assert_eq!(n.pitch, 3);
+        assert_eq!(n.panning, 103, "终止层 3 编进声像字节（(3+100)%256）");
+        assert_eq!(n.velocity, 100);
+    }
+
+    /// 原版 change_block_manual 的 is_event 分支：落点已是事件乐器时不覆盖音符，
+    /// 草稿回填现有值（消音器终止层从声像 + 力度解出来）。
+    #[test]
+    fn clicking_existing_event_note_reedits_without_overwriting() {
+        let ctx = Context::default();
+        let stopper_ins = nbs_core::model::FIRST_CUSTOM_INDEX;
+        let tempo_ins = nbs_core::model::FIRST_CUSTOM_INDEX + 1;
+        let mut song = Song {
+            layers: vec![Layer::default(); 2],
+            ..Song::new()
+        };
+        song.custom_instruments = vec![
+            nbs_core::model::CustomInstrument {
+                name: nbs_core::SOUND_STOPPER_NAME.into(),
+                filename: String::new(),
+                key: 45,
+                press: true,
+            },
+            nbs_core::model::CustomInstrument {
+                name: nbs_core::TEMPO_CHANGER_NAME.into(),
+                filename: String::new(),
+                key: 45,
+                press: true,
+            },
+        ];
+        let existing = Note {
+            instrument: stopper_ins,
+            key: 45,
+            velocity: 100,
+            panning: 157,
+            pitch: 39,
+        };
+        song.set(7, 1, existing);
+        let mut state = state_with(song);
+
+        // 用消音器画笔点自己：再编辑，音符不动。
+        state.current = Note::new(stopper_ins, 45);
+        dispatch(&mut state, Command::PlaceNote { tick: 7, layer: 1 }, &ctx);
+        assert_eq!(state.window, Some(WindowKind::EditSoundStopper(7, 1)));
+        assert_eq!(state.event_edit.start, "39");
+        assert_eq!(state.event_edit.until, "57", "pv_short(157, 100) = 57");
+        assert_eq!(state.doc.song.get(7, 1), Some(existing));
+
+        // 用速度变换画笔点它：一样不覆盖，草稿换成速度窗口的默认。
+        state.window = None;
+        state.current = Note::new(tempo_ins, 45);
+        dispatch(&mut state, Command::PlaceNote { tick: 7, layer: 1 }, &ctx);
+        assert_eq!(state.window, Some(WindowKind::EditTempoChanger(7, 1)));
+        assert_eq!(state.event_edit.tempo, "39", "再编辑用现有 pit 当 BPM 草稿");
+        assert_eq!(state.doc.song.get(7, 1), Some(existing));
+    }
+
+    /// 编辑窗「确定」的两条命令：速度变换只改 pit；消音器改 pit + 声像/力度，
+    /// key 与乐器保持原样（原版 h_changeblock 只写这三个字段）。
+    #[test]
+    fn event_edit_ok_commands_write_only_event_fields() {
+        let ctx = Context::default();
+        let mut song = Song {
+            layers: vec![Layer::default(); 2],
+            ..Song::new()
+        };
+        let tempo_ins = nbs_core::model::FIRST_CUSTOM_INDEX;
+        let stopper_ins = nbs_core::model::FIRST_CUSTOM_INDEX + 1;
+        song.custom_instruments = vec![
+            nbs_core::model::CustomInstrument {
+                name: nbs_core::TEMPO_CHANGER_NAME.into(),
+                filename: String::new(),
+                key: 45,
+                press: true,
+            },
+            nbs_core::model::CustomInstrument {
+                name: nbs_core::SOUND_STOPPER_NAME.into(),
+                filename: String::new(),
+                key: 45,
+                press: true,
+            },
+        ];
+        song.set(2, 0, Note { instrument: tempo_ins, key: 50, velocity: 80, panning: 60, pitch: 150 });
+        song.set(3, 0, Note { instrument: stopper_ins, key: 40, velocity: 100, panning: 157, pitch: 39 });
+        let mut state = state_with(song);
+
+        dispatch(
+            &mut state,
+            Command::SetEventTempo { tick: 2, layer: 0, bpm: 400 },
+            &ctx,
+        );
+        let n = state.doc.song.get(2, 0).unwrap();
+        assert_eq!(n.pitch, 400);
+        assert_eq!((n.key, n.velocity, n.panning), (50, 80, 60));
+
+        dispatch(
+            &mut state,
+            Command::SetEventStopper { tick: 3, layer: 0, start: 10, until: 57 },
+            &ctx,
+        );
+        let n = state.doc.song.get(3, 0).unwrap();
+        assert_eq!(n.pitch, 10);
+        assert_eq!(n.panning, 157, "until 57 解码回 (157, 100)");
+        assert_eq!(n.velocity, 100);
+        assert_eq!(n.key, 40);
     }
 
     /// 选乐器顺带复位力度/声像/微调并发一声——原版每个入口都这么做

@@ -187,6 +187,11 @@ pub enum WindowKind {
     Autosaves,
     /// 原版 `w_minecraft`（`macros.gml:69`）：右上角兼容性图标点开的窗口。
     MinecraftCompat,
+    /// 原版 `w_edit_tempo_changer`（`add/change_block_manual` 落速度变换时弹出），
+    /// 参数是目标格 (tick, layer)。
+    EditTempoChanger(u32, u32),
+    /// 原版 `w_edit_sound_stopper`：落消音器时弹出，参数同上。
+    EditSoundStopper(u32, u32),
 }
 
 impl WindowKind {
@@ -222,6 +227,9 @@ impl WindowKind {
             Self::Autosaves => "自动保存 / 备份",
             // 原版 `draw_window_minecraft.gml:24` 的标题文字。
             Self::MinecraftCompat => "Minecraft 兼容性",
+            // 原版两个编辑窗在标题带写的文字（语言 1 = 中文分支）。
+            Self::EditTempoChanger(..) => "设置速度",
+            Self::EditSoundStopper(..) => "设置抑制范围",
         }
     }
 }
@@ -608,6 +616,16 @@ pub struct LayerDrag {
     pub raw: f32,
 }
 
+/// 原版 `tempo_changer_set_tempo` / `sound_stopper_set_start` / `sound_stopper_set_until`：
+/// 两个事件乐器编辑窗里 `draw_textarea` 的原始字符串（能整成 int64 才算合法）。
+/// 一次只开一个窗，三个草稿共用一个结构体。
+#[derive(Clone, Debug, Default)]
+pub struct EventEditDraft {
+    pub tempo: String,
+    pub start: String,
+    pub until: String,
+}
+
 pub struct EditorState {
     pub doc: Document,
     pub viewport: Viewport,
@@ -645,6 +663,8 @@ pub struct EditorState {
     pub pending_dialog: Option<FileDialog>,
     pub recent_files: Vec<PathBuf>,
     pub editing_layer_name: Option<(u32, String)>,
+    /// 事件乐器编辑窗的输入草稿（见 [`EventEditDraft`]），开窗时由落格逻辑回填。
+    pub event_edit: EventEditDraft,
     /// 图层音量/声像拖拽预览（松开时才提交一条历史，避免拖拽产生几百条）。
     pub layer_drag: Option<LayerDrag>,
     pub macro_amount: f32,
@@ -835,6 +855,7 @@ impl EditorState {
             pending_dialog: None,
             recent_files,
             editing_layer_name: None,
+            event_edit: EventEditDraft::default(),
             layer_drag: None,
             macro_amount: 1.0,
             macro_index: 0,
