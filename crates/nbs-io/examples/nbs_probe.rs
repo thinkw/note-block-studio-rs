@@ -1,10 +1,10 @@
 //! 把 .nbs 的头部与乐器索引分布打出来，用来核对原版把铜块一族算在内置（0..19）还是自定义里。
 //!
 //! 运行：`cargo run -p nbs-io --example nbs_probe -- <文件…>`
-//! 压缩过的文件（头 8 字节是 gzip）会先解压再看。
+//! 注意：原版 v3.12 的保存/加载都不压缩 .nbs（buffer_save/buffer_load 裸读写），
+//! 生态库 rsnbs/nbs-rs 也不解压，所以这里只处理裸格式。
 
 use std::collections::BTreeMap;
-use std::io::Read;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -13,8 +13,7 @@ fn main() {
         std::process::exit(2);
     }
     for path in args {
-        let raw = std::fs::read(&path).unwrap_or_default();
-        let bytes = decompress(&raw);
+        let bytes = std::fs::read(&path).unwrap_or_default();
         let (version, first_custom) = if bytes.len() > 4 && &bytes[0..2] == b"\x00\x00" {
             (bytes[2], bytes[3])
         } else {
@@ -50,13 +49,3 @@ fn main() {
     }
 }
 
-/// 压缩过的 nbs 头两字节是 00 00，接着是 gzip 长度 u32 + zlib 数据；未压缩的原样返回。
-fn decompress(bytes: &[u8]) -> Vec<u8> {
-    if bytes.len() < 8 || &bytes[0..4] != b"\x00\x00\x1f\x8b" {
-        return bytes.to_vec();
-    }
-    let mut d = flate2::read::ZlibDecoder::new(&bytes[8..]);
-    let mut out = Vec::new();
-    d.read_to_end(&mut out).unwrap_or_default();
-    out
-}
