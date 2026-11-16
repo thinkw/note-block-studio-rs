@@ -85,6 +85,8 @@ pub fn tr<'a>(en: &'a str, zh: &'a str) -> &'a str {
 /// 效果等价（开关在下一帧生效，帧内不跳变）。
 pub fn set_language(l: u8) {
     LANGUAGE.store(l, Ordering::Relaxed);
+    // IO 层的错误文案读同一开关（原版深层脚本同样读 `language` 全局）。
+    nbs_io::set_language(l);
 }
 
 /// 跑帧的测试互相串行：show() 每帧开头把全局语言对齐到 prefs，两个测试并发
@@ -293,6 +295,7 @@ mod gui_export_tests {
         let ctx = egui::Context::default();
         let mut state = EditorState::new();
         state.theme.apply(&ctx);
+        state.prefs.language = 1;
         state.window = Some(WindowKind::AudioExport);
         frame(&mut state, &ctx);
 
@@ -306,6 +309,8 @@ mod gui_export_tests {
 
         let out = std::env::temp_dir().join("nbs_gui_export_mono.wav");
         let _ = std::fs::remove_file(&out);
+        // dispatch 与随后的文案断言整段持帧锁，理由同 gui_imports。
+        let _lock = crate::frame_lock();
         dispatch(&mut state, crate::commands::Command::DialogConfirm(out.clone()), &ctx);
 
         let bytes = std::fs::read(&out).expect("GUI 导出必须写出真实文件");
@@ -314,7 +319,13 @@ mod gui_export_tests {
         let rate = u32::from_le_bytes(bytes[24..28].try_into().unwrap());
         let ch = u16::from_le_bytes(bytes[22..24].try_into().unwrap());
         assert_eq!((rate, ch), (22050, 1), "采样率/声道必须按窗口里的选项写进头部");
-        assert!(state.export_status.as_deref().unwrap_or_default().contains("WAV 已导出"));
+        assert!(
+            state.export_status.as_deref().unwrap_or_default().contains("WAV 已导出"),
+            "实际状态：{:?}（全局语言 {}）",
+            state.export_status,
+            crate::lang()
+        );
+        drop(_lock);
         let _ = std::fs::remove_file(&out);
     }
 
@@ -643,6 +654,7 @@ mod gui_window_tests {
         let ctx = egui::Context::default();
         let mut state = EditorState::new();
         state.theme.apply(&ctx);
+        state.prefs.language = 1;
         state.datapack_options.name = "  !! ".into();
         let dir = scratch("bad-name");
         let out = dir.join("nope.zip");
@@ -651,14 +663,16 @@ mod gui_window_tests {
             commands::Command::OpenDialog(state::DialogAction::ExportDatapack),
             &ctx,
         );
+        let _lock = crate::frame_lock();
         dispatch(&mut state, commands::Command::DialogConfirm(out.clone()), &ctx);
         assert!(state.export_status.is_none(), "失败却写了成功状态");
         assert!(!out.exists(), "报错时不应留下产物");
         assert!(
-            msg(&state).contains("数据包需要一个有效的唯一名称"),
+            msg(&state).contains("请输入一个有效的数据包名"),
             "{:?}",
             msg(&state)
         );
+        drop(_lock);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -668,6 +682,7 @@ mod gui_window_tests {
         let ctx = egui::Context::default();
         let mut state = EditorState::new();
         state.theme.apply(&ctx);
+        state.prefs.language = 1;
         dispatch(
             &mut state,
             commands::Command::ShowWindow(WindowKind::DatapackExport),
@@ -693,9 +708,11 @@ mod gui_window_tests {
             commands::Command::OpenDialog(state::DialogAction::ExportDatapack),
             &ctx,
         );
+        let _lock = crate::frame_lock();
         dispatch(&mut state, commands::Command::DialogConfirm(out.clone()), &ctx);
         assert!(!out.exists());
-        assert!(msg(&state).contains("路径最多只能套 5 个子文件夹"));
+        assert!(msg(&state).contains("路径最多只能套五个文件夹"));
+        drop(_lock);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -706,6 +723,7 @@ mod gui_window_tests {
         let ctx = egui::Context::default();
         let mut state = EditorState::new();
         state.theme.apply(&ctx);
+        state.prefs.language = 1;
         dispatch(
             &mut state,
             commands::Command::ShowWindow(WindowKind::DatapackExport),
@@ -809,6 +827,8 @@ mod gui_window_tests {
         assert_eq!(state.window, Some(WindowKind::FileSave), "点「导出」应打开保存对话框");
         let dir = scratch("schematic");
         let out = dir.join("by_click.nbt");
+        // dispatch 与随后的文案断言整段持帧锁，理由同 gui_imports。
+        let _lock = crate::frame_lock();
         dispatch(&mut state, commands::Command::DialogConfirm(out.clone()), &ctx);
         assert!(out.is_file(), "结构方块分支应写出 {}", out.display());
         let bytes = std::fs::read(&out).expect("导出必须写出真实文件");
@@ -816,7 +836,14 @@ mod gui_window_tests {
 
         // 原版保存成功后 `message("Schematic 已保存！")`，答完把导出窗口重新打开。
         assert_eq!(state.modals.items.len(), 1);
-        assert_eq!(state.modals.items[0].title, "导出 Schematic");
+        assert_eq!(
+            state.modals.items[0].title,
+            "导出 Schematic",
+            "全局语言 {}，prefs 语言 {}",
+            crate::lang(),
+            state.prefs.language
+        );
+        drop(_lock);
         click_text(&mut state, &ctx, "确定");
         assert_eq!(state.window, Some(WindowKind::SchematicExport));
         assert_eq!(state.schematic_tab, 0, "重新开窗回到设计页");
@@ -854,6 +881,9 @@ mod gui_window_tests {
 
         state.doc.replace_song(nbs_core::Song::new());
         assert_eq!(state.doc.song.total_blocks, 0);
+        // dispatch 与随后的文案断言要整段持帧锁：字符串在 dispatch 线程上构建，
+        // 并行用例的帧会把全局语言翻走（生产是单主线程，没有这个窗口）。
+        let _lock = crate::frame_lock();
         dispatch(&mut state, commands::Command::DialogConfirm(file.clone()), &ctx);
         assert!(state.file_dialog.is_none());
         assert_eq!(state.window, None);
@@ -861,6 +891,7 @@ mod gui_window_tests {
         assert!(msg(&state).starts_with("Schematic 导入完成"), "{}", msg(&state));
         assert_eq!(state.doc.song.filename, None, "不学原版把 filename 指向 .schematic");
         assert_eq!(state.recent_files.len(), recents, "原版 open_schematic() 不写最近列表");
+        drop(_lock);
 
         // 打开分流：.schematic 走导入，不会被当成 NBS 解析。
         let mut s2 = EditorState::new();
@@ -868,10 +899,12 @@ mod gui_window_tests {
         s2.prefs.language = 1;
         let recents2 = s2.recent_files.len();
         s2.doc.replace_song(nbs_core::Song::new());
+        let _lock = crate::frame_lock();
         dispatch(&mut s2, commands::Command::OpenPath(file), &ctx);
         assert!(s2.doc.song.total_blocks > 0);
         assert!(msg(&s2).starts_with("Schematic 导入完成"), "{}", msg(&s2));
         assert_eq!(s2.recent_files.len(), recents2);
+        drop(_lock);
 
         // 坏文件：原版的 message()，标题不经 condstr，保持英文。
         let bad = dir.join("bad.schematic");
@@ -879,6 +912,7 @@ mod gui_window_tests {
         click_text(&mut s2, &ctx, "文件");
         click_text(&mut s2, &ctx, "导入");
         click_text(&mut s2, &ctx, "从 Schematic 导入…");
+        let _lock = crate::frame_lock();
         dispatch(&mut s2, commands::Command::DialogConfirm(bad), &ctx);
         assert_eq!(s2.modals.items.len(), 1, "失败要弹模态，不只是状态栏一行字");
         assert_eq!(s2.modals.items[0].title, "Error");
@@ -888,6 +922,7 @@ mod gui_window_tests {
             "{}",
             s2.modals.items[0].text
         );
+        drop(_lock);
         // 模态框要能画出来、答完就清空。
         frame(&mut s2, &ctx);
         click_text(&mut s2, &ctx, "确定");
@@ -902,6 +937,7 @@ mod gui_window_tests {
     fn instruments_window_lists_twenty_and_advertises_only_real_bindings() {
         let ctx = egui::Context::default();
         let mut state = EditorState::new();
+        state.prefs.language = 1;
         dispatch(&mut state, commands::Command::ShowWindow(WindowKind::Instruments), &ctx);
         assert_eq!(state.window, Some(WindowKind::Instruments));
         // 刚 dispatch 完的第一帧只登记窗口，正文要第二帧才画出来。
@@ -1082,6 +1118,7 @@ mod gui_window_tests {
         let ctx = egui::Context::default();
         let mut state = EditorState::new();
         state.theme.apply(&ctx);
+        state.prefs.language = 1;
         state.window = Some(WindowKind::Preferences);
         frame(&mut state, &ctx);
         let out = frame_out(&mut state, &ctx, base_input());

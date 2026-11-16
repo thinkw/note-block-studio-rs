@@ -7,6 +7,8 @@
 
 use egui::{Color32, Context, Style, Visuals};
 
+use crate::tr;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ThemeKind {
     Aqua,
@@ -18,12 +20,12 @@ pub enum ThemeKind {
 
 impl ThemeKind {
     pub const ALL: [ThemeKind; 4] = [Self::Aqua, Self::Retro, Self::Dark, Self::Fluent];
-    /// 原版首选项「主题」下拉框里印的名字（`draw_window_preferences.gml:326-328`）。
+    /// 原版首选项「主题」下拉框里印的名字（`draw_window_preferences.gml:274-276`）。
     pub fn name(self) -> &'static str {
         match self {
-            Self::Aqua => "经典",
-            Self::Retro => "复古",
-            Self::Dark => "暗黑",
+            Self::Aqua => tr("Aqua", "经典"),
+            Self::Retro => tr("90s", "复古"),
+            Self::Dark => tr("Dark", "暗黑"),
             Self::Fluent => "Fluent",
         }
     }

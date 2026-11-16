@@ -17,6 +17,7 @@ use crate::commands::Command;
 use crate::state::{EditMode, Flag, WindowKind};
 use crate::state::EditorState;
 use crate::theme::ThemeKind;
+use crate::tr;
 
 /// 原版 `control_draw.gml:822-843` 的数字快捷键只覆盖前 16 个乐器：
 /// Ctrl+1..9 → 0..8，Ctrl+Shift+1..7 → 9..15。v6 新增的铜块一族（16..19）
@@ -282,44 +283,50 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
 }
 
 /// 快捷键说明（帮助窗口用）。只列本端口真正接线的按键，鼠标行为同理。
-pub const SHORTCUT_HELP: &[(&str, &str)] = &[
-    ("左键单击", "放置 / 覆盖音符"),
-    ("左键拖动", "框选（音符进入浮动选区）"),
-    ("左键拖选中音符", "移动浮动选区"),
-    ("右键单击音符", "删除音符"),
-    ("右键单击空格", "上下文菜单"),
-    ("右键拖动", "从选区减选"),
-    ("中键单击 / Ctrl+中键", "吸管（音高音色 / 全部属性）"),
-    ("中键拖动", "平移画布"),
-    ("Alt + 框选", "复制框选，不摘出原音符"),
-    ("Ctrl + 单击", "单点加选"),
-    ("Ctrl + 滚轮", "整窗口缩放（原版档位 0.5..4）"),
-    ("滚轮", "平移视口 / 悬停音符时改属性"),
-    ("Shift + 滚轮", "横向平移"),
-    ("Ctrl+N/O/S", "新建 / 打开 / 保存"),
-    ("Ctrl+C/X/V", "复制 / 剪切 / 粘贴"),
-    ("Ctrl+Z / Ctrl+Y", "撤销 / 重做"),
-    ("Ctrl+A / Ctrl+I", "全选 / 反选"),
-    ("Ctrl+E / D", "按当前模式 ±大步（音高 ±12，其余 ±10）"),
-    ("Ctrl+R / F", "按当前模式 ±1"),
-    ("Ctrl+T / Ctrl+G", "批量设置窗口 / 当前属性回默认（音高模式无，需选区才生效）"),
-    ("Ctrl+P", "首选项"),
-    ("Ctrl+1..9", "选前 9 种乐器（力度 / 声像 / 微调复位并试听）"),
-    ("Ctrl+Shift+1..7", "选第 10..16 种乐器"),
-    ("Ctrl+Shift+P", "片段编辑器"),
-    ("Ctrl+Shift+R / T / Y", "批量设置力度 / 声像 / 微调（需选区，无选区按键无效）"),
-    ("Ctrl+Shift+A / S", "颤音 / 立体声宏窗口（需选区，无选区按键无效）"),
-    ("Ctrl+0 / Ctrl+±", "重置 / 调整整窗口缩放"),
-    ("Delete", "删除选区（停止播放时）"),
-    ("Space / Enter", "播放暂停 / 停止并回到开头"),
-    ("按住 ← / →", "向左 / 向右滚动（同底部快退 / 快进按钮）"),
-    ("Home / End", "播放头到开头 / 结尾"),
-    ("F10 / F11", "全黑模式 / 全屏"),
-    ("Ctrl+Shift+F5", "炫彩模式开关（仅 Fluent 主题）"),
-    ("F1", "打开本页"),
-    ("窗口内 ← / →", "切换页签"),
-    ("Escape", "关闭首选项窗口 / 取消选择"),
-];
+/// 这是 port 自有的帮助页，EN 文案自拟。
+pub fn shortcut_help() -> Vec<(&'static str, &'static str)> {
+    [
+        ("Left click", "左键单击", "Place / overwrite notes", "放置 / 覆盖音符"),
+        ("Left drag", "左键拖动", "Box-select (notes enter the floating selection)", "框选（音符进入浮动选区）"),
+        ("Drag selected notes", "左键拖选中音符", "Move the floating selection", "移动浮动选区"),
+        ("Right-click note", "右键单击音符", "Delete note", "删除音符"),
+        ("Right-click empty space", "右键单击空格", "Context menu", "上下文菜单"),
+        ("Right drag", "右键拖动", "Subtract from the selection", "从选区减选"),
+        ("Middle click / Ctrl+middle", "中键单击 / Ctrl+中键", "Eyedropper (key & instrument / all properties)", "吸管（音高音色 / 全部属性）"),
+        ("Middle drag", "中键拖动", "Pan the canvas", "平移画布"),
+        ("Alt + box-select", "Alt + 框选", "Copy the boxed area without lifting the original notes", "复制框选，不摘出原音符"),
+        ("Ctrl + click", "Ctrl + 单击", "Add a single note to the selection", "单点加选"),
+        ("Ctrl + wheel", "Ctrl + 滚轮", "Whole-window zoom (original steps 0.5..4)", "整窗口缩放（原版档位 0.5..4）"),
+        ("Wheel", "滚轮", "Pan viewport / change hovered note's property", "平移视口 / 悬停音符时改属性"),
+        ("Shift + wheel", "Shift + 滚轮", "Pan horizontally", "横向平移"),
+        ("Ctrl+N/O/S", "Ctrl+N/O/S", "New / open / save", "新建 / 打开 / 保存"),
+        ("Ctrl+C/X/V", "Ctrl+C/X/V", "Copy / cut / paste", "复制 / 剪切 / 粘贴"),
+        ("Ctrl+Z / Ctrl+Y", "Ctrl+Z / Ctrl+Y", "Undo / redo", "撤销 / 重做"),
+        ("Ctrl+A / Ctrl+I", "Ctrl+A / Ctrl+I", "Select all / invert", "全选 / 反选"),
+        ("Ctrl+E / D", "Ctrl+E / D", "Current mode ±large step (pitch ±12, others ±10)", "按当前模式 ±大步（音高 ±12，其余 ±10）"),
+        ("Ctrl+R / F", "Ctrl+R / F", "Current mode ±1", "按当前模式 ±1"),
+        ("Ctrl+T / Ctrl+G", "Ctrl+T / Ctrl+G", "Batch-set window / reset current property (none in pitch mode; needs a selection)", "批量设置窗口 / 当前属性回默认（音高模式无，需选区才生效）"),
+        ("Ctrl+P", "Ctrl+P", "Preferences", "首选项"),
+        ("Ctrl+1..9", "Ctrl+1..9", "Pick instruments 1-9 (velocity / panning / pitch reset + preview)", "选前 9 种乐器（力度 / 声像 / 微调复位并试听）"),
+        ("Ctrl+Shift+1..7", "Ctrl+Shift+1..7", "Pick instruments 10-16", "选第 10..16 种乐器"),
+        ("Ctrl+Shift+P", "Ctrl+Shift+P", "Clip editor", "片段编辑器"),
+        ("Ctrl+Shift+R / T / Y", "Ctrl+Shift+R / T / Y", "Batch-set velocity / panning / pitch (needs a selection, no-op without one)", "批量设置力度 / 声像 / 微调（需选区，无选区按键无效）"),
+        ("Ctrl+Shift+A / S", "Ctrl+Shift+A / S", "Tremolo / stereo macro windows (needs a selection, no-op without one)", "颤音 / 立体声宏窗口（需选区，无选区按键无效）"),
+        ("Ctrl+0 / Ctrl+±", "Ctrl+0 / Ctrl+±", "Reset / adjust whole-window zoom", "重置 / 调整整窗口缩放"),
+        ("Delete", "Delete", "Delete selection (while playback is stopped)", "删除选区（停止播放时）"),
+        ("Space / Enter", "Space / Enter", "Play-pause / stop and rewind to start", "播放暂停 / 停止并回到开头"),
+        ("Hold ← / →", "按住 ← / →", "Scroll left / right (same as the rewind / fast-forward buttons)", "向左 / 向右滚动（同底部快退 / 快进按钮）"),
+        ("Home / End", "Home / End", "Playhead to start / end", "播放头到开头 / 结尾"),
+        ("F10 / F11", "F10 / F11", "Blackout mode / fullscreen", "全黑模式 / 全屏"),
+        ("Ctrl+Shift+F5", "Ctrl+Shift+F5", "Rainbow mode toggle (Fluent theme only)", "炫彩模式开关（仅 Fluent 主题）"),
+        ("F1", "F1", "Open this page", "打开本页"),
+        ("← / → in window", "窗口内 ← / →", "Switch tabs", "切换页签"),
+        ("Escape", "Escape", "Close the preferences window / cancel selection", "关闭首选项窗口 / 取消选择"),
+    ]
+    .into_iter()
+    .map(|(k_en, k_zh, d_en, d_zh)| (tr(k_en, k_zh), tr(d_en, d_zh)))
+    .collect()
+}
 
 
 #[cfg(test)]

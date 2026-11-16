@@ -413,14 +413,14 @@ impl MidiImportPrefs {
 
 fn be_u16(b: &[u8], p: usize) -> Result<u16, String> {
     if p + 2 > b.len() {
-        return Err("文件意外结束 (u16)".into());
+        return Err(crate::tr("Unexpected end of file (u16)", "文件意外结束 (u16)").into());
     }
     Ok(u16::from_be_bytes([b[p], b[p + 1]]))
 }
 
 fn be_u32(b: &[u8], p: usize) -> Result<u32, String> {
     if p + 4 > b.len() {
-        return Err("文件意外结束 (u32)".into());
+        return Err(crate::tr("Unexpected end of file (u32)", "文件意外结束 (u32)").into());
     }
     Ok(u32::from_be_bytes([b[p], b[p + 1], b[p + 2], b[p + 3]]))
 }
@@ -429,7 +429,7 @@ fn read_varlen(data: &[u8], pos: &mut usize) -> Result<u32, String> {
     let mut value: u32 = 0;
     for _ in 0..4 {
         if *pos >= data.len() {
-            return Err("文件意外结束 (varlen)".into());
+            return Err(crate::tr("Unexpected end of file (varlen)", "文件意外结束 (varlen)").into());
         }
         let b = data[*pos];
         *pos += 1;
@@ -438,7 +438,7 @@ fn read_varlen(data: &[u8], pos: &mut usize) -> Result<u32, String> {
             return Ok(value);
         }
     }
-    Err("非法的变长整数".into())
+    Err(crate::tr("Invalid variable-length integer", "非法的变长整数").into())
 }
 
 fn read_text(data: &[u8], pos: &mut usize, len: usize) -> String {
@@ -537,15 +537,15 @@ fn set_until(
 /// 解析 SMF 字节流，逐条对应 `open_midi.gml`。
 pub fn parse_midi(data: &[u8]) -> Result<MidiData, String> {
     if data.len() < 14 || &data[0..4] != b"MThd" {
-        return Err("不是有效的 MIDI 文件（缺少 MThd）".into());
+        return Err(crate::tr("Not a valid MIDI file (missing MThd)", "不是有效的 MIDI 文件（缺少 MThd）").into());
     }
     let header_len = be_u32(data, 4)? as usize;
     if be_u32(data, 4)? != 6 {
-        return Err("MIDI 头部长度必须是 00 00 00 06".into());
+        return Err(crate::tr("MIDI header length must be 00 00 00 06", "MIDI 头部长度必须是 00 00 00 06").into());
     }
     let format = be_u16(data, 8)?;
     if format > 2 {
-        return Err("不支持的 MIDI 格式".into());
+        return Err(crate::tr("Unsupported MIDI format", "不支持的 MIDI 格式").into());
     }
     let tracks = be_u16(data, 10)? as usize;
     let mut midi = MidiData {
@@ -564,7 +564,7 @@ pub fn parse_midi(data: &[u8]) -> Result<MidiData, String> {
             break;
         }
         if &data[pos..pos + 4] != b"MTrk" {
-            return Err("MIDI 轨道块必须以 MTrk 开头".into());
+            return Err(crate::tr("MIDI track chunk must start with MTrk", "MIDI 轨道块必须以 MTrk 开头").into());
         }
         let len = be_u32(data, pos + 4)? as usize;
         let mut p = pos + 8;
@@ -667,7 +667,7 @@ pub fn parse_midi(data: &[u8]) -> Result<MidiData, String> {
                     p += 1;
                 }
                 0xD => p = (p + 1).min(end),
-                _ => return Err("未知的 MIDI 事件".into()),
+                _ => return Err(crate::tr("Unknown MIDI event", "未知的 MIDI 事件").into()),
             }
         }
     }
@@ -681,7 +681,9 @@ pub fn parse_midi(data: &[u8]) -> Result<MidiData, String> {
 
 /// 原版 `open_midi()`：只读盘解析，不落歌。落歌是导入窗口点「导入」之后的事。
 pub fn parse_midi_path(path: &Path) -> Result<MidiData, String> {
-    let data = std::fs::read(path).map_err(|e| format!("读取 MIDI 失败: {e}"))?;
+    let data = std::fs::read(path).map_err(|e| {
+        crate::tr(&format!("Failed to read MIDI: {e}"), &format!("读取 MIDI 失败: {e}")).to_string()
+    })?;
     parse_midi(&data)
 }
 
@@ -693,7 +695,9 @@ pub fn import_midi_bytes(data: &[u8], opts: &MidiImportOptions) -> Result<Song, 
 }
 
 pub fn import_midi_path(path: &Path, opts: &MidiImportOptions) -> Result<Song, String> {
-    let data = std::fs::read(path).map_err(|e| format!("读取 MIDI 失败: {e}"))?;
+    let data = std::fs::read(path).map_err(|e| {
+        crate::tr(&format!("Failed to read MIDI: {e}"), &format!("读取 MIDI 失败: {e}")).to_string()
+    })?;
     import_midi_bytes(&data, opts)
 }
 
@@ -1071,7 +1075,9 @@ pub fn export_midi_bytes(song: &Song) -> Vec<u8> {
 }
 
 pub fn export_midi(song: &Song, path: &Path) -> Result<(), String> {
-    std::fs::write(path, export_midi_bytes(song)).map_err(|e| format!("写入 MIDI 失败: {e}"))?;
+    std::fs::write(path, export_midi_bytes(song)).map_err(|e| {
+        crate::tr(&format!("Failed to write MIDI: {e}"), &format!("写入 MIDI 失败: {e}")).to_string()
+    })?;
     Ok(())
 }
 

@@ -17,6 +17,33 @@ pub mod pattern;
 pub mod prefs;
 pub mod schematic;
 
+// ---- 多语言。原版 GML 的 `language` 是全局变量，深层脚本（导入导出、错误
+// 消息）照样读它；这里给 IO 层一份同款原子量，由 nbs-editor 的
+// `set_language()` 每帧同步下来，IO 侧文案统一写 tr(英文, 中文)。
+
+use std::sync::atomic::{AtomicU8, Ordering};
+
+static LANGUAGE: AtomicU8 = AtomicU8::new(0);
+
+pub fn lang() -> u8 {
+    LANGUAGE.load(Ordering::Relaxed)
+}
+
+pub fn set_language(l: u8) {
+    LANGUAGE.store(l, Ordering::Relaxed);
+}
+
+pub fn tr<'a>(en: &'a str, zh: &'a str) -> &'a str {
+    if lang() == 1 {
+        zh
+    } else {
+        en
+    }
+}
+
+#[cfg(test)]
+pub(crate) static TEST_LANG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub use image_export::{export_png, render_image, ImageOptions};
 pub use midi::{
     export_midi, export_midi_bytes, import_midi_bytes, import_midi_data, import_midi_path,

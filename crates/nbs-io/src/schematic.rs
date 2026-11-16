@@ -715,13 +715,25 @@ impl SchematicStats {
     pub fn compat_questions(&self) -> Vec<String> {
         let mut v = Vec::new();
         if self.block_outside > 0 {
-            v.push("一些方块在 Minecraft 的2八度范围外。你想无视这些方块导出 Schematic 吗？".into());
+            v.push(crate::tr(
+                "Some note blocks are outside of Minecraft's 2 octave limit. Do you want to export a Schematic anyway, ignoring the affected blocks?",
+                "一些方块在 Minecraft 的2八度范围外。你想无视这些方块导出 Schematic 吗？",
+            )
+            .into());
         }
         if self.block_custom > 0 {
-            v.push("一些方块带有自定义音色。继续导出吗？".into());
+            v.push(crate::tr(
+                "Some note blocks have a custom instrument assigned to them. Export anyway?",
+                "一些方块带有自定义音色。继续导出吗？",
+            )
+            .into());
         }
         if self.block_pitched > 0 {
-            v.push("一些方块带有音符盒不支持的微分音。继续导出吗？".into());
+            v.push(crate::tr(
+                "Some note blocks have fine pitch tuning, which isn't supported in note blocks. Export anyway?",
+                "一些方块带有音符盒不支持的微分音。继续导出吗？",
+            )
+            .into());
         }
         v
     }
@@ -730,7 +742,10 @@ impl SchematicStats {
     pub fn tempo_notice(&self) -> Option<&'static str> {
         let t = self.tempo;
         if !(t == 10.0 || t == 5.0 || t == 2.5) {
-            Some("歌曲的速度与 Minecraft 不兼容。所以，在游戏内的播放会和软件内的有差别。")
+            Some(crate::tr(
+                "The tempo of the song is not compatible with Minecraft. As a result, the playback speed of the song in-game will differ from the one in the program.",
+                "歌曲的速度与 Minecraft 不兼容。所以，在游戏内的播放会和软件内的有差别。",
+            ))
         } else {
             None
         }
@@ -2134,15 +2149,19 @@ pub struct SchematicInfo {
 
 fn gzip(data: &[u8]) -> Result<Vec<u8>, String> {
     let mut enc = GzEncoder::new(Vec::new(), Compression::default());
-    enc.write_all(data).map_err(|e| format!("gzip 压缩失败: {e}"))?;
-    enc.finish().map_err(|e| format!("gzip 结束失败: {e}"))
+    enc.write_all(data).map_err(|e| {
+        crate::tr(&format!("gzip compression failed: {e}"), &format!("gzip 压缩失败: {e}")).to_string()
+    })?;
+    enc.finish().map_err(|e| {
+        crate::tr(&format!("gzip finish failed: {e}"), &format!("gzip 结束失败: {e}")).to_string()
+    })
 }
 
 /// 原版菜单打开窗口前的闸门（`calculate_size()` 的返回值）：
 /// 可导出的音符数 = 音符总数 − 2 八度范围外的数量，为 0 时不弹窗口。
 pub fn open_guard(stats: &SchematicStats) -> Result<(), String> {
     if stats.song_blocks.saturating_sub(stats.block_outside) == 0 {
-        return Err("没有方块可以导出！".into());
+        return Err(crate::tr("There are no blocks to export!", "没有方块可以导出！").into());
     }
     Ok(())
 }
@@ -2159,13 +2178,21 @@ pub enum ExportCheck {
 
 impl ExportCheck {
     /// 原版 `message(正文, 标题)`，闸门通过时没有对话框。
+    /// 原版 CN 分支（`draw_window_schematic_export.gml:346-351`）的
+    /// 无方块标题是「导出结构」，不是「导出 Schematic」。
     pub fn dialog(self) -> Option<(&'static str, &'static str)> {
         match self {
             ExportCheck::Ok => None,
-            ExportCheck::NoBlocks => Some(("导出 Schematic", "没有方块可以导出！")),
+            ExportCheck::NoBlocks => Some((
+                crate::tr("Schematic export", "导出结构"),
+                crate::tr("There are no blocks to export!", "没有方块可以导出！"),
+            )),
             ExportCheck::TooBig => Some((
-                "错误",
-                "这个 Schematic 太大了。大小限制为 2000x2000x256。\n可以更改“每行中继器个数”来减小大小。",
+                crate::tr("Error", "错误"),
+                crate::tr(
+                    "The Schematic is too big. The maximum size is 2000x2000x256.\nTry changing the \"Repeaters per row\" value to decrease the size.",
+                    "这个结构太大了。大小限制为 2000x2000x256。\n可以更改“每行中继器个数”来减小大小。",
+                ),
             )),
         }
     }
@@ -2204,7 +2231,10 @@ pub fn export_schematic(
         built.classic_nbt()
     };
     let packed = gzip(&nbt)?;
-    std::fs::write(path, packed).map_err(|e| format!("写入 schematic 失败: {e}"))?;
+    std::fs::write(path, packed).map_err(|e| {
+        crate::tr(&format!("Failed to write schematic: {e}"), &format!("写入 schematic 失败: {e}"))
+            .to_string()
+    })?;
     Ok(built.info())
 }
 
@@ -2222,7 +2252,9 @@ pub fn build_nbt(song: &Song, opts: &SchematicOptions) -> Result<Vec<u8>, String
 /// 结构方块文件用 size + palette/blocks 联表。
 /// 结构文件里 `size[0]` 是原版硬编码的 32（不是真实长度），这里照文件读。
 pub fn inspect_schematic(path: &Path) -> Result<SchematicInfo, String> {
-    let packed = std::fs::read(path).map_err(|e| format!("打开文件失败: {e}"))?;
+    let packed = std::fs::read(path).map_err(|e| {
+        crate::tr(&format!("Failed to open file: {e}"), &format!("打开文件失败: {e}")).to_string()
+    })?;
     Ok(inspect_bytes(&packed)?)
 }
 
@@ -2233,7 +2265,9 @@ pub fn inspect_bytes(d: &[u8]) -> Result<SchematicInfo, String> {
     let mut raw = Vec::new();
     GzDecoder::new(d)
         .read_to_end(&mut raw)
-        .map_err(|e| format!("gzip 解压失败: {e}"))?;
+        .map_err(|e| {
+            crate::tr(&format!("gzip decompression failed: {e}"), &format!("gzip 解压失败: {e}")).to_string()
+        })?;
     let (_, root) = crate::nbt::parse_named(&raw)?;
     read_info(&root)
 }
@@ -2276,7 +2310,11 @@ fn read_info(root: &crate::nbt::Value) -> Result<SchematicInfo, String> {
         }
         return Ok(info);
     }
-    Err("文件里既没有 Width/Height/Length，也没有 size，不是 Schematic 或结构文件".into())
+    Err(crate::tr(
+        "Neither Width/Height/Length nor size found; not a Schematic or structure file",
+        "文件里既没有 Width/Height/Length，也没有 size，不是 Schematic 或结构文件",
+    )
+    .into())
 }
 
 /// 结构文件的 palette：原版写的是 compound 列表（`TAG_List("palette", n, 10)`）。
@@ -3173,6 +3211,21 @@ mod tests {
         s
     }
 
+    /// 钉住中文文案：串行化语言敏感断言，退出时恢复原语言。
+    struct CnGuard(std::sync::MutexGuard<'static, ()>, u8);
+    impl Drop for CnGuard {
+        fn drop(&mut self) {
+            crate::set_language(self.1);
+        }
+    }
+
+    fn pin_cn() -> CnGuard {
+        let lock = crate::TEST_LANG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = crate::lang();
+        crate::set_language(1);
+        CnGuard(lock, prev)
+    }
+
     fn keys_of(v: &Value) -> Vec<&str> {
         v.fields()
             .unwrap_or_default()
@@ -3352,6 +3405,7 @@ mod tests {
 
     #[test]
     fn compat_questions_use_the_original_texts() {
+        let _cn = pin_cn();
         let mut s = song_with(&[(0, 0, 0, 45)]);
         s.meta.tempo = 7.0;
         s.set(1, 0, Note::new(20, 45)); // 自定义音色
@@ -3821,6 +3875,7 @@ mod tests {
 
     #[test]
     fn open_guard_uses_totalblocks_minus_block_outside() {
+        let _cn = pin_cn();
         let empty = Song::new();
         let st = calculate_stats(&empty);
         assert_eq!(open_guard(&st).unwrap_err(), "没有方块可以导出！");
@@ -3837,6 +3892,7 @@ mod tests {
 
     #[test]
     fn too_big_is_refused_with_the_original_message() {
+        let _cn = pin_cn();
         let s = song_with(&[(0, 0, 0, 45)]);
         let mut o = SchematicOptions::default();
         o.layout = 0;
@@ -3851,6 +3907,7 @@ mod tests {
 
     #[test]
     fn export_guard_follows_include_locked() {
+        let _cn = pin_cn();
         let mut s = song_with(&[(0, 0, 0, 45)]);
         s.layers[0].lock = LockMode::Locked;
         let st = calculate_stats(&s);

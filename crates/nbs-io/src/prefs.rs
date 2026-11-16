@@ -374,13 +374,21 @@ impl Preferences {
 
     pub fn save(&self) -> Result<(), String> {
         let dir = Self::config_dir();
-        std::fs::create_dir_all(&dir).map_err(|e| format!("创建配置目录失败: {e}"))?;
-        let json = serde_json::to_string_pretty(self).map_err(|e| format!("序列化失败: {e}"))?;
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            crate::tr(&format!("Failed to create config directory: {e}"), &format!("创建配置目录失败: {e}"))
+                .to_string()
+        })?;
+        let json = serde_json::to_string_pretty(self).map_err(|e| {
+            crate::tr(&format!("Serialization failed: {e}"), &format!("序列化失败: {e}")).to_string()
+        })?;
         // 原子写：先写 .tmp 再 rename，避免中断损坏配置
         let tmp = dir.join("prefs.json.tmp");
-        std::fs::write(&tmp, json).map_err(|e| format!("写入配置失败: {e}"))?;
-        std::fs::rename(&tmp, Self::config_path())
-            .map_err(|e| format!("替换配置失败: {e}"))
+        std::fs::write(&tmp, json).map_err(|e| {
+            crate::tr(&format!("Failed to write config: {e}"), &format!("写入配置失败: {e}")).to_string()
+        })?;
+        std::fs::rename(&tmp, Self::config_path()).map_err(|e| {
+            crate::tr(&format!("Failed to replace config: {e}"), &format!("替换配置失败: {e}")).to_string()
+        })
     }
 
     /// 原版 `add_to_recent.gml`：去重挪到最前，时间戳记打开时刻，11 条封顶。
@@ -428,7 +436,14 @@ fn existing_dir(s: Option<&str>) -> Option<PathBuf> {
 /// 受首选项「打开旧版格式时提示」管。文案照抄源码的中文分支，只换扩展名。
 /// 比本程序新的文件不走这里：原版直接拒绝打开，我们的加载器已经报了错。
 pub fn old_file_warning(ext: &str) -> String {
-    format!("警告：你正在打开旧版的 {ext} 文件。保存此文件会使其与旧版 Note Block Studio 不兼容。")
+    if crate::lang() == 1 {
+        format!("警告：你正在打开旧版的 {ext} 文件。保存此文件会使其与旧版 Note Block Studio 不兼容。")
+    } else {
+        format!(
+            "Warning: You are opening an older {ext} file. Saving this file will make it \
+             incompatible with older Note Block Studio versions."
+        )
+    }
 }
 
 /// 原子保存歌曲：写临时文件再替换。
@@ -436,18 +451,28 @@ pub fn save_song_atomic(song: &Song, path: &Path) -> Result<(), String> {
     let version = song.meta.save_version;
     let bytes = nbs_core::nbs::save_bytes(song, version).map_err(|e| e.to_string())?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            crate::tr(&format!("Failed to create directory: {e}"), &format!("创建目录失败: {e}")).to_string()
+        })?;
     }
     let tmp = path.with_extension("nbs.tmp");
-    std::fs::write(&tmp, bytes).map_err(|e| format!("写入临时文件失败: {e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("替换歌曲文件失败: {e}"))?;
+    std::fs::write(&tmp, bytes).map_err(|e| {
+        crate::tr(&format!("Failed to write temporary file: {e}"), &format!("写入临时文件失败: {e}"))
+            .to_string()
+    })?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        crate::tr(&format!("Failed to replace song file: {e}"), &format!("替换歌曲文件失败: {e}")).to_string()
+    })?;
     Ok(())
 }
 
 /// 自动保存一份备份（不改动当前文件名/脏标记）。
 pub fn autosave(song: &Song, prefs: &Preferences) -> Result<PathBuf, String> {
     let dir = Preferences::backup_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建备份目录失败: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        crate::tr(&format!("Failed to create backup directory: {e}"), &format!("创建备份目录失败: {e}"))
+            .to_string()
+    })?;
     let base = song
         .filename
         .as_ref()
@@ -648,7 +673,7 @@ mod tests {
     /// 原版 `date_inc_month(now, 1)`：同日下月，月末截断，闰年单独看 2 月。
     #[test]
     fn inc_month_clamps_to_month_end() {
-        /// 当月第 d 天 01:00:00Z 的 unix 秒（2024 闰年 / 2025、2026 平年）。
+        // 当月第 d 天 01:00:00Z 的 unix 秒（2024 闰年 / 2025、2026 平年）。
         let day = |days_since_epoch: i64| days_since_epoch * 86400 + 3600;
         let (d2026_01_01, d2024_01_01) = (20454, 19723);
         // 1-15 → 2-15。
@@ -684,11 +709,26 @@ mod tests {
     /// 原版 `open_song_nbs.gml:13` / `pattern_import.gml:37` 的中文文案。
     #[test]
     fn old_file_warning_text_matches_source() {
+        let _cn = crate::TEST_LANG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        struct ResetLang(u8);
+        impl Drop for ResetLang {
+            fn drop(&mut self) {
+                crate::set_language(self.0);
+            }
+        }
+        let _lang = ResetLang(crate::lang());
+        crate::set_language(1);
         assert_eq!(
             old_file_warning("NBS"),
             "警告：你正在打开旧版的 NBS 文件。保存此文件会使其与旧版 Note Block Studio 不兼容。"
         );
         assert!(old_file_warning("NBP").contains("NBP"));
+        crate::set_language(0);
+        assert_eq!(
+            old_file_warning("NBS"),
+            "Warning: You are opening an older NBS file. Saving this file will make it \
+             incompatible with older Note Block Studio versions."
+        );
     }
 
     /// 原版 `control_draw.gml:47-50` + 首选项下拉：0..4 = 30 / 60 / 120 / 144 / 240。

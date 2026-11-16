@@ -71,13 +71,14 @@ pub fn export_pattern_bytes(sel: &Selection, song: &Song) -> Vec<u8> {
 }
 
 pub fn export_pattern(sel: &Selection, song: &Song, path: &Path) -> Result<(), String> {
-    std::fs::write(path, export_pattern_bytes(sel, song))
-        .map_err(|e| format!("写入片段失败: {e}"))
+    std::fs::write(path, export_pattern_bytes(sel, song)).map_err(|e| {
+        crate::tr(&format!("Failed to write pattern: {e}"), &format!("写入片段失败: {e}")).to_string()
+    })
 }
 
 pub fn parse_pattern(data: &[u8]) -> Result<Pattern, String> {
     if data.len() < 8 {
-        return Err("片段文件过短".into());
+        return Err(crate::tr("Pattern file too short", "片段文件过短").into());
     }
     let version = data[0];
     let enda = u16::from_le_bytes([data[1], data[2]]);
@@ -88,7 +89,7 @@ pub fn parse_pattern(data: &[u8]) -> Result<Pattern, String> {
         p += 1;
     }
     if p >= data.len() {
-        return Err("片段缺少字符串结束符".into());
+        return Err(crate::tr("Pattern missing string terminator", "片段缺少字符串结束符").into());
     }
     let code = String::from_utf8_lossy(&data[7..p]).into_owned();
     p += 1;
@@ -105,11 +106,18 @@ pub fn parse_pattern(data: &[u8]) -> Result<Pattern, String> {
 
 /// 原版 `pattern_import.gml:31-37`：读到的片段版本和本程序 `pat_version` 不一致时弹什么。
 /// 旧版警告受首选项「打开旧版格式时提示」管，新版那句不受（源码就没管）。
+/// 新版文案照抄 v3.12.0-rc.1（EN "This pattern was created in a newer version…"）。
 pub fn version_warning(version: u8, show_old_warning: bool) -> Option<String> {
     if version < PAT_VERSION && show_old_warning {
         Some(crate::prefs::old_file_warning("NBP"))
     } else if version > PAT_VERSION {
-        Some("警告：你正在打开在新版 Note Block Studio 里保存的文件。打开时可能会崩溃。".into())
+        Some(
+            crate::tr(
+                "This pattern was created in a newer version of Note Block Studio and cannot be opened safely.",
+                "此分段文件由新版 Note Block Studio 创建，无法安全打开。",
+            )
+            .into(),
+        )
     } else {
         None
     }
@@ -117,7 +125,9 @@ pub fn version_warning(version: u8, show_old_warning: bool) -> Option<String> {
 
 /// 给回整个 `Pattern`（含 `version`），原版 `pattern_import` 要用版本号决定弹不弹警告。
 pub fn import_pattern(path: &Path) -> Result<Pattern, String> {
-    let data = std::fs::read(path).map_err(|e| format!("读取片段失败: {e}"))?;
+    let data = std::fs::read(path).map_err(|e| {
+        crate::tr(&format!("Failed to read pattern: {e}"), &format!("读取片段失败: {e}")).to_string()
+    })?;
     parse_pattern(&data)
 }
 
@@ -241,6 +251,15 @@ mod tests {
     /// 比它新的那句「可能会崩溃」不受开关管。
     #[test]
     fn nbp_version_warnings() {
+        let _lock = crate::TEST_LANG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        struct ResetLang(u8);
+        impl Drop for ResetLang {
+            fn drop(&mut self) {
+                crate::set_language(self.0);
+            }
+        }
+        let _lang = ResetLang(crate::lang());
+        crate::set_language(1);
         assert_eq!(version_warning(1, true), None);
         assert_eq!(version_warning(1, false), None);
         assert_eq!(
@@ -250,7 +269,10 @@ mod tests {
         assert_eq!(version_warning(0, false), None, "旧版警告要看「打开旧版格式时提示」");
         assert_eq!(
             version_warning(2, false).as_deref(),
-            Some("警告：你正在打开在新版 Note Block Studio 里保存的文件。打开时可能会崩溃。")
+            Some(crate::tr(
+                "This pattern was created in a newer version of Note Block Studio and cannot be opened safely.",
+                "此分段文件由新版 Note Block Studio 创建，无法安全打开。",
+            ))
         );
     }
 }

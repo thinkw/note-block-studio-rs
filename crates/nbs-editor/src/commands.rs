@@ -13,6 +13,7 @@ use nbs_core::Macro;
 
 use crate::state::{DialogAction, EditMode, EditorState, FileDialog, Flag, Modal, ModalQueue, PrefsFolder, WindowKind};
 use crate::theme::{Theme, ThemeKind};
+use crate::tr;
 
 #[derive(Clone, Debug)]
 pub enum Command {
@@ -210,6 +211,9 @@ fn record_note(state: &mut EditorState, key: u8) {
 
 /// 供右键菜单/快捷键共用的入口。
 pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
+    // 界面语言跟着 prefs 走：生产路径 dispatch 都在帧内（app::show 已同步过），
+    // 但测试直接调 dispatch，不在这里同步的话消息文案会被并行用例的全局量串台。
+    crate::set_language(state.prefs.language);
     match cmd {
         Command::New => {
             if state.doc.song.dirty {
@@ -225,7 +229,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.viewport.start_layer = 0;
             state.set_marker(0.0);
             state.window = None;
-            state.set_message("已新建歌曲");
+            state.set_message(tr("New song created", "已新建歌曲"));
         }
         Command::Open => {
             // 原版 `load_song.gml:11-12`：起始目录只看 `songfolder`，默认名是空串。
@@ -264,15 +268,19 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 state.add_recent(path.clone());
                 state.window = None;
                 if old {
-                    state.modals = ModalQueue::message("警告", &text);
+                    state.modals = ModalQueue::message(tr("Warning", "警告"), &text);
                 }
-                state.set_message(format!(
-                    "已打开 {}（{} 个音符）",
-                    name,
-                    state.doc.song.total_blocks
-                ));
+                state.set_message(if crate::lang() == 1 {
+                    format!("已打开 {}（{} 个音符）", name, state.doc.song.total_blocks)
+                } else {
+                    format!("Loaded {} ({} notes)", name, state.doc.song.total_blocks)
+                });
             }
-            Err(e) => state.set_message(format!("打开失败: {e}")),
+            Err(e) => state.set_message(if crate::lang() == 1 {
+                format!("打开失败: {e}")
+            } else {
+                format!("Load failed: {e}")
+            }),
         },
         Command::SavePath(path) => {
             let version = state.doc.song.meta.save_version;
@@ -282,38 +290,48 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     state.doc.song.dirty = false;
                     state.add_recent(path);
                     state.window = None;
-                    state.set_message("歌曲已保存");
+                    state.set_message(tr("Song saved", "歌曲已保存"));
                 }
-                Err(e) => state.set_message(format!("保存失败: {e}")),
+                Err(e) => state.set_message(if crate::lang() == 1 {
+                    format!("保存失败: {e}")
+                } else {
+                    format!("Save failed: {e}")
+                }),
             }
         }
         Command::Undo => {
             if state.doc.undo() {
-                state.set_message(format!(
-                    "撤销: {}",
-                    state.doc.history.undo_label().unwrap_or("")
-                ));
+                state.set_message(if crate::lang() == 1 {
+                    format!("撤销: {}", state.doc.history.undo_label().unwrap_or(""))
+                } else {
+                    format!("Undo: {}", state.doc.history.undo_label().unwrap_or(""))
+                });
             }
         }
         Command::Redo => {
             if state.doc.redo() {
-                state.set_message(format!(
-                    "重做: {}",
-                    state.doc.history.redo_label().unwrap_or("")
-                ));
+                state.set_message(if crate::lang() == 1 {
+                    format!("重做: {}", state.doc.history.redo_label().unwrap_or(""))
+                } else {
+                    format!("Redo: {}", state.doc.history.redo_label().unwrap_or(""))
+                });
             }
         }
         Command::Copy => {
             state.doc.copy_selection();
             ctx.copy_text(state.doc.clipboard_text.clone());
-            state.set_message(format!("已复制 {} 个音符", state.doc.clipboard.len()));
+            state.set_message(if crate::lang() == 1 {
+                format!("已复制 {} 个音符", state.doc.clipboard.len())
+            } else {
+                format!("Copied {} notes", state.doc.clipboard.len())
+            });
         }
         Command::Cut => {
             // 原版 `action_cut` 就是 `selection_delete(false)`，淡出边框同样要出。
             spawn_selection_effects(state);
             state.doc.cut_selection();
             ctx.copy_text(state.doc.clipboard_text.clone());
-            state.set_message("已剪切");
+            state.set_message(tr("Cut", "已剪切"));
         }
         Command::Paste => {
             let (x, y) = state
@@ -321,7 +339,10 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 .map(|(t, l)| (t as i64, l as i64))
                 .unwrap_or((state.viewport.start_tick as i64, state.viewport.start_layer as i64));
             state.doc.paste(x, y);
-            state.set_message("已粘贴（浮动选区，拖拽可定位）");
+            state.set_message(tr(
+                "Pasted (floating selection; drag to place)",
+                "已粘贴（浮动选区，拖拽可定位）",
+            ));
         }
         Command::PasteText(text) => {
             let (x, y) = state
@@ -330,7 +351,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 .unwrap_or((state.viewport.start_tick as i64, state.viewport.start_layer as i64));
             if text.contains('|') {
                 state.doc.paste_text(&text, x, y);
-                state.set_message("已从剪贴板文本粘贴");
+                state.set_message(tr("Pasted from clipboard text", "已从剪贴板文本粘贴"));
             } else {
                 dispatch(state, Command::Paste, ctx);
             }
@@ -346,11 +367,15 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         Command::InvertSelection => state.doc.select_invert(),
         Command::SelectByInstrument { instrument, invert } => {
             state.doc.select_by_instrument(instrument, invert);
-            state.set_message(format!("已选中 {} 个音符", state.doc.selection.len()));
+            state.set_message(if crate::lang() == 1 {
+                format!("已选中 {} 个音符", state.doc.selection.len())
+            } else {
+                format!("Selected {} notes", state.doc.selection.len())
+            });
         }
         Command::PlaceNote { tick, layer } => {
             if state.doc.song.is_locked(layer) {
-                state.set_message("图层已锁定");
+                state.set_message(tr("Layer is locked", "图层已锁定"));
                 return;
             }
             // 原版 add/change_block_manual 的结尾：落的是事件乐器就不直接吃画笔值，
@@ -430,7 +455,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         }
         Command::RemoveNote { tick, layer } => {
             if state.doc.song.is_locked(layer) {
-                state.set_message("图层已锁定");
+                state.set_message(tr("Layer is locked", "图层已锁定"));
                 return;
             }
             // 原版 `remove_block_manual.gml:64-68`：右键单删也出淡出边框。
@@ -467,11 +492,16 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     state.current.panning = 100;
                     state.current.pitch = 0;
                 }
-                state.set_message(format!(
-                    "吸管: {} / {}",
+                let picked = format!(
+                    "{} / {}",
                     nbs_core::instruments::instrument_name(n.instrument),
                     nbs_core::model::key_name(n.key, true, state.flags.flats)
-                ));
+                );
+                state.set_message(if crate::lang() == 1 {
+                    format!("吸管: {picked}")
+                } else {
+                    format!("Picked: {picked}")
+                });
             }
         }
         Command::SelectRect { x0, y0, x1, y1, copy, additive, subtract } => {
@@ -479,7 +509,11 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 state.doc.selection_remove_rect(x0, y0, x1, y1);
             } else {
                 state.doc.select_rect(x0, y0, x1, y1, copy, additive, false);
-                state.set_message(format!("已选中 {} 个音符", state.doc.selection.len()));
+                state.set_message(if crate::lang() == 1 {
+                    format!("已选中 {} 个音符", state.doc.selection.len())
+                } else {
+                    format!("Selected {} notes", state.doc.selection.len())
+                });
             }
         }
         Command::AddLayer => state.doc.append_layer(),
@@ -709,10 +743,14 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             let mut items: std::collections::VecDeque<Modal> = std::collections::VecDeque::new();
             if !state.prefs.warning_schematic {
                 items.push_back(Modal {
-                    title: "警告",
-                    text: "导出的 schematic 目前之和 Minecraft: Java Edition 1.12 及以下兼容。\
+                    title: tr("Warning", "警告"),
+                    text: if crate::lang() == 1 {
+                        "导出的 schematic 目前之和 Minecraft: Java Edition 1.12 及以下兼容。\
 如想在 1.13 和以上使用，请使用结构方块格式导出。\n\n此警告将不再提示。"
-                        .into(),
+                            .into()
+                    } else {
+                        "The exported schematic is currently only compatible with Minecraft: Java Edition 1.12 and below. To import it in 1.13 and above, please use the export to structure block function.\n\nThis warning will never be shown again.".into()
+                    },
                     yes_no: false,
                 });
                 // 原版在这里 `save_settings()`，把“已看过”落盘。
@@ -720,14 +758,26 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 let _ = state.prefs.save();
             }
             for q in st.compat_questions() {
-                items.push_back(Modal { title: "Minecraft 兼容性", text: q, yes_no: true });
+                items.push_back(Modal {
+                    title: tr("Minecraft Compatibility", "Minecraft 兼容性"),
+                    text: q,
+                    yes_no: true,
+                });
             }
             if let Some(t) = st.tempo_notice() {
-                items.push_back(Modal { title: "速度", text: t.into(), yes_no: false });
+                items.push_back(Modal {
+                    title: tr("Tempo", "速度"),
+                    text: t.into(),
+                    yes_no: false,
+                });
             }
             let guard = nbs_io::schematic::open_guard(st);
             if let Err(e) = &guard {
-                items.push_back(Modal { title: "错误", text: e.clone(), yes_no: false });
+                items.push_back(Modal {
+                    title: tr("Error", "错误"),
+                    text: e.clone(),
+                    yes_no: false,
+                });
             }
             state.modals = ModalQueue {
                 items,
@@ -751,7 +801,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         }
         Command::ResetSchematicOptions => {
             state.schematic_options.reset();
-            state.set_message("导出 Schematic 的设定已还原");
+            state.set_message(tr("Schematic export defaults restored", "导出 Schematic 的设定已还原"));
         }
         Command::MidiImportRun => {
             // 原版 `import_midi()`：用窗口里那份已解析的 MIDI + 界面上的映射表落一首新歌，
@@ -774,7 +824,11 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.viewport.start_layer = 0;
             state.set_marker(0.0);
             state.save_prefs();
-            state.set_message(format!("MIDI 导入完成：{n} 个音符"));
+            state.set_message(if crate::lang() == 1 {
+                format!("MIDI 导入完成：{n} 个音符")
+            } else {
+                format!("MIDI import finished: {n} notes")
+            });
         }
         Command::MidiUseDefaults => {
             // 原版「使用默认值」答「是」之后：先 `midi_instruments()` 把 GM 映射恢复出厂，
@@ -782,7 +836,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             let Some(midi) = state.midi_data.clone() else { return };
             state.midi_gm = nbs_io::MidiGmTable::default();
             state.midi_options.use_defaults(&midi, &state.midi_gm);
-            state.set_message("MIDI 导入设定已还原");
+            state.set_message(crate::tr("MIDI import options restored", "MIDI 导入设定已还原"));
         }
         Command::MidiImportCancel => {
             // 原版「取消」：`songs[song].midifile = ""` 后关窗，解析好的那份 MIDI 一起丢掉，
@@ -808,7 +862,11 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.theme = Theme::new(kind);
             state.theme.set_accent_base(base);
             state.theme.apply(ctx);
-            state.set_message(format!("主题 => {}", kind.name()));
+            state.set_message(if crate::lang() == 1 {
+                format!("主题 => {}", kind.name())
+            } else {
+                format!("Theme => {}", kind.name())
+            });
         }
         Command::ToggleRainbow => {
             state.toggle_rainbow();
@@ -956,18 +1014,29 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         }
         Command::SelectOutside { lower, higher } => {
             state.doc.select_outside(lower, higher);
-            state.set_message(format!("已选中 {} 个音符", state.doc.selection.len()));
+            state.set_message(if crate::lang() == 1 {
+                format!("已选中 {} 个音符", state.doc.selection.len())
+            } else {
+                format!("Selected {} notes", state.doc.selection.len())
+            });
             state.window = None;
         }
         Command::SelectCustom => {
             state.doc.select_custom();
-            state.set_message(format!("已选中 {} 个音符", state.doc.selection.len()));
+            state.set_message(if crate::lang() == 1 {
+                format!("已选中 {} 个音符", state.doc.selection.len())
+            } else {
+                format!("Selected {} notes", state.doc.selection.len())
+            });
             state.window = None;
         }
         Command::TransposeToMinecraft => {
             state.modals = ModalQueue::question(
-                "转换音符",
-                "转换音符使其在 Minecraft 的 2 八度限制内吗？",
+                tr("Transpose notes", "转换音符"),
+                tr(
+                    "Transpose notes so that they fall within Minecraft's 2 octaves?",
+                    "转换音符使其在 Minecraft 的 2 八度限制内吗？",
+                ),
                 Command::TransposeToMinecraftApply,
             );
         }
@@ -1026,9 +1095,15 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             };
             // 原版 `if (!directory_exists_lib(…)) message("该路径不存在！", "错误") else open_url(…)`。
             if !dir.is_dir() {
-                state.modals = ModalQueue::message("错误", "该路径不存在！");
+                state.modals = ModalQueue::message(
+                    tr("Error", "错误"),
+                    tr("The indicated folder doesn't exist!", "该路径不存在！"),
+                );
             } else if open_in_file_manager(&dir).is_err() {
-                state.modals = ModalQueue::message("错误", "无法打开文件管理器。");
+                state.modals = ModalQueue::message(
+                    tr("Error", "错误"),
+                    tr("Could not open the file manager.", "无法打开文件管理器。"),
+                );
             }
         }
         Command::ResetPrefsFolder(folder) => match folder {
@@ -1100,9 +1175,9 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 }
             }
             if action == DialogAction::SaveExtraNotes {
-                // 原版 `datapack_getextranotes.gml:6`：默认名写死「更多音符盒」，
-                // 跟当前歌曲完全无关；扩展名交给对话框的 *.zip 过滤器补。
-                dialog.name = "更多音符盒".to_string();
+                // 原版 `datapack_getextranotes.gml:6`：默认名写死 "Extra Note Blocks"（中文
+                // 分支是「更多音符盒」），跟当前歌曲完全无关；扩展名交给对话框的 *.zip 过滤器补。
+                dialog.name = tr("Extra Note Blocks", "更多音符盒").to_string();
                 dialog.refresh();
             }
             state.request_file_dialog(dialog);
@@ -1136,8 +1211,12 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 }
                 DialogAction::ExportMidi => {
                     match nbs_io::midi::export_midi(&state.doc.song, &path) {
-                        Ok(()) => state.set_message("MIDI 已导出"),
-                        Err(e) => state.set_message(format!("导出 MIDI 失败: {e}")),
+                        Ok(()) => state.set_message(tr("MIDI exported", "MIDI 已导出")),
+                        Err(e) => state.set_message(if crate::lang() == 1 {
+                            format!("导出 MIDI 失败: {e}")
+                        } else {
+                            format!("MIDI export failed: {e}")
+                        }),
                     }
                     state.window = None;
                 }
@@ -1145,10 +1224,19 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     let opts = state.png_options.clone();
                     match nbs_io::image_export::export_png(&state.doc.song, &path, &opts) {
                         Ok((w, h)) => {
-                            state.export_status = Some(format!("PNG 谱面已导出：{w}×{h}"));
-                            state.set_message(format!("PNG 谱面已导出：{w}×{h}"));
+                            let msg = if crate::lang() == 1 {
+                                format!("PNG 谱面已导出：{w}×{h}")
+                            } else {
+                                format!("PNG chart exported: {w}×{h}")
+                            };
+                            state.export_status = Some(msg.clone());
+                            state.set_message(msg);
                         }
-                        Err(e) => state.set_message(format!("导出 PNG 失败: {e}")),
+                        Err(e) => state.set_message(if crate::lang() == 1 {
+                            format!("导出 PNG 失败: {e}")
+                        } else {
+                            format!("PNG export failed: {e}")
+                        }),
                     }
                     state.window = None;
                 }
@@ -1164,15 +1252,29 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                         // 原版：保存成功后 `message("Schematic 已保存！")`，
                         // 关掉提示再把导出窗口重新打开。
                         Ok(info) => {
-                            state.set_message(format!(
-                                "Schematic 已保存：{}×{}×{}，{} 个音符盒",
-                                info.length, info.width, info.height, info.note_blocks
-                            ));
-                            let mut q = ModalQueue::message("导出 Schematic", "Schematic 已保存！");
+                            state.set_message(if crate::lang() == 1 {
+                                format!(
+                                    "Schematic 已保存：{}×{}×{}，{} 个音符盒",
+                                    info.length, info.width, info.height, info.note_blocks
+                                )
+                            } else {
+                                format!(
+                                    "Schematic saved: {}×{}×{}, {} note blocks",
+                                    info.length, info.width, info.height, info.note_blocks
+                                )
+                            });
+                            let mut q = ModalQueue::message(
+                                crate::tr("Schematic Export", "导出 Schematic"),
+                                crate::tr("Schematic saved!", "Schematic 已保存！"),
+                            );
                             q.then = Some(Command::ShowWindow(WindowKind::SchematicExport));
                             state.modals = q;
                         }
-                        Err(e) => state.set_message(format!("导出 Schematic 失败: {e}")),
+                        Err(e) => state.set_message(if crate::lang() == 1 {
+                            format!("导出 Schematic 失败: {e}")
+                        } else {
+                            format!("Schematic export failed: {e}")
+                        }),
                     }
                 }
                 DialogAction::ExportDatapack => {
@@ -1188,8 +1290,16 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                         state.doc.selection.clone()
                     };
                     match nbs_io::pattern::export_pattern(&sel, &state.doc.song, &path) {
-                        Ok(()) => state.set_message(format!("片段已导出：{} 音符", sel.len())),
-                        Err(e) => state.set_message(format!("导出片段失败: {e}")),
+                        Ok(()) => state.set_message(if crate::lang() == 1 {
+                            format!("片段已导出：{} 音符", sel.len())
+                        } else {
+                            format!("Pattern exported: {} notes", sel.len())
+                        }),
+                        Err(e) => state.set_message(if crate::lang() == 1 {
+                            format!("导出片段失败: {e}")
+                        } else {
+                            format!("Pattern export failed: {e}")
+                        }),
                     }
                     state.window = None;
                 }
@@ -1210,7 +1320,11 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                         }
                         Err(e) => {
                             state.window = None;
-                            state.set_message(format!("导入 MIDI 失败: {e}"));
+                            state.set_message(if crate::lang() == 1 {
+                                format!("导入 MIDI 失败: {e}")
+                            } else {
+                                format!("MIDI import failed: {e}")
+                            });
                         }
                     }
                 }
@@ -1237,11 +1351,20 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                             state.doc.paste(x, y);
                             state.window = None;
                             if let Some(warn) = warn {
-                                state.modals = ModalQueue::message("警告", &warn);
+                                state.modals =
+                                    ModalQueue::message(crate::tr("Warning", "警告"), &warn);
                             }
-                            state.set_message(format!("片段已导入：{n} 个音符（浮动选区）"));
+                            state.set_message(if crate::lang() == 1 {
+                                format!("片段已导入：{n} 个音符（浮动选区）")
+                            } else {
+                                format!("Pattern imported: {n} notes (floating selection)")
+                            });
                         }
-                        Err(e) => state.set_message(format!("导入片段失败: {e}")),
+                        Err(e) => state.set_message(if crate::lang() == 1 {
+                            format!("导入片段失败: {e}")
+                        } else {
+                            format!("Pattern import failed: {e}")
+                        }),
                     }
                 }
                 DialogAction::SaveExtraNotes => {
@@ -1253,9 +1376,19 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                             if let Some(w) = state.dialog_return.take() {
                                 state.window = Some(w);
                             }
-                            state.modals = ModalQueue::message("保存", "资源包保存成功！");
+                            state.modals = ModalQueue::message(
+                                crate::tr("Saved", "保存"),
+                                crate::tr(
+                                    "Resource pack saved successfully!",
+                                    "资源包保存成功！",
+                                ),
+                            );
                         }
-                        Err(e) => state.set_message(format!("保存资源包失败: {e}")),
+                        Err(e) => state.set_message(if crate::lang() == 1 {
+                            format!("保存资源包失败: {e}")
+                        } else {
+                            format!("Resource pack save failed: {e}")
+                        }),
                     }
                 }
             }
@@ -1265,7 +1398,11 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             let label = m.name().to_string();
             state.doc.run_macro(&m);
             state.prepare_audio();
-            state.set_message(format!("已应用宏：{label}"));
+            state.set_message(if crate::lang() == 1 {
+                format!("已应用宏：{label}")
+            } else {
+                format!("Macro applied: {label}")
+            });
         }
         Command::SetMasterVolume(v) => {
             state.prefs.master_volume = v.clamp(0.0, 2.0);
@@ -1299,11 +1436,15 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             let dir = state.prefs.sounds_dir_path();
             state.audio.reload_bank(dir.as_deref());
             state.prepare_audio();
-            state.set_message(format!("采样已重新加载：{}", state.audio.sample_status()));
+            state.set_message(if crate::lang() == 1 {
+                format!("采样已重新加载：{}", state.audio.sample_status())
+            } else {
+                format!("Samples reloaded: {}", state.audio.sample_status())
+            });
         }
         Command::SavePreferences => {
             state.save_prefs();
-            state.set_message("偏好设置已保存");
+            state.set_message(crate::tr("Preferences saved", "偏好设置已保存"));
         }
         Command::RestoreAutosave(path) => dispatch(state, Command::OpenPath(path), ctx),
         // 原版 `open_url(url)`：欢迎窗 / 更新弹窗里所有跳浏览器的链接都走这里。
@@ -1350,7 +1491,11 @@ fn import_schematic(state: &mut EditorState, path: &std::path::Path) {
             state.viewport.start_tick = 0;
             state.viewport.start_layer = 0;
             state.set_marker(0.0);
-            state.set_message(format!("Schematic 导入完成：{n} 个音符，{inputs} 个输入"));
+            state.set_message(if crate::lang() == 1 {
+                format!("Schematic 导入完成：{n} 个音符，{inputs} 个输入")
+            } else {
+                format!("Schematic imported: {n} notes, {inputs} inputs")
+            });
             // 原版：`inputam > 1` 时提示几段曲子被首尾接了起来（标题不经 `condstr`，保持英文）。
             if inputs > 1 {
                 state.modals = ModalQueue::message(
@@ -1363,7 +1508,11 @@ fn import_schematic(state: &mut EditorState, path: &std::path::Path) {
         // 读不到的错误在原版全是 message()（模态）；只有文件打不开才是静默 return。
         Err(e) => match e.dialog() {
             Some((title, text)) => state.modals = ModalQueue::message(title, text),
-            None => state.set_message(format!("导入 Schematic 失败: {e}")),
+            None => state.set_message(if crate::lang() == 1 {
+                format!("导入 Schematic 失败: {e}")
+            } else {
+                format!("Schematic import failed: {e}")
+            }),
         },
     }
 }
@@ -1392,7 +1541,11 @@ fn audio_format(state: &EditorState) -> Option<nbs_io::audio_export::AudioFormat
 /// 转码成功或失败都会删掉。
 fn export_audio(state: &mut EditorState, path: &std::path::Path) {
     let Some(format) = audio_format(state) else {
-        state.set_message(format!("导出音频失败：未知格式 {:?}", state.prefs.export_format));
+        state.set_message(if crate::lang() == 1 {
+            format!("导出音频失败：未知格式 {:?}", state.prefs.export_format)
+        } else {
+            format!("Audio export failed: unknown format {:?}", state.prefs.export_format)
+        });
         return;
     };
     let opts = ExportOptions {
@@ -1412,7 +1565,11 @@ fn export_audio(state: &mut EditorState, path: &std::path::Path) {
         Ok(s) => s,
         Err(e) => {
             state.export_status = None;
-            state.set_message(format!("导出音频失败: {e}"));
+            state.set_message(if crate::lang() == 1 {
+                format!("导出音频失败: {e}")
+            } else {
+                format!("Audio export failed: {e}")
+            });
             return;
         }
     };
@@ -1430,20 +1587,41 @@ fn export_audio(state: &mut EditorState, path: &std::path::Path) {
     };
     match encoded {
         Ok(()) => {
-            state.export_status = Some(format!(
-                "{} 已导出：{} 音符 / {:.1}s / {} 线程 / 峰值 {:.2} → {}",
-                format.name(),
-                stats.notes,
-                stats.duration_seconds,
-                stats.threads,
-                stats.peak,
-                path.display()
-            ));
-            state.set_message(format!("音频已导出到 {}", path.display()));
+            let status = if crate::lang() == 1 {
+                format!(
+                    "{} 已导出：{} 音符 / {:.1}s / {} 线程 / 峰值 {:.2} → {}",
+                    format.name(),
+                    stats.notes,
+                    stats.duration_seconds,
+                    stats.threads,
+                    stats.peak,
+                    path.display()
+                )
+            } else {
+                format!(
+                    "{} exported: {} notes / {:.1}s / {} threads / peak {:.2} → {}",
+                    format.name(),
+                    stats.notes,
+                    stats.duration_seconds,
+                    stats.threads,
+                    stats.peak,
+                    path.display()
+                )
+            };
+            state.export_status = Some(status);
+            state.set_message(if crate::lang() == 1 {
+                format!("音频已导出到 {}", path.display())
+            } else {
+                format!("Audio exported to {}", path.display())
+            });
         }
         Err(e) => {
             state.export_status = None;
-            state.set_message(format!("导出音频失败: {e}"));
+            state.set_message(if crate::lang() == 1 {
+                format!("导出音频失败: {e}")
+            } else {
+                format!("Audio export failed: {e}")
+            });
         }
     }
 }
@@ -1468,21 +1646,43 @@ fn export_datapack(state: &mut EditorState, path: &std::path::Path) {
     match nbs_io::datapack::export(&state.doc.song, &opts, &dest) {
         Ok(info) => {
             let fp = &info.functionpath;
-            state.export_status = Some(format!(
-                "数据包已保存到 {}（{} 个文件，{}）\n\n如想在游戏内播放，使用命令：\n/function {}play\n/function {}pause\n/function {}stop\n\n如果你想从你的世界中卸载它，使用命令：\n/function {}uninstall\n\n然后从“datapacks”文件夹取出就行了。",
-                dest.display(),
-                info.files,
-                if info.zip { "ZIP" } else { "目录" },
-                fp,
-                fp,
-                fp,
-                fp
-            ));
-            state.set_message(format!("数据包已导出：{} 个文件", info.files));
+            let status = if crate::lang() == 1 {
+                format!(
+                    "数据包已保存到 {}（{} 个文件，{}）\n\n如想在游戏内播放，使用命令：\n/function {}play\n/function {}pause\n/function {}stop\n\n如果你想从你的世界中卸载它，使用命令：\n/function {}uninstall\n\n然后从“datapacks”文件夹取出就行了。",
+                    dest.display(),
+                    info.files,
+                    if info.zip { "ZIP" } else { "目录" },
+                    fp,
+                    fp,
+                    fp,
+                    fp
+                )
+            } else {
+                format!(
+                    "Data pack saved to {} ({} files, {})\n\nTo play the song in-game, use:\n/function {}play\n/function {}pause\n/function {}stop\n\nIf you wish to uninstall it from your world, use:\n/function {}uninstall\n\nand then remove it from the 'datapacks' folder.",
+                    dest.display(),
+                    info.files,
+                    if info.zip { "ZIP" } else { "Folder" },
+                    fp,
+                    fp,
+                    fp,
+                    fp
+                )
+            };
+            state.export_status = Some(status);
+            state.set_message(if crate::lang() == 1 {
+                format!("数据包已导出：{} 个文件", info.files)
+            } else {
+                format!("Data pack exported: {} files", info.files)
+            });
         }
         Err(e) => {
             state.export_status = None;
-            state.set_message(format!("导出数据包失败: {e}"));
+            state.set_message(if crate::lang() == 1 {
+                format!("导出数据包失败: {e}")
+            } else {
+                format!("Data pack export failed: {e}")
+            });
         }
     }
 }
@@ -1529,6 +1729,8 @@ mod tests {
         let mut s = EditorState::new();
         // 原版第一次走到这里会写 settings.ini；测试预先当作「已经提示过」，不碰用户配置。
         s.prefs.warning_schematic = true;
+        // dispatch 按各自 state 的 prefs 同步全局语言；钉成中文让断言不跟本机/并行用例漂。
+        s.prefs.language = 1;
         s.doc.replace_song(song);
         // 开机流程会开欢迎窗，命令测试的靶子是「欢迎窗已经关掉」的裸编辑器。
         s.window = None;
@@ -1547,6 +1749,8 @@ mod tests {
     /// 全部答完才轮到窗口本身。
     #[test]
     fn open_schematic_export_queues_the_original_dialogs_in_order() {
+        let _lock = crate::frame_lock();
+        let _cn = crate::LangGuard::set(1);
         let ctx = Context::default();
         let mut state = state_with(four_case_song(3.0));
         dispatch(&mut state, Command::OpenSchematicExport, &ctx);
@@ -1770,6 +1974,8 @@ mod tests {
     /// 没有方块可导出时，原版只弹一个错误并到此为止。
     #[test]
     fn empty_song_shows_the_no_blocks_error_instead_of_the_window() {
+        let _lock = crate::frame_lock();
+        let _cn = crate::LangGuard::set(1);
         let ctx = Context::default();
         let mut state = state_with(Song::new());
         dispatch(&mut state, Command::OpenSchematicExport, &ctx);
@@ -1784,6 +1990,8 @@ mod tests {
     /// 「使用默认值」先问「你确定吗？」，答是才恢复，且不动原版默认值表里没有的三项。
     #[test]
     fn reset_defaults_asks_first_and_keeps_the_unlisted_options() {
+        let _lock = crate::frame_lock();
+        let _cn = crate::LangGuard::set(1);
         let ctx = Context::default();
         let mut state = state_with(four_case_song(10.0));
         dispatch(&mut state, Command::OpenSchematicExport, &ctx);
@@ -1816,6 +2024,8 @@ mod tests {
     /// 「导出」按钮的两道闸门各有一个不同标题的 message，通过后才轮到保存对话框。
     #[test]
     fn export_button_gates_run_before_the_save_dialog() {
+        let _lock = crate::frame_lock();
+        let _cn = crate::LangGuard::set(1);
         let ctx = Context::default();
         let mut state = state_with(four_case_song(10.0));
         // 把 2 八度内的音符全锁在静音层里：totalblocks[不静音] = 0，但 open 闸门仍过。
@@ -1830,8 +2040,8 @@ mod tests {
         dispatch(&mut state, Command::ExportSchematicChecked, &ctx);
         assert_eq!(
             titles(&state),
-            vec!["导出 Schematic"],
-            "原版这里的标题是「导出 Schematic」，不是「错误」"
+            vec!["导出结构"],
+            "原版这条闸门的标题是「导出结构」（EN \"Schematic export\"），不是「错误」"
         );
         assert_eq!(texts(&state), vec!["没有方块可以导出！"]);
         assert_eq!(
@@ -1854,6 +2064,8 @@ mod tests {
     /// 模态框置顶时背景界面完全失效，等价于原版 `message()` 冻结游戏循环。
     #[test]
     fn background_commands_are_dropped_while_a_modal_is_up() {
+        let _lock = crate::frame_lock();
+        let _cn = crate::LangGuard::set(1);
         let ctx = Context::default();
         let mut state = state_with(four_case_song(10.0));
         state.modals = ModalQueue::question("确定", "你确定吗？", Command::ResetSchematicOptions);
@@ -1937,6 +2149,8 @@ mod tests {
     /// 「打开」的成功分支会真的开一个资源管理器窗口，测试里只验它「目录不存在要报错」这一支。
     #[test]
     fn prefs_folder_buttons_are_wired() {
+        let _lock = crate::frame_lock();
+        let _cn = crate::LangGuard::set(1);
         let ctx = Context::default();
         let tmp = std::env::temp_dir();
         let tmp_str = tmp.to_string_lossy().into_owned();
@@ -1991,6 +2205,8 @@ mod tests {
     /// 而且完全受首选项「打开旧版格式时提示」管。
     #[test]
     fn opening_an_older_nbs_warns_only_when_told_to() {
+        let _lock = crate::frame_lock();
+        let _cn = crate::LangGuard::set(1);
         let ctx = Context::default();
         let dir = std::env::temp_dir();
         let old = dir.join("nbs_rust_old_version.nbs");

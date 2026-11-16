@@ -162,7 +162,9 @@ pub fn render_image(song: &Song, opts: &ImageOptions) -> RgbImage {
 pub fn export_png(song: &Song, path: &Path, opts: &ImageOptions) -> Result<(u32, u32), String> {
     let img = render_image(song, opts);
     let dims = (img.width(), img.height());
-    img.save(path).map_err(|e| format!("写入 PNG 失败: {e}"))?;
+    img.save(path).map_err(|e| {
+        crate::tr(&format!("Failed to write PNG: {e}"), &format!("写入 PNG 失败: {e}")).to_string()
+    })?;
     Ok(dims)
 }
 

@@ -120,10 +120,29 @@ pub enum EncodeError {
 impl std::fmt::Display for EncodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::EncoderNotFound => write!(f, "未找到 ffmpeg，无法导出该格式（原版随程序附带 ffmpeg.exe）"),
-            Self::UnsupportedRate(r) => write!(f, "不支持的采样率 {r}"),
-            Self::Failed(m) => write!(f, "ffmpeg 转码失败: {m}"),
-            Self::Io(e) => write!(f, "IO 错误: {e}"),
+            Self::EncoderNotFound => write!(
+                f,
+                "{}",
+                crate::tr(
+                    "ffmpeg not found; this format cannot be exported (the original bundles ffmpeg.exe)",
+                    "未找到 ffmpeg，无法导出该格式（原版随程序附带 ffmpeg.exe）"
+                )
+            ),
+            Self::UnsupportedRate(r) => write!(
+                f,
+                "{}",
+                crate::tr(&format!("Unsupported sample rate {r}"), &format!("不支持的采样率 {r}"))
+            ),
+            Self::Failed(m) => write!(
+                f,
+                "{}",
+                crate::tr(&format!("ffmpeg transcode failed: {m}"), &format!("ffmpeg 转码失败: {m}"))
+            ),
+            Self::Io(e) => write!(
+                f,
+                "{}",
+                crate::tr(&format!("IO error: {e}"), &format!("IO 错误: {e}"))
+            ),
         }
     }
 }
@@ -144,7 +163,13 @@ pub fn encode_from_wav(wav: &Path, out: &Path, opts: &EncodeOptions) -> Result<(
         return Err(EncodeError::UnsupportedRate(opts.sample_rate));
     }
     if opts.channels != 1 && opts.channels != 2 {
-        return Err(EncodeError::Failed(format!("声道数只支持 1 或 2，收到 {}", opts.channels)));
+        return Err(EncodeError::Failed(
+            crate::tr(
+                &format!("Only 1 or 2 channels are supported, got {}", opts.channels),
+                &format!("声道数只支持 1 或 2，收到 {}", opts.channels),
+            )
+            .to_string(),
+        ));
     }
     if !matches!(opts.format, AudioFormat::Mp3 | AudioFormat::Aiff | AudioFormat::Flac) {
         // WAV 不需要转码；调用方不该走到这里。
@@ -173,18 +198,20 @@ pub fn encode_from_wav(wav: &Path, out: &Path, opts: &EncodeOptions) -> Result<(
     cmd.arg(out);
     let status = cmd.status().map_err(EncodeError::Io)?;
     if !status.success() {
-        return Err(EncodeError::Failed(format!(
-            "{} 退出码 {:?}",
-            ffmpeg.display(),
-            status.code()
-        )));
+        return Err(EncodeError::Failed(crate::tr(
+            &format!("{} exited with {:?}", ffmpeg.display(), status.code()),
+            &format!("{} 退出码 {:?}", ffmpeg.display(), status.code()),
+        )
+        .to_string()));
     }
     // ffmpeg 4.4 里 vorbis 这类实验编码器会「返回 0 但写出空文件」，
     // 所以必须真的检查产物大小，而不是只看退出码。
     let size = std::fs::metadata(out).map_err(EncodeError::Io)?.len();
     if size == 0 {
         let _ = std::fs::remove_file(out);
-        return Err(EncodeError::Failed("产物为空".into()));
+        return Err(EncodeError::Failed(
+            crate::tr("Output is empty", "产物为空").to_string(),
+        ));
     }
     Ok(())
 }

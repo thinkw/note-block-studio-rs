@@ -17,6 +17,7 @@ use nbs_io::schematic::SchematicOptions;
 use crate::commands::Command;
 use crate::interaction::Interaction;
 use crate::theme::{Theme, ThemeKind};
+use crate::tr;
 use crate::viewport::Viewport;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -32,10 +33,10 @@ impl EditMode {
     pub const ALL: [EditMode; 4] = [Self::Key, Self::Velocity, Self::Panning, Self::Pitch];
     pub fn name(self) -> &'static str {
         match self {
-            Self::Key => "音高",
-            Self::Velocity => "力度",
-            Self::Panning => "声像",
-            Self::Pitch => "微调",
+            Self::Key => tr("Key", "音高"),
+            Self::Velocity => tr("Velocity", "力度"),
+            Self::Panning => tr("Panning", "声像"),
+            Self::Pitch => tr("Pitch", "微调"),
         }
     }
 }
@@ -63,30 +64,6 @@ pub enum Flag {
 }
 
 impl Flag {
-    /// 原版首选项里印的中文标签（`draw_window_preferences.gml` 外观页）。
-    /// `ShowGridLines` 是原版没有的我们自己加的开关，所以名字留着。
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::ShowLayers => "显示每层操作区",
-            Self::ShowPiano => "显示琴键",
-            Self::UseColors => "彩色音符盒",
-            Self::UseShapes => "音符盒形状",
-            Self::UseIcons => "显示音色图标",
-            Self::ShowNumbers => "显示音符序号",
-            Self::ShowOctaves => "显示八度序号",
-            Self::ShowKeyNames => "显示键名",
-            Self::ShowKeyNumbers => "显示音符序号",
-            Self::ShowKeyboard => "显示键盘键位",
-            Self::ShowOutOfRange => "标记超范围琴键",
-            Self::ShowIncompatible => "标记不兼容的音符盒",
-            Self::Fade => "音符盒不透明",
-            Self::ShowGridLines => "显示网格线",
-            Self::Flats => "使用降记号",
-            Self::Blackout => "全黑模式",
-            Self::RemoveEffect => "显示删除效果",
-            Self::ShowNoteChart => "在琴键上时显示五线谱对应音符",
-        }
-    }
     pub fn get(self, f: &UiFlags) -> bool {
         match self {
             Self::ShowLayers => f.show_layers,
@@ -231,39 +208,45 @@ pub enum WindowKind {
 impl WindowKind {
     pub fn title(&self) -> &'static str {
         match self {
-            Self::SongInfo => "歌曲信息",
-            Self::Properties => "歌曲属性",
-            Self::Statistics => "歌曲统计",
-            Self::Preferences => "首选项",
-            Self::Instruments => "音色设置",
-            Self::About => "关于 nbs-rust",
-            Self::SetTempo => "设置速度",
-            Self::SetVelocity => "批量设置力度",
-            Self::SetPanning => "批量设置声像",
-            Self::SetPitch => "批量设置微调",
-            Self::Transpose => "移调",
-            Self::Tremolo => "颤音 / Tremolo",
-            Self::Stereo => "立体声 / Stereo",
-            Self::ClipEditor => "片段编辑器",
-            Self::Shortcuts => "快捷键一览",
-            Self::FileOpen => "打开歌曲",
-            Self::FileSave => "保存歌曲",
-            Self::LayerRename(_) => "重命名图层",
-            Self::ConfirmNew => "新建歌曲",
-            Self::AudioExport => "音频导出",
-            Self::AudioSettings => "音频设置",
-            Self::DatapackExport => "导出为数据包",
+            Self::SongInfo => tr("Song Info", "歌曲信息"),
+            Self::Properties => tr("Song Properties", "歌曲属性"),
+            // 原版 `draw_window_stats`：EN "Song Stats" / CN "歌曲数据"。
+            Self::Statistics => tr("Song Stats", "歌曲数据"),
+            Self::Preferences => tr("Preferences", "首选项"),
+            Self::Instruments => tr("Instruments", "音色设置"),
+            Self::About => tr("About nbs-rust", "关于 nbs-rust"),
+            // 以下批量/数值窗口是 port 自绘（原版对应入口是别的交互形式），
+            // 标题没有原版文字可抄，EN 自拟。
+            Self::SetTempo => tr("Set Tempo", "设置速度"),
+            Self::SetVelocity => tr("Set Velocity", "批量设置力度"),
+            Self::SetPanning => tr("Set Panning", "批量设置声像"),
+            Self::SetPitch => tr("Set Pitch", "批量设置微调"),
+            Self::Transpose => tr("Transpose", "移调"),
+            Self::Tremolo => tr("Tremolo", "颤音 / Tremolo"),
+            Self::Stereo => tr("Stereo", "立体声 / Stereo"),
+            Self::ClipEditor => tr("Clip Editor", "片段编辑器"),
+            Self::Shortcuts => tr("Shortcuts", "快捷键一览"),
+            Self::FileOpen => tr("Open Song", "打开歌曲"),
+            Self::FileSave => tr("Save Song", "保存歌曲"),
+            Self::LayerRename(_) => tr("Rename layer", "重命名图层"),
+            Self::ConfirmNew => tr("New song", "新建歌曲"),
+            Self::AudioExport => tr("Audio Export", "音频导出"),
+            Self::AudioSettings => tr("Audio Settings", "音频设置"),
+            // 原版 `draw_window_datapack_export.gml:13`：CN "导出数据包"。
+            Self::DatapackExport => tr("Data Pack Export", "导出数据包"),
             // 原版 `draw_window_midi_import.gml` 中文分支画的是 `"导入MIDI"`。
-            Self::MidiImport => "导入MIDI",
-            Self::SchematicExport => "导出 Minecraft 原理图",
-            Self::PngExport => "导出 PNG 谱面",
-            Self::MacroEditor => "宏",
-            Self::Autosaves => "自动保存 / 备份",
-            // 原版 `draw_window_minecraft.gml:24` 的标题文字。
-            Self::MinecraftCompat => "Minecraft 兼容性",
-            // 原版两个编辑窗在标题带写的文字（语言 1 = 中文分支）。
-            Self::EditTempoChanger(..) => "设置速度",
-            Self::EditSoundStopper(..) => "设置抑制范围",
+            Self::MidiImport => tr("MIDI Import", "导入MIDI"),
+            // 原版 `draw_window_schematic_export.gml:14`：CN "导出结构"。
+            Self::SchematicExport => tr("Schematic Export", "导出结构"),
+            Self::PngExport => tr("Export PNG chart", "导出 PNG 谱面"),
+            Self::MacroEditor => tr("Macros", "宏"),
+            Self::Autosaves => tr("Autosaves / Backups", "自动保存 / 备份"),
+            // 原版 `draw_window_minecraft.gml:21` 的标题文字。
+            Self::MinecraftCompat => tr("Minecraft Compatibility", "Minecraft 兼容性"),
+            // 原版两个编辑窗没有画标题文字（w_settempo 只有输入框），
+            // 这里是 port 标题栏的用词，与窗口内部报错标题保持一致。
+            Self::EditTempoChanger(..) => tr("Set Tempo", "设置速度"),
+            Self::EditSoundStopper(..) => tr("Set Stopping Range", "设置抑制范围"),
             // 原版欢迎窗没有标题文字（draw_window 只画边框），这里仅供窗口 id 用。
             Self::Greeting => "Note Block Studio",
         }
@@ -367,24 +350,30 @@ impl PrefsFolder {
     /// 原版 `draw_text_dynamic` 那行的前缀（冒号和空格由源码写在一起）。
     pub fn label(self) -> &'static str {
         match self {
-            Self::Song => "歌曲路径: ",
-            Self::Pattern => "片段路径: ",
+            Self::Song => tr("Song folder: ", "歌曲路径: "),
+            Self::Pattern => tr("Pattern folder: ", "片段路径: "),
         }
     }
 
     /// 原版「修改」按钮里先弹的那句 `message(…, "")`。
     pub fn tip(self) -> &'static str {
         match self {
-            Self::Song => "选择保存和打开的文件夹",
-            Self::Pattern => "选择导出和导入片段的文件夹",
+            Self::Song => tr(
+                "Select the directory where saving/loading should be opened in.",
+                "选择保存和打开的文件夹",
+            ),
+            Self::Pattern => tr(
+                "Select the directory where patterns can be imported/exported to.",
+                "选择导出和导入片段的文件夹",
+            ),
         }
     }
 
     /// 原版系统对话框的标题（`draw_window_preferences.gml:278/294` 的第 4 个参数）。
     pub fn title(self) -> &'static str {
         match self {
-            Self::Song => "歌曲文件夹",
-            Self::Pattern => "片段文件夹",
+            Self::Song => tr("Song folder", "歌曲文件夹"),
+            Self::Pattern => tr("Pattern folder", "片段文件夹"),
         }
     }
 
@@ -394,8 +383,8 @@ impl PrefsFolder {
     /// 但它确实显示在文件名栏里，照抄。
     pub fn placeholder(self) -> &'static str {
         match self {
-            Self::Song => "选择歌曲文件夹",
-            Self::Pattern => "选择片段文件夹",
+            Self::Song => tr("Select song folder", "选择歌曲文件夹"),
+            Self::Pattern => tr("Select patterns folder", "选择片段文件夹"),
         }
     }
 }
@@ -560,59 +549,81 @@ impl FileDialog {
     pub fn picker_spec(&self) -> PickerSpec {
         let ext = self.ext;
         let (title, filters) = match self.action {
-            // 原版 `load_song.gml:12` 的过滤器还有 `Zipped Files (*.zip)` 和
+            // 原版 `load_song.gml:20` 的过滤器还有 `Zipped Files (*.zip)` 和
             // `MIDI Sequences (*.mid)`；这两条路我们还没接通（带自定义音色的 .nbs 压缩包
             // 读不了，.mid 要先开 MIDI 导入窗口），列出来只会让人选了以后报错，所以先不列。
-            DialogAction::OpenSong => ("打开歌曲", vec![
+            DialogAction::OpenSong => (tr("Load song", "打开歌曲"), vec![
                 filter("Note Block Songs (*.nbs)", "*.nbs"),
                 filter("Minecraft Schematics (*.schematic)", "*.schematic"),
             ]),
-            DialogAction::SaveSong => ("保存歌曲", vec![
+            // 原版 `save_song.gml:27`。
+            DialogAction::SaveSong => (tr("Save song", "保存歌曲"), vec![
                 filter("Note Block Songs (*.nbs)", "*.nbs"),
             ]),
             // 原版 `audio_export.gml:24`：`audio_exp_format + " files (*" + output_ext + ")"`。
-            DialogAction::ExportAudio => ("导出音频文件", vec![
+            DialogAction::ExportAudio => (tr("Export audio track", "导出音频文件"), vec![
                 filter(&format!("{} files (*.{ext})", ext.to_uppercase()), &format!("*.{ext}")),
             ]),
             DialogAction::ExportDatapack => {
                 if ext.is_empty() {
-                    // 原版 `datapack_export.gml:12` 的过滤器串只有一个词、没有 `|通配符`，
-                    // 传进系统组件就是一个空白模式；导出的目录名来自文件名栏，不是选中的目录。
-                    ("导出数据包", vec![filter("数据包目录", "")])
+                    // 原版 `datapack_export.gml:29-32`：目录选择框标题；过滤器串只有一个词、
+                    // 没有 `|通配符`，传进系统组件就是一个空白模式；导出的目录名来自文件名栏，
+                    // 不是选中的目录。
+                    (
+                        tr("Choose where to create the data pack folder", "选择数据包文件夹的保存位置"),
+                        vec![filter(tr("Data pack folder", "数据包目录"), "")],
+                    )
                 } else {
-                    ("导出数据包", vec![filter("ZIP archive (*.zip)", "*.zip")])
+                    // 原版 `datapack_export.gml:21/24`。
+                    (
+                        tr("Data Pack Export", "导出数据包"),
+                        vec![filter("ZIP archive (*.zip)", "*.zip")],
+                    )
                 }
             }
-            DialogAction::ExportMidi => ("导出 MIDI", vec![
+            // 原版 `open_midi.gml:14/15`。
+            DialogAction::ExportMidi => (tr("Export MIDI", "导出 MIDI"), vec![
                 filter("MIDI Sequences (*.mid)", "*.mid"),
             ]),
-            DialogAction::ExportPng => ("导出图片", vec![
+            DialogAction::ExportPng => (tr("Export image", "导出图片"), vec![
                 filter("PNG image (*.png)", "*.png"),
             ]),
             DialogAction::ExportSchematic => {
-                // 原版 `schematic_export.gml:5-6`：结构方块存的是 .nbt，过滤器名也不同。
+                // 原版 `schematic_export.gml:7/8`：结构方块存的是 .nbt，过滤器名也不同；
+                // 标题原文两种语言都是 "Export Schematic"（原版没翻译这句）。
                 if ext == "nbt" {
-                    ("导出 Schematic", vec![filter("Minecraft Structures (*.nbt)", "*.nbt")])
+                    (
+                        "Export Schematic",
+                        vec![filter("Minecraft Structures (*.nbt)", "*.nbt")],
+                    )
                 } else {
-                    ("导出 Schematic", vec![filter("Minecraft Schematics (*.schematic)", "*.schematic")])
+                    (
+                        "Export Schematic",
+                        vec![filter("Minecraft Schematics (*.schematic)", "*.schematic")],
+                    )
                 }
             }
-            DialogAction::ExportPattern => ("保存分段", vec![
+            // 原版 `pattern_export.gml:12`。
+            DialogAction::ExportPattern => (tr("Save pattern", "保存分段"), vec![
                 filter("Note Block Pattern (*.nbp)", "*.nbp"),
             ]),
-            DialogAction::ImportMidi => ("从 MIDI 导入", vec![
+            // 原版 `open_midi.gml:14/15`。
+            DialogAction::ImportMidi => (tr("Import from MIDI", "从 MIDI 导入"), vec![
                 filter("MIDI Sequences (*.mid)", "*.midi;*.mid"),
             ]),
-            DialogAction::ImportPattern => ("打开分段", vec![
+            // 原版 `pattern_import.gml:23`。
+            DialogAction::ImportPattern => (tr("Load pattern", "打开分段"), vec![
                 filter("Note Block Pattern (*.nbp)", "*.nbp"),
             ]),
-            DialogAction::ImportSchematic => ("从 Schematic 导入", vec![
+            // 原版 `open_schematic.gml:11`：标题原文两种语言都是 "Import from Schematic"。
+            DialogAction::ImportSchematic => ("Import from Schematic", vec![
                 filter("Minecraft Schematics (*.schematic)", "*.schematic"),
             ]),
             // 原版 `datapack_getextranotes.gml:6`：过滤器名和标题都是照抄的这一句。
-            DialogAction::SaveExtraNotes => ("为数据包保存音符盒资源包", vec![
-                filter("Resource pack (*.zip)", "*.zip"),
-            ]),
+            DialogAction::SaveExtraNotes => (
+                tr("Save extra notes for data pack", "为数据包保存音符盒资源包"),
+                vec![filter("Resource pack (*.zip)", "*.zip")],
+            ),
             // 原版 `draw_window_preferences.gml:278/294` 是 `get_save_filename_ext("", …)`：
             // 过滤器整串为空，文件名栏塞的是占位串，按下保存后取的是它所在的目录
             // （换算回来见 `EditorState::run_pending_dialog`）。不是目录选择器。
@@ -1338,7 +1349,12 @@ impl EditorState {
         {
             self.last_autosave = Instant::now();
             if let Ok(p) = nbs_io::prefs::autosave(&self.doc.song, &self.prefs) {
-                self.set_message(format!("已自动备份 {}", p.file_name().unwrap_or_default().to_string_lossy()));
+                let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                self.set_message(if crate::lang() == 1 {
+                    format!("已自动备份 {name}")
+                } else {
+                    format!("Autosaved {name}")
+                });
             }
         }
     }
@@ -1433,7 +1449,11 @@ impl EditorState {
         for (j, ci) in self.doc.song.custom_instruments.iter().enumerate() {
             let idx = nbs_core::model::FIRST_CUSTOM_INDEX + j as u8;
             let name = if ci.name.trim().is_empty() {
-                format!("自定义音色 {}", j + 1)
+                tr(
+                    &format!("Custom instrument {}", j + 1),
+                    &format!("自定义音色 {}", j + 1),
+                )
+                .to_string()
             } else {
                 ci.name.clone()
             };
@@ -1517,7 +1537,11 @@ impl EditorState {
         self.sync_prefs();
         self.last_prefs_save = Instant::now();
         if let Err(e) = self.prefs.save() {
-            self.set_message(format!("保存偏好失败: {e}"));
+            self.set_message(if crate::lang() == 1 {
+                format!("保存偏好失败: {e}")
+            } else {
+                format!("Failed to save preferences: {e}")
+            });
         }
     }
 
@@ -1571,7 +1595,7 @@ impl EditorState {
                 .as_ref()
                 .and_then(|p| p.file_stem())
                 .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "未命名".to_string())
+                .unwrap_or_else(|| tr("Untitled song", "无名歌曲").to_string())
         } else {
             self.doc.song.meta.name.clone()
         };
@@ -1612,8 +1636,11 @@ mod tests {
     }
 
     /// 原生选择器的文案必须和原版传给 `get_*_filename_ext` 的参数一致。
+    /// 断言写的是中文分支，测试里把语言钉回 1。
     #[test]
     fn picker_spec_carries_the_original_titles_and_filters() {
+        let _lock = crate::frame_lock();
+        let _cn = crate::LangGuard::set(1);
         let open = FileDialog::for_action(DialogAction::OpenSong, None, None).picker_spec();
         assert_eq!(open.title, "打开歌曲");
         assert_eq!(
@@ -1701,6 +1728,8 @@ mod tests {
     fn state_with(answer: PickResult) -> (EditorState, std::sync::Arc<FakePicker>) {
         let picker = std::sync::Arc::new(FakePicker { answer, seen: std::sync::Mutex::new(Vec::new()) });
         let mut st = EditorState::new();
+        // dispatch 按各自 state 的 prefs 同步全局语言；钉中文让「保存歌曲」断言稳定。
+        st.prefs.language = 1;
         st.picker = Some(picker.clone());
         // 开机流程会开欢迎窗；选框测试的靶子是「欢迎窗已关」的裸编辑器。
         st.window = None;
@@ -1710,6 +1739,8 @@ mod tests {
     /// 装了原生选择器：请求挂到帧外，回来后直接走 `DialogConfirm`，全程不开自绘窗口。
     #[test]
     fn native_picker_answers_without_the_in_app_dialog() {
+        let _lock = crate::frame_lock();
+        let _cn = crate::LangGuard::set(1);
         let dir = std::env::temp_dir().join("nbs-rust-pick-test");
         let _ = std::fs::create_dir_all(&dir);
         let out = dir.join("picked.nbs");

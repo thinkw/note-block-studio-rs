@@ -708,11 +708,21 @@ pub fn write_folder(dest: &Path, files: &[GeneratedFile]) -> Result<(), String> 
     for f in files {
         let path = dest.join(f.path.replace('/', std::path::MAIN_SEPARATOR_STR));
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("创建 {} 失败: {e}", parent.display()))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                crate::tr(
+                    &format!("Failed to create {}: {e}", parent.display()),
+                    &format!("创建 {} 失败: {e}", parent.display()),
+                )
+                .to_string()
+            })?;
         }
-        std::fs::write(&path, bytes_of(f))
-            .map_err(|e| format!("写入 {} 失败: {e}", path.display()))?;
+        std::fs::write(&path, bytes_of(f)).map_err(|e| {
+            crate::tr(
+                &format!("Failed to write {}: {e}", path.display()),
+                &format!("写入 {} 失败: {e}", path.display()),
+            )
+            .to_string()
+        })?;
     }
     Ok(())
 }
@@ -739,8 +749,12 @@ pub fn write_zip(dest: &Path, files: &[GeneratedFile]) -> Result<(), String> {
         let crc = hasher.finalize();
 
         let mut enc = DeflateEncoder::new(Vec::new(), Compression::default());
-        enc.write_all(&data).map_err(|e| format!("压缩失败: {e}"))?;
-        let comp = enc.finish().map_err(|e| format!("压缩结束失败: {e}"))?;
+        enc.write_all(&data).map_err(|e| {
+            crate::tr(&format!("Compression failed: {e}"), &format!("压缩失败: {e}")).to_string()
+        })?;
+        let comp = enc.finish().map_err(|e| {
+            crate::tr(&format!("Compression finish failed: {e}"), &format!("压缩结束失败: {e}")).to_string()
+        })?;
 
         let offset = out.len() as u32;
         out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
@@ -789,9 +803,21 @@ pub fn write_zip(dest: &Path, files: &[GeneratedFile]) -> Result<(), String> {
     out.extend_from_slice(&0u16.to_le_bytes()); // comment length
 
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("创建 {} 失败: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            crate::tr(
+                &format!("Failed to create {}: {e}", parent.display()),
+                &format!("创建 {} 失败: {e}", parent.display()),
+            )
+            .to_string()
+        })?;
     }
-    std::fs::write(dest, &out).map_err(|e| format!("写入 {} 失败: {e}", dest.display()))?;
+    std::fs::write(dest, &out).map_err(|e| {
+        crate::tr(
+            &format!("Failed to write {}: {e}", dest.display()),
+            &format!("写入 {} 失败: {e}", dest.display()),
+        )
+        .to_string()
+    })?;
     Ok(())
 }
 
@@ -809,10 +835,20 @@ pub struct DatapackInfo {
 /// 调用方必须保证它和 `dest` 的扩展名一致，否则包内文本会和实际容器对不上。
 pub fn export(song: &Song, opts: &DatapackOptions, dest: &Path) -> Result<DatapackInfo, String> {
     if letters_digits(&opts.name).is_empty() {
-        return Err("数据包需要一个有效的唯一名称".into());
+        // 原版 `draw_window_datapack_export.gml:223/369`。
+        return Err(crate::tr(
+            "Please enter a valid name for the data pack",
+            "请输入一个有效的数据包名",
+        )
+        .to_string());
     }
     if sanitize_path(&opts.path).matches('/').count() >= 5 {
-        return Err("路径最多只能套 5 个子文件夹".into());
+        // 原版 `draw_window_datapack_export.gml:218/364`。
+        return Err(crate::tr(
+            "Path can only contain up to 5 subfolders",
+            "路径最多只能套五个文件夹",
+        )
+        .to_string());
     }
     let stem = dest
         .file_stem()
