@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use nbs_core::model::{Note, Song};
+use nbs_core::model::{Note, PAN_CENTER, Song};
 
 use crate::mixer::Voice;
 use crate::samples::{SoundBank, BUILTIN_FILES, SAMPLE_RATE};
@@ -515,6 +515,27 @@ pub fn render_offline(
     )
 }
 
+/// pydub 0.25.1 `AudioSegment.pan`（effects.py:284）——原版导出的声像曲线。
+/// pan ∈ -1..1（0 = 中）：响侧提升 |pan|·6.0206 dB 的一半（最多 +3.01 dB），
+/// 另一侧按 `2 − 10^(|pan|·6.0206/20)` 线性扣减（pydub 的怪癖：在比值域直接
+/// 相减），极偏时归零；居中不动。实时播放走 GameMaker 发射器的衰减式声像，
+/// 导出走 pydub——原版两边本就不是同一条曲线。
+fn pan_factors_pydub(pan: f32) -> (f32, f32) {
+    if pan == 0.0 {
+        return (1.0, 1.0);
+    }
+    let max_boost_db = 20.0 * 2.0f32.log10();
+    let boost_db = pan.abs() * max_boost_db;
+    let boost_factor = 10f32.powf(boost_db / 20.0);
+    let reduce_factor = 2.0 - boost_factor;
+    let boost_half = 10f32.powf(boost_db / 2.0 / 20.0);
+    if pan < 0.0 {
+        (boost_half, reduce_factor)
+    } else {
+        (reduce_factor, boost_half)
+    }
+}
+
 fn render_event_group(
     events: &[NoteEvent],
     bank: &SoundBank,
@@ -535,9 +556,18 @@ fn render_event_group(
             continue;
         }
         let ratio = Voice::playback_ratio(&ev.note, sample.base_key, rate);
-        // 导出不用播放主音量：原版 nbswave 没有 master 概念，音符增益
-        // 只由层音量 × 力度决定（mono 时 pydub 会把两声道取平均）。
-        let (gl, gr) = Voice::gains(&ev.note, ev.layer_volume, ev.layer_stereo, 1.0, channels == 1);
+        // 导出不用播放主音量：原版 nbswave 没有 master 概念，音符增益只由
+        // 层音量 × 力度决定；声像走 pydub pan 曲线（mono 时 pydub 把已声像
+        // 的两声道取平均，下面的混合循环正是 (gl+gr)/2）。
+        let vol_eff = (ev.layer_volume as f32 / 100.0) * ev.note.velocity as f32;
+        let g = vol_eff / 100.0;
+        let pan_eff = if ev.layer_stereo == PAN_CENTER {
+            ev.note.panning as f32 - 100.0
+        } else {
+            (ev.layer_stereo as f32 + ev.note.panning as f32) / 2.0 - 100.0
+        };
+        let (pl, pr) = pan_factors_pydub(pan_eff / 100.0);
+        let (gl, gr) = (g * pl, g * pr);
         let pcm = &sample.pcm;
         let mut pos = 0.0f64;
         let mut f = start;
@@ -723,6 +753,25 @@ mod tests {
         // 长度 = 起点 + 采样本身（1000 帧，ratio=1），无尾巴
         let start = (expect) as usize;
         assert_eq!(stats.frames, start + 1000);
+    }
+
+    /// pydub pan 曲线：居中不动；极偏响侧 +3.01dB（√2）、另一侧归零；
+    /// +50（pan 150/右半）左侧 2−10^(3.0103/20)、右侧 10^(1.50515/20)。
+    #[test]
+    fn export_pan_matches_pydub_curve() {
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        let (l, r) = pan_factors_pydub(0.0);
+        assert!(near(l, 1.0) && near(r, 1.0), "居中必须不动，实测 ({l}, {r})");
+        let (l, r) = pan_factors_pydub(-1.0);
+        assert!(near(l, 2f32.sqrt()) && near(r, 0.0), "全左 = (√2, 0)，实测 ({l}, {r})");
+        let (l, r) = pan_factors_pydub(1.0);
+        assert!(near(l, 0.0) && near(r, 2f32.sqrt()), "全右 = (0, √2)，实测 ({l}, {r})");
+        let (l, r) = pan_factors_pydub(0.5);
+        // boost_factor 恰为 √2：reduce = 2−√2，boost/2 = 2^0.25
+        assert!(
+            near(l, 2.0 - 2f32.sqrt()) && near(r, 2f32.powf(0.25)),
+            "半右，实测 ({l}, {r})"
+        );
     }
 
     /// 20 种内置乐器都得真的出声：逐个渲染单音符歌曲，检查峰值不为零。
