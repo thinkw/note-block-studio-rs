@@ -13,6 +13,11 @@
 //! `workspace.dependencies.eframe.features` 改成 `wgpu` 即可切换，
 //! 网格画布只依赖 `egui::Painter`，无需改动任何编辑器代码。
 
+// 双击 exe 不该先闪一个黑色命令行框，所以 Windows 上按 GUI 子系统编译。
+// 命令行用法不受影响：从终端/cargo 启动时 stdout、stderr 句柄是继承来的，
+// 打印照样回到那个终端，只是 shell 不会等 GUI 退出。
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
