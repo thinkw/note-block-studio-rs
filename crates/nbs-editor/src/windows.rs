@@ -292,8 +292,11 @@ fn preferences(state: &mut EditorState, ui: &mut Ui) {
     // 窗口外沿宽 500（原版 `draw_window(x1, y1, x1 + 500, y1 + 510)`），
     // 内容区扣掉 egui 的窗口内边距；把原点左移一个内边距，行内 x 就能直接用原版的 K。
     let (ml, mr) = (margin.left as f32, margin.right as f32);
+    // 内容原点 o 相当于原版的 (x1, y1 + 30)（Fluent）/ (x1, y1 + 26)（其余），
+    // 所以原版窗口底边 y1 + 510 落到 o 系就是 480 / 484。
+    let body_h = if fluent { 480.0 } else { 484.0 };
     let body = ui.allocate_exact_size(
-        egui::vec2(500.0 - ml - mr, 472.0),
+        egui::vec2(500.0 - ml - mr, body_h),
         egui::Sense::hover(),
     );
     // allocate_exact_size 之后 cursor 已经移到这块区域的下面，原点必须取分配到的矩形。
@@ -346,7 +349,10 @@ fn preferences(state: &mut EditorState, ui: &mut Ui) {
             _ => prefs_playback(state, &mut pg),
         }
         // 原版 `draw_button2(x1 + 420, y1 + 478, 72, "确定")`：确定 / Escape / Ctrl+P 都关窗。
-        if pg.button(420.0, 478.0, 72.0, "确定", false) {
+        // 这一行的 y 没有 `(theme = 3) * 22`，所以 Fluent 要把那 22 减回去，
+        // 否则按钮会掉到窗口底边外面（原版底边在 y1 + 510，按钮占到 y1 + 499）。
+        let ok_n = 478.0 - if fluent { 22.0 } else { 0.0 };
+        if pg.button(420.0, ok_n, 72.0, "确定", false) {
             state.emit(Command::CloseWindow);
         }
         // Escape 取「松开」沿（原版 `keyboard_check_released(vk_escape)`）；Ctrl+P 的 Ctrl 位
@@ -782,9 +788,12 @@ fn rate_menu(state: &mut EditorState, ui: &Ui, at: Pos2) {
     }
 }
 
-/// 原版 `fnt_main` 9 像素（正文）和 `fnt_info_med` 11 像素（Fluent 的分组标题与页签）。
-const PREFS_FONT: f32 = 9.0;
-const PREFS_FONT_MED: f32 = 11.0;
+/// 首选项正文的字号。原版是 `fnt_main` 9 像素、菜单栏是 `fnt_small` 8 像素，
+/// 但重写版其余界面（菜单栏、面板、状态栏）都走 egui 默认档，9 像素夹在里面明显偏小，
+/// 所以按用户要求取菜单栏同一档：`TextStyle::Button`，下面那条测试盯着这个等式。
+const PREFS_FONT: f32 = 12.5;
+/// 分组标题与页签：原版 `fnt_info_med` 11 对 `fnt_main` 9（约 1.22 倍），这里同比例放大一档。
+const PREFS_FONT_MED: f32 = 14.0;
 
 /// 原版「帧率限制」下拉的五项（中文分支），下标就是 `refreshrate`。
 const RATE_ITEMS: [&str; 5] = ["30帧", "60帧", "120帧", "144帧", "240帧"];
@@ -3988,6 +3997,18 @@ fn minecraft_compat_window(state: &mut EditorState, ui: &mut Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 首选项正文要和菜单栏同一档：菜单栏用的是 egui 的 `TextStyle::Button`，
+    /// 谁改了那边就得同步改这里，否则窗口里会同时出现两种字号。
+    #[test]
+    fn prefs_font_matches_the_menu_bar() {
+        let style = egui::Style::default();
+        assert_eq!(
+            PREFS_FONT,
+            style.text_styles[&egui::TextStyle::Button].size,
+            "菜单栏字号变了"
+        );
+    }
 
     #[test]
     fn hz_label_inserts_the_original_commas() {
