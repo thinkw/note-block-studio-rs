@@ -867,4 +867,27 @@ mod tests {
             assert!(f <= frame::INSBOX_COLLAPSE, "索引 {i} 取到不存在的帧 {f}");
         }
     }
+
+    /// `Strip::blit` 对越界帧号是静默夹到最后一帧，画错了也不会报错。
+    /// 3.11 的贴图目录比 3.12 少 4 帧，自定义乐器 `(i - 20) % 18 + 20` 取到 34..37 时
+    /// 就全被夹成 33，音符盒的形状和颜色一起走样 —— 所以帧数必须钉在装机版的值上。
+    #[test]
+    fn block_and_icon_strips_have_every_frame() {
+        let root = asset_root().expect("找不到 assets/icons");
+        for (dir, want) in [
+            ("block_color", 38),
+            ("block_color_shape", 38),
+            ("block_shape", 38),
+            ("block", 1),
+            ("block_sel", 1),
+            ("instrumenticons", 21),
+        ] {
+            let got = std::fs::read_dir(root.join(dir))
+                .unwrap_or_else(|e| panic!("{dir} 目录读不到：{e}"))
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("png"))
+                .count();
+            assert_eq!(got, want, "{dir} 帧数不对，音符盒会画到错误的形状上");
+        }
+    }
 }
