@@ -20,8 +20,8 @@ use crate::icons::BlockSet;
 use crate::interaction::{DragMode, InputSnapshot};
 use crate::layers_panel::time_str;
 use crate::state::{ContextKind, ContextMenu, EditMode, EditorState};
-use crate::tr;
 use crate::theme::{Theme, ThemeKind};
+use crate::tr;
 use crate::viewport::{SCROLLBAR_SIZE, TIMELINE_HEIGHT};
 
 /// 原版标尺用的 `font_small`（fnt_small / fnt_wslui_small 的 size 都是 8）。
@@ -47,7 +47,10 @@ const C_YELLOW: Color32 = Color32::from_rgb(255, 255, 0);
 /// （`y1 + 32`）和网格最后一行才会落在同一条线上。
 fn split(area: Rect, cell: f32) -> (Rect, Rect, Rect, Rect) {
     let w = (area.width() - SCROLLBAR_SIZE).max(64.0);
-    let h = (((area.height() - TIMELINE_HEIGHT - SCROLLBAR_SIZE) / cell).floor().max(1.0)) * cell;
+    let h = (((area.height() - TIMELINE_HEIGHT - SCROLLBAR_SIZE) / cell)
+        .floor()
+        .max(1.0))
+        * cell;
     let timeline = Rect::from_min_size(area.min, Vec2::new(w, TIMELINE_HEIGHT));
     let grid = Rect::from_min_size(
         pos2(area.min.x, area.min.y + TIMELINE_HEIGHT),
@@ -140,13 +143,15 @@ fn handle_grid_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect)
     // 滚轮：悬停音符调属性 / 按 `mousewheel` 档位决定是平移、换音色还是换键。
     // Ctrl+滚轮不在这里处理——原版把它归在键盘快捷键段（`control_draw.gml:736-751`），
     // 改的是整窗口缩放，见 `shortcuts.rs`。
-    if pointer_in_grid && !input.ctrl && (input.scroll.x.abs() > 0.0 || input.scroll.y.abs() > 0.0) {
+    if pointer_in_grid && !input.ctrl && (input.scroll.x.abs() > 0.0 || input.scroll.y.abs() > 0.0)
+    {
         let delta = input.scroll.y + input.scroll.x;
         let d = if delta > 0.0 { 1 } else { -1 };
         // 原版条件 `exist && changepitch`：停在音符上且开了「滚轮改音符属性」才改那颗音。
         let note_cell = hover.filter(|(t, l)| {
             state.prefs.changepitch
-                && (state.doc.song.has(*t as u32, *l as u32) || state.doc.selection.contains(*t, *l))
+                && (state.doc.song.has(*t as u32, *l as u32)
+                    || state.doc.selection.contains(*t, *l))
         });
         if let Some((t, l)) = note_cell {
             state.emit(Command::WheelOnNote {
@@ -249,13 +254,17 @@ fn handle_grid_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect)
             state.interaction.cursor = CursorIcon::Crosshair;
             edge_scroll(state, input, rect);
         }
-        DragMode::PanView { start, start_tick, start_layer } => {
+        DragMode::PanView {
+            start,
+            start_tick,
+            start_layer,
+        } => {
             if let Some(pos) = input.pointer {
                 let c = state.viewport.cell();
-                state.viewport.start_tick = (start_tick as f64 - (pos.x - start.x) as f64 / c as f64)
-                    .max(0.0) as u32;
-                state.viewport.start_layer = (start_layer as f64 - (pos.y - start.y) as f64 / c as f64)
-                    .max(0.0) as u32;
+                state.viewport.start_tick =
+                    (start_tick as f64 - (pos.x - start.x) as f64 / c as f64).max(0.0) as u32;
+                state.viewport.start_layer =
+                    (start_layer as f64 - (pos.y - start.y) as f64 / c as f64).max(0.0) as u32;
             }
             state.interaction.cursor = CursorIcon::Grabbing;
         }
@@ -332,7 +341,11 @@ fn finish_drag(state: &mut EditorState, input: &InputSnapshot, hover: Option<(i6
 
     if input.primary_released {
         match mode.clone() {
-            DragMode::BoxSelect { anchor, subtract, alt_copy } => {
+            DragMode::BoxSelect {
+                anchor,
+                subtract,
+                alt_copy,
+            } => {
                 let end = hover.unwrap_or(anchor);
                 state.emit(Command::SelectRect {
                     x0: anchor.0.max(0) as u32,
@@ -399,8 +412,13 @@ fn finish_drag(state: &mut EditorState, input: &InputSnapshot, hover: Option<(i6
                         let (t, l) = (cell.0.max(0) as u32, cell.1.max(0) as u32);
                         if ctrl {
                             state.emit(Command::SelectRect {
-                                x0: t, y0: l, x1: t, y1: l,
-                                copy: false, additive: false, subtract: true,
+                                x0: t,
+                                y0: l,
+                                x1: t,
+                                y1: l,
+                                copy: false,
+                                additive: false,
+                                subtract: true,
                             });
                         } else if state.doc.song.has(t, l) {
                             state.emit(Command::RemoveNote { tick: t, layer: l });
@@ -444,21 +462,39 @@ fn h_geometry(state: &EditorState, rect: Rect) -> (f32, f32, Rect) {
     let visible = state.viewport.columns().max(1) as f32;
     let max_units = (state.doc.song.enda.max(state.viewport.start_tick) as f32 + visible + 8.0)
         .max(visible * 2.0);
-    let thumb_w = ((visible / max_units) * rect.width()).max(24.0).min(rect.width());
+    let thumb_w = ((visible / max_units) * rect.width())
+        .max(24.0)
+        .min(rect.width());
     let thumb_x = rect.min.x
         + (state.viewport.start_tick as f32 / max_units.max(1.0)) * (rect.width() - thumb_w);
-    (max_units, thumb_w, Rect::from_min_size(pos2(thumb_x, rect.min.y + 2.0), Vec2::new(thumb_w, rect.height() - 4.0)))
+    (
+        max_units,
+        thumb_w,
+        Rect::from_min_size(
+            pos2(thumb_x, rect.min.y + 2.0),
+            Vec2::new(thumb_w, rect.height() - 4.0),
+        ),
+    )
 }
 
 fn v_geometry(state: &EditorState, rect: Rect) -> (f32, f32, Rect) {
     let visible = state.viewport.rows().max(1) as f32;
-    let max_units = (state.doc.song.layer_count().max(state.viewport.start_layer) as f32
-        + visible + 4.0)
-        .max(visible * 2.0);
-    let thumb_h = ((visible / max_units) * rect.height()).max(24.0).min(rect.height());
+    let max_units =
+        (state.doc.song.layer_count().max(state.viewport.start_layer) as f32 + visible + 4.0)
+            .max(visible * 2.0);
+    let thumb_h = ((visible / max_units) * rect.height())
+        .max(24.0)
+        .min(rect.height());
     let thumb_y = rect.min.y
         + (state.viewport.start_layer as f32 / max_units.max(1.0)) * (rect.height() - thumb_h);
-    (max_units, thumb_h, Rect::from_min_size(pos2(rect.min.x + 2.0, thumb_y), Vec2::new(rect.width() - 4.0, thumb_h)))
+    (
+        max_units,
+        thumb_h,
+        Rect::from_min_size(
+            pos2(rect.min.x + 2.0, thumb_y),
+            Vec2::new(rect.width() - 4.0, thumb_h),
+        ),
+    )
 }
 
 fn handle_scrollbar_input(state: &mut EditorState, input: &InputSnapshot, hbar: Rect, vbar: Rect) {
@@ -469,14 +505,18 @@ fn handle_scrollbar_input(state: &mut EditorState, input: &InputSnapshot, hbar: 
     if input.primary_pressed {
         if hbar.contains(pos) {
             if ht.contains(pos) {
-                state.interaction.mode = DragMode::DragScrollbarH { grab: pos.x - ht.min.x };
+                state.interaction.mode = DragMode::DragScrollbarH {
+                    grab: pos.x - ht.min.x,
+                };
             } else {
                 let ratio = ((pos.x - hbar.min.x) / hbar.width()).clamp(0.0, 1.0);
                 state.viewport.start_tick = (ratio * hm) as u32;
             }
         } else if vbar.contains(pos) {
             if vt.contains(pos) {
-                state.interaction.mode = DragMode::DragScrollbarV { grab: pos.y - vt.min.y };
+                state.interaction.mode = DragMode::DragScrollbarV {
+                    grab: pos.y - vt.min.y,
+                };
             } else {
                 let ratio = ((pos.y - vbar.min.y) / vbar.height()).clamp(0.0, 1.0);
                 state.viewport.start_layer = (ratio * vm) as u32;
@@ -515,9 +555,19 @@ fn draw_scrollbars(state: &EditorState, ui: &Ui, hbar: Rect, vbar: Rect) {
     let (_, _, ht) = h_geometry(state, hbar);
     let (_, _, vt) = v_geometry(state, vbar);
     shapes.push(Shape::rect_filled(ht, 3.0, th.accent_soft));
-    shapes.push(Shape::rect_stroke(ht, 3.0, Stroke::new(1.0_f32, th.accent), StrokeKind::Inside));
+    shapes.push(Shape::rect_stroke(
+        ht,
+        3.0,
+        Stroke::new(1.0_f32, th.accent),
+        StrokeKind::Inside,
+    ));
     shapes.push(Shape::rect_filled(vt, 3.0, th.accent_soft));
-    shapes.push(Shape::rect_stroke(vt, 3.0, Stroke::new(1.0_f32, th.accent), StrokeKind::Inside));
+    shapes.push(Shape::rect_stroke(
+        vt,
+        3.0,
+        Stroke::new(1.0_f32, th.accent),
+        StrokeKind::Inside,
+    ));
     p.extend(shapes);
 }
 
@@ -565,7 +615,11 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
         let x = x0 + xx;
         p.text(
             pos2(x, top),
-            if first { Align2::LEFT_TOP } else { Align2::CENTER_TOP },
+            if first {
+                Align2::LEFT_TOP
+            } else {
+                Align2::CENTER_TOP
+            },
             time_str(sec),
             RULER_FONT,
             th.text,
@@ -597,7 +651,11 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
         if by4 {
             p.text(
                 pos2(x, top + 15.0),
-                if a == 0 { Align2::LEFT_TOP } else { Align2::CENTER_TOP },
+                if a == 0 {
+                    Align2::LEFT_TOP
+                } else {
+                    Align2::CENTER_TOP
+                },
                 tick.to_string(),
                 RULER_FONT,
                 th.text,
@@ -612,12 +670,13 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
     if let Some(bank) = state.icons.bank() {
         for a in 0..=vp.columns() {
             let tick = vp.start_tick + a;
-            let Some(col) = state.doc.song.column(tick) else { continue };
-            let Some((_, n)) = col
-                .notes
-                .iter()
-                .rev()
-                .find(|(_, n)| state.doc.song.instrument_name(n.instrument) == TEMPO_CHANGER_NAME)
+            let Some(col) = state.doc.song.column(tick) else {
+                continue;
+            };
+            let Some((_, n)) =
+                col.notes.iter().rev().find(|(_, n)| {
+                    state.doc.song.instrument_name(n.instrument) == TEMPO_CHANGER_NAME
+                })
             else {
                 continue;
             };
@@ -627,18 +686,28 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
             let fill = if th.kind == ThemeKind::Dark {
                 Color32::from_gray(54)
             } else if th.kind == ThemeKind::Fluent {
-                if th.fdark { Color32::from_gray(45) } else { Color32::from_gray(252) }
+                if th.fdark {
+                    Color32::from_gray(45)
+                } else {
+                    Color32::from_gray(252)
+                }
             } else {
                 Color32::WHITE
             };
             p.rect_filled(
-                Rect::from_min_max(pos2(xx + 10.0, rect.min.y + 4.0), pos2(xx + 10.0 + w, rect.min.y + 16.0)),
+                Rect::from_min_max(
+                    pos2(xx + 10.0, rect.min.y + 4.0),
+                    pos2(xx + 10.0 + w, rect.min.y + 16.0),
+                ),
                 0.0,
                 fill,
             );
             bank.area(
                 &p,
-                Rect::from_min_max(pos2(xx + 9.0, rect.min.y + 3.0), pos2(xx + 11.0 + w, rect.min.y + 17.0)),
+                Rect::from_min_max(
+                    pos2(xx + 9.0, rect.min.y + 3.0),
+                    pos2(xx + 11.0 + w, rect.min.y + 17.0),
+                ),
                 th,
             );
             let dark_marker = th.kind == ThemeKind::Dark
@@ -647,10 +716,24 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
             let f = 8 * dark_marker as usize;
             let at = pos2(xx, rect.min.y + 2.0);
             bank.marker(&p, at, f, Vec2::new(16.0, 15.0), Color32::WHITE);
-            bank.marker(&p, pos2(xx, rect.min.y + 17.0), f + 1, Vec2::new(16.0, 15.0), Color32::WHITE);
+            bank.marker(
+                &p,
+                pos2(xx, rect.min.y + 17.0),
+                f + 1,
+                Vec2::new(16.0, 15.0),
+                Color32::WHITE,
+            );
             // 原版 `draw_text(xx + 10, y1 + 2 + (theme != 3), …)`，对齐当时是 fa_left。
             p.galley(
-                pos2(xx + 10.0, rect.min.y + if th.kind == ThemeKind::Fluent { 2.0 } else { 3.0 }),
+                pos2(
+                    xx + 10.0,
+                    rect.min.y
+                        + if th.kind == ThemeKind::Fluent {
+                            2.0
+                        } else {
+                            3.0
+                        },
+                ),
                 galley,
                 th.text,
             );
@@ -659,8 +742,7 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
 
     // 播放头：原版在时间轴顶端画 spr_marker 的箭头帧，细身帧一路拉满整个网格；
     // 精灵 xorigin = 8，贴图横坐标就是线所在的 x。网格那半截见 draw_grid。
-    let mx = vp.tick_x(state.marker().floor() as i64)
-        + (state.marker().fract() as f32) * cell;
+    let mx = vp.tick_x(state.marker().floor() as i64) + (state.marker().fract() as f32) * cell;
     if let Some(bank) = state.icons.bank() {
         if mx >= rect.min.x - 8.0 && mx <= rect.max.x + 8.0 {
             let tint = if th.kind == ThemeKind::Fluent {
@@ -669,7 +751,13 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
                 Color32::WHITE
             };
             let at = pos2(mx, rect.min.y + 2.0);
-            bank.marker(&p, at, marker_frame(th, state.flags.blackout), Vec2::new(16.0, 15.0), tint);
+            bank.marker(
+                &p,
+                at,
+                marker_frame(th, state.flags.blackout),
+                Vec2::new(16.0, 15.0),
+                tint,
+            );
             bank.marker(
                 &p,
                 at,
@@ -731,7 +819,10 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
     // 拖框：原版 select = 1（左键加选）时才给框内音符加亮，select = 2（右键减选）什么都不画。
     let mut box_sel: Option<(i64, i64, i64, i64)> = None;
     let mut box_subtract = false;
-    if let DragMode::BoxSelect { anchor, subtract, .. } = &state.interaction.mode {
+    if let DragMode::BoxSelect {
+        anchor, subtract, ..
+    } = &state.interaction.mode
+    {
         if let Some(hover) = state.hover_cell {
             let end = (hover.0 as i64, hover.1 as i64);
             box_sel = Some((
@@ -781,7 +872,9 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
             let visible_rows = (rect.height() / cell).floor() as i64;
             let visible_end = l0 as i64 + visible_rows - 1;
             for tick in t0..t1 {
-                let Some(col) = state.doc.song.column(tick) else { continue };
+                let Some(col) = state.doc.song.column(tick) else {
+                    continue;
+                };
                 for (_, note) in &col.notes {
                     if state.doc.song.instrument_name(note.instrument) != SOUND_STOPPER_NAME {
                         continue;
@@ -817,12 +910,17 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
                 for n in &sel.notes {
                     let at = sel.x + n.dx as i64;
                     let al = sel.y + n.dy as i64;
-                    if at < t0 as i64 - 1 || at > t1 as i64 || al < l0 as i64 - 1 || al > l1 as i64 {
+                    if at < t0 as i64 - 1 || at > t1 as i64 || al < l0 as i64 - 1 || al > l1 as i64
+                    {
                         continue;
                     }
                     let mut salpha = sel_alpha;
                     if hover == Some((at, al)) {
-                        salpha = if sel_alpha > 0.4 { sel_alpha * 0.72 } else { 0.0 };
+                        salpha = if sel_alpha > 0.4 {
+                            sel_alpha * 0.72
+                        } else {
+                            0.0
+                        };
                     }
                     if box_subtract && inside_box(at, al) {
                         salpha = 0.3125;
@@ -850,8 +948,7 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
     // 播放头：原版 spr_marker 第 0 帧是箭头、第 1 帧是纵向拉满的细身（箭头画在时间轴那一格，
     // 见 draw_timeline），精灵 xorigin = 8，所以贴图横坐标就是播放头所在的 x。
     if let Some(bank) = state.icons.bank() {
-        let mx = vp.tick_x(state.marker().floor() as i64)
-            + (state.marker().fract() as f32) * cell;
+        let mx = vp.tick_x(state.marker().floor() as i64) + (state.marker().fract() as f32) * cell;
         if mx >= rect.min.x && mx <= rect.max.x {
             let tint = if th.kind == ThemeKind::Fluent {
                 th.accent(3)
@@ -914,7 +1011,9 @@ fn push_note(
     block_alpha: f32,
     salpha: f32,
 ) {
-    let Some(bank) = state.icons.bank() else { return };
+    let Some(bank) = state.icons.bank() else {
+        return;
+    };
     let th = &state.theme;
     let flags = &state.flags;
     let size = Vec2::splat(state.viewport.cell());
@@ -960,13 +1059,15 @@ fn push_note(
     if note.pitch != 0 {
         let a = ((note.pitch.abs() as f32 / 100.0) * block_alpha * 0.25).min(0.5);
         let c = if note.pitch < 0 { C_RED } else { C_BLUE };
-        p.rect_filled(Rect::from_min_size(at, size), 0.0, alpha(c, (a * 255.0) as u8));
+        p.rect_filled(
+            Rect::from_min_size(at, size),
+            0.0,
+            alpha(c, (a * 255.0) as u8),
+        );
     }
 
     // 不兼容：自定义乐器、或超出 MC 音域的键，画一圈红框（原版 draw_rectangle(..., 1)）。
-    if flags.show_incompatible
-        && (iscustom || note.key < MC_KEY_MIN || note.key > MC_KEY_MAX)
-    {
+    if flags.show_incompatible && (iscustom || note.key < MC_KEY_MIN || note.key > MC_KEY_MAX) {
         let r = Rect::from_min_max(pos2(at.x + 1.0, at.y + 1.0), pos2(at.x + 32.0, at.y + 32.0));
         p.rect_stroke(r, 0.0, Stroke::new(1.0_f32, C_RED), StrokeKind::Inside);
     }
@@ -975,7 +1076,11 @@ fn push_note(
     if salpha > 0.0 {
         bank.block_sel(p, at, size, salpha);
     }
-    let text_alpha = if salpha > 0.0 { 1.0 } else { (block_alpha + 0.25).min(1.0) };
+    let text_alpha = if salpha > 0.0 {
+        1.0
+    } else {
+        (block_alpha + 0.25).min(1.0)
+    };
     let font = MAIN_FONT;
 
     if flags.show_numbers {
@@ -990,7 +1095,11 @@ fn push_note(
         );
     }
     // 键名不受 show_keynames 开关控制（那个开关只管琴键），原版恒画。
-    let name_color = if th.kind == ThemeKind::Dark { Color32::WHITE } else { C_YELLOW };
+    let name_color = if th.kind == ThemeKind::Dark {
+        Color32::WHITE
+    } else {
+        C_YELLOW
+    };
     p.text(
         pos2(at.x + 16.0, at.y + 4.0),
         Align2::CENTER_TOP,
@@ -1073,17 +1182,50 @@ fn draw_context_menu(state: &mut EditorState, ui: &Ui) {
             let item = |ui: &mut Ui, label: &str| -> bool { ui.button(label).clicked() };
             match menu.kind {
                 ContextKind::Grid => {
-                    if item(ui, tr("Copy  Ctrl+C", "复制  Ctrl+C")) { cmds.push(Command::Copy); close = true; }
-                    if item(ui, tr("Cut  Ctrl+X", "剪切  Ctrl+X")) { cmds.push(Command::Cut); close = true; }
-                    if item(ui, tr("Paste  Ctrl+V", "粘贴  Ctrl+V")) { cmds.push(Command::Paste); close = true; }
-                    if item(ui, tr("Delete  Delete", "删除  Delete")) { cmds.push(Command::Delete); close = true; }
+                    if item(ui, tr("Copy  Ctrl+C", "复制  Ctrl+C")) {
+                        cmds.push(Command::Copy);
+                        close = true;
+                    }
+                    if item(ui, tr("Cut  Ctrl+X", "剪切  Ctrl+X")) {
+                        cmds.push(Command::Cut);
+                        close = true;
+                    }
+                    if item(ui, tr("Paste  Ctrl+V", "粘贴  Ctrl+V")) {
+                        cmds.push(Command::Paste);
+                        close = true;
+                    }
+                    if item(ui, tr("Delete  Delete", "删除  Delete")) {
+                        cmds.push(Command::Delete);
+                        close = true;
+                    }
                     ui.separator();
-                    if item(ui, tr("Select all  Ctrl+A", "全选  Ctrl+A")) { cmds.push(Command::SelectAll); close = true; }
-                    if item(ui, tr("Invert selection  Ctrl+I", "反选  Ctrl+I")) { cmds.push(Command::InvertSelection); close = true; }
-                    if item(ui, tr("Deselect all", "取消选择")) { cmds.push(Command::Deselect); close = true; }
+                    if item(ui, tr("Select all  Ctrl+A", "全选  Ctrl+A")) {
+                        cmds.push(Command::SelectAll);
+                        close = true;
+                    }
+                    if item(ui, tr("Invert selection  Ctrl+I", "反选  Ctrl+I")) {
+                        cmds.push(Command::InvertSelection);
+                        close = true;
+                    }
+                    if item(ui, tr("Deselect all", "取消选择")) {
+                        cmds.push(Command::Deselect);
+                        close = true;
+                    }
                     ui.separator();
-                    if item(ui, &format!("{}  +12", tr("Transpose one octave up", "升八度"))) { cmds.push(Command::Transpose(12)); close = true; }
-                    if item(ui, &format!("{}  -12", tr("Transpose one octave down", "降八度"))) { cmds.push(Command::Transpose(-12)); close = true; }
+                    if item(
+                        ui,
+                        &format!("{}  +12", tr("Transpose one octave up", "升八度")),
+                    ) {
+                        cmds.push(Command::Transpose(12));
+                        close = true;
+                    }
+                    if item(
+                        ui,
+                        &format!("{}  -12", tr("Transpose one octave down", "降八度")),
+                    ) {
+                        cmds.push(Command::Transpose(-12));
+                        close = true;
+                    }
                     if item(ui, tr("Paste here", "在此粘贴到此处")) {
                         cmds.push(Command::Paste);
                         state.hover_cell = Some(menu.cell);
@@ -1098,10 +1240,12 @@ fn draw_context_menu(state: &mut EditorState, ui: &Ui) {
                         close = true;
                     }
                     if item(ui, tr("Set as loop start", "设为循环起点")) {
-                        state.doc.edit_meta(tr("Set loop start", "设置循环起点"), |m| {
-                            m.loop_start = menu.cell.0.min(u16::MAX as u32) as u16;
-                            m.loop_enabled = true;
-                        });
+                        state
+                            .doc
+                            .edit_meta(tr("Set loop start", "设置循环起点"), |m| {
+                                m.loop_start = menu.cell.0.min(u16::MAX as u32) as u16;
+                                m.loop_enabled = true;
+                            });
                         close = true;
                     }
                     if item(ui, tr("Seek here", "定位到此处")) {
@@ -1109,30 +1253,64 @@ fn draw_context_menu(state: &mut EditorState, ui: &Ui) {
                         close = true;
                     }
                     if item(ui, tr("Select all up to here", "全选到此处")) {
-                        state.doc.select_rect(0, 0, menu.cell.0, state.doc.song.endb, false, false, true);
+                        state.doc.select_rect(
+                            0,
+                            0,
+                            menu.cell.0,
+                            state.doc.song.endb,
+                            false,
+                            false,
+                            true,
+                        );
                         close = true;
                     }
                 }
                 ContextKind::Layer(layer) => {
                     if item(ui, tr("Rename layer", "重命名图层")) {
-                        cmds.push(Command::ShowWindow(crate::state::WindowKind::LayerRename(layer)));
+                        cmds.push(Command::ShowWindow(crate::state::WindowKind::LayerRename(
+                            layer,
+                        )));
                         close = true;
                     }
-                    if item(ui, tr("Select whole layer", "选中整层")) { cmds.push(Command::SelectLayer(layer)); close = true; }
-                    if item(ui, tr("Insert layer above", "在上方插入图层")) { cmds.push(Command::InsertLayer(layer)); close = true; }
-                    if item(ui, tr("Add layer at end", "在末尾添加图层")) { cmds.push(Command::AddLayer); close = true; }
-                    if item(ui, tr("Move layer up", "上移图层")) { cmds.push(Command::MoveLayerUp(layer)); close = true; }
-                    if item(ui, tr("Move layer down", "下移图层")) { cmds.push(Command::MoveLayerDown(layer)); close = true; }
-                    if item(ui, tr("Remove layer", "删除图层")) { cmds.push(Command::RemoveLayer(layer)); close = true; }
+                    if item(ui, tr("Select whole layer", "选中整层")) {
+                        cmds.push(Command::SelectLayer(layer));
+                        close = true;
+                    }
+                    if item(ui, tr("Insert layer above", "在上方插入图层")) {
+                        cmds.push(Command::InsertLayer(layer));
+                        close = true;
+                    }
+                    if item(ui, tr("Add layer at end", "在末尾添加图层")) {
+                        cmds.push(Command::AddLayer);
+                        close = true;
+                    }
+                    if item(ui, tr("Move layer up", "上移图层")) {
+                        cmds.push(Command::MoveLayerUp(layer));
+                        close = true;
+                    }
+                    if item(ui, tr("Move layer down", "下移图层")) {
+                        cmds.push(Command::MoveLayerDown(layer));
+                        close = true;
+                    }
+                    if item(ui, tr("Remove layer", "删除图层")) {
+                        cmds.push(Command::RemoveLayer(layer));
+                        close = true;
+                    }
                 }
                 ContextKind::Tempo => {
                     let bpm_on = state.prefs.use_bpm;
-                    if ui.selectable_label(!bpm_on, tr("Ticks per second (t/s)", "红石刻/秒 (t/s)")).clicked() {
+                    if ui
+                        .selectable_label(!bpm_on, tr("Ticks per second (t/s)", "红石刻/秒 (t/s)"))
+                        .clicked()
+                    {
                         state.prefs.use_bpm = false;
                         cmds.push(Command::SavePreferences);
                         close = true;
                     }
-                    if ui.selectable_label(bpm_on, tr("Beats per minute (BPM)", "拍数/分钟 (BPM)")).clicked() {
+                    if ui
+                        .selectable_label(bpm_on, tr("Beats per minute (BPM)", "拍数/分钟 (BPM)"))
+                        .clicked()
+                    {
                         state.prefs.use_bpm = true;
                         cmds.push(Command::SavePreferences);
                         close = true;
@@ -1140,7 +1318,11 @@ fn draw_context_menu(state: &mut EditorState, ui: &Ui) {
                     ui.separator();
                     // 原版末尾还有一项「速度测量器」，我们没有打点测速功能，就不画它。
                     for t in [10.0_f32, 12.0, 14.0, 16.0, 18.0, 20.0, 30.0, 60.0] {
-                        let label = if bpm_on { format!("{:.0} BPM", t * 15.0) } else { format!("{t:.0} t/s") };
+                        let label = if bpm_on {
+                            format!("{:.0} BPM", t * 15.0)
+                        } else {
+                            format!("{t:.0} t/s")
+                        };
                         if item(ui, &label) {
                             cmds.push(Command::SetTempo(t));
                             close = true;
@@ -1149,7 +1331,9 @@ fn draw_context_menu(state: &mut EditorState, ui: &Ui) {
                 }
             }
             ui.separator();
-            if item(ui, tr("Close menu", "关闭菜单")) { close = true; }
+            if item(ui, tr("Close menu", "关闭菜单")) {
+                close = true;
+            }
         });
     });
 

@@ -113,9 +113,9 @@ impl<'a> Tx<'a> {
             before,
             after: self.doc.song.meta.clone(),
         });
-        let selection = self.track_sel.then(|| {
-            (self.selection_before.clone(), self.doc.selection.clone())
-        });
+        let selection = self
+            .track_sel
+            .then(|| (self.selection_before.clone(), self.doc.selection.clone()));
 
         let edit = Edit {
             label: self.label,
@@ -143,7 +143,10 @@ impl Document {
     }
 
     pub fn with_song(song: Song) -> Self {
-        Self { song, ..Self::new() }
+        Self {
+            song,
+            ..Self::new()
+        }
     }
 
     pub fn begin(&mut self, label: impl Into<String>) -> Tx<'_> {
@@ -162,7 +165,7 @@ impl Document {
     // ---------------------------------------------------------------- 音符
 
     pub fn place_note(&mut self, tick: u32, layer: u32, note: Note) {
-        let mut tx = self.begin("放置音符");
+        let mut tx = self.begin(crate::tr("Place note", "放置音符"));
         tx.watch(tick, layer);
         tx.song().set(tick, layer, note.clamped());
         tx.commit();
@@ -172,7 +175,7 @@ impl Document {
         if self.song.get(tick, layer).is_none() {
             return;
         }
-        let mut tx = self.begin("删除音符");
+        let mut tx = self.begin(crate::tr("Delete note", "删除音符"));
         tx.watch(tick, layer);
         tx.song().remove(tick, layer);
         tx.commit();
@@ -180,7 +183,7 @@ impl Document {
 
     /// 点击已有音符：用当前画笔覆盖其属性。
     pub fn change_note(&mut self, tick: u32, layer: u32, note: Note) {
-        let mut tx = self.begin("修改音符");
+        let mut tx = self.begin(crate::tr("Modify note", "修改音符"));
         tx.watch(tick, layer);
         tx.song().set(tick, layer, note.clamped());
         tx.commit();
@@ -189,7 +192,7 @@ impl Document {
     /// 事件乐器（速度变换 / 消音器）落格：pit 直接是 BPM / 起始层号，远超音符
     /// 微调的 ±1200，不能走 [`Note::clamped`]（原版 `add_block_manual` 就是直接赋值）。
     pub fn place_note_raw(&mut self, tick: u32, layer: u32, note: Note) {
-        let mut tx = self.begin("放置音符");
+        let mut tx = self.begin(crate::tr("Place note", "放置音符"));
         tx.watch(tick, layer);
         tx.song().set(tick, layer, note);
         tx.commit();
@@ -197,7 +200,7 @@ impl Document {
 
     /// 同 [`Self::place_note_raw`]：覆盖已有事件乐器的属性，历史标签用「修改音符」。
     pub fn change_note_raw(&mut self, tick: u32, layer: u32, note: Note) {
-        let mut tx = self.begin("修改音符");
+        let mut tx = self.begin(crate::tr("Modify note", "修改音符"));
         tx.watch(tick, layer);
         tx.song().set(tick, layer, note);
         tx.commit();
@@ -206,7 +209,7 @@ impl Document {
     /// 编辑窗口「确定」（原版 `h_changeblock`）：速度变换只改 pit，
     /// key / 力度 / 声像保持原样。
     pub fn set_event_tempo(&mut self, tick: u32, layer: u32, bpm: i64) {
-        let mut tx = self.begin("修改音符");
+        let mut tx = self.begin(crate::tr("Modify note", "修改音符"));
         tx.watch(tick, layer);
         if let Some(mut note) = tx.song().get(tick, layer) {
             note.pitch = bpm as i16;
@@ -217,7 +220,7 @@ impl Document {
 
     /// 编辑窗口「确定」：消音器写起始层（pit）和终止层（pan+vel 短编码）。
     pub fn set_event_stopper(&mut self, tick: u32, layer: u32, start: i64, until: u64) {
-        let mut tx = self.begin("修改音符");
+        let mut tx = self.begin(crate::tr("Modify note", "修改音符"));
         tx.watch(tick, layer);
         if let Some(mut note) = tx.song().get(tick, layer) {
             note.pitch = start as i16;
@@ -233,7 +236,7 @@ impl Document {
         if self.song.total_blocks == 0 {
             return;
         }
-        let mut tx = self.begin("清空所有音符");
+        let mut tx = self.begin(crate::tr("Clear all notes", "清空所有音符"));
         let all: Vec<_> = tx.read_song().iter_notes().collect();
         tx.watch_notes(&all);
         for (t, l, _) in all {
@@ -249,7 +252,7 @@ impl Document {
         if self.selection.is_empty() {
             return;
         }
-        let mut tx = self.begin("落定选区");
+        let mut tx = self.begin(crate::tr("Commit selection", "落定选区"));
         tx.track_selection();
         place_selection_in_tx(&mut tx);
         tx.commit();
@@ -275,12 +278,20 @@ impl Document {
             x0.min(x1),
             y0.min(y1),
             x0.max(x1).min(self.song.enda),
-            y0.max(y1).min(self.song.endb.max(self.song.layer_count().saturating_sub(1))),
+            y0.max(y1).min(
+                self.song
+                    .endb
+                    .max(self.song.layer_count().saturating_sub(1)),
+            ),
         );
         if ax > bx || ay > by {
             return;
         }
-        let mut tx = self.begin(if copy { "复制框选" } else { "框选" });
+        let mut tx = self.begin(if copy {
+            crate::tr("Copy marquee", "复制框选")
+        } else {
+            crate::tr("Marquee select", "框选")
+        });
         tx.track_selection();
 
         // 非加选时，先把旧浮动选区落回歌曲，保证新框选的坐标是对的。
@@ -322,23 +333,32 @@ impl Document {
     /// 按乐器选择全部音符。`invert = true` 对应原版的「选择除该乐器之外的全部」。
     /// 语义与 select_rect 一致：选中即摘出为浮动选区。
     pub fn select_by_instrument(&mut self, instrument: u8, invert: bool) {
-        self.select_where(if invert { "选择除该乐器" } else { "按乐器选择" }, |n| {
-            (n.instrument == instrument) != invert
-        });
+        self.select_where(
+            if invert {
+                crate::tr("Select all but this instrument", "选择除该乐器")
+            } else {
+                crate::tr("Select by instrument", "按乐器选择")
+            },
+            |n| (n.instrument == instrument) != invert,
+        );
     }
 
     /// 原版 `select_outside(lower, higher)`：把 Minecraft 两个八度之外
     /// （`key < 33` 算过低、`key > 57` 算过高）的音符摘成浮动选区。
     /// 兼容性窗口「选择过低的音符 / 选择过高的音符」两个按钮走的就是它。
     pub fn select_outside(&mut self, lower: bool, higher: bool) {
-        self.select_where("选择范围外的音符", |n| {
-            (lower && n.key < MC_KEY_MIN) || (higher && n.key > MC_KEY_MAX)
-        });
+        self.select_where(
+            crate::tr("Select notes outside range", "选择范围外的音符"),
+            |n| (lower && n.key < MC_KEY_MIN) || (higher && n.key > MC_KEY_MAX),
+        );
     }
 
     /// 原版 `select_custom()`：把用了自定义音色的音符摘成浮动选区。
     pub fn select_custom(&mut self) {
-        self.select_where("选择自定义音色的音符", |n| n.instrument >= FIRST_CUSTOM_INDEX);
+        self.select_where(
+            crate::tr("Select custom-instrument notes", "选择自定义音色的音符"),
+            |n| n.instrument >= FIRST_CUSTOM_INDEX,
+        );
     }
 
     /// 原版 `select_by_instrument` / `select_outside` / `select_custom` 的共同骨架：
@@ -349,8 +369,11 @@ impl Document {
         if !tx.read_selection().is_empty() {
             place_selection_in_tx(&mut tx);
         }
-        let keep: Vec<(u32, u32, Note)> =
-            tx.read_song().iter_notes().filter(|(_, _, n)| keep_if(n)).collect();
+        let keep: Vec<(u32, u32, Note)> = tx
+            .read_song()
+            .iter_notes()
+            .filter(|(_, _, n)| keep_if(n))
+            .collect();
         if keep.is_empty() {
             tx.commit();
             return;
@@ -373,7 +396,7 @@ impl Document {
             return None;
         }
         let mut changed = 0usize;
-        let mut tx = self.begin("转换音符");
+        let mut tx = self.begin(crate::tr("Convert notes", "转换音符"));
         tx.track_selection();
         tx.selection().change_all(|n| {
             let out_of_range = n.key < MC_KEY_MIN || n.key > MC_KEY_MAX;
@@ -396,9 +419,14 @@ impl Document {
             .selection
             .notes
             .iter()
-            .map(|n| (self.selection.x + n.dx as i64, self.selection.y + n.dy as i64))
+            .map(|n| {
+                (
+                    self.selection.x + n.dx as i64,
+                    self.selection.y + n.dy as i64,
+                )
+            })
             .collect();
-        let mut tx = self.begin("反选");
+        let mut tx = self.begin(crate::tr("Invert selection", "反选"));
         tx.track_selection();
         // 先把旧选区落回，再重新摘出「不在旧集合」的音符。
         if !tx.read_selection().is_empty() {
@@ -422,7 +450,7 @@ impl Document {
         if self.selection.is_empty() {
             return;
         }
-        let mut tx = self.begin("删除选区");
+        let mut tx = self.begin(crate::tr("Delete selection", "删除选区"));
         tx.track_selection();
         *tx.selection() = Selection::new();
         tx.commit();
@@ -437,7 +465,7 @@ impl Document {
     pub fn commit_selection_move(&mut self, before: SelectionSnapshot) {
         self.selection.clamp_origin();
         let after = self.selection.clone();
-        let mut tx = self.begin("移动选区");
+        let mut tx = self.begin(crate::tr("Move selection", "移动选区"));
         tx.track_selection();
         // 覆盖事务捕获的 before（begin 时捕获的是当前值）。
         tx.selection_before = before;
@@ -450,7 +478,7 @@ impl Document {
         if self.selection.is_empty() {
             return;
         }
-        let mut tx = self.begin("减少选区");
+        let mut tx = self.begin(crate::tr("Compress selection", "减少选区"));
         tx.track_selection();
         let (ax, ay, bx, by) = (x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1));
         let removed = tx.selection().remove_rect(ax, ay, bx, by);
@@ -487,7 +515,7 @@ impl Document {
         if items.is_empty() {
             return;
         }
-        let mut tx = self.begin("粘贴");
+        let mut tx = self.begin(crate::tr("Paste", "粘贴"));
         tx.track_selection();
         place_selection_in_tx(&mut tx);
 
@@ -502,7 +530,12 @@ impl Document {
             let ay = (y + n.dy as i64).max(0) as u32;
             tx.song().remove(ax, ay);
         }
-        let mut sel = Selection { x, y, notes: items, ..Default::default() };
+        let mut sel = Selection {
+            x,
+            y,
+            notes: items,
+            ..Default::default()
+        };
         sel.recalc_size();
         sel.clamp_origin();
         *tx.selection() = sel;
@@ -537,20 +570,22 @@ impl Document {
     }
 
     pub fn transpose(&mut self, semitones: i32) {
-        self.batch_change("移调", |n| {
+        self.batch_change(crate::tr("Transpose", "移调"), |n| {
             n.key = (n.key as i32 + semitones).clamp(0, 87) as u8;
         });
     }
 
     pub fn set_instrument_all(&mut self, instrument: u8) {
-        self.batch_change("更改音色", |n| n.instrument = instrument);
+        self.batch_change(crate::tr("Change instrument", "更改音色"), |n| {
+            n.instrument = instrument
+        });
     }
 
     // ---------------------------------------------------------------- 图层
 
     pub fn insert_layer(&mut self, at: u32) {
         let at = at.min(self.song.layers.len() as u32);
-        let mut tx = self.begin("添加图层");
+        let mut tx = self.begin(crate::tr("Add layer", "添加图层"));
         tx.track_layers();
         remap_layers(&mut tx, at, |l| Some(l + 1));
         tx.song().layers.insert(at as usize, Layer::default());
@@ -566,18 +601,12 @@ impl Document {
         if self.song.layers.len() <= 1 || at as usize >= self.song.layers.len() {
             return;
         }
-        let mut tx = self.begin("删除图层");
+        let mut tx = self.begin(crate::tr("Delete layer", "删除图层"));
         tx.track_layers();
         // 先把浮动选区落定，避免层号变化后选区错位。
         place_selection_in_tx(&mut tx);
         tx.track_selection();
-        remap_layers(&mut tx, at, |l| {
-            if l == at {
-                None
-            } else {
-                Some(l - 1)
-            }
-        });
+        remap_layers(&mut tx, at, |l| if l == at { None } else { Some(l - 1) });
         tx.song().layers.remove(at as usize);
         tx.commit();
     }
@@ -587,7 +616,7 @@ impl Document {
             return;
         }
         let from = a.min(b);
-        let mut tx = self.begin("移动图层");
+        let mut tx = self.begin(crate::tr("Move layer", "移动图层"));
         tx.track_layers();
         remap_layers(&mut tx, from, |l| {
             if l == a {
@@ -606,7 +635,7 @@ impl Document {
         if index as usize >= self.song.layers.len() {
             return;
         }
-        let mut tx = self.begin("修改图层");
+        let mut tx = self.begin(crate::tr("Modify layer", "修改图层"));
         tx.track_layers();
         if let Some(layer) = tx.song().layers.get_mut(index as usize) {
             f(layer);
@@ -632,7 +661,7 @@ impl Document {
             return;
         }
         let tick = loop_end - 1;
-        let mut tx = self.begin("延长循环结尾");
+        let mut tx = self.begin(crate::tr("Extend loop end", "延长循环结尾"));
         tx.watch(tick, 0);
         tx.song().set(
             tick,
@@ -722,7 +751,13 @@ mod tests {
         assert_eq!(doc.song.song_length(), 10);
         assert_eq!(
             doc.song.get(9, 0),
-            Some(Note { instrument: 0, key: 45, velocity: 0, panning: 100, pitch: 0 })
+            Some(Note {
+                instrument: 0,
+                key: 45,
+                velocity: 0,
+                panning: 100,
+                pitch: 0
+            })
         );
         // 不缩短、不重复加：与原版 median(enda + 1, …) 的单向语义一致。
         doc.extend_loop_end(6);
@@ -742,10 +777,11 @@ mod tests {
         assert_eq!(doc.selection.len(), 2);
         assert_eq!(doc.song.total_blocks, 0, "选中后音符应从歌曲摘出");
         doc.set_selection_origin(10, 0);
-        doc.commit_selection_move(Selection::from_absolute(5, 0, &[
-            (5, 0, Note::new(0, 45)),
-            (6, 0, Note::new(0, 47)),
-        ]));
+        doc.commit_selection_move(Selection::from_absolute(
+            5,
+            0,
+            &[(5, 0, Note::new(0, 45)), (6, 0, Note::new(0, 47))],
+        ));
         doc.place_selection();
         assert_eq!(doc.song.get(10, 0), Some(Note::new(0, 45)));
         assert_eq!(doc.song.get(11, 0), Some(Note::new(0, 47)));
@@ -819,7 +855,11 @@ mod tests {
         doc.place_note(1, 0, Note::new(0, 45)); // 范围内
         doc.place_note(2, 0, Note::new(0, 70)); // 高出一个八度多
 
-        assert_eq!(doc.fold_keys_to_minecraft(), None, "空选区时原版直接 return，连提示都不弹");
+        assert_eq!(
+            doc.fold_keys_to_minecraft(),
+            None,
+            "空选区时原版直接 return，连提示都不弹"
+        );
 
         // select_outside(true, false)：只摘 key < 33。
         doc.select_outside(true, false);

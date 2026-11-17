@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use nbs_core::model::{Note, PAN_CENTER, Song};
+use nbs_core::model::{Note, Song, PAN_CENTER};
 
 use crate::mixer::Voice;
 use crate::samples::{SoundBank, BUILTIN_FILES, SAMPLE_RATE};
@@ -49,12 +49,26 @@ pub trait AudioEngine {
     fn reload_bank(&mut self, _dir: Option<&Path>) {}
 }
 
+/// 输出设备快照。设备名是系统给的（Windows 会按系统语言给「耳机 (Realtek(R) Audio)」
+/// 这类名字），不能由我们翻译；句式文案留到显示时按当前语言拼。
+enum DeviceReport {
+    Streamed {
+        name: String,
+        rate: u32,
+        channels: usize,
+    },
+    /// 降级为静音时钟的原因（cpal 的报错串，按技术原文显示）。
+    Fallback(String),
+    /// 还没尝试建流。
+    Uninitialised,
+}
+
 pub struct CpalEngine {
     shared: Shared,
     clock: TransportClock,
     bank: Arc<SoundBank>,
     stream: Option<cpal::Stream>,
-    device_info: String,
+    device: DeviceReport,
     last_song: Option<Song>,
     export_options: ExportOptions,
 }
@@ -74,29 +88,29 @@ impl CpalEngine {
             clock,
             bank,
             stream: None,
-            device_info: "静音时钟（未初始化音频设备）".into(),
+            device: DeviceReport::Uninitialised,
             last_song: None,
             export_options: ExportOptions::default(),
         };
         match engine.try_start_stream() {
-            Ok(info) => engine.device_info = info,
+            Ok(info) => engine.device = info,
             Err(e) => {
-                engine.device_info = format!("静音时钟（{e}）");
+                engine.device = DeviceReport::Fallback(e);
                 engine.shared.lock().audio_active = false;
             }
         }
         engine
     }
 
-    fn try_start_stream(&mut self) -> Result<String, String> {
+    fn try_start_stream(&mut self) -> Result<DeviceReport, String> {
         let host = cpal::default_host();
         let device = host
             .default_output_device()
-            .ok_or_else(|| "没有默认输出设备".to_string())?;
-        let name = device.name().unwrap_or_else(|_| "未知设备".into());
+            .ok_or_else(|| "no default output device".to_string())?;
+        let name = device.name().unwrap_or_else(|_| "unknown device".into());
         let supported = device
             .default_output_config()
-            .map_err(|e| format!("读取输出配置失败: {e}"))?;
+            .map_err(|e| format!("failed to read output config: {e}"))?;
         let sample_format = supported.sample_format();
         let config: cpal::StreamConfig = supported.config();
         let rate = config.sample_rate.0;
@@ -123,12 +137,12 @@ impl CpalEngine {
                         }
                     },
                     move |e| {
-                        eprintln!("[nbs-audio] 输出流错误: {e}");
+                        eprintln!("[nbs-audio] output stream error: {e}");
                         err_shared.lock().audio_active = false;
                     },
                     None,
                 )
-                .map_err(|e| format!("创建 f32 输出流失败: {e}"))?,
+                .map_err(|e| format!("failed to build f32 output stream: {e}"))?,
             cpal::SampleFormat::I16 => {
                 let mut scratch: Vec<f32> = Vec::new();
                 device
@@ -146,20 +160,26 @@ impl CpalEngine {
                             }
                         },
                         move |e| {
-                            eprintln!("[nbs-audio] 输出流错误: {e}");
+                            eprintln!("[nbs-audio] output stream error: {e}");
                             err_shared.lock().audio_active = false;
                         },
                         None,
                     )
-                    .map_err(|e| format!("创建 i16 输出流失败: {e}"))?
+                    .map_err(|e| format!("failed to build i16 output stream: {e}"))?
             }
-            other => return Err(format!("不支持的采样格式 {other:?}")),
+            other => return Err(format!("unsupported sample format {other:?}")),
         };
-        stream.play().map_err(|e| format!("启动输出流失败: {e}"))?;
+        stream
+            .play()
+            .map_err(|e| format!("failed to start output stream: {e}"))?;
         // 必须把 Stream 保存到结构体：cpal 的 Stream 一旦 drop 就立刻停止输出。
         self.stream = Some(stream);
         self.shared.lock().audio_active = true;
-        Ok(format!("{name} · {} Hz · {} 声道", rate, channels))
+        Ok(DeviceReport::Streamed {
+            name,
+            rate,
+            channels,
+        })
     }
 
     pub fn shared(&self) -> &Shared {
@@ -193,9 +213,9 @@ impl CpalEngine {
 impl AudioEngine for CpalEngine {
     fn name(&self) -> &str {
         if self.stream.is_some() {
-            "原版采样音频引擎"
+            nbs_core::tr("Sample audio engine", "原版采样音频引擎")
         } else {
-            "静音时钟（无音频设备）"
+            nbs_core::tr("Silent clock (no audio device)", "静音时钟（无音频设备）")
         }
     }
     fn prepare(&mut self, song: &Song) {
@@ -253,21 +273,56 @@ impl AudioEngine for CpalEngine {
         &mut self.clock
     }
     fn device_info(&self) -> String {
-        self.device_info.clone()
+        match &self.device {
+            DeviceReport::Streamed {
+                name,
+                rate,
+                channels,
+            } => {
+                let ch = if nbs_core::lang() == 1 {
+                    format!("{channels} 声道")
+                } else {
+                    format!("{channels} channels")
+                };
+                format!("{name} · {rate} Hz · {ch}")
+            }
+            DeviceReport::Fallback(reason) => {
+                if nbs_core::lang() == 1 {
+                    format!("静音时钟（{reason}）")
+                } else {
+                    format!("Silent clock ({reason})")
+                }
+            }
+            DeviceReport::Uninitialised => nbs_core::tr(
+                "Silent clock (audio device not initialised)",
+                "静音时钟（未初始化音频设备）",
+            )
+            .to_string(),
+        }
     }
     fn bank(&self) -> Arc<SoundBank> {
         self.bank.clone()
     }
     fn sample_status(&self) -> String {
         if self.bank.is_ready() {
-            format!(
-                "已加载 {}/{} 个内置采样{}",
-                self.bank.loaded_count(),
-                BUILTIN_FILES.len(),
-                if self.bank.missing.is_empty() { "" } else { "（部分缺失）" }
-            )
+            let (count, total) = (self.bank.loaded_count(), BUILTIN_FILES.len());
+            if nbs_core::lang() == 1 {
+                let miss = if self.bank.missing.is_empty() {
+                    ""
+                } else {
+                    "（部分缺失）"
+                };
+                format!("已加载 {count}/{total} 个内置采样{miss}")
+            } else {
+                let miss = if self.bank.missing.is_empty() {
+                    ""
+                } else {
+                    " (some missing)"
+                };
+                format!("Loaded {count}/{total} built-in samples{miss}")
+            }
         } else {
-            "未找到内置采样目录".into()
+            nbs_core::tr("Built-in samples folder not found", "未找到内置采样目录").into()
         }
     }
     fn take_visual_events(&mut self) -> Vec<VisualEvent> {
@@ -337,7 +392,7 @@ impl SilentEngine {
 
 impl AudioEngine for SilentEngine {
     fn name(&self) -> &str {
-        "静音时钟"
+        nbs_core::tr("Silent clock", "静音时钟")
     }
     fn prepare(&mut self, song: &Song) {
         self.events = build_event_table(song, false);
@@ -387,13 +442,13 @@ impl AudioEngine for SilentEngine {
         &mut self.clock
     }
     fn device_info(&self) -> String {
-        "无音频输出（纯时钟）".into()
+        nbs_core::tr("No audio output (clock only)", "无音频输出（纯时钟）").into()
     }
     fn bank(&self) -> Arc<SoundBank> {
         self.bank.clone()
     }
     fn sample_status(&self) -> String {
-        "未加载采样".into()
+        nbs_core::tr("No samples loaded", "未加载采样").into()
     }
     fn take_visual_events(&mut self) -> Vec<VisualEvent> {
         std::mem::take(&mut self.visual)
@@ -503,7 +558,9 @@ pub fn render_offline(
         0
     };
     for ev in &all_notes {
-        let Some(&pos) = segs.get(ev.tick as usize) else { continue };
+        let Some(&pos) = segs.get(ev.tick as usize) else {
+            continue;
+        };
         let start = pos * rate as f64;
         let end = match bank.get(ev.note.instrument as usize) {
             Some(sample) if !sample.is_empty() => {
@@ -604,11 +661,15 @@ fn render_event_group(
     rate: u32,
 ) {
     for ev in events {
-        let Some(sample) = bank.get(ev.note.instrument as usize) else { continue };
+        let Some(sample) = bank.get(ev.note.instrument as usize) else {
+            continue;
+        };
         if sample.is_empty() {
             continue;
         }
-        let Some(&pos) = segs.get(ev.tick as usize) else { continue };
+        let Some(&pos) = segs.get(ev.tick as usize) else {
+            continue;
+        };
         let start = (pos * rate as f64) as usize;
         if start >= frames {
             continue;
@@ -676,7 +737,13 @@ pub fn write_wav_i16(
         let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
         out.extend_from_slice(&v.to_le_bytes());
     }
-    std::fs::write(path, out).map_err(|e| format!("写入 WAV 失败: {e}"))
+    std::fs::write(path, out).map_err(|e| {
+        if nbs_core::lang() == 1 {
+            format!("写入 WAV 失败: {e}")
+        } else {
+            format!("failed to write WAV: {e}")
+        }
+    })
 }
 
 #[cfg(test)]
@@ -740,10 +807,18 @@ mod tests {
         quiet.recalculate();
         let events = build_event_table(&quiet, false);
         let (pcm, stats) = render_offline(&quiet, &bank, &events, &Default::default());
-        assert!((stats.peak - 0.9).abs() < 1e-5, "未削顶不应缩放，实测 {}", stats.peak);
+        assert!(
+            (stats.peak - 0.9).abs() < 1e-5,
+            "未削顶不应缩放，实测 {}",
+            stats.peak
+        );
         // nbswave 时间轴：tick 0 落在 1/tempo = 0.1s（交错立体声 ×2）
         let start = (0.1 * 44100.0) as usize * 2;
-        assert!((pcm[start] - 0.9).abs() < 1e-4, "首样本应原样 0.9，实测 {}", pcm[start]);
+        assert!(
+            (pcm[start] - 0.9).abs() < 1e-4,
+            "首样本应原样 0.9，实测 {}",
+            pcm[start]
+        );
     }
 
     /// nbswave tempo_segments 的移植对照：10 t/s，tick 4 一枚变速器
@@ -752,21 +827,36 @@ mod tests {
     fn tempo_segments_match_nbswave() {
         let mut song = Song::new();
         song.meta.tempo = 10.0;
-        song.custom_instruments.push(nbs_core::model::CustomInstrument {
-            name: "Tempo Changer".into(),
-            filename: String::new(),
-            key: 45,
-            press: false,
-        });
+        song.custom_instruments
+            .push(nbs_core::model::CustomInstrument {
+                name: "Tempo Changer".into(),
+                filename: String::new(),
+                key: 45,
+                press: false,
+            });
         song.set(0, 0, Note::new(0, 45));
-        song.set(4, 0, Note { instrument: 20, key: 45, velocity: 100, panning: 100, pitch: 600 });
+        song.set(
+            4,
+            0,
+            Note {
+                instrument: 20,
+                key: 45,
+                velocity: 100,
+                panning: 100,
+                pitch: 600,
+            },
+        );
         song.set(8, 0, Note::new(0, 45));
         song.recalculate();
         let events = build_event_table(&song, false);
         let segs = tempo_segments(&song, &events);
         assert_eq!(segs.len(), 10, "歌长 9 → 覆盖 tick 0..=9");
         let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
-        assert!(near(segs[0], 0.1), "segments[0] = 1/tempo，实测 {}", segs[0]);
+        assert!(
+            near(segs[0], 0.1),
+            "segments[0] = 1/tempo，实测 {}",
+            segs[0]
+        );
         assert!(near(segs[3], 0.4), "{}", segs[3]);
         assert!(
             near(segs[4], 0.4 + 1.0 / 40.0),
@@ -788,14 +878,25 @@ mod tests {
         });
         let mut song = Song::new();
         song.meta.tempo = 10.0;
-        song.custom_instruments.push(nbs_core::model::CustomInstrument {
-            name: "Tempo Changer".into(),
-            filename: String::new(),
-            key: 45,
-            press: false,
-        });
+        song.custom_instruments
+            .push(nbs_core::model::CustomInstrument {
+                name: "Tempo Changer".into(),
+                filename: String::new(),
+                key: 45,
+                press: false,
+            });
         song.set(8, 0, Note::new(0, 45));
-        song.set(4, 1, Note { instrument: 20, key: 45, velocity: 100, panning: 100, pitch: 600 });
+        song.set(
+            4,
+            1,
+            Note {
+                instrument: 20,
+                key: 45,
+                velocity: 100,
+                panning: 100,
+                pitch: 600,
+            },
+        );
         song.recalculate();
         let events = build_event_table(&song, false);
         let (pcm, stats) = render_offline(&song, &bank, &events, &Default::default());
@@ -819,11 +920,20 @@ mod tests {
     fn export_pan_matches_pydub_curve() {
         let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
         let (l, r) = pan_factors_pydub(0.0);
-        assert!(near(l, 1.0) && near(r, 1.0), "居中必须不动，实测 ({l}, {r})");
+        assert!(
+            near(l, 1.0) && near(r, 1.0),
+            "居中必须不动，实测 ({l}, {r})"
+        );
         let (l, r) = pan_factors_pydub(-1.0);
-        assert!(near(l, 2f32.sqrt()) && near(r, 0.0), "全左 = (√2, 0)，实测 ({l}, {r})");
+        assert!(
+            near(l, 2f32.sqrt()) && near(r, 0.0),
+            "全左 = (√2, 0)，实测 ({l}, {r})"
+        );
         let (l, r) = pan_factors_pydub(1.0);
-        assert!(near(l, 0.0) && near(r, 2f32.sqrt()), "全右 = (0, √2)，实测 ({l}, {r})");
+        assert!(
+            near(l, 0.0) && near(r, 2f32.sqrt()),
+            "全右 = (0, √2)，实测 ({l}, {r})"
+        );
         let (l, r) = pan_factors_pydub(0.5);
         // boost_factor 恰为 √2：reduce = 2−√2，boost/2 = 2^0.25
         assert!(

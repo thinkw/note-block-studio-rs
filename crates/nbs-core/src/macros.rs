@@ -64,25 +64,57 @@ pub enum Macro {
 }
 
 impl Macro {
+    /// 英文宏名，逐字取自原版 `lang_en_us.gml:136-149`（`name_macro_*`）。
     pub fn name(&self) -> &'static str {
+        match self {
+            Self::FadeIn => "Fade in",
+            Self::FadeOut => "Fade out",
+            Self::VelocityLfo => "Volume LFO",
+            Self::Vibrato => "Vibrato",
+            Self::Reset => "Reset all properties",
+            Self::ReplaceKey => "Replace key",
+            Self::Tremolo { .. } => "Tremolo",
+            Self::Stereo { .. } => "Stereo",
+            Self::Arpeggio { .. } => "Arpeggio",
+            Self::Portamento { .. } => "Portamento",
+            Self::Stagger { .. } => "Stagger",
+            Self::Chorus { .. } => "Chorus",
+            Self::SetVelocity { .. } => "Set velocity",
+            Self::SetPanning { .. } => "Set panning",
+            Self::SetPitch { .. } => "Set pitch",
+            Self::SetInstrument { .. } => "Set instrument",
+        }
+    }
+
+    /// 中文宏名，取自原版中文菜单（`control_draw.gml:1848`）：
+    /// 只有 淡入/淡出/替换音/设定音量/设定声道/设定音高/重置所有属性 这七条有
+    /// 中文，其余（Tremolo、Stereo、Arpeggio、Portamento、Vibrato、Stagger、
+    /// Chorus、Volume LFO）原版在中文界面里也保持英文，这里如实照抄。
+    /// Set instrument 是移植自建的宏，按同一条「设定〇〇」构词补齐。
+    pub fn name_zh(&self) -> &'static str {
         match self {
             Self::FadeIn => "淡入",
             Self::FadeOut => "淡出",
-            Self::VelocityLfo => "音量 LFO",
-            Self::Vibrato => "颤音 (Vibrato)",
-            Self::Reset => "重置全部属性",
-            Self::ReplaceKey => "统一音高",
-            Self::Tremolo { .. } => "震音 (Tremolo)",
-            Self::Stereo { .. } => "立体声展开",
-            Self::Arpeggio { .. } => "琶音",
-            Self::Portamento { .. } => "滑音",
-            Self::Stagger { .. } => "错拍",
-            Self::Chorus { .. } => "合唱",
-            Self::SetVelocity { .. } => "设置力度",
-            Self::SetPanning { .. } => "设置声像",
-            Self::SetPitch { .. } => "设置微调",
-            Self::SetInstrument { .. } => "设置音色",
+            Self::VelocityLfo => "Volume LFO",
+            Self::Vibrato => "Vibrato",
+            Self::Reset => "重置所有属性",
+            Self::ReplaceKey => "替换音",
+            Self::Tremolo { .. } => "Tremolo",
+            Self::Stereo { .. } => "Stereo",
+            Self::Arpeggio { .. } => "Arpeggio",
+            Self::Portamento { .. } => "Portamento",
+            Self::Stagger { .. } => "Stagger",
+            Self::Chorus { .. } => "Chorus",
+            Self::SetVelocity { .. } => "设定音量",
+            Self::SetPanning { .. } => "设定声道",
+            Self::SetPitch { .. } => "设定音高",
+            Self::SetInstrument { .. } => "设定音色",
         }
+    }
+
+    /// 按当前语言取宏名（原版 `condstr(language != 1, …)` 的写法）。
+    pub fn label(&self) -> &'static str {
+        crate::tr(self.name(), self.name_zh())
     }
 
     pub fn all() -> Vec<Macro> {
@@ -93,15 +125,35 @@ impl Macro {
             Self::Vibrato,
             Self::Reset,
             Self::ReplaceKey,
-            Self::Tremolo { spacing: 2, fade: TremoloFade::None, amount: 20 },
-            Self::Stereo { width: 60, reverse: false },
-            Self::Arpeggio { pattern: vec![0, 4, 7, 12] },
-            Self::Portamento { cents: 300, reverse: false },
-            Self::Stagger { pattern: vec![0, 1, 2] },
+            Self::Tremolo {
+                spacing: 2,
+                fade: TremoloFade::None,
+                amount: 20,
+            },
+            Self::Stereo {
+                width: 60,
+                reverse: false,
+            },
+            Self::Arpeggio {
+                pattern: vec![0, 4, 7, 12],
+            },
+            Self::Portamento {
+                cents: 300,
+                reverse: false,
+            },
+            Self::Stagger {
+                pattern: vec![0, 1, 2],
+            },
             Self::Chorus { detune: 40 },
-            Self::SetVelocity { value: 100, percent: false },
+            Self::SetVelocity {
+                value: 100,
+                percent: false,
+            },
             Self::SetPanning { value: 0 },
-            Self::SetPitch { value: 0, additive: false },
+            Self::SetPitch {
+                value: 0,
+                additive: false,
+            },
             Self::SetInstrument { value: 0 },
         ]
     }
@@ -134,14 +186,19 @@ pub fn transform(items: Vec<(i64, i64, Note)>, m: &Macro) -> Vec<(i64, i64, Note
             let fade_in = matches!(m, Macro::FadeIn);
             for (ci, &x) in col_keys.iter().enumerate() {
                 let factor = if ncol <= 1 {
-                    if fade_in { 0.0 } else { 1.0 }
+                    if fade_in {
+                        0.0
+                    } else {
+                        1.0
+                    }
                 } else if fade_in {
                     ci as f32 / (ncol - 1) as f32
                 } else {
                     1.0 - ci as f32 / (ncol - 1) as f32
                 };
                 for &(xx, y, mut n) in &cols[&x] {
-                    n.velocity = ((n.velocity as f32 * factor).ceil() as i32).clamp(1, VEL_MAX as i32) as u8;
+                    n.velocity =
+                        ((n.velocity as f32 * factor).ceil() as i32).clamp(1, VEL_MAX as i32) as u8;
                     out.push((xx, y, n));
                 }
             }
@@ -254,7 +311,9 @@ pub fn transform(items: Vec<(i64, i64, Note)>, m: &Macro) -> Vec<(i64, i64, Note
         Macro::SetVelocity { value, percent } => {
             for (x, y, mut n) in items {
                 n.velocity = if *percent {
-                    ((n.velocity as f32) * (*value as f32 / 100.0)).round().clamp(0.0, VEL_MAX as f32) as u8
+                    ((n.velocity as f32) * (*value as f32 / 100.0))
+                        .round()
+                        .clamp(0.0, VEL_MAX as f32) as u8
                 } else {
                     (*value).min(VEL_MAX)
                 };
@@ -284,7 +343,11 @@ pub fn transform(items: Vec<(i64, i64, Note)>, m: &Macro) -> Vec<(i64, i64, Note
                 out.push((x, y, n));
             }
         }
-        Macro::Tremolo { spacing, fade, amount } => {
+        Macro::Tremolo {
+            spacing,
+            fade,
+            amount,
+        } => {
             let sp = (*spacing).clamp(1, 8) as i64;
             let total_out = ncol as i64 * sp;
             for (ci, &x) in col_keys.iter().enumerate() {
@@ -292,7 +355,11 @@ pub fn transform(items: Vec<(i64, i64, Note)>, m: &Macro) -> Vec<(i64, i64, Note
                     let _ = k;
                     for j in 0..sp {
                         let nx = xx * sp + j;
-                        let progress = if total_out <= 1 { 0.0 } else { (ci as f64 * sp as f64 + j as f64) / total_out as f64 };
+                        let progress = if total_out <= 1 {
+                            0.0
+                        } else {
+                            (ci as f64 * sp as f64 + j as f64) / total_out as f64
+                        };
                         let env = match fade {
                             TremoloFade::None => 0,
                             TremoloFade::In => (amount.abs() as f64 * progress) as i32,
@@ -333,7 +400,7 @@ impl Document {
             .map(|n| (sel.x + n.dx as i64, sel.y + n.dy as i64, n.note))
             .collect();
         let result = transform(abs, m);
-        let mut tx = self.begin(format!("宏: {}", m.name()));
+        let mut tx = self.begin(format!("{}: {}", crate::tr("Macro", "宏"), m.label()));
         tx.track_selection();
         let new_sel = selection_from_absolute(&result);
         *tx.selection() = new_sel;
@@ -357,7 +424,12 @@ fn selection_from_absolute(items: &[(i64, i64, Note)]) -> Selection {
         .collect();
     notes.sort_by_key(|n| (n.dx, n.dy));
     notes.dedup_by_key(|n| (n.dx, n.dy));
-    let mut s = Selection { x: minx, y: miny, notes, ..Default::default() };
+    let mut s = Selection {
+        x: minx,
+        y: miny,
+        notes,
+        ..Default::default()
+    };
     s.recalc_size();
     s
 }
@@ -403,7 +475,11 @@ mod tests {
     fn tremolo_expands_notes() {
         let mut d = doc_with_column();
         d.select_rect(0, 0, 7, 0, false, false, false);
-        d.run_macro(&Macro::Tremolo { spacing: 2, fade: TremoloFade::None, amount: 0 });
+        d.run_macro(&Macro::Tremolo {
+            spacing: 2,
+            fade: TremoloFade::None,
+            amount: 0,
+        });
         assert_eq!(d.selection.len(), 16);
     }
 
@@ -423,7 +499,10 @@ mod tests {
     fn stereo_alternates_pan() {
         let mut d = doc_with_column();
         d.select_rect(0, 0, 7, 0, false, false, false);
-        d.run_macro(&Macro::Stereo { width: 60, reverse: false });
+        d.run_macro(&Macro::Stereo {
+            width: 60,
+            reverse: false,
+        });
         assert_eq!(d.selection.at(0, 0).unwrap().panning, 40);
         assert_eq!(d.selection.at(1, 0).unwrap().panning, 160);
     }
@@ -436,7 +515,10 @@ mod tests {
         let before = d.history.len();
         d.run_macro(&Macro::Vibrato);
         d.run_macro(&Macro::FadeIn);
-        d.run_macro(&Macro::Stereo { width: 60, reverse: false });
+        d.run_macro(&Macro::Stereo {
+            width: 60,
+            reverse: false,
+        });
         assert_eq!(d.history.len(), before);
         assert!(d.selection.is_empty());
         let n = d.song.get(0, 0).unwrap();
@@ -452,7 +534,9 @@ mod tests {
         d.place_note(0, 1, Note::new(0, 45));
         d.place_note(0, 2, Note::new(0, 45));
         d.select_rect(0, 0, 0, 2, false, false, false);
-        d.run_macro(&Macro::Arpeggio { pattern: vec![0, 4, 7] });
+        d.run_macro(&Macro::Arpeggio {
+            pattern: vec![0, 4, 7],
+        });
         assert_eq!(d.selection.at(0, 0).unwrap().key, 45);
         assert_eq!(d.selection.at(0, 1).unwrap().key, 49);
         assert_eq!(d.selection.at(0, 2).unwrap().key, 52);

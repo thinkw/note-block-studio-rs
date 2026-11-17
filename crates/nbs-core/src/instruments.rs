@@ -17,29 +17,129 @@ pub struct Instrument {
 }
 
 pub const INSTRUMENTS: [Instrument; 20] = [
-    Instrument { name: "Harp",             color: ( 96, 190, 130), shape: 0, short: "Hp" },
-    Instrument { name: "Double Bass",      color: ( 92, 140, 190), shape: 1, short: "DB" },
-    Instrument { name: "Bass Drum",        color: (190,  96,  96), shape: 1, short: "BD" },
-    Instrument { name: "Snare Drum",       color: (206, 150,  78), shape: 2, short: "SD" },
-    Instrument { name: "Click",            color: (150, 150, 160), shape: 3, short: "Ck" },
-    Instrument { name: "Guitar",           color: (176, 128, 190), shape: 0, short: "Gt" },
-    Instrument { name: "Flute",            color: (126, 196, 196), shape: 2, short: "Fl" },
-    Instrument { name: "Bell",             color: (220, 196,  96), shape: 1, short: "Bl" },
-    Instrument { name: "Chime",            color: (140, 206, 216), shape: 3, short: "Ch" },
-    Instrument { name: "Xylophone",        color: (206, 126, 126), shape: 0, short: "Xy" },
-    Instrument { name: "Iron Xylophone",   color: (160, 164, 172), shape: 0, short: "IX" },
-    Instrument { name: "Cow Bell",         color: (196, 176, 110), shape: 2, short: "CB" },
-    Instrument { name: "Didgeridoo",       color: (150, 116,  86), shape: 1, short: "Dg" },
-    Instrument { name: "Bit",              color: (120, 170, 220), shape: 3, short: "Bt" },
-    Instrument { name: "Banjo",            color: (216, 146,  96), shape: 0, short: "Bj" },
-    Instrument { name: "Pling",            color: (176, 196, 116), shape: 2, short: "Pl" },
+    Instrument {
+        name: "Harp",
+        color: (96, 190, 130),
+        shape: 0,
+        short: "Hp",
+    },
+    Instrument {
+        name: "Double Bass",
+        color: (92, 140, 190),
+        shape: 1,
+        short: "DB",
+    },
+    Instrument {
+        name: "Bass Drum",
+        color: (190, 96, 96),
+        shape: 1,
+        short: "BD",
+    },
+    Instrument {
+        name: "Snare Drum",
+        color: (206, 150, 78),
+        shape: 2,
+        short: "SD",
+    },
+    Instrument {
+        name: "Click",
+        color: (150, 150, 160),
+        shape: 3,
+        short: "Ck",
+    },
+    Instrument {
+        name: "Guitar",
+        color: (176, 128, 190),
+        shape: 0,
+        short: "Gt",
+    },
+    Instrument {
+        name: "Flute",
+        color: (126, 196, 196),
+        shape: 2,
+        short: "Fl",
+    },
+    Instrument {
+        name: "Bell",
+        color: (220, 196, 96),
+        shape: 1,
+        short: "Bl",
+    },
+    Instrument {
+        name: "Chime",
+        color: (140, 206, 216),
+        shape: 3,
+        short: "Ch",
+    },
+    Instrument {
+        name: "Xylophone",
+        color: (206, 126, 126),
+        shape: 0,
+        short: "Xy",
+    },
+    Instrument {
+        name: "Iron Xylophone",
+        color: (160, 164, 172),
+        shape: 0,
+        short: "IX",
+    },
+    Instrument {
+        name: "Cow Bell",
+        color: (196, 176, 110),
+        shape: 2,
+        short: "CB",
+    },
+    Instrument {
+        name: "Didgeridoo",
+        color: (150, 116, 86),
+        shape: 1,
+        short: "Dg",
+    },
+    Instrument {
+        name: "Bit",
+        color: (120, 170, 220),
+        shape: 3,
+        short: "Bt",
+    },
+    Instrument {
+        name: "Banjo",
+        color: (216, 146, 96),
+        shape: 0,
+        short: "Bj",
+    },
+    Instrument {
+        name: "Pling",
+        color: (176, 196, 116),
+        shape: 2,
+        short: "Pl",
+    },
     // 铜块一族的配色是装机版自带 `instrumenttextures.zip` 里对应方块贴图
     // （copper_block / exposed_copper / weathered_copper / oxidized_copper，16×16 RGB）
     // 的逐像素平均值，形状按「整块立方体」取 0，与铁块/骨块一族一致。
-    Instrument { name: "Trumpet",           color: (160, 101,  95), shape: 0, short: "Tr" },
-    Instrument { name: "Exposed Trumpet",   color: (147, 110, 107), shape: 0, short: "Ex" },
-    Instrument { name: "Weathered Trumpet", color: (107, 132, 114), shape: 0, short: "We" },
-    Instrument { name: "Oxidized Trumpet",  color: ( 96, 127, 123), shape: 0, short: "Ox" },
+    Instrument {
+        name: "Trumpet",
+        color: (160, 101, 95),
+        shape: 0,
+        short: "Tr",
+    },
+    Instrument {
+        name: "Exposed Trumpet",
+        color: (147, 110, 107),
+        shape: 0,
+        short: "Ex",
+    },
+    Instrument {
+        name: "Weathered Trumpet",
+        color: (107, 132, 114),
+        shape: 0,
+        short: "We",
+    },
+    Instrument {
+        name: "Oxidized Trumpet",
+        color: (96, 127, 123),
+        shape: 0,
+        short: "Ox",
+    },
 ];
 
 pub fn instrument(index: u8) -> Option<&'static Instrument> {
@@ -49,7 +149,11 @@ pub fn instrument(index: u8) -> Option<&'static Instrument> {
 pub fn instrument_name(index: u8) -> String {
     match instrument(index) {
         Some(i) => i.name.to_string(),
-        None => format!("自定义音色 {}", index - FIRST_CUSTOM_INDEX + 1),
+        None => format!(
+            "{} {}",
+            crate::tr("Custom instrument", "自定义音色"),
+            index - FIRST_CUSTOM_INDEX + 1,
+        ),
     }
 }
 
@@ -72,5 +176,7 @@ pub fn instrument_color(index: u8) -> (u8, u8, u8) {
 }
 
 pub fn instrument_shape(index: u8) -> u8 {
-    instrument(index).map(|i| i.shape).unwrap_or((index % 4) as u8)
+    instrument(index)
+        .map(|i| i.shape)
+        .unwrap_or((index % 4) as u8)
 }

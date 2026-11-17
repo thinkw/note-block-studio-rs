@@ -8,8 +8,8 @@ use std::fmt;
 use std::path::Path;
 
 use crate::model::{
-    CustomInstrument, Layer, LockMode, Note, PAN_CENTER, Song, SongMeta, FIRST_CUSTOM_INDEX,
-    KEY_MAX,
+    CustomInstrument, Layer, LockMode, Note, Song, SongMeta, FIRST_CUSTOM_INDEX, KEY_MAX,
+    PAN_CENTER,
 };
 
 /// 本程序自身的 NBS 版本（原版 `nbs_version`）：新建曲默认写到这个版本。
@@ -27,11 +27,25 @@ pub enum NbsError {
 impl fmt::Display for NbsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io(e) => write!(f, "IO 错误: {e}"),
-            Self::UnexpectedEof(what) => write!(f, "文件意外结束（读取 {what} 时）"),
-            Self::UnsupportedVersion(v) => {
-                write!(f, "不支持的 NBS 版本: {v}（最高支持 {MAX_NBS_VERSION}）")
-            }
+            Self::Io(e) => write!(f, "{}: {e}", crate::tr("IO error", "IO 错误")),
+            Self::UnexpectedEof(what) => write!(
+                f,
+                "{}",
+                if crate::lang() == 1 {
+                    format!("文件意外结束（读取 {what} 时）")
+                } else {
+                    format!("Unexpected end of file while reading {what}")
+                }
+            ),
+            Self::UnsupportedVersion(v) => write!(
+                f,
+                "{}",
+                if crate::lang() == 1 {
+                    format!("不支持的 NBS 版本: {v}（最高支持 {MAX_NBS_VERSION}）")
+                } else {
+                    format!("Unsupported NBS version {v} (up to {MAX_NBS_VERSION})")
+                }
+            ),
         }
     }
 }
@@ -82,8 +96,8 @@ impl<'a> Reader<'a> {
         Ok(i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
     fn string(&mut self) -> Result<String, NbsError> {
-        let len = self.i32("字符串长度")?.max(0) as usize;
-        let b = self.take(len, "字符串内容")?;
+        let len = self.i32(crate::tr("string length", "字符串长度"))?.max(0) as usize;
+        let b = self.take(len, crate::tr("string body", "字符串内容"))?;
         Ok(String::from_utf8_lossy(b).into_owned())
     }
 }
@@ -94,7 +108,9 @@ struct Writer {
 
 impl Writer {
     fn new() -> Self {
-        Self { data: Vec::with_capacity(4096) }
+        Self {
+            data: Vec::with_capacity(4096),
+        }
     }
     fn u8(&mut self, v: u8) {
         self.data.push(v);
@@ -121,43 +137,46 @@ pub fn load_bytes(bytes: &[u8]) -> Result<Song, NbsError> {
     let mut song = Song::new();
 
     // 前两个字节为 0 表示带版本号的新格式；否则是 v0 老格式（首 u16 = 歌曲长度）。
-    let first = r.u16("格式标志")?;
+    let first = r.u16(crate::tr("format marker", "格式标志"))?;
     let version: u8;
     let first_custom: u8;
     if first == 0 {
-        version = r.u8("NBS 版本")?;
+        version = r.u8(crate::tr("NBS version", "NBS 版本"))?;
         if version > MAX_NBS_VERSION {
             return Err(NbsError::UnsupportedVersion(version));
         }
-        first_custom = r.u8("首个自定义乐器索引")?;
+        first_custom = r.u8(crate::tr(
+            "first custom instrument index",
+            "首个自定义乐器索引",
+        ))?;
         if version >= 3 {
-            let _length = r.u16("歌曲长度")?;
+            let _length = r.u16(crate::tr("song length", "歌曲长度"))?;
         }
     } else {
         version = 0;
         first_custom = 0;
     }
 
-    let layer_count = r.u16("图层数")? as usize;
+    let layer_count = r.u16(crate::tr("layer count", "图层数"))? as usize;
     let mut meta = SongMeta::default();
     meta.name = r.string()?;
     meta.author = r.string()?;
     meta.original_author = r.string()?;
     meta.description = r.string()?;
-    meta.tempo = (r.u16("速度")? as f32 / 100.0).max(0.01);
-    meta.auto_save = r.u8("自动保存")? != 0;
-    meta.auto_save_mins = r.u8("自动保存间隔")?;
-    meta.time_signature = r.u8("拍号")?.clamp(2, 8);
-    meta.minutes_spent = r.i32("工作时间")?.max(0);
-    meta.left_clicks = r.i32("左键次数")?.max(0);
-    meta.right_clicks = r.i32("右键次数")?.max(0);
-    meta.blocks_added = r.i32("添加音符数")?.max(0);
-    meta.blocks_removed = r.i32("删除音符数")?.max(0);
+    meta.tempo = (r.u16(crate::tr("tempo", "速度"))? as f32 / 100.0).max(0.01);
+    meta.auto_save = r.u8(crate::tr("autosave", "自动保存"))? != 0;
+    meta.auto_save_mins = r.u8(crate::tr("autosave interval", "自动保存间隔"))?;
+    meta.time_signature = r.u8(crate::tr("time signature", "拍号"))?.clamp(2, 8);
+    meta.minutes_spent = r.i32(crate::tr("minutes spent", "工作时间"))?.max(0);
+    meta.left_clicks = r.i32(crate::tr("left clicks", "左键次数"))?.max(0);
+    meta.right_clicks = r.i32(crate::tr("right clicks", "右键次数"))?.max(0);
+    meta.blocks_added = r.i32(crate::tr("blocks added", "添加音符数"))?.max(0);
+    meta.blocks_removed = r.i32(crate::tr("blocks removed", "删除音符数"))?.max(0);
     meta.midi_file = r.string()?;
     if version >= 4 {
-        meta.loop_enabled = r.u8("循环开关")? != 0;
-        meta.loop_max = r.u8("循环次数")?;
-        meta.loop_start = r.u16("循环起点")?;
+        meta.loop_enabled = r.u8(crate::tr("loop enabled", "循环开关"))? != 0;
+        meta.loop_max = r.u8(crate::tr("loop count", "循环次数"))?;
+        meta.loop_start = r.u16(crate::tr("loop start", "循环起点"))?;
     }
     meta.save_version = version;
     song.meta = meta;
@@ -165,25 +184,25 @@ pub fn load_bytes(bytes: &[u8]) -> Result<Song, NbsError> {
     // 音符区：tick 与 layer 都是相对跳跃 RLE。
     let mut tick: i64 = -1;
     loop {
-        let jump = r.u16("tick 跳跃")?;
+        let jump = r.u16(crate::tr("tick jump", "tick 跳跃"))?;
         if jump == 0 {
             break;
         }
         tick += jump as i64;
         let mut layer: i64 = -1;
         loop {
-            let ljump = r.u16("layer 跳跃")?;
+            let ljump = r.u16(crate::tr("layer jump", "layer 跳跃"))?;
             if ljump == 0 {
                 break;
             }
             layer += ljump as i64;
-            let mut ins = r.u8("乐器")?;
-            let key = r.u8("音高")?.min(KEY_MAX);
+            let mut ins = r.u8(crate::tr("instrument", "乐器"))?;
+            let key = r.u8(crate::tr("key", "音高"))?.min(KEY_MAX);
             let (velocity, panning, pitch) = if version >= 4 {
                 (
-                    r.u8("力度")?,
-                    r.u8("声像")?,
-                    r.i16("微调")?,
+                    r.u8(crate::tr("velocity", "力度"))?,
+                    r.u8(crate::tr("panning", "声像"))?,
+                    r.i16(crate::tr("pitch", "微调"))?,
                 )
             } else {
                 (100, 100, 0)
@@ -201,7 +220,13 @@ pub fn load_bytes(bytes: &[u8]) -> Result<Song, NbsError> {
                 song.set(
                     tick as u32,
                     layer as u32,
-                    Note { instrument: ins, key, velocity, panning, pitch },
+                    Note {
+                        instrument: ins,
+                        key,
+                        velocity,
+                        panning,
+                        pitch,
+                    },
                 );
             }
         }
@@ -213,12 +238,12 @@ pub fn load_bytes(bytes: &[u8]) -> Result<Song, NbsError> {
         let mut layer = Layer::default();
         layer.name = r.string()?;
         if version >= 4 {
-            layer.lock = LockMode::from_byte(r.u8("图层锁定")?);
+            layer.lock = LockMode::from_byte(r.u8(crate::tr("layer lock", "图层锁定"))?);
         }
-        let vol = r.u8("图层音量")?;
+        let vol = r.u8(crate::tr("layer volume", "图层音量"))?;
         layer.volume = if vol == 255 { 100 } else { vol.min(100) };
         if version >= 2 {
-            layer.stereo = r.u8("图层声像")?;
+            layer.stereo = r.u8(crate::tr("layer stereo", "图层声像"))?;
         }
         song.layers.push(layer);
     }
@@ -229,13 +254,13 @@ pub fn load_bytes(bytes: &[u8]) -> Result<Song, NbsError> {
 
     // 自定义乐器（可选尾部）。
     if !r.eof() {
-        let count = r.u8("自定义乐器数")?;
+        let count = r.u8(crate::tr("custom instrument count", "自定义乐器数"))?;
         for _ in 0..count {
             song.custom_instruments.push(CustomInstrument {
                 name: r.string()?,
                 filename: r.string()?,
-                key: r.u8("采样基准音高")?,
-                press: r.u8("按键发声")? != 0,
+                key: r.u8(crate::tr("sample base key", "采样基准音高"))?,
+                press: r.u8(crate::tr("press sound", "按键发声"))? != 0,
             });
         }
     }
@@ -539,8 +564,17 @@ mod tests {
             // 用读到的版本重新序列化，再读回来，音符数与图层数必须一致
             let bytes = save_bytes(&song, song.meta.save_version).unwrap();
             let back = load_bytes(&bytes).unwrap();
-            assert_eq!(back.total_blocks, song.total_blocks, "{:?} 音符数不一致", path);
-            assert_eq!(back.layers.len(), song.layers.len(), "{:?} 图层数不一致", path);
+            assert_eq!(
+                back.total_blocks, song.total_blocks,
+                "{:?} 音符数不一致",
+                path
+            );
+            assert_eq!(
+                back.layers.len(),
+                song.layers.len(),
+                "{:?} 图层数不一致",
+                path
+            );
             println!(
                 "  {:?}: v{}, {} 音符, {} 图层, {:.2} t/s, {} ticks",
                 path.file_name().unwrap_or_default(),

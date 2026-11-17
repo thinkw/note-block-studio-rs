@@ -4,14 +4,17 @@
 use std::path::PathBuf;
 
 use egui::Context;
-use nbs_audio::{export_wav, ExportOptions, EXTENDED_MAX_VOICES, DEFAULT_MAX_VOICES};
+use nbs_audio::{export_wav, ExportOptions, DEFAULT_MAX_VOICES, EXTENDED_MAX_VOICES};
 use nbs_core::model::{
     panning_velocity_to_short, short_to_panning_velocity, LockMode, Note, Song, SongMeta, KEY_MAX,
-    PAN_MAX, VEL_MAX, PIT_MAX,
+    PAN_MAX, PIT_MAX, VEL_MAX,
 };
 use nbs_core::Macro;
 
-use crate::state::{DialogAction, EditMode, EditorState, FileDialog, Flag, Modal, ModalQueue, PrefsFolder, WindowKind};
+use crate::state::{
+    DialogAction, EditMode, EditorState, FileDialog, Flag, Modal, ModalQueue, PrefsFolder,
+    WindowKind,
+};
 use crate::theme::{Theme, ThemeKind};
 use crate::tr;
 
@@ -34,14 +37,36 @@ pub enum Command {
     SelectAll,
     Deselect,
     InvertSelection,
-    SelectByInstrument { instrument: u8, invert: bool },
-    PlaceNote { tick: u32, layer: u32 },
+    SelectByInstrument {
+        instrument: u8,
+        invert: bool,
+    },
+    PlaceNote {
+        tick: u32,
+        layer: u32,
+    },
     /// 速度变换编辑窗「确定」：pit = BPM（原版 `h_changeblock`）。
-    SetEventTempo { tick: u32, layer: u32, bpm: i64 },
+    SetEventTempo {
+        tick: u32,
+        layer: u32,
+        bpm: i64,
+    },
     /// 消音器编辑窗「确定」：pit = 起始层，终止层编码进声像 + 力度。
-    SetEventStopper { tick: u32, layer: u32, start: i64, until: u64 },
-    RemoveNote { tick: u32, layer: u32 },
-    PickNote { tick: u32, layer: u32, all: bool },
+    SetEventStopper {
+        tick: u32,
+        layer: u32,
+        start: i64,
+        until: u64,
+    },
+    RemoveNote {
+        tick: u32,
+        layer: u32,
+    },
+    PickNote {
+        tick: u32,
+        layer: u32,
+        all: bool,
+    },
     SelectRect {
         x0: u32,
         y0: u32,
@@ -114,7 +139,10 @@ pub enum Command {
     FixTempoSchematic,
     FixTempoDatapack,
     /// 原版 `select_outside(lower, higher)`，按钮点完跟着 `windowclose = 1`。
-    SelectOutside { lower: bool, higher: bool },
+    SelectOutside {
+        lower: bool,
+        higher: bool,
+    },
     /// 原版 `select_custom()`，同样跟着 `windowclose = 1`。
     SelectCustom,
     /// 兼容性窗口「转换音符」：先 `question()`，答「是」才走下一条。
@@ -124,7 +152,12 @@ pub enum Command {
     /// 「保存资源包」= 原版 `datapack_getextranotes()`，兼容性窗口和数据包导出窗口都有。
     SaveExtraNotesPack,
     /// 鼠标悬停在音符上滚轮调整其属性（对应原版 `changepitch`）。
-    WheelOnNote { tick: u32, layer: u32, delta: i32, shift: bool },
+    WheelOnNote {
+        tick: u32,
+        layer: u32,
+        delta: i32,
+        shift: bool,
+    },
     /// 原版 `mousewheel = 1`：滚轮在音色表上前后挪一格，力度/声像/微调复位并试听。
     WheelInstrument(i32),
     /// 原版 `mousewheel = 2`：滚轮在琴键上前后挪一格，同样复位并试听。
@@ -174,8 +207,11 @@ pub enum Command {
 /// 交给 `EditorState::spawn_remove_effects` 生成淡出边框（剪切 / 删除共用）。
 fn spawn_selection_effects(state: &mut EditorState) {
     let sel = &state.doc.selection;
-    let cells: Vec<(i64, i64)> =
-        sel.notes.iter().map(|n| (sel.x + n.dx as i64, sel.y + n.dy as i64)).collect();
+    let cells: Vec<(i64, i64)> = sel
+        .notes
+        .iter()
+        .map(|n| (sel.x + n.dx as i64, sel.y + n.dy as i64))
+        .collect();
     state.spawn_remove_effects(cells);
 }
 
@@ -337,7 +373,10 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             let (x, y) = state
                 .hover_cell
                 .map(|(t, l)| (t as i64, l as i64))
-                .unwrap_or((state.viewport.start_tick as i64, state.viewport.start_layer as i64));
+                .unwrap_or((
+                    state.viewport.start_tick as i64,
+                    state.viewport.start_layer as i64,
+                ));
             state.doc.paste(x, y);
             state.set_message(tr(
                 "Pasted (floating selection; drag to place)",
@@ -348,7 +387,10 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             let (x, y) = state
                 .hover_cell
                 .map(|(t, l)| (t as i64, l as i64))
-                .unwrap_or((state.viewport.start_tick as i64, state.viewport.start_layer as i64));
+                .unwrap_or((
+                    state.viewport.start_tick as i64,
+                    state.viewport.start_layer as i64,
+                ));
             if text.contains('|') {
                 state.doc.paste_text(&text, x, y);
                 state.set_message(tr("Pasted from clipboard text", "已从剪贴板文本粘贴"));
@@ -384,12 +426,10 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             let brush = state.current;
             let name = state.doc.song.instrument_name(brush.instrument).to_string();
             let existing = state.doc.song.get(tick, layer);
-            let existing_is_event = existing
-                .as_ref()
-                .is_some_and(|n| {
-                    let n = state.doc.song.instrument_name(n.instrument);
-                    n == nbs_core::TEMPO_CHANGER_NAME || n == nbs_core::SOUND_STOPPER_NAME
-                });
+            let existing_is_event = existing.as_ref().is_some_and(|n| {
+                let n = state.doc.song.instrument_name(n.instrument);
+                n == nbs_core::TEMPO_CHANGER_NAME || n == nbs_core::SOUND_STOPPER_NAME
+            });
             match name.as_str() {
                 nbs_core::TEMPO_CHANGER_NAME => {
                     let bpm = if existing_is_event {
@@ -399,7 +439,10 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                         // （窗口校验也只收 < 32768），这里截断，普通落格路径不受影响。
                         let bpm = ((state.doc.song.meta.tempo as f64 * 15.0) as i64)
                             .clamp(0, i16::MAX as i64) as i16;
-                        let note = Note { pitch: bpm, ..brush };
+                        let note = Note {
+                            pitch: bpm,
+                            ..brush
+                        };
                         if existing.is_some() {
                             state.doc.change_note_raw(tick, layer, note);
                         } else {
@@ -450,7 +493,12 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         Command::SetEventTempo { tick, layer, bpm } => {
             state.doc.set_event_tempo(tick, layer, bpm);
         }
-        Command::SetEventStopper { tick, layer, start, until } => {
+        Command::SetEventStopper {
+            tick,
+            layer,
+            start,
+            until,
+        } => {
             state.doc.set_event_stopper(tick, layer, start, until);
         }
         Command::RemoveNote { tick, layer } => {
@@ -471,13 +519,10 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     .selection
                     .contains(tick as i64, layer as i64)
                     .then(|| {
-                        state
-                            .doc
-                            .selection
-                            .at(
-                                (tick as i64 - state.doc.selection.x) as u32,
-                                (layer as i64 - state.doc.selection.y) as u32,
-                            )
+                        state.doc.selection.at(
+                            (tick as i64 - state.doc.selection.x) as u32,
+                            (layer as i64 - state.doc.selection.y) as u32,
+                        )
                     })
                     .flatten()
             }) {
@@ -504,7 +549,15 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 });
             }
         }
-        Command::SelectRect { x0, y0, x1, y1, copy, additive, subtract } => {
+        Command::SelectRect {
+            x0,
+            y0,
+            x1,
+            y1,
+            copy,
+            additive,
+            subtract,
+        } => {
             if subtract {
                 state.doc.selection_remove_rect(x0, y0, x1, y1);
             } else {
@@ -677,7 +730,9 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         Command::SeekHome => state.set_marker(0.0),
         Command::SeekEnd => state.set_marker(state.doc.song.song_length() as f64),
         Command::ToggleLoop => {
-            state.doc.edit_meta("切换循环", |m| m.loop_enabled = !m.loop_enabled);
+            state.doc.edit_meta(tr("Toggle loop", "切换循环"), |m| {
+                m.loop_enabled = !m.loop_enabled
+            });
             state.sync_loop_params();
         }
         Command::ToggleFollow => state.marker_follow = !state.marker_follow,
@@ -781,7 +836,9 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             }
             state.modals = ModalQueue {
                 items,
-                then: guard.ok().map(|_| Command::ShowWindow(WindowKind::SchematicExport)),
+                then: guard
+                    .ok()
+                    .map(|_| Command::ShowWindow(WindowKind::SchematicExport)),
             };
             if state.modals.is_empty() {
                 dispatch(state, Command::ShowWindow(WindowKind::SchematicExport), ctx);
@@ -801,7 +858,10 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         }
         Command::ResetSchematicOptions => {
             state.schematic_options.reset();
-            state.set_message(tr("Schematic export defaults restored", "导出 Schematic 的设定已还原"));
+            state.set_message(tr(
+                "Schematic export defaults restored",
+                "导出 Schematic 的设定已还原",
+            ));
         }
         Command::MidiImportRun => {
             // 原版 `import_midi()`：用窗口里那份已解析的 MIDI + 界面上的映射表落一首新歌，
@@ -833,10 +893,15 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         Command::MidiUseDefaults => {
             // 原版「使用默认值」答「是」之后：先 `midi_instruments()` 把 GM 映射恢复出厂，
             // 再按这份出厂表重刷界面四张表，最后把 w_midi_* 设成出厂值。
-            let Some(midi) = state.midi_data.clone() else { return };
+            let Some(midi) = state.midi_data.clone() else {
+                return;
+            };
             state.midi_gm = nbs_io::MidiGmTable::default();
             state.midi_options.use_defaults(&midi, &state.midi_gm);
-            state.set_message(crate::tr("MIDI import options restored", "MIDI 导入设定已还原"));
+            state.set_message(crate::tr(
+                "MIDI import options restored",
+                "MIDI 导入设定已还原",
+            ));
         }
         Command::MidiImportCancel => {
             // 原版「取消」：`songs[song].midifile = ""` 后关窗，解析好的那份 MIDI 一起丢掉，
@@ -849,7 +914,11 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         Command::ExportSchematicChecked => {
             let st = state.schematic_stats.clone();
             match nbs_io::schematic::export_check(&st, &state.schematic_options).dialog() {
-                None => dispatch(state, Command::OpenDialog(DialogAction::ExportSchematic), ctx),
+                None => dispatch(
+                    state,
+                    Command::OpenDialog(DialogAction::ExportSchematic),
+                    ctx,
+                ),
                 Some((title, msg)) => {
                     state.modals = ModalQueue::message(title, msg);
                 }
@@ -906,40 +975,59 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         Command::SetAllInstrument(ins) => state.doc.set_instrument_all(ins),
         Command::BatchVelocity(v) => {
             let v = v.min(VEL_MAX);
-            state.doc.batch_change("批量设置力度", |n| n.velocity = v);
+            state
+                .doc
+                .batch_change(tr("Set velocity", "批量设置力度"), |n| n.velocity = v);
         }
         Command::BatchPanning(v) => {
             let v = v.min(PAN_MAX);
-            state.doc.batch_change("批量设置声像", |n| n.panning = v);
+            state
+                .doc
+                .batch_change(tr("Set panning", "批量设置声像"), |n| n.panning = v);
         }
         Command::BatchPitch(v) => {
             let v = v.clamp(-PIT_MAX, PIT_MAX);
-            state.doc.batch_change("批量设置微调", |n| n.pitch = v);
+            state
+                .doc
+                .batch_change(tr("Set pitch", "批量设置微调"), |n| n.pitch = v);
         }
         Command::Tremolo(amount) => {
             // 按列交替升降力度，等价于原版 Tremolo 宏的简化版。
-            state.doc.batch_change("颤音", |n| {
+            state.doc.batch_change(tr("Vibrato", "颤音"), |n| {
                 let d = if n.key % 2 == 0 { amount } else { -amount };
                 n.velocity = (n.velocity as i32 + d).clamp(0, VEL_MAX as i32) as u8;
             });
         }
         Command::Stereo(amount) => {
             let mut i = 0i32;
-            state.doc.batch_change("立体声", |n| {
-                let d = if i % 2 == 0 { amount as i32 } else { -(amount as i32) };
+            state.doc.batch_change(tr("Stereo", "立体声"), |n| {
+                let d = if i % 2 == 0 {
+                    amount as i32
+                } else {
+                    -(amount as i32)
+                };
                 n.panning = (n.panning as i32 + d).clamp(0, PAN_MAX as i32) as u8;
                 i += 1;
             });
         }
         Command::SetTempo(t) => {
-            state.doc.edit_meta("修改速度", |m| m.tempo = t.clamp(0.25, 60.0));
+            state.doc.edit_meta(tr("Change tempo", "修改速度"), |m| {
+                m.tempo = t.clamp(0.25, 60.0)
+            });
             state.audio.clock_mut().set_tempo(state.doc.song.meta.tempo);
         }
         Command::SetTimeSignature(ts) => {
-            state.doc.edit_meta("修改拍号", |m| m.time_signature = ts.clamp(2, 8));
+            state
+                .doc
+                .edit_meta(tr("Change time signature", "修改拍号"), |m| {
+                    m.time_signature = ts.clamp(2, 8)
+                });
         }
         Command::SetSaveVersion(v) => {
-            state.doc.edit_meta("修改保存版本", |m: &mut SongMeta| m.save_version = v.min(nbs_core::nbs::MAX_NBS_VERSION));
+            state.doc.edit_meta(
+                tr("Change save version", "修改保存版本"),
+                |m: &mut SongMeta| m.save_version = v.min(nbs_core::nbs::MAX_NBS_VERSION),
+            );
         }
         Command::ClearSong => {
             state.doc.clear_all_notes();
@@ -1053,9 +1141,18 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             }
         }
         Command::SaveExtraNotesPack => {
-            dispatch(state, Command::OpenDialog(DialogAction::SaveExtraNotes), ctx);
+            dispatch(
+                state,
+                Command::OpenDialog(DialogAction::SaveExtraNotes),
+                ctx,
+            );
         }
-        Command::WheelOnNote { tick, layer, delta, shift } => {
+        Command::WheelOnNote {
+            tick,
+            layer,
+            delta,
+            shift,
+        } => {
             if let Some(mut n) = state.doc.song.get(tick, layer) {
                 match state.tool {
                     EditMode::Key => {
@@ -1113,9 +1210,13 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         Command::ChangePrefsFolder(folder) => {
             // 原版按钮里先 `message(说明, "")`，再弹 `get_save_filename_ext`。
             state.modals = ModalQueue {
-                items: [Modal { title: "", text: folder.tip().into(), yes_no: false }]
-                    .into_iter()
-                    .collect(),
+                items: [Modal {
+                    title: "",
+                    text: folder.tip().into(),
+                    yes_no: false,
+                }]
+                .into_iter()
+                .collect(),
                 then: Some(Command::OpenDialog(DialogAction::PickFolder(folder))),
             };
         }
@@ -1131,7 +1232,9 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             let start: Option<PathBuf> = match action {
                 DialogAction::OpenSong
                 | DialogAction::SaveSong
-                | DialogAction::PickFolder(PrefsFolder::Song) => Some(state.prefs.song_folder_path()),
+                | DialogAction::PickFolder(PrefsFolder::Song) => {
+                    Some(state.prefs.song_folder_path())
+                }
                 DialogAction::ImportPattern
                 | DialogAction::ExportPattern
                 | DialogAction::PickFolder(PrefsFolder::Pattern) => {
@@ -1195,7 +1298,9 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     // 原版 `songfolder = filename_dir(a)`：认的是对话框当时所在的那个目录。
                     // `windows.rs` 的目录模式直接把 `dialog.dir` 传过来，不带文件名。
                     match folder {
-                        PrefsFolder::Song => state.prefs.song_folder = Some(path.to_string_lossy().into_owned()),
+                        PrefsFolder::Song => {
+                            state.prefs.song_folder = Some(path.to_string_lossy().into_owned())
+                        }
                         PrefsFolder::Pattern => {
                             state.prefs.pattern_folder = Some(path.to_string_lossy().into_owned())
                         }
@@ -1347,7 +1452,10 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                             let (x, y) = state
                                 .hover_cell
                                 .map(|(t, l)| (t as i64, l as i64))
-                                .unwrap_or((state.viewport.start_tick as i64, state.viewport.start_layer as i64));
+                                .unwrap_or((
+                                    state.viewport.start_tick as i64,
+                                    state.viewport.start_layer as i64,
+                                ));
                             state.doc.paste(x, y);
                             state.window = None;
                             if let Some(warn) = warn {
@@ -1378,10 +1486,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                             }
                             state.modals = ModalQueue::message(
                                 crate::tr("Saved", "保存"),
-                                crate::tr(
-                                    "Resource pack saved successfully!",
-                                    "资源包保存成功！",
-                                ),
+                                crate::tr("Resource pack saved successfully!", "资源包保存成功！"),
                             );
                         }
                         Err(e) => state.set_message(if crate::lang() == 1 {
@@ -1395,7 +1500,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.file_dialog = None;
         }
         Command::RunMacro(m) => {
-            let label = m.name().to_string();
+            let label = m.label().to_string();
             state.doc.run_macro(&m);
             state.prepare_audio();
             state.set_message(if crate::lang() == 1 {
@@ -1418,18 +1523,25 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         }
         Command::ToggleExtendedVoices => {
             state.prefs.extended_voices = !state.prefs.extended_voices;
-            state.audio.clock_mut().set_max_voices(if state.prefs.extended_voices {
-                EXTENDED_MAX_VOICES
-            } else {
-                DEFAULT_MAX_VOICES
-            });
+            state
+                .audio
+                .clock_mut()
+                .set_max_voices(if state.prefs.extended_voices {
+                    EXTENDED_MAX_VOICES
+                } else {
+                    DEFAULT_MAX_VOICES
+                });
         }
         Command::ToggleMono => {
             state.prefs.mono = !state.prefs.mono;
             state.apply_audio_prefs();
         }
         Command::SetSoundsDir(dir) => {
-            state.prefs.sounds_dir = if dir.trim().is_empty() { None } else { Some(dir) };
+            state.prefs.sounds_dir = if dir.trim().is_empty() {
+                None
+            } else {
+                Some(dir)
+            };
             dispatch(state, Command::ReloadSamples, ctx);
         }
         Command::ReloadSamples => {
@@ -1463,7 +1575,9 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
 fn open_url(url: &str) {
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn();
     }
     #[cfg(not(windows))]
     {
@@ -1544,7 +1658,10 @@ fn export_audio(state: &mut EditorState, path: &std::path::Path) {
         state.set_message(if crate::lang() == 1 {
             format!("导出音频失败：未知格式 {:?}", state.prefs.export_format)
         } else {
-            format!("Audio export failed: unknown format {:?}", state.prefs.export_format)
+            format!(
+                "Audio export failed: unknown format {:?}",
+                state.prefs.export_format
+            )
         });
         return;
     };
@@ -1731,6 +1848,9 @@ mod tests {
         s.prefs.warning_schematic = true;
         // dispatch 按各自 state 的 prefs 同步全局语言；钉成中文让断言不跟本机/并行用例漂。
         s.prefs.language = 1;
+        // 缩放档出厂是 None = 系统倍率，用户把界面调到 150% 时阶梯断言就会从 1.25
+        // 变成 1.75；测试环境里钉回默认，阶梯才只由代码决定。
+        s.prefs.window_scale = None;
         s.doc.replace_song(song);
         // 开机流程会开欢迎窗，命令测试的靶子是「欢迎窗已经关掉」的裸编辑器。
         s.window = None;
@@ -1758,7 +1878,12 @@ mod tests {
         assert_eq!(state.window, None, "队列没走完不得打开导出窗口");
         assert_eq!(
             titles(&state),
-            vec!["Minecraft 兼容性", "Minecraft 兼容性", "Minecraft 兼容性", "速度"]
+            vec![
+                "Minecraft 兼容性",
+                "Minecraft 兼容性",
+                "Minecraft 兼容性",
+                "速度"
+            ]
         );
         assert_eq!(
             texts(&state),
@@ -1770,7 +1895,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            state.modals.items.iter().map(|m| m.yes_no).collect::<Vec<_>>(),
+            state
+                .modals
+                .items
+                .iter()
+                .map(|m| m.yes_no)
+                .collect::<Vec<_>>(),
             vec![true, true, true, false],
             "只有提问会中断导出，速度提示是 message"
         );
@@ -1787,7 +1917,10 @@ mod tests {
         dispatch(&mut state, Command::AnswerModal(true), &ctx);
         assert!(state.modals.is_empty());
         assert_eq!(state.window, Some(WindowKind::SchematicExport));
-        assert_eq!(state.schematic_options.tempo_mode, 2, "3.0 t/s 对应 2.5 红石刻档");
+        assert_eq!(
+            state.schematic_options.tempo_mode, 2,
+            "3.0 t/s 对应 2.5 红石刻档"
+        );
     }
 
     /// 原版 add_block_manual 结尾：落速度变换写默认 BPM（tempo*15）并弹编辑窗；
@@ -1915,13 +2048,37 @@ mod tests {
                 press: true,
             },
         ];
-        song.set(2, 0, Note { instrument: tempo_ins, key: 50, velocity: 80, panning: 60, pitch: 150 });
-        song.set(3, 0, Note { instrument: stopper_ins, key: 40, velocity: 100, panning: 157, pitch: 39 });
+        song.set(
+            2,
+            0,
+            Note {
+                instrument: tempo_ins,
+                key: 50,
+                velocity: 80,
+                panning: 60,
+                pitch: 150,
+            },
+        );
+        song.set(
+            3,
+            0,
+            Note {
+                instrument: stopper_ins,
+                key: 40,
+                velocity: 100,
+                panning: 157,
+                pitch: 39,
+            },
+        );
         let mut state = state_with(song);
 
         dispatch(
             &mut state,
-            Command::SetEventTempo { tick: 2, layer: 0, bpm: 400 },
+            Command::SetEventTempo {
+                tick: 2,
+                layer: 0,
+                bpm: 400,
+            },
             &ctx,
         );
         let n = state.doc.song.get(2, 0).unwrap();
@@ -1930,7 +2087,12 @@ mod tests {
 
         dispatch(
             &mut state,
-            Command::SetEventStopper { tick: 3, layer: 0, start: 10, until: 57 },
+            Command::SetEventStopper {
+                tick: 3,
+                layer: 0,
+                start: 10,
+                until: 57,
+            },
             &ctx,
         );
         let n = state.doc.song.get(3, 0).unwrap();
@@ -2016,9 +2178,18 @@ mod tests {
         let d = nbs_io::SchematicOptions::default();
         assert_eq!(state.schematic_options.layout, d.layout);
         assert_eq!(state.schematic_options.notesperrow, d.notesperrow);
-        assert_eq!(state.schematic_options.tempo_mode, 1, "sch_exp_tempo 不在默认值表里");
-        assert!(state.schematic_options.structure, "structure 是全局变量，不被重置");
-        assert!(state.schematic_options.command_block, "command_block 同样不在表里");
+        assert_eq!(
+            state.schematic_options.tempo_mode, 1,
+            "sch_exp_tempo 不在默认值表里"
+        );
+        assert!(
+            state.schematic_options.structure,
+            "structure 是全局变量，不被重置"
+        );
+        assert!(
+            state.schematic_options.command_block,
+            "command_block 同样不在表里"
+        );
     }
 
     /// 「导出」按钮的两道闸门各有一个不同标题的 message，通过后才轮到保存对话框。
@@ -2078,7 +2249,10 @@ mod tests {
 
         state.pending.push(Command::AnswerModal(true));
         state.flush(&ctx);
-        assert_eq!(state.schematic_options.layout, 1, "答「是」后队列尾部的动作照常执行");
+        assert_eq!(
+            state.schematic_options.layout, 1,
+            "答「是」后队列尾部的动作照常执行"
+        );
     }
 
     /// 保存框的文件名跟原版一致：经典格式保留原名，结构方块转小写并加下划线。
@@ -2089,13 +2263,21 @@ mod tests {
         state.doc.song.filename = Some(Path::new("Megalovania Boss.nbs").to_path_buf());
 
         state.schematic_options.structure = false;
-        dispatch(&mut state, Command::OpenDialog(DialogAction::ExportSchematic), &ctx);
+        dispatch(
+            &mut state,
+            Command::OpenDialog(DialogAction::ExportSchematic),
+            &ctx,
+        );
         let d = state.file_dialog.clone().unwrap();
         assert_eq!(d.ext, "schematic");
         assert_eq!(d.name, "Megalovania Boss.schematic");
 
         state.schematic_options.structure = true;
-        dispatch(&mut state, Command::OpenDialog(DialogAction::ExportSchematic), &ctx);
+        dispatch(
+            &mut state,
+            Command::OpenDialog(DialogAction::ExportSchematic),
+            &ctx,
+        );
         let d = state.file_dialog.clone().unwrap();
         assert_eq!(d.ext, "nbt");
         assert_eq!(d.name, "megalovania_boss.nbt");
@@ -2128,12 +2310,18 @@ mod tests {
         state.current.instrument = 0;
         state.current.velocity = 55;
         dispatch(&mut state, Command::WheelInstrument(1), &ctx);
-        assert_eq!(state.current.instrument, 1, "原版 mouse_wheel_up 往后走一格");
+        assert_eq!(
+            state.current.instrument, 1,
+            "原版 mouse_wheel_up 往后走一格"
+        );
         assert_eq!(state.current.velocity, 100);
         dispatch(&mut state, Command::WheelInstrument(-1), &ctx);
         assert_eq!(state.current.instrument, 0);
         dispatch(&mut state, Command::WheelInstrument(-1), &ctx);
-        assert_eq!(state.current.instrument, 0, "第 0 格再往下没有位置，保持不动");
+        assert_eq!(
+            state.current.instrument, 0,
+            "第 0 格再往下没有位置，保持不动"
+        );
 
         state.current.key = 0;
         dispatch(&mut state, Command::WheelKey(-1), &ctx);
@@ -2158,10 +2346,18 @@ mod tests {
 
         // 起始目录：原版歌曲对话框只看 songfolder，当前文件在哪它不看。
         state.prefs.song_folder = Some(tmp_str.clone());
-        dispatch(&mut state, Command::OpenDialog(DialogAction::OpenSong), &ctx);
+        dispatch(
+            &mut state,
+            Command::OpenDialog(DialogAction::OpenSong),
+            &ctx,
+        );
         assert_eq!(state.file_dialog.clone().unwrap().dir, tmp);
         state.file_dialog = None;
-        dispatch(&mut state, Command::OpenDialog(DialogAction::ExportPattern), &ctx);
+        dispatch(
+            &mut state,
+            Command::OpenDialog(DialogAction::ExportPattern),
+            &ctx,
+        );
         assert_eq!(
             state.file_dialog.clone().unwrap().dir,
             nbs_io::prefs::Preferences::default_pattern_folder(),
@@ -2170,24 +2366,43 @@ mod tests {
         state.file_dialog = None;
 
         // 「还原默认」清掉自定义值，界面与对话框一起退回出厂目录。
-        dispatch(&mut state, Command::ResetPrefsFolder(PrefsFolder::Song), &ctx);
+        dispatch(
+            &mut state,
+            Command::ResetPrefsFolder(PrefsFolder::Song),
+            &ctx,
+        );
         assert_eq!(state.prefs.song_folder, None);
-        assert_eq!(state.prefs.song_folder_path(), nbs_io::prefs::Preferences::default_song_folder());
+        assert_eq!(
+            state.prefs.song_folder_path(),
+            nbs_io::prefs::Preferences::default_song_folder()
+        );
 
         // 「修改」：原版先 message 说明，答完才弹目录选择框。
-        dispatch(&mut state, Command::ChangePrefsFolder(PrefsFolder::Pattern), &ctx);
+        dispatch(
+            &mut state,
+            Command::ChangePrefsFolder(PrefsFolder::Pattern),
+            &ctx,
+        );
         assert_eq!(titles(&state), vec![""]);
         assert_eq!(texts(&state), vec!["选择导出和导入片段的文件夹"]);
         assert!(matches!(
             state.modals.then,
-            Some(Command::OpenDialog(DialogAction::PickFolder(PrefsFolder::Pattern)))
+            Some(Command::OpenDialog(DialogAction::PickFolder(
+                PrefsFolder::Pattern
+            )))
         ));
         dispatch(&mut state, Command::AnswerModal(true), &ctx);
         let d = state.file_dialog.clone().unwrap();
         assert_eq!(d.action, DialogAction::PickFolder(PrefsFolder::Pattern));
         assert_eq!(d.ext, "", "原版第 1 个参数是空过滤器串");
-        assert_eq!(d.name, "选择片段文件夹", "原版把占位串塞进文件名栏（`draw_window_preferences.gml:294`）");
-        assert!(d.save, "原版这条走的是 get_save_filename_ext，不是目录选择器");
+        assert_eq!(
+            d.name, "选择片段文件夹",
+            "原版把占位串塞进文件名栏（`draw_window_preferences.gml:294`）"
+        );
+        assert!(
+            d.save,
+            "原版这条走的是 get_save_filename_ext，不是目录选择器"
+        );
 
         // 确定：认的是对话框当时显示的目录，随后把首选项窗口放回去。
         dispatch(&mut state, Command::DialogConfirm(tmp.clone()), &ctx);
@@ -2196,7 +2411,11 @@ mod tests {
 
         // 「打开」：连出厂目录都不存在时，原版弹「该路径不存在！」。
         state.prefs.pattern_folder = Some("Z:\\nbs-rust 没有这个目录".into());
-        dispatch(&mut state, Command::OpenPrefsFolder(PrefsFolder::Pattern), &ctx);
+        dispatch(
+            &mut state,
+            Command::OpenPrefsFolder(PrefsFolder::Pattern),
+            &ctx,
+        );
         assert_eq!(titles(&state), vec!["错误"]);
         assert_eq!(texts(&state), vec!["该路径不存在！"]);
     }
@@ -2274,21 +2493,35 @@ mod tests {
         let step = |up: bool, state: &mut EditorState| {
             dispatch(
                 state,
-                if up { Command::WindowScaleUp } else { Command::WindowScaleDown },
+                if up {
+                    Command::WindowScaleUp
+                } else {
+                    Command::WindowScaleDown
+                },
                 &ctx,
             )
         };
         // 出厂是 None（= 系统倍率，测试环境里 1.0），往上第一档 1.25 而不是连续值。
         step(true, &mut state);
-        assert_eq!(state.prefs.window_scale, Some(1.25), "1.0 的上一档应是 1.25");
+        assert_eq!(
+            state.prefs.window_scale,
+            Some(1.25),
+            "1.0 的上一档应是 1.25"
+        );
         // 再往下要一路退到 0.5，中间一档都不能漏。
         for want in [1.0, 0.9, 0.8, 0.75, 0.67, 0.5] {
             step(false, &mut state);
             assert_eq!(state.prefs.window_scale, Some(want), "往下漏了一档");
         }
         step(false, &mut state);
-        assert_eq!(state.prefs.window_scale, Some(0.5), "0.5 是原版下界，不能再小");
-        for want in [0.67, 0.75, 0.8, 0.9, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0] {
+        assert_eq!(
+            state.prefs.window_scale,
+            Some(0.5),
+            "0.5 是原版下界，不能再小"
+        );
+        for want in [
+            0.67, 0.75, 0.8, 0.9, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0,
+        ] {
             step(true, &mut state);
             assert_eq!(state.prefs.window_scale, Some(want), "往上漏了一档");
         }
@@ -2307,10 +2540,16 @@ mod tests {
         let ctx = Context::default();
         let mut state = state_with(Song::new());
         state.scrub = 1; // 按住快进，和播放一样是连续重绘的来源
-        // 头两帧 egui 自己会补一次立即重绘（字体、outstanding 计数），先跑掉。
+                         // 头两帧 egui 自己会补一次立即重绘（字体、outstanding 计数），先跑掉。
         let _ = ctx.run(raw_input(), |c| state.tick_transport(c));
         let _ = ctx.run(raw_input(), |c| state.tick_transport(c));
-        for (rate, fps) in [(0u8, 30.0f64), (1, 60.0), (2, 120.0), (3, 144.0), (4, 240.0)] {
+        for (rate, fps) in [
+            (0u8, 30.0f64),
+            (1, 60.0),
+            (2, 120.0),
+            (3, 144.0),
+            (4, 240.0),
+        ] {
             state.prefs.refresh_rate = rate;
             let out = ctx.run(raw_input(), |c| state.tick_transport(c));
             let got = out
@@ -2354,7 +2593,11 @@ mod tests {
         state.prefs.window_icon = false;
         state.applied_window_icon = None;
         let new = icon_command(&ctx, &mut state).expect("出厂就该把自带的图标发给窗口");
-        assert_eq!((new.width, new.height), (256, 256), "原版那两个 .ico 只有 256 一档");
+        assert_eq!(
+            (new.width, new.height),
+            (256, 256),
+            "原版那两个 .ico 只有 256 一档"
+        );
         assert_eq!(new.rgba.len(), 256 * 256 * 4);
         // 同一档位不该每帧重发：原版只在值变化时打开重发窗口。
         let out = ctx.run(raw_input(), |c| state.tick_transport(c));
@@ -2385,7 +2628,10 @@ mod tests {
         assert_eq!(state.window, Some(WindowKind::MinecraftCompat));
         assert!(!state.is_playing(), "原版 playing = 0");
         assert!(!state.record && !state.record_armed, "原版 record = 0");
-        assert!(state.doc.selection.is_empty(), "原版 selection_place(0)：选区要落回歌曲");
+        assert!(
+            state.doc.selection.is_empty(),
+            "原版 selection_place(0)：选区要落回歌曲"
+        );
         assert_eq!(state.doc.song.total_blocks, 4);
         assert_eq!(state.mc_tab, 0, "原版开窗就从 Schematic 页开始");
     }
@@ -2395,8 +2641,8 @@ mod tests {
     #[test]
     fn play_after_reaching_the_end_restarts_from_zero() {
         let mut state = state_with(four_case_song(10.0));
-        let end_stop = state.doc.song.song_length() as f64
-            + nbs_audio::scheduler::END_STOP_MARGIN_TICKS;
+        let end_stop =
+            state.doc.song.song_length() as f64 + nbs_audio::scheduler::END_STOP_MARGIN_TICKS;
         state.audio.clock_mut().seek(end_stop);
         state.begin_playback();
         assert!(state.is_playing());
@@ -2475,7 +2721,11 @@ mod tests {
         let bytes = std::fs::read(&dst).expect("资源包应已写到所选路径");
         assert_eq!(&bytes[..2], b"PK", "复制的必须是那个 zip，不是别的文件");
         assert_eq!(bytes.len(), nbs_io::datapack::EXTRA_NOTES_ZIP.len());
-        assert_eq!(state.window, Some(WindowKind::MinecraftCompat), "选完放回原窗口");
+        assert_eq!(
+            state.window,
+            Some(WindowKind::MinecraftCompat),
+            "选完放回原窗口"
+        );
         assert_eq!(titles(&state), vec!["保存"]);
         assert_eq!(texts(&state), vec!["资源包保存成功！"]);
         let _ = std::fs::remove_file(&dst);
@@ -2527,8 +2777,15 @@ mod tests {
             egui::Color32::from_rgb(0x0a, 0x0b, 0x0c),
             "整窗背景那一档应变新色"
         );
-        assert_eq!(state.theme.accent, state.theme.accent_table[4], "派生档跟着表走");
-        assert_eq!(state.theme.accent_base, [0, 120, 212], "基色不被改色乐器覆盖");
+        assert_eq!(
+            state.theme.accent, state.theme.accent_table[4],
+            "派生档跟着表走"
+        );
+        assert_eq!(
+            state.theme.accent_base,
+            [0, 120, 212],
+            "基色不被改色乐器覆盖"
+        );
     }
 
     /// 原版 toggle_playing 的 Toggle Rainbow 分支：切换 + draw_accent_init（无消息）。
@@ -2540,7 +2797,10 @@ mod tests {
         play_and_drain(&mut state, 3.0);
         assert!(state.rainbow, "跨过该列后彩虹应打开");
         assert!(state.rainbow_hue > 0.0, "彩虹动画每帧在走");
-        assert_eq!(state.message, None, "事件乐器的切换不发消息（消息只归快捷键）");
+        assert_eq!(
+            state.message, None,
+            "事件乐器的切换不发消息（消息只归快捷键）"
+        );
         state.toggle_rainbow();
         assert!(!state.rainbow);
         assert_eq!(
@@ -2598,10 +2858,7 @@ mod tests {
         let mut state = state_with(four_case_song(10.0));
         state.doc.select_rect(50, 0, 50, 0, false, false, false);
         dispatch(&mut state, Command::Delete, &ctx);
-        assert!(
-            state.remove_effects.is_empty(),
-            "视口外的删除不生成效果"
-        );
+        assert!(state.remove_effects.is_empty(), "视口外的删除不生成效果");
     }
 
     /// 原版闸门：`theme = 3 && remove_effect`（remove_block_manual.gml:64）。
@@ -2650,10 +2907,7 @@ mod tests {
         let mut state = state_with(four_case_song(10.0));
         state.doc.song.layers[0].lock = nbs_core::model::LockMode::Locked;
         dispatch(&mut state, Command::RemoveNote { tick: 0, layer: 0 }, &ctx);
-        assert!(
-            state.remove_effects.is_empty(),
-            "锁定层拦截时不生成效果"
-        );
+        assert!(state.remove_effects.is_empty(), "锁定层拦截时不生成效果");
         assert!(state.doc.song.get(0, 0).is_some(), "音符还在");
     }
 }

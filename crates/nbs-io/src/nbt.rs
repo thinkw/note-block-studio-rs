@@ -117,9 +117,19 @@ struct Reader<'a> {
 
 impl<'a> Reader<'a> {
     fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
-        let end = self.p.checked_add(n).ok_or("NBT 偏移溢出")?;
+        let end = self
+            .p
+            .checked_add(n)
+            .ok_or(crate::tr("NBT offset overflow", "NBT 偏移溢出"))?;
         if end > self.d.len() {
-            return Err(format!("NBT 截断：需要 {n} 字节，只剩 {}", self.d.len() - self.p));
+            return Err(if crate::lang() == 1 {
+                format!("NBT 截断：需要 {n} 字节，只剩 {}", self.d.len() - self.p)
+            } else {
+                format!(
+                    "NBT truncated: {n} bytes needed, {} left",
+                    self.d.len() - self.p
+                )
+            });
         }
         let s = &self.d[self.p..end];
         self.p = end;
@@ -182,7 +192,17 @@ impl<'a> Reader<'a> {
                 let n = self.i32()?.max(0) as usize;
                 // 元素数量不能超过剩余字节，否则一个坏文件就能让这里吃掉整块内存。
                 if n > self.d.len() - self.p {
-                    return Err(format!("NBT list 声明了 {n} 个元素，但只剩 {}", self.d.len() - self.p));
+                    return Err(if crate::lang() == 1 {
+                        format!(
+                            "NBT list 声明了 {n} 个元素，但只剩 {}",
+                            self.d.len() - self.p
+                        )
+                    } else {
+                        format!(
+                            "NBT list declares {n} elements, {} bytes left",
+                            self.d.len() - self.p
+                        )
+                    });
                 }
                 let mut items = Vec::new();
                 for _ in 0..n {
@@ -210,7 +230,13 @@ impl<'a> Reader<'a> {
                 }
                 Value::List(3, v.into_iter().map(Value::Int).collect())
             }
-            other => return Err(format!("未知的 NBT 标签类型 {other}")),
+            other => {
+                return Err(if crate::lang() == 1 {
+                    format!("未知的 NBT 标签类型 {other}")
+                } else {
+                    format!("unknown NBT tag type {other}")
+                })
+            }
         })
     }
 
@@ -327,7 +353,10 @@ mod tests {
         assert_eq!(names, ["Height", "Materials", "Blocks", "TileEntities"]);
         assert_eq!(back.get("Height").and_then(Value::as_i16), Some(7));
         assert_eq!(back.get("Materials").and_then(Value::as_str), Some("Alpha"));
-        assert_eq!(back.get("Blocks").and_then(Value::as_bytes).unwrap().len(), 3);
+        assert_eq!(
+            back.get("Blocks").and_then(Value::as_bytes).unwrap().len(),
+            3
+        );
         let (ty, items) = back.get("TileEntities").unwrap().as_list().unwrap();
         assert_eq!(ty, 10);
         assert_eq!(items.len(), 1);

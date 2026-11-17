@@ -197,9 +197,7 @@ pub fn sanitize_path(s: &str) -> String {
     let mut out = String::new();
     let mut prev = '\0';
     for (i, c) in lower.chars().enumerate() {
-        let keep = c == '_'
-            || (c == '/' && prev != '/' && i > 0)
-            || c.is_ascii_alphanumeric();
+        let keep = c == '_' || (c == '/' && prev != '/' && i > 0) || c.is_ascii_alphanumeric();
         if keep {
             out.push(c);
         }
@@ -298,7 +296,13 @@ pub fn generate(song: &Song, opts: &DatapackOptions, output_stem: &str) -> Plan 
     let name = gml_string_path(&opts.name);
     let mut namespace = gml_string_path(&opts.namespace);
     let mut path = sanitize_path(&opts.path);
-    let objective = format!("nbs_{}", letters_digits(&opts.name).chars().take(10).collect::<String>());
+    let objective = format!(
+        "nbs_{}",
+        letters_digits(&opts.name)
+            .chars()
+            .take(10)
+            .collect::<String>()
+    );
     let tag = objective.clone();
 
     // 原版三分支：命名空间为空时用歌名当命名空间且不建子路径；
@@ -410,9 +414,23 @@ pub fn generate(song: &Song, opts: &DatapackOptions, output_stem: &str) -> Plan 
     if add_teams {
         // 原版写死 17 个队：先 17 行 team add，再 17 行 team modify，颜色表照抄。
         let colors = [
-            "dark_gray", "red", "black", "yellow", "light_purple", "green", "dark_red",
-            "dark_aqua", "dark_green", "blue", "aqua", "dark_blue", "dark_gray", "dark_green",
-            "gray", "gold", "white",
+            "dark_gray",
+            "red",
+            "black",
+            "yellow",
+            "light_purple",
+            "green",
+            "dark_red",
+            "dark_aqua",
+            "dark_green",
+            "blue",
+            "aqua",
+            "dark_blue",
+            "dark_gray",
+            "dark_green",
+            "gray",
+            "gold",
+            "white",
         ];
         let mut add = String::new();
         let mut rem = String::new();
@@ -436,14 +454,19 @@ pub fn generate(song: &Song, opts: &DatapackOptions, output_stem: &str) -> Plan 
     let mut by_tick: std::collections::BTreeMap<i64, Vec<(usize, nbs_core::model::Note)>> =
         std::collections::BTreeMap::new();
     for (tick, layer, note) in song.iter_notes() {
-        by_tick.entry(tick as i64).or_default().push((layer as usize, note));
+        by_tick
+            .entry(tick as i64)
+            .or_default()
+            .push((layer as usize, note));
     }
     let has_notes = |tick: i64| -> bool {
         tick >= 0 && tick <= enda && by_tick.get(&tick).map(|v| !v.is_empty()).unwrap_or(false)
     };
 
     for tick in 0..=enda {
-        let Some(cells) = by_tick.get(&tick) else { continue };
+        let Some(cells) = by_tick.get(&tick) else {
+            continue;
+        };
         let mut str = String::new();
         for (layer, note) in cells {
             if locked.get(*layer).copied().unwrap_or(false) && !opts.include_locked {
@@ -494,7 +517,13 @@ pub fn generate(song: &Song, opts: &DatapackOptions, output_stem: &str) -> Plan 
             }
 
             if opts.visualizer {
-                str.push_str(&visualizer_line(opts, index, key, blockposition, blockvolume));
+                str.push_str(&visualizer_line(
+                    opts,
+                    index,
+                    key,
+                    blockposition,
+                    blockvolume,
+                ));
             }
         }
         if tick < enda {
@@ -514,7 +543,11 @@ pub fn generate(song: &Song, opts: &DatapackOptions, output_stem: &str) -> Plan 
 
     // ---- 二分查找树
     let steps_f = (enda as f64).log2().floor() + 1.0;
-    let steps = if steps_f.is_finite() && steps_f > 0.0 { steps_f as i64 } else { 0 };
+    let steps = if steps_f.is_finite() && steps_f > 0.0 {
+        steps_f as i64
+    } else {
+        0
+    };
     let pow = 2i64.pow(steps.max(0) as u32);
     for step in 0..steps {
         let searchrange = pow / 2i64.pow(step as u32);
@@ -575,7 +608,11 @@ pub fn generate(song: &Song, opts: &DatapackOptions, output_stem: &str) -> Plan 
         }
     }
 
-    Plan { files, functionpath, objective }
+    Plan {
+        files,
+        functionpath,
+        objective,
+    }
 }
 
 /// 原版 `dat_generate` 里效果器的 summon 行，逐分支照抄（含原版自身的坐标/选择器差异）。
@@ -609,7 +646,9 @@ fn visualizer_line(
             ));
             s.push_str("Time:-120,DropItem:0,Motion:[0.0d,1.0d,1.0d]}\n");
             if opts.glow {
-                s.push_str(&format!("team join nbs_{team_number} @e[tag=nbs_{team_number}]\n"));
+                s.push_str(&format!(
+                    "team join nbs_{team_number} @e[tag=nbs_{team_number}]\n"
+                ));
             }
         }
         VisType::Fall => {
@@ -622,7 +661,9 @@ fn visualizer_line(
             ));
             s.push_str("Time:-80,DropItem:0,Motion:[0.0d,-1.3d,0.0d]}\n");
             if opts.glow {
-                s.push_str(&format!("team join nbs_{team_number} @e[tag=nbs_{team_number}]\n"));
+                s.push_str(&format!(
+                    "team join nbs_{team_number} @e[tag=nbs_{team_number}]\n"
+                ));
             }
         }
         VisType::Rise => {
@@ -635,7 +676,9 @@ fn visualizer_line(
             ));
             s.push_str("Time:-50,DropItem:0,Glowing:1,NoGravity:1,Motion:[0.0d,1.0d,0.0d]}\n");
             if opts.glow {
-                s.push_str(&format!("team join nbs_{team_number} @e[tag=nbs_{team_number}]\n"));
+                s.push_str(&format!(
+                    "team join nbs_{team_number} @e[tag=nbs_{team_number}]\n"
+                ));
             }
         }
         VisType::Bounce => {
@@ -647,7 +690,9 @@ fn visualizer_line(
             ));
             s.push_str("Time:-80,DropItem:0,Motion:[0.0d,1.3d,0.0d]}\n");
             if opts.glow {
-                s.push_str(&format!("team join nbs_{team_number} @e[tag=nbs_{team_number}]\n"));
+                s.push_str(&format!(
+                    "team join nbs_{team_number} @e[tag=nbs_{team_number}]\n"
+                ));
             }
         }
         VisType::PianoRoll => {
@@ -660,7 +705,9 @@ fn visualizer_line(
             ));
             s.push_str("Time:-50,DropItem:0,NoGravity:1,Motion:[0.0d,0.0d,2.5d]}\n");
             if opts.glow {
-                s.push_str(&format!("team join nbs_{team_number} @e[tag=nbs_{team_number}]\n"));
+                s.push_str(&format!(
+                    "team join nbs_{team_number} @e[tag=nbs_{team_number}]\n"
+                ));
             }
         }
         VisType::Fountain => {
@@ -677,7 +724,9 @@ fn visualizer_line(
             }
             if opts.glow {
                 // 原版这里用的是 ins_index（比队名少 1），照抄。
-                s.push_str(&format!("team join nbs_{team_number} @e[tag=nbs_{index}]\n"));
+                s.push_str(&format!(
+                    "team join nbs_{team_number} @e[tag=nbs_{index}]\n"
+                ));
             }
         }
         VisType::RittaiOnkyou => {
@@ -750,10 +799,18 @@ pub fn write_zip(dest: &Path, files: &[GeneratedFile]) -> Result<(), String> {
 
         let mut enc = DeflateEncoder::new(Vec::new(), Compression::default());
         enc.write_all(&data).map_err(|e| {
-            crate::tr(&format!("Compression failed: {e}"), &format!("压缩失败: {e}")).to_string()
+            crate::tr(
+                &format!("Compression failed: {e}"),
+                &format!("压缩失败: {e}"),
+            )
+            .to_string()
         })?;
         let comp = enc.finish().map_err(|e| {
-            crate::tr(&format!("Compression finish failed: {e}"), &format!("压缩结束失败: {e}")).to_string()
+            crate::tr(
+                &format!("Compression finish failed: {e}"),
+                &format!("压缩结束失败: {e}"),
+            )
+            .to_string()
         })?;
 
         let offset = out.len() as u32;
@@ -875,19 +932,31 @@ pub fn export(song: &Song, opts: &DatapackOptions, dest: &Path) -> Result<Datapa
 /// 字节直接取自装机版 `D:\software\NBS\Data\extranotes.zip`（462095 字节，
 /// md5 `152915fa5ddf5d53610b2b6f4e686e6e`），不是我们生成的——原版那条按钮
 /// 就是 `file_copy(data_directory + "extranotes.zip", fn)` 原样复制。
-pub const EXTRA_NOTES_ZIP: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/extranotes.zip"));
+pub const EXTRA_NOTES_ZIP: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/extranotes.zip"
+));
 
 /// 原版 `datapack_getextranotes()`：把上面那份资源包写到用户选的路径。
 /// 原版只在复制成功时报「资源包保存成功！」，源文件不在时什么都不做；
 /// 我们的源文件是内嵌的，因此只剩写盘失败这一条错误路径。
 pub fn save_extra_notes_pack(dest: &Path) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("创建 {} 失败: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            if crate::lang() == 1 {
+                format!("创建 {} 失败: {e}", parent.display())
+            } else {
+                format!("failed to create {}: {e}", parent.display())
+            }
+        })?;
     }
-    std::fs::write(dest, EXTRA_NOTES_ZIP)
-        .map_err(|e| format!("写入 {} 失败: {e}", dest.display()))?;
+    std::fs::write(dest, EXTRA_NOTES_ZIP).map_err(|e| {
+        if crate::lang() == 1 {
+            format!("写入 {} 失败: {e}", dest.display())
+        } else {
+            format!("failed to write {}: {e}", dest.display())
+        }
+    })?;
     Ok(())
 }
 
@@ -967,7 +1036,10 @@ mod tests {
 
     /// 函数目录（原版 `dat_makefolders` 返回的 functiondir 的包内形式）。
     fn func_dir(plan: &Plan, registry: &str) -> String {
-        let (ns, rest) = plan.functionpath.split_once(':').expect("functionpath 带命名空间");
+        let (ns, rest) = plan
+            .functionpath
+            .split_once(':')
+            .expect("functionpath 带命名空间");
         let sub = rest.trim_end_matches('/');
         if sub.is_empty() {
             format!("data/{ns}/{registry}/")
@@ -990,11 +1062,19 @@ mod tests {
 
     /// 模拟游戏里的一次函数遍历：分数 `score`、已播放到 `_t = seen` 时，
     /// 从 `root` 出发会命中哪些 notes 函数。
-    fn walk(map: &std::collections::HashMap<String, String>, dir: &str, root: &str, score: i64, seen: i64) -> Vec<String> {
+    fn walk(
+        map: &std::collections::HashMap<String, String>,
+        dir: &str,
+        root: &str,
+        score: i64,
+        seen: i64,
+    ) -> Vec<String> {
         let mut fired = Vec::new();
         let mut stack = vec![root.to_string()];
         while let Some(p) = stack.pop() {
-            let text = map.get(&p).unwrap_or_else(|| panic!("引用了不存在的函数文件 {p}"));
+            let text = map
+                .get(&p)
+                .unwrap_or_else(|| panic!("引用了不存在的函数文件 {p}"));
             for line in text.lines() {
                 let (lo, hi, tlo, thi, target) = pred(line);
                 if lo <= score && score <= hi && tlo <= seen && seen <= thi {
@@ -1017,7 +1097,11 @@ mod tests {
             for line in f.content.lines() {
                 if let Some(target) = function_ref(line) {
                     let p = path_of(dir, &target);
-                    assert!(have.contains(p.as_str()), "{} 引用了不存在的 {target}", f.path);
+                    assert!(
+                        have.contains(p.as_str()),
+                        "{} 引用了不存在的 {target}",
+                        f.path
+                    );
                 }
             }
         }
@@ -1065,8 +1149,14 @@ mod tests {
     fn command_preview_matches_dat_preview() {
         assert_eq!(command_preview("", "", ""), "<enter name>");
         assert_eq!(command_preview("!!!", "ns", ""), "<enter name>");
-        assert_eq!(command_preview("Nyan Cat", "", ""), "/function nyan_cat:play");
-        assert_eq!(command_preview("Nyan Cat", "///", ""), "/function nyan_cat:play");
+        assert_eq!(
+            command_preview("Nyan Cat", "", ""),
+            "/function nyan_cat:play"
+        );
+        assert_eq!(
+            command_preview("Nyan Cat", "///", ""),
+            "/function nyan_cat:play"
+        );
         assert_eq!(
             command_preview("Nyan Cat", "MyNS", ""),
             "/function myns:nyan_cat/play"
@@ -1166,7 +1256,10 @@ mod tests {
             "{zip}"
         );
         assert!(zip.contains("datapack disable \"file/my pack\"\n"), "{zip}");
-        assert!(folder.contains("datapack disable \"my pack\"\n"), "{folder}");
+        assert!(
+            folder.contains("datapack disable \"my pack\"\n"),
+            "{folder}"
+        );
         assert_eq!(zip.replace("file/my pack", "my pack"), folder);
         assert!(zip.ends_with("uninstalled successfully. You may now remove it from your data pack folder.\",\"color\":\"yellow\"}]"));
     }
@@ -1198,7 +1291,10 @@ mod tests {
         let p = generate(&two_tick_song(), &o, "t");
         assert_eq!(p.functionpath, "myns:songs/other/test_song/");
         assert_eq!(
-            line0(&p, "data/myns/function/songs/other/test_song/play.mcfunction"),
+            line0(
+                &p,
+                "data/myns/function/songs/other/test_song/play.mcfunction"
+            ),
             "tag @s add nbs_TestSong"
         );
         assert!(p
@@ -1298,7 +1394,10 @@ mod tests {
         let plan = generate(&song, &o, "mix");
         let n0 = content(&plan, "data/mix/function/notes/0.mcfunction");
         assert_eq!(n0.matches("playsound").count(), 2, "{n0}");
-        assert!(n0.contains("playsound minecraft:block.note_block.bass record @s ^0 ^ ^ 1 1.122462 1"), "{n0}");
+        assert!(
+            n0.contains("playsound minecraft:block.note_block.bass record @s ^0 ^ ^ 1 1.122462 1"),
+            "{n0}"
+        );
     }
 
     #[test]
@@ -1386,14 +1485,20 @@ mod tests {
         assert_eq!(n0.lines().nth(2).unwrap(), "team join nbs_1 @e[tag=nbs_1]");
         let add = content(&plan, "data/vis/function/add_teams.mcfunction");
         assert!(add.starts_with("team add nbs_1\nteam add nbs_2\n"), "{add}");
-        assert!(add.contains("team add nbs_17\nteam modify nbs_1 color dark_gray\n"), "{add}");
+        assert!(
+            add.contains("team add nbs_17\nteam modify nbs_1 color dark_gray\n"),
+            "{add}"
+        );
         assert!(add.ends_with("team modify nbs_17 color white"), "{add}");
         assert_eq!(add.lines().count(), 34);
         let rem = content(&plan, "data/vis/function/remove_teams.mcfunction");
         assert_eq!(rem.lines().count(), 17);
         assert!(rem.ends_with("team remove nbs_17"), "{rem}");
-        assert!(content(&plan, "data/vis/function/play.mcfunction").ends_with("function vis:add_teams"));
-        assert!(content(&plan, "data/vis/function/stop.mcfunction").ends_with("function vis:remove_teams"));
+        assert!(
+            content(&plan, "data/vis/function/play.mcfunction").ends_with("function vis:add_teams")
+        );
+        assert!(content(&plan, "data/vis/function/stop.mcfunction")
+            .ends_with("function vis:remove_teams"));
         assert!(content(&plan, "data/vis/function/uninstall.mcfunction")
             .contains("kill @e[type=falling_block,tag=nbs]\nfunction vis:remove_teams\n"));
 
@@ -1437,7 +1542,10 @@ mod tests {
             } else {
                 Vec::new()
             };
-            assert_eq!(fired, want, "tick {tick} 命中的音符文件不对（根 {root_target}）");
+            assert_eq!(
+                fired, want,
+                "tick {tick} 命中的音符文件不对（根 {root_target}）"
+            );
         }
         assert!(with_notes > 0, "样本曲要有音符");
     }
@@ -1543,7 +1651,12 @@ mod tests {
 
         for f in &plan.files {
             let p = folder.join(f.path.replace('/', std::path::MAIN_SEPARATOR_STR));
-            assert_eq!(std::fs::read(&p).unwrap(), f.content.as_bytes(), "{}", f.path);
+            assert_eq!(
+                std::fs::read(&p).unwrap(),
+                f.content.as_bytes(),
+                "{}",
+                f.path
+            );
         }
 
         let entries = read_zip(&zipfile);
@@ -1575,7 +1688,11 @@ mod tests {
         let mut off = u32(eocd + 16) as usize;
         let mut out = Vec::new();
         for _ in 0..count {
-            assert_eq!(&bytes[off..off + 4], &[0x50, 0x4b, 0x01, 0x02], "中央目录签名");
+            assert_eq!(
+                &bytes[off..off + 4],
+                &[0x50, 0x4b, 0x01, 0x02],
+                "中央目录签名"
+            );
             let method = u16(off + 10);
             let crc = u32(off + 16);
             let csize = u32(off + 20) as usize;
@@ -1593,7 +1710,9 @@ mod tests {
                 comp.to_vec()
             } else {
                 let mut d = Vec::new();
-                flate2::read::DeflateDecoder::new(comp).read_to_end(&mut d).unwrap();
+                flate2::read::DeflateDecoder::new(comp)
+                    .read_to_end(&mut d)
+                    .unwrap();
                 d
             };
             assert_eq!(data.len(), dsize, "{name} 解压长度不符");
@@ -1613,14 +1732,25 @@ mod tests {
         let path = std::env::temp_dir().join("nbs_rust_extranotes.zip");
         save_extra_notes_pack(&path).unwrap();
         let entries = read_zip(&path);
-        assert_eq!(EXTRA_NOTES_ZIP.len(), 462095, "装机版 Data/extranotes.zip 的字节数");
+        assert_eq!(
+            EXTRA_NOTES_ZIP.len(),
+            462095,
+            "装机版 Data/extranotes.zip 的字节数"
+        );
         assert_eq!(&EXTRA_NOTES_ZIP[..4], b"PK\x03\x04", "内嵌的必须是一份 ZIP");
-        assert!(entries.iter().any(|(n, _)| n == "pack.mcmeta"), "资源包描述文件");
+        assert!(
+            entries.iter().any(|(n, _)| n == "pack.mcmeta"),
+            "资源包描述文件"
+        );
         assert!(
             entries.iter().any(|(n, _)| n.ends_with("sounds.json")),
             "音符盒声音表"
         );
-        assert_eq!(std::fs::read(&path).unwrap(), EXTRA_NOTES_ZIP, "复制必须逐字节");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            EXTRA_NOTES_ZIP,
+            "复制必须逐字节"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }

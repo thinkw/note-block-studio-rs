@@ -137,7 +137,8 @@ pub struct Nbt {
 impl Nbt {
     fn header(&mut self, id: u8, name: &str) {
         self.buf.push(id);
-        self.buf.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        self.buf
+            .extend_from_slice(&(name.len() as u16).to_be_bytes());
         self.buf.extend_from_slice(name.as_bytes());
     }
     /// `TAG_Compound(name)`
@@ -508,7 +509,10 @@ pub struct BlockMenuSection {
 
 fn plain_blocks(ids: &[u8]) -> Vec<BlockMenuSection> {
     ids.iter()
-        .map(|&id| BlockMenuSection { title: None, items: vec![McBlock::new(id, 0)] })
+        .map(|&id| BlockMenuSection {
+            title: None,
+            items: vec![McBlock::new(id, 0)],
+        })
         .collect()
 }
 
@@ -533,7 +537,10 @@ fn all_blocks(titles: [&'static str; 3], circuit: bool) -> Vec<BlockMenuSection>
             159 => out.push(color_section(titles[2], id)),
             _ => {
                 if !block_display_name(id, 0).is_empty() {
-                    out.push(BlockMenuSection { title: None, items: vec![McBlock::new(id, 0)] });
+                    out.push(BlockMenuSection {
+                        title: None,
+                        items: vec![McBlock::new(id, 0)],
+                    });
                 }
             }
         }
@@ -578,7 +585,12 @@ impl McBlock {
     }
     /// 原界面里显示的形式：`"35, 11"` 加方块名。
     pub fn label(&self) -> String {
-        format!("{}, {} — {}", self.id, self.data, block_display_name(self.id, self.data))
+        format!(
+            "{}, {} — {}",
+            self.id,
+            self.data,
+            block_display_name(self.id, self.data)
+        )
     }
 }
 
@@ -722,11 +734,13 @@ impl SchematicStats {
             .into());
         }
         if self.block_custom > 0 {
-            v.push(crate::tr(
-                "Some note blocks have a custom instrument assigned to them. Export anyway?",
-                "一些方块带有自定义音色。继续导出吗？",
-            )
-            .into());
+            v.push(
+                crate::tr(
+                    "Some note blocks have a custom instrument assigned to them. Export anyway?",
+                    "一些方块带有自定义音色。继续导出吗？",
+                )
+                .into(),
+            );
         }
         if self.block_pitched > 0 {
             v.push(crate::tr(
@@ -782,7 +796,9 @@ pub fn calculate_stats(song: &Song) -> SchematicStats {
     s.tempo_mode = tempo_to_mode(song.meta.tempo);
 
     for a in 0..=enda {
-        let Some(col) = song.columns.get(&a) else { continue };
+        let Some(col) = song.columns.get(&a) else {
+            continue;
+        };
         if col.amount() == 0 {
             continue;
         }
@@ -790,7 +806,9 @@ pub fn calculate_stats(song: &Song) -> SchematicStats {
         let mut c = 0usize; // 含静音层
         let mut d = 0usize; // 不含静音层
         for b in 0..=last {
-            let Some(note) = col.notes.get(&(b as u32)) else { continue };
+            let Some(note) = col.notes.get(&(b as u32)) else {
+                continue;
+            };
             if note.key > 32 && note.key < 58 {
                 c += 1;
                 s.totalblocks[1] += 1;
@@ -926,7 +944,13 @@ struct Grid {
 impl Grid {
     fn new(len: usize, wid: usize, hei: usize) -> Self {
         let n = len * wid * hei;
-        Self { len, wid, hei, blocks: vec![AIR; n], data: vec![0; n] }
+        Self {
+            len,
+            wid,
+            hei,
+            blocks: vec![AIR; n],
+            data: vec![0; n],
+        }
     }
     #[inline]
     fn idx(&self, a: usize, b: usize, c: usize) -> usize {
@@ -1046,7 +1070,9 @@ impl<'a> Builder<'a> {
     /// 原版 `nblockins/nblockkey/nblockpit` 的构造过程。
     fn tick_slots(&self, tick: u32) -> Vec<Slot> {
         let mut out = Vec::new();
-        let Some(col) = self.song.columns.get(&tick) else { return out };
+        let Some(col) = self.song.columns.get(&tick) else {
+            return out;
+        };
         if col.amount() == 0 {
             return out;
         }
@@ -1061,14 +1087,26 @@ impl<'a> Builder<'a> {
             match note {
                 Some(n) if unlocked || self.include_locked => {
                     if mc_range || cb_range {
-                        out.push(Slot { ins: n.instrument as i32, key: n.key, pit: n.pitch });
+                        out.push(Slot {
+                            ins: n.instrument as i32,
+                            key: n.key,
+                            pit: n.pitch,
+                        });
                     } else if !self.compress {
-                        out.push(Slot { ins: -1, key: 0, pit: 0 });
+                        out.push(Slot {
+                            ins: -1,
+                            key: 0,
+                            pit: 0,
+                        });
                     }
                 }
                 _ => {
                     if !self.compress {
-                        out.push(Slot { ins: -1, key: 0, pit: 0 });
+                        out.push(Slot {
+                            ins: -1,
+                            key: 0,
+                            pit: 0,
+                        });
                     }
                 }
             }
@@ -1081,7 +1119,14 @@ impl<'a> Builder<'a> {
         let direction = if dir == 1 { 3 } else { 1 };
         for b in 0..self.size.layers {
             let y1 = yy + dir;
-            self.block_repeater(xx, y1, (b * 3 + 2) as i32, (rep - 1) as u8, direction, false);
+            self.block_repeater(
+                xx,
+                y1,
+                (b * 3 + 2) as i32,
+                (rep - 1) as u8,
+                direction,
+                false,
+            );
             self.block_circuit(xx, y1, (b * 3 + 1) as i32);
             self.block_circuit(xx, y1 + dir, (b * 3 + 2) as i32);
             if b > 0 {
@@ -1092,19 +1137,47 @@ impl<'a> Builder<'a> {
             // Note block #1：这一格还会额外铺一段 wire。
             if *n > -1 {
                 self.block_other(xx, y1 + dir, (b * 3 + 1) as i32, REDSTONE_WIRE, 0);
-                self.put_note(xx - 1, y1 + dir * 2, (b * 3 + 1) as i32, (b * 3) as i32, slots, *n);
+                self.put_note(
+                    xx - 1,
+                    y1 + dir * 2,
+                    (b * 3 + 1) as i32,
+                    (b * 3) as i32,
+                    slots,
+                    *n,
+                );
                 *n -= 1;
             }
             if *n > -1 {
-                self.put_note(xx + 1, y1 + dir * 2, (b * 3 + 1) as i32, (b * 3) as i32, slots, *n);
+                self.put_note(
+                    xx + 1,
+                    y1 + dir * 2,
+                    (b * 3 + 1) as i32,
+                    (b * 3) as i32,
+                    slots,
+                    *n,
+                );
                 *n -= 1;
             }
             if *n > -1 {
-                self.put_note(xx - 1, y1 + dir, (b * 3 + 2) as i32, (b * 3 + 1) as i32, slots, *n);
+                self.put_note(
+                    xx - 1,
+                    y1 + dir,
+                    (b * 3 + 2) as i32,
+                    (b * 3 + 1) as i32,
+                    slots,
+                    *n,
+                );
                 *n -= 1;
             }
             if *n > -1 {
-                self.put_note(xx + 1, y1 + dir, (b * 3 + 2) as i32, (b * 3 + 1) as i32, slots, *n);
+                self.put_note(
+                    xx + 1,
+                    y1 + dir,
+                    (b * 3 + 2) as i32,
+                    (b * 3 + 1) as i32,
+                    slots,
+                    *n,
+                );
                 *n -= 1;
             }
         }
@@ -1339,11 +1412,7 @@ impl<'a> Builder<'a> {
                                 REDSTONE_WIRE,
                                 0,
                             );
-                            self.block_circuit(
-                                xx + cc * circ,
-                                yy + dir * 2,
-                                (b * 3 + 1) as i32,
-                            );
+                            self.block_circuit(xx + cc * circ, yy + dir * 2, (b * 3 + 1) as i32);
                         }
                     }
                     yy += dir * 2;
@@ -1624,7 +1693,14 @@ impl Built {
         n.short("Width", self.size.wid as i16);
         n.list("Entities", self.minecart as i32, 10);
         if self.minecart {
-            n.string("id", if old { "Minecart" } else { "minecraft:minecart" });
+            n.string(
+                "id",
+                if old {
+                    "Minecart"
+                } else {
+                    "minecraft:minecart"
+                },
+            );
             n.byte("OnGround", 0);
             n.short("Air", 300);
             n.short("Fire", -1);
@@ -1739,7 +1815,10 @@ impl Built {
 
         n.list("palette", 29 + insnum as i32 * 26, 10);
         for blk in [self.opts.walkway, self.opts.circuit, self.opts.ground] {
-            n.string("Name", &format!("minecraft:{}", namespaced_id(blk.id, blk.data)));
+            n.string(
+                "Name",
+                &format!("minecraft:{}", namespaced_id(blk.id, blk.data)),
+            );
             n.end();
         }
         for a in 0..insnum {
@@ -1785,7 +1864,11 @@ impl Built {
         // 尾部 26 项，顺序即 state 偏移，必须逐字对应原版。
         prop(&mut n, "minecraft:blue_wool", &[]);
         prop(&mut n, "minecraft:air", &[]);
-        prop(&mut n, "minecraft:ladder", &[("facing", "north"), ("waterlogged", "false")]);
+        prop(
+            &mut n,
+            "minecraft:ladder",
+            &[("facing", "north"), ("waterlogged", "false")],
+        );
         prop(
             &mut n,
             "minecraft:redstone_wire",
@@ -1851,9 +1934,17 @@ impl Built {
         prop(
             &mut n,
             "minecraft:chest",
-            &[("facing", "west"), ("type", "single"), ("waterlogged", "false")],
+            &[
+                ("facing", "west"),
+                ("type", "single"),
+                ("waterlogged", "false"),
+            ],
         );
-        prop(&mut n, "minecraft:rail", &[("shape", "north_south"), ("waterlogged", "false")]);
+        prop(
+            &mut n,
+            "minecraft:rail",
+            &[("shape", "north_south"), ("waterlogged", "false")],
+        );
         prop(
             &mut n,
             "minecraft:redstone_wall_torch",
@@ -2014,8 +2105,8 @@ impl Built {
                     // 扫描要跳过：装机版参照文件里没有任何重复格子，
                     // blocks 条数正好等于网格体积。
                     let same_sign_column = a as i32 == self.signx && bb as i32 == self.signy;
-                    if same_sign_column && (c as i32 == self.signz
-                        || (self.sch_loop && c as i32 == self.signz - 1))
+                    if same_sign_column
+                        && (c as i32 == self.signz || (self.sch_loop && c as i32 == self.signz - 1))
                     {
                         continue;
                     }
@@ -2029,7 +2120,10 @@ impl Built {
                 }
             }
         }
-        debug_assert_eq!(written, cells, "blocks 声明 {cells} 条，实际写出 {written} 条");
+        debug_assert_eq!(
+            written, cells,
+            "blocks 声明 {cells} 条，实际写出 {written} 条"
+        );
         n.end();
         n.buf
     }
@@ -2150,10 +2244,18 @@ pub struct SchematicInfo {
 fn gzip(data: &[u8]) -> Result<Vec<u8>, String> {
     let mut enc = GzEncoder::new(Vec::new(), Compression::default());
     enc.write_all(data).map_err(|e| {
-        crate::tr(&format!("gzip compression failed: {e}"), &format!("gzip 压缩失败: {e}")).to_string()
+        crate::tr(
+            &format!("gzip compression failed: {e}"),
+            &format!("gzip 压缩失败: {e}"),
+        )
+        .to_string()
     })?;
     enc.finish().map_err(|e| {
-        crate::tr(&format!("gzip finish failed: {e}"), &format!("gzip 结束失败: {e}")).to_string()
+        crate::tr(
+            &format!("gzip finish failed: {e}"),
+            &format!("gzip 结束失败: {e}"),
+        )
+        .to_string()
     })
 }
 
@@ -2232,8 +2334,11 @@ pub fn export_schematic(
     };
     let packed = gzip(&nbt)?;
     std::fs::write(path, packed).map_err(|e| {
-        crate::tr(&format!("Failed to write schematic: {e}"), &format!("写入 schematic 失败: {e}"))
-            .to_string()
+        crate::tr(
+            &format!("Failed to write schematic: {e}"),
+            &format!("写入 schematic 失败: {e}"),
+        )
+        .to_string()
     })?;
     Ok(built.info())
 }
@@ -2243,7 +2348,11 @@ pub fn build_nbt(song: &Song, opts: &SchematicOptions) -> Result<Vec<u8>, String
     let stats = calculate_stats(song);
     export_guard(&stats, opts)?;
     let built = build_with_stats(song, opts, &stats);
-    Ok(if opts.structure { built.structure_nbt(song) } else { built.classic_nbt() })
+    Ok(if opts.structure {
+        built.structure_nbt(song)
+    } else {
+        built.classic_nbt()
+    })
 }
 
 /// 解压并读出文件里真实存在的尺寸/音符统计，供界面与测试核对。
@@ -2253,7 +2362,11 @@ pub fn build_nbt(song: &Song, opts: &SchematicOptions) -> Result<Vec<u8>, String
 /// 结构文件里 `size[0]` 是原版硬编码的 32（不是真实长度），这里照文件读。
 pub fn inspect_schematic(path: &Path) -> Result<SchematicInfo, String> {
     let packed = std::fs::read(path).map_err(|e| {
-        crate::tr(&format!("Failed to open file: {e}"), &format!("打开文件失败: {e}")).to_string()
+        crate::tr(
+            &format!("Failed to open file: {e}"),
+            &format!("打开文件失败: {e}"),
+        )
+        .to_string()
     })?;
     Ok(inspect_bytes(&packed)?)
 }
@@ -2263,11 +2376,13 @@ pub fn inspect_bytes(d: &[u8]) -> Result<SchematicInfo, String> {
     use flate2::read::GzDecoder;
     use std::io::Read;
     let mut raw = Vec::new();
-    GzDecoder::new(d)
-        .read_to_end(&mut raw)
-        .map_err(|e| {
-            crate::tr(&format!("gzip decompression failed: {e}"), &format!("gzip 解压失败: {e}")).to_string()
-        })?;
+    GzDecoder::new(d).read_to_end(&mut raw).map_err(|e| {
+        crate::tr(
+            &format!("gzip decompression failed: {e}"),
+            &format!("gzip 解压失败: {e}"),
+        )
+        .to_string()
+    })?;
     let (_, root) = crate::nbt::parse_named(&raw)?;
     read_info(&root)
 }
@@ -2277,10 +2392,23 @@ fn read_info(root: &crate::nbt::Value) -> Result<SchematicInfo, String> {
     let mut info = SchematicInfo::default();
     if let Some(v) = root.get("Width").and_then(Value::as_i16) {
         info.width = v.max(0) as usize;
-        info.height = root.get("Height").and_then(Value::as_i16).unwrap_or(0).max(0) as usize;
-        info.length = root.get("Length").and_then(Value::as_i16).unwrap_or(0).max(0) as usize;
+        info.height = root
+            .get("Height")
+            .and_then(Value::as_i16)
+            .unwrap_or(0)
+            .max(0) as usize;
+        info.length = root
+            .get("Length")
+            .and_then(Value::as_i16)
+            .unwrap_or(0)
+            .max(0) as usize;
         // 经典格式：note block 是 TileEntities 里 id 为 Music/minecraft:noteblock 的条目。
-        for te in root.get("TileEntities").and_then(Value::as_list).unwrap_or((0, &[])).1 {
+        for te in root
+            .get("TileEntities")
+            .and_then(Value::as_list)
+            .unwrap_or((0, &[]))
+            .1
+        {
             match te.get("id").and_then(Value::as_str) {
                 Some("Music") | Some("minecraft:noteblock") => info.note_blocks += 1,
                 _ => {}
@@ -2288,7 +2416,10 @@ fn read_info(root: &crate::nbt::Value) -> Result<SchematicInfo, String> {
         }
         // 中继器只能从 Blocks 字节数组里数（id 93/94）。
         if let Some(blocks) = root.get("Blocks").and_then(Value::as_bytes) {
-            info.repeaters = blocks.iter().filter(|&&b| b == REPEATER || b == REPEATER_POWERED).count();
+            info.repeaters = blocks
+                .iter()
+                .filter(|&&b| b == REPEATER || b == REPEATER_POWERED)
+                .count();
         }
         return Ok(info);
     }
@@ -2298,9 +2429,18 @@ fn read_info(root: &crate::nbt::Value) -> Result<SchematicInfo, String> {
         info.height = get(1);
         info.length = get(2);
         let palette = structure_palette(root);
-        for b in root.get("blocks").and_then(Value::as_list).unwrap_or((0, &[])).1 {
-            let Some(state) = b.get("state").and_then(Value::as_i32) else { continue };
-            let Some(entry) = palette.get(state.max(0) as usize).copied() else { continue };
+        for b in root
+            .get("blocks")
+            .and_then(Value::as_list)
+            .unwrap_or((0, &[]))
+            .1
+        {
+            let Some(state) = b.get("state").and_then(Value::as_i32) else {
+                continue;
+            };
+            let Some(entry) = palette.get(state.max(0) as usize).copied() else {
+                continue;
+            };
             let name = entry.get("Name").and_then(Value::as_str).unwrap_or("");
             if name.ends_with("note_block") || name.ends_with("command_block") {
                 info.note_blocks += 1;
@@ -2344,8 +2484,8 @@ fn structure_palette(root: &crate::nbt::Value) -> Vec<&crate::nbt::Value> {
 // - 原版末尾把 `debugstr` 那份传播过程 `clipboard_set_text()` 覆盖到系统剪贴板
 //   （调试残留）。同一份文本放在 `SchematicImport::trace` 里，由测试断言。
 
-use std::collections::HashMap;
 use nbs_core::model::{Note, KEY_MAX};
+use std::collections::HashMap;
 
 /// 原版 `obj_dummy` 里的 `t_AIR..t_INPUT`。
 const T_AIR: u8 = 0;
@@ -2440,12 +2580,7 @@ impl Sch {
     /// 原版那句边界检查：`tx < 0 || ty < 0 || tz < 0 || tx >= sch_length ||
     /// ty >= sch_width || tz >= sch_height`。
     fn inside(&self, xx: i64, yy: i64, zz: i64) -> bool {
-        !(xx < 0
-            || yy < 0
-            || zz < 0
-            || xx >= self.length
-            || yy >= self.width
-            || zz >= self.height)
+        !(xx < 0 || yy < 0 || zz < 0 || xx >= self.length || yy >= self.width || zz >= self.height)
     }
     fn insert(&mut self, t: i64, cell: Cell) {
         self.cells.insert(t, cell);
@@ -2539,7 +2674,8 @@ impl Tags {
                 for item in items {
                     self.walk("", item);
                     if name == "TileEntities" && self.nb_n > -1 {
-                        self.notes.push((self.nb_x, self.nb_y, self.nb_z, self.nb_n));
+                        self.notes
+                            .push((self.nb_x, self.nb_y, self.nb_z, self.nb_n));
                         self.nb_n = -1;
                     }
                 }
@@ -2657,7 +2793,8 @@ pub fn import_bytes(packed: &[u8], stem: &str) -> Result<SchematicImport, Import
     if GzDecoder::new(packed).read_to_end(&mut raw).is_err() {
         return Err(ImportError::NotASchematic);
     }
-    let (root_name, root) = crate::nbt::parse_named(&raw).map_err(|_| ImportError::NotASchematic)?;
+    let (root_name, root) =
+        crate::nbt::parse_named(&raw).map_err(|_| ImportError::NotASchematic)?;
     if root_name != "Schematic" {
         return Err(ImportError::NotASchematic);
     }
@@ -2711,7 +2848,15 @@ pub fn import_bytes(packed: &[u8], stem: &str) -> Result<SchematicImport, Import
                 T_AIR
             };
         }
-        sch.insert(cell_t(xx, yy, zz), Cell { block: a, data: 0, kind, added: false });
+        sch.insert(
+            cell_t(xx, yy, zz),
+            Cell {
+                block: a,
+                data: 0,
+                kind,
+                added: false,
+            },
+        );
     }
     for (i, d) in data.into_iter().take(total).enumerate() {
         let zz = (i / plane) as i64;
@@ -2732,7 +2877,12 @@ pub fn import_bytes(packed: &[u8], stem: &str) -> Result<SchematicImport, Import
 
     let mut engine = Propagator::new(sch, stem, inputs.len());
     engine.run(&inputs);
-    let Propagator { mut song, added, trace, .. } = engine;
+    let Propagator {
+        mut song,
+        added,
+        trace,
+        ..
+    } = engine;
     if added == 0 {
         return Err(ImportError::NoNotesAdded);
     }
@@ -2815,7 +2965,8 @@ impl Propagator {
         }
         // 原版的 `instrument_list[| a]`：本仓库的内置乐器顺序与那 10 项一致，不用换表。
         let key = key.clamp(0, KEY_MAX as i64) as u8;
-        self.song.set(tick as u32, layer, Note::new(instrument, key));
+        self.song
+            .set(tick as u32, layer, Note::new(instrument, key));
         true
     }
 
@@ -2898,7 +3049,14 @@ impl Propagator {
                         }
                         self.enqueue(
                             "next to wire",
-                            QueueItem { kind: cell.kind, x: tx, y: ty, z: tz, delay: cd, from: ct },
+                            QueueItem {
+                                kind: cell.kind,
+                                x: tx,
+                                y: ty,
+                                z: tz,
+                                delay: cd,
+                                from: ct,
+                            },
                         );
                     }
                 }
@@ -2919,7 +3077,14 @@ impl Propagator {
                     }
                     self.enqueue(
                         "next to wire",
-                        QueueItem { kind: cell.kind, x: tx, y: ty, z: cz, delay: cd, from: ct },
+                        QueueItem {
+                            kind: cell.kind,
+                            x: tx,
+                            y: ty,
+                            z: cz,
+                            delay: cd,
+                            from: ct,
+                        },
                     );
                 }
                 // 正下方那一格。
@@ -2935,7 +3100,14 @@ impl Propagator {
                     }
                     self.enqueue(
                         "below wire",
-                        QueueItem { kind: cell.kind, x: cx, y: cy, z: tz, delay: cd, from: ct },
+                        QueueItem {
+                            kind: cell.kind,
+                            x: cx,
+                            y: cy,
+                            z: tz,
+                            delay: cd,
+                            from: ct,
+                        },
                     );
                     break;
                 }
@@ -2954,16 +3126,21 @@ impl Propagator {
                     if cell.added || cell.kind == T_AIR || cell.kind == T_TORCH {
                         break;
                     }
-                    if cell.kind == T_REPEATER
-                        && (repeater_direction(cell.data) + 2) % 4 != b
-                    {
+                    if cell.kind == T_REPEATER && (repeater_direction(cell.data) + 2) % 4 != b {
                         break;
                     }
                     // 延迟用的是自己这一格的 data（原版在算之前把 t 复位回本格）。
                     let delay = cd + repeater_delay(self.sch.at(t).data) + 1;
                     self.enqueue(
                         "next to repeater",
-                        QueueItem { kind: cell.kind, x: tx, y: ty, z: cz, delay, from: ct },
+                        QueueItem {
+                            kind: cell.kind,
+                            x: tx,
+                            y: ty,
+                            z: cz,
+                            delay,
+                            from: ct,
+                        },
                     );
                     break;
                 }
@@ -2985,7 +3162,14 @@ impl Propagator {
                     }
                     self.enqueue(
                         "below block",
-                        QueueItem { kind: cell.kind, x: cx, y: cy, z: tz, delay: cd, from: ct },
+                        QueueItem {
+                            kind: cell.kind,
+                            x: cx,
+                            y: cy,
+                            z: tz,
+                            delay: cd,
+                            from: ct,
+                        },
                     );
                     break;
                 }
@@ -3008,7 +3192,14 @@ impl Propagator {
                     }
                     self.enqueue(
                         "above block",
-                        QueueItem { kind: cell.kind, x: cx, y: cy, z: tz, delay: cd, from: ct },
+                        QueueItem {
+                            kind: cell.kind,
+                            x: cx,
+                            y: cy,
+                            z: tz,
+                            delay: cd,
+                            from: ct,
+                        },
                     );
                     break;
                 }
@@ -3055,7 +3246,14 @@ impl Propagator {
                     }
                     self.enqueue(
                         "next to block",
-                        QueueItem { kind: cell.kind, x: tx, y: ty, z: cz, delay: cd, from: ct },
+                        QueueItem {
+                            kind: cell.kind,
+                            x: tx,
+                            y: ty,
+                            z: cz,
+                            delay: cd,
+                            from: ct,
+                        },
                     );
                 }
             }
@@ -3069,8 +3267,8 @@ impl Propagator {
                 } else {
                     0
                 };
-                let blocked = cz + 1 < self.sch.height
-                    && self.sch.at(cell_t(cx, cy, cz + 1)).kind == T_BLOCK;
+                let blocked =
+                    cz + 1 < self.sch.height && self.sch.at(cell_t(cx, cy, cz + 1)).kind == T_BLOCK;
                 if blocked {
                     self.log("Didn't add note block.");
                 } else {
@@ -3097,7 +3295,14 @@ impl Propagator {
                     }
                     self.enqueue(
                         "below torch",
-                        QueueItem { kind: cell.kind, x: cx, y: cy, z: tz, delay: cd + 1, from: ct },
+                        QueueItem {
+                            kind: cell.kind,
+                            x: cx,
+                            y: cy,
+                            z: tz,
+                            delay: cd + 1,
+                            from: ct,
+                        },
                     );
                     break;
                 }
@@ -3113,7 +3318,14 @@ impl Propagator {
                     }
                     self.enqueue(
                         "above torch",
-                        QueueItem { kind: cell.kind, x: cx, y: cy, z: tz, delay: cd + 1, from: ct },
+                        QueueItem {
+                            kind: cell.kind,
+                            x: cx,
+                            y: cy,
+                            z: tz,
+                            delay: cd + 1,
+                            from: ct,
+                        },
                     );
                     break;
                 }
@@ -3137,7 +3349,14 @@ impl Propagator {
                     }
                     self.enqueue(
                         "next to torch",
-                        QueueItem { kind: cell.kind, x: tx, y: ty, z: cz, delay: cd + 1, from: ct },
+                        QueueItem {
+                            kind: cell.kind,
+                            x: tx,
+                            y: ty,
+                            z: cz,
+                            delay: cd + 1,
+                            from: ct,
+                        },
                     );
                 }
             }
@@ -3162,7 +3381,14 @@ impl Propagator {
                     }
                     self.enqueue(
                         "below input",
-                        QueueItem { kind: cell.kind, x: cx, y: cy, z: tz, delay: cd, from: ct },
+                        QueueItem {
+                            kind: cell.kind,
+                            x: cx,
+                            y: cy,
+                            z: tz,
+                            delay: cd,
+                            from: ct,
+                        },
                     );
                     break;
                 }
@@ -3183,7 +3409,14 @@ impl Propagator {
                     }
                     self.enqueue(
                         "next to input",
-                        QueueItem { kind: cell.kind, x: tx, y: ty, z: cz, delay: cd, from: ct },
+                        QueueItem {
+                            kind: cell.kind,
+                            x: tx,
+                            y: ty,
+                            z: cz,
+                            delay: cd,
+                            from: ct,
+                        },
                     );
                 }
             }
@@ -3220,7 +3453,9 @@ mod tests {
     }
 
     fn pin_cn() -> CnGuard {
-        let lock = crate::TEST_LANG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = crate::TEST_LANG_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prev = crate::lang();
         crate::set_language(1);
         CnGuard(lock, prev)
@@ -3464,7 +3699,13 @@ mod tests {
         assert_eq!(ids(instrument_block_menu(9)), "216,0");
         // 10 号起是全部方块：三种带色方块收成子菜单，其余每项都有名字。
         let full = instrument_block_menu(10);
-        assert_eq!(ids(full.clone()).split(' ').filter(|s| s.contains(':')).count(), 3);
+        assert_eq!(
+            ids(full.clone())
+                .split(' ')
+                .filter(|s| s.contains(':'))
+                .count(),
+            3
+        );
         for s in &full {
             if s.title.is_none() {
                 assert!(!block_display_name(s.items[0].id, 0).is_empty());
@@ -3528,7 +3769,10 @@ mod tests {
         // Blocks/Data 都是 len*wid*hei 个字节。
         let blocks = root.get("Blocks").and_then(Value::as_bytes).unwrap();
         assert_eq!(blocks.len(), 7 * 5 * 43);
-        assert_eq!(root.get("Data").and_then(Value::as_bytes).unwrap().len(), blocks.len());
+        assert_eq!(
+            root.get("Data").and_then(Value::as_bytes).unwrap().len(),
+            blocks.len()
+        );
         let version = root.get("Version").unwrap();
         assert_eq!(keys_of(version), ["Id", "Name", "Snapshot"]);
         assert_eq!(version.get("Id").and_then(Value::as_i32), Some(922));
@@ -3543,14 +3787,23 @@ mod tests {
         let (ty, tes) = root.get("TileEntities").unwrap().as_list().unwrap();
         assert_eq!(ty, 10);
         assert_eq!(tes.len(), 3); // 1 个签名 + 2 个音符盒
-        assert_eq!(keys_of(&tes[0]), ["id", "x", "y", "z", "Text1", "Text2", "Text3", "Text4"]);
-        assert_eq!(tes[0].get("id").and_then(Value::as_str), Some("minecraft:sign"));
+        assert_eq!(
+            keys_of(&tes[0]),
+            ["id", "x", "y", "z", "Text1", "Text2", "Text3", "Text4"]
+        );
+        assert_eq!(
+            tes[0].get("id").and_then(Value::as_str),
+            Some("minecraft:sign")
+        );
         assert_eq!(
             tes[0].get("Text4").and_then(Value::as_str),
             Some("{\"text\": \"Block Studio\"}")
         );
         assert_eq!(keys_of(&tes[1]), ["id", "x", "y", "z", "note"]);
-        assert_eq!(tes[1].get("id").and_then(Value::as_str), Some("minecraft:noteblock"));
+        assert_eq!(
+            tes[1].get("id").and_then(Value::as_str),
+            Some("minecraft:noteblock")
+        );
         assert_eq!(tes[1].get("note").and_then(Value::as_i8), Some(45 - 33));
         assert_eq!(tes[2].get("note").and_then(Value::as_i8), Some(50 - 33));
         // 关掉循环、非环形过道 -> 只有一个签名；没开矿车 -> 没有箱子。
@@ -3565,7 +3818,10 @@ mod tests {
         let root = crate::nbt::parse(&nbt).unwrap();
         let tes = items(root.get("TileEntities").unwrap());
         assert_eq!(tes[0].get("id").and_then(Value::as_str), Some("Sign"));
-        assert_eq!(tes[0].get("Text1").and_then(Value::as_str), Some("Song generated"));
+        assert_eq!(
+            tes[0].get("Text1").and_then(Value::as_str),
+            Some("Song generated")
+        );
         assert_eq!(tes[1].get("id").and_then(Value::as_str), Some("Music"));
         let version = root.get("Version").unwrap();
         assert_eq!(keys_of(version), ["Name", "Snapshot"]);
@@ -3595,13 +3851,19 @@ mod tests {
                 "Rotation"
             ]
         );
-        assert_eq!(ents[0].get("id").and_then(Value::as_str), Some("minecraft:minecart"));
+        assert_eq!(
+            ents[0].get("id").and_then(Value::as_str),
+            Some("minecraft:minecart")
+        );
         assert_eq!(ents[0].get("Air").and_then(Value::as_i16), Some(300));
         assert_eq!(ents[0].get("Fire").and_then(Value::as_i16), Some(-1));
         assert_eq!(items(ents[0].get("Motion").unwrap()).len(), 3);
         // 矿车打开后箱子才会出现（chest 依赖 minecart），TileEntities 多一项。
         let tes = items(root.get("TileEntities").unwrap());
-        assert_eq!(tes.last().unwrap().get("id").and_then(Value::as_str), Some("minecraft:chest"));
+        assert_eq!(
+            tes.last().unwrap().get("id").and_then(Value::as_str),
+            Some("minecraft:chest")
+        );
         assert_eq!(items(tes.last().unwrap().get("Items").unwrap()).len(), 27);
     }
 
@@ -3613,7 +3875,10 @@ mod tests {
         let nbt = build_nbt(&s, &o).unwrap();
         let (name, root) = crate::nbt::parse_named(&nbt).unwrap();
         assert_eq!(name, "");
-        assert_eq!(keys_of(&root), ["DataVersion", "size", "palette", "entities", "blocks"]);
+        assert_eq!(
+            keys_of(&root),
+            ["DataVersion", "size", "palette", "entities", "blocks"]
+        );
         assert_eq!(root.get("DataVersion").and_then(Value::as_i32), Some(1519));
         let size = items(root.get("size").unwrap());
         assert_eq!(size.len(), 3);
@@ -3625,12 +3890,15 @@ mod tests {
         // 20 个内置乐器（v6 铜块一族）：palette 条数 = 29 + insnum * 26，
         // 与装机版自己导出的参照文件一致。
         assert_eq!(pal.len(), 29 + 20 * 26);
+        assert_eq!(keys_of(&pal[0]), ["Name"]);
         assert_eq!(
-            keys_of(&pal[0]),
-            ["Name"]
+            pal[0].get("Name").and_then(Value::as_str),
+            Some("minecraft:stone")
         );
-        assert_eq!(pal[0].get("Name").and_then(Value::as_str), Some("minecraft:stone"));
-        assert_eq!(pal[3].get("Name").and_then(Value::as_str), Some("minecraft:dirt"));
+        assert_eq!(
+            pal[3].get("Name").and_then(Value::as_str),
+            Some("minecraft:dirt")
+        );
         // 第 9 个音色方块（索引 3+9）带 axis 属性，其余不带。
         let axis = pal[3 + 9].get("Properties").unwrap();
         assert_eq!(axis.get("axis").and_then(Value::as_str), Some("y"));
@@ -3650,20 +3918,35 @@ mod tests {
         );
         // 音符盒调色板从 3+insnum 开始，第一项是 harp/note 0。
         let nb = &pal[3 + 20];
-        assert_eq!(nb.get("Name").and_then(Value::as_str), Some("minecraft:note_block"));
-        let props = nb.get("Properties").unwrap();
         assert_eq!(
-            keys_of(props),
-            ["instrument", "note", "powered"]
+            nb.get("Name").and_then(Value::as_str),
+            Some("minecraft:note_block")
         );
-        assert_eq!(props.get("instrument").and_then(Value::as_str), Some("harp"));
+        let props = nb.get("Properties").unwrap();
+        assert_eq!(keys_of(props), ["instrument", "note", "powered"]);
+        assert_eq!(
+            props.get("instrument").and_then(Value::as_str),
+            Some("harp")
+        );
         assert_eq!(props.get("note").and_then(Value::as_str), Some("0"));
         // 尾部 26 项的第一项是蓝色羊毛，最后一项是朝北亮着的红石墙火把。
         let tail = &pal[pal.len() - 26];
-        assert_eq!(tail.get("Name").and_then(Value::as_str), Some("minecraft:blue_wool"));
+        assert_eq!(
+            tail.get("Name").and_then(Value::as_str),
+            Some("minecraft:blue_wool")
+        );
         let last = pal.last().unwrap();
-        assert_eq!(last.get("Name").and_then(Value::as_str), Some("minecraft:redstone_wall_torch"));
-        assert_eq!(last.get("Properties").unwrap().get("facing").and_then(Value::as_str), Some("north"));
+        assert_eq!(
+            last.get("Name").and_then(Value::as_str),
+            Some("minecraft:redstone_wall_torch")
+        );
+        assert_eq!(
+            last.get("Properties")
+                .unwrap()
+                .get("facing")
+                .and_then(Value::as_str),
+            Some("north")
+        );
     }
 
     #[test]
@@ -3680,11 +3963,18 @@ mod tests {
         let size = items(root.get("size").unwrap());
         let s2 = size.len();
         assert_eq!(s2, 3);
-        assert_eq!(blocks.len(), built.size.hei * built.size.len * built.size.wid);
+        assert_eq!(
+            blocks.len(),
+            built.size.hei * built.size.len * built.size.wid
+        );
         // 第一个条目是签名方块：nbt -> pos -> state。
         assert_eq!(keys_of(&blocks[0]), ["nbt", "pos", "state"]);
         assert_eq!(
-            blocks[0].get("nbt").unwrap().get("id").and_then(Value::as_str),
+            blocks[0]
+                .get("nbt")
+                .unwrap()
+                .get("id")
+                .and_then(Value::as_str),
             Some("minecraft:sign")
         );
         // 音符盒条目不带 nbt，state = 3 + insnum + ins*25 + note。
@@ -3692,11 +3982,19 @@ mod tests {
             .iter()
             .filter_map(|b| b.get("state").and_then(Value::as_i32))
             .collect();
-        assert!(states.contains(&(3 + 20 + (0 * 25 + (45 - 33)))), "{states:?}");
+        assert!(
+            states.contains(&(3 + 20 + (0 * 25 + (45 - 33)))),
+            "{states:?}"
+        );
         // 每个格子只出现一次：牌格不再被网格扫描重复写成 air。
         let cells: std::collections::HashSet<Vec<i32>> = blocks
             .iter()
-            .map(|b| items(b.get("pos").unwrap()).iter().filter_map(Value::as_i32).collect())
+            .map(|b| {
+                items(b.get("pos").unwrap())
+                    .iter()
+                    .filter_map(Value::as_i32)
+                    .collect()
+            })
             .collect();
         assert_eq!(cells.len(), blocks.len(), "有格子被写了两次");
         // 矿车实体：pos -> blockPos -> 无名 compound。
@@ -3761,19 +4059,43 @@ mod tests {
         assert_eq!(pal.len(), 29 + 21 * 26);
         // 命令方块调色板区（3+21 起）全叫 command_block，朝向向上。
         let cb = &pal[3 + 21];
-        assert_eq!(cb.get("Name").and_then(Value::as_str), Some("minecraft:command_block"));
-        assert_eq!(cb.get("Properties").unwrap().get("facing").and_then(Value::as_str), Some("up"));
+        assert_eq!(
+            cb.get("Name").and_then(Value::as_str),
+            Some("minecraft:command_block")
+        );
+        assert_eq!(
+            cb.get("Properties")
+                .unwrap()
+                .get("facing")
+                .and_then(Value::as_str),
+            Some("up")
+        );
         let blocks = items(root.get("blocks").unwrap());
         let cmd = blocks
             .iter()
             .find(|b| b.get("nbt").is_some() && b.get("nbt").unwrap().get("Command").is_some())
             .unwrap();
-        let command = cmd.get("nbt").unwrap().get("Command").and_then(Value::as_str).unwrap();
+        let command = cmd
+            .get("nbt")
+            .unwrap()
+            .get("Command")
+            .and_then(Value::as_str)
+            .unwrap();
         assert_eq!(
             command,
             "playsound minecraft:block.note_block.harp block @a ~ ~ ~ 3 1.000000"
         );
-        assert_eq!(keys_of(cmd.get("nbt").unwrap()), ["Command", "TrackOutput", "powered", "auto", "conditionMet", "UpdateLastExecution"]);
+        assert_eq!(
+            keys_of(cmd.get("nbt").unwrap()),
+            [
+                "Command",
+                "TrackOutput",
+                "powered",
+                "auto",
+                "conditionMet",
+                "UpdateLastExecution"
+            ]
+        );
         assert_eq!(cmd.get("state").and_then(Value::as_i32), Some(3 + 21));
     }
 
@@ -3822,8 +4144,14 @@ mod tests {
         let nbt = built.classic_nbt();
         let root = crate::nbt::parse(&nbt).unwrap();
         let tes = items(root.get("TileEntities").unwrap());
-        assert_eq!(tes[1].get("Text1").and_then(Value::as_str), Some("{\"text\": \"Looping ON\"}"));
-        assert_eq!(tes[1].get("Text4").and_then(Value::as_str), Some("{\"text\": \"Looping OFF\"}"));
+        assert_eq!(
+            tes[1].get("Text1").and_then(Value::as_str),
+            Some("{\"text\": \"Looping ON\"}")
+        );
+        assert_eq!(
+            tes[1].get("Text4").and_then(Value::as_str),
+            Some("{\"text\": \"Looping OFF\"}")
+        );
         // 关掉循环选项后签名只剩一个。
         o.loop_option = false;
         let built = build(&s, &o);
@@ -3982,13 +4310,13 @@ mod tests {
         assert_eq!(built.state_of(76, 5), (base + 17) as i32); // lit torch
         assert_eq!(built.state_of(77, 0), (base + 18) as i32); // stone button
         assert_eq!(built.state_of(27, 0), (base + 20) as i32); // powered rail
-        // 原版的 else-if 链里没有 54 分支（外层已经把箱子格跳过），落到 air。
+                                                               // 原版的 else-if 链里没有 54 分支（外层已经把箱子格跳过），落到 air。
         assert_eq!(built.state_of(54, 0), (base + 4) as i32);
         assert_eq!(built.state_of(66, 0), (base + 22) as i32); // rail
         assert_eq!(built.state_of(75, 1), (base + 23) as i32); // east unlit wall torch
         assert_eq!(built.state_of(76, 2), (base + 26) as i32); // west lit wall torch
         assert_eq!(built.state_of(69, 0), (base + 27) as i32); // lever
-        // 原版这条写的是 75（不亮的火把），但调色板第 28 项叫 "lit=true facing=north"。
+                                                               // 原版这条写的是 75（不亮的火把），但调色板第 28 项叫 "lit=true facing=north"。
         assert_eq!(built.state_of(75, 4), (base + 28) as i32);
         assert_eq!(built.state_of(76, 4), (base + 4) as i32);
         // 音色可视化方块映射到调色板第 3+i 项；不在表里的落到 air。
@@ -4006,12 +4334,18 @@ mod tests {
                 o.structure = structure;
                 let path = scratch(&format!("demo-{layout}-{structure}.out"));
                 let info = export_schematic(&s, &path, &o).unwrap();
-                assert!(info.note_blocks > 0, "layout {layout} structure {structure}");
+                assert!(
+                    info.note_blocks > 0,
+                    "layout {layout} structure {structure}"
+                );
                 assert!(info.length > 0 && info.width > 0 && info.height > 0);
                 let raw = gzip_decode(&path);
                 let (_, root) = crate::nbt::parse_named(&raw).unwrap();
                 if structure {
-                    assert_eq!(keys_of(&root), ["DataVersion", "size", "palette", "entities", "blocks"]);
+                    assert_eq!(
+                        keys_of(&root),
+                        ["DataVersion", "size", "palette", "entities", "blocks"]
+                    );
                     // 声明的 blocks 数量必须和真正写出来的一致。
                     let blocks = items(root.get("blocks").unwrap());
                     // 声明数量 = 网格体积：牌子/音符/箱子都由前面的显式条目写，
@@ -4092,11 +4426,51 @@ mod tests {
     #[test]
     fn block_get_ins_matches_the_original_table() {
         let table = [
-            (1, 2), (4, 2), (5, 1), (7, 2), (12, 3), (13, 3), (14, 2), (15, 2), (16, 2), (17, 1),
-            (20, 4), (21, 2), (22, 2), (23, 2), (24, 2), (25, 1), (35, 5), (41, 7), (43, 2),
-            (44, 2), (45, 2), (47, 1), (48, 2), (49, 2), (53, 1), (54, 1), (56, 1), (61, 2),
-            (62, 2), (67, 2), (73, 2), (74, 2), (82, 6), (84, 1), (85, 1), (87, 2), (88, 3),
-            (89, 2), (97, 2), (98, 2), (107, 1), (108, 2), (109, 2), (174, 8), (216, 9),
+            (1, 2),
+            (4, 2),
+            (5, 1),
+            (7, 2),
+            (12, 3),
+            (13, 3),
+            (14, 2),
+            (15, 2),
+            (16, 2),
+            (17, 1),
+            (20, 4),
+            (21, 2),
+            (22, 2),
+            (23, 2),
+            (24, 2),
+            (25, 1),
+            (35, 5),
+            (41, 7),
+            (43, 2),
+            (44, 2),
+            (45, 2),
+            (47, 1),
+            (48, 2),
+            (49, 2),
+            (53, 1),
+            (54, 1),
+            (56, 1),
+            (61, 2),
+            (62, 2),
+            (67, 2),
+            (73, 2),
+            (74, 2),
+            (82, 6),
+            (84, 1),
+            (85, 1),
+            (87, 2),
+            (88, 3),
+            (89, 2),
+            (97, 2),
+            (98, 2),
+            (107, 1),
+            (108, 2),
+            (109, 2),
+            (174, 8),
+            (216, 9),
         ];
         assert_eq!(table.len(), 45, "原版 block_get_ins 一共 45 条 if");
         for id in 0..=255u8 {
@@ -4111,7 +4485,11 @@ mod tests {
         for (ins, &blk) in INSTRUMENT_BLOCKS[..10].iter().enumerate() {
             assert_eq!(block_get_ins(blk), ins as u8, "乐器 {ins} 的方块 {blk}");
         }
-        assert_eq!(block_get_ins(INSTRUMENT_BLOCKS[10]), 0, "铁片琴的方块回读是竖琴");
+        assert_eq!(
+            block_get_ins(INSTRUMENT_BLOCKS[10]),
+            0,
+            "铁片琴的方块回读是竖琴"
+        );
     }
 
     #[test]
@@ -4139,7 +4517,10 @@ mod tests {
         assert_eq!((got.inputs, got.note_blocks, got.added_notes), (1, 2, 2));
         let notes: Vec<_> = got.song.iter_notes().collect();
         // 后入队的 B 先弹出（原版的队列是 LIFO），所以 B 落在第 0 层。
-        assert_eq!(notes, vec![(0, 0, Note::new(2, 45)), (0, 1, Note::new(7, 40))]);
+        assert_eq!(
+            notes,
+            vec![(0, 0, Note::new(2, 45)), (0, 1, Note::new(7, 40))]
+        );
         assert_eq!(got.song.layers.len(), 2);
         assert!(!got.song.dirty, "原版 reset() 之后 changed = 0");
         assert_eq!(
@@ -4176,7 +4557,10 @@ mod tests {
         assert_eq!(got.inputs, 2, "原版 inputam = 2 时还会多弹一句提示");
         assert_eq!(got.added_notes, 2);
         let notes: Vec<_> = got.song.iter_notes().collect();
-        assert_eq!(notes, vec![(0, 0, Note::new(0, 40)), (16, 0, Note::new(0, 45))]);
+        assert_eq!(
+            notes,
+            vec![(0, 0, Note::new(0, 40)), (16, 0, Note::new(0, 45))]
+        );
         assert_eq!(got.song.song_length(), 17);
     }
 
@@ -4344,7 +4728,10 @@ mod tests {
         let got = import_bytes(&gzip(&n.buf).unwrap(), "offset").unwrap();
         assert_eq!((got.note_blocks, got.added_notes), (2, 2));
         let notes: Vec<_> = got.song.iter_notes().collect();
-        assert_eq!(notes, vec![(0, 0, Note::new(0, 40)), (0, 1, Note::new(0, 42))]);
+        assert_eq!(
+            notes,
+            vec![(0, 0, Note::new(0, 40)), (0, 1, Note::new(0, 42))]
+        );
     }
 
     #[test]
@@ -4419,7 +4806,11 @@ mod tests {
 
         // palette 整表相同：29 + 20 个乐器的方块行与音符行（含铜块一族的
         // waxed 铜块和 trumpet_* 属性名）+ 尾部 26 项，顺序也必须一致。
-        assert_eq!(palette_names(&ours), palette_names(&theirs), "调色板与原版不同");
+        assert_eq!(
+            palette_names(&ours),
+            palette_names(&theirs),
+            "调色板与原版不同"
+        );
 
         // 方块表：逐条同序同值。原版网格扫描会跳过已经写过牌子的格子，
         // 所以牌格里只有牌子那一条，任何格子都不该出现两次。
@@ -4462,10 +4853,7 @@ mod tests {
                 .collect();
             kv.sort_unstable();
             s.push('[');
-            let parts: Vec<String> = kv
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect();
+            let parts: Vec<String> = kv.iter().map(|(k, v)| format!("{k}={v}")).collect();
             s.push_str(&parts.join(","));
             s.push(']');
         }
@@ -4514,10 +4902,22 @@ mod tests {
             .collect();
         let nbt = signs[index].get("nbt").unwrap();
         [
-            nbt.get("Text1").and_then(Value::as_str).unwrap().to_string(),
-            nbt.get("Text2").and_then(Value::as_str).unwrap().to_string(),
-            nbt.get("Text3").and_then(Value::as_str).unwrap().to_string(),
-            nbt.get("Text4").and_then(Value::as_str).unwrap().to_string(),
+            nbt.get("Text1")
+                .and_then(Value::as_str)
+                .unwrap()
+                .to_string(),
+            nbt.get("Text2")
+                .and_then(Value::as_str)
+                .unwrap()
+                .to_string(),
+            nbt.get("Text3")
+                .and_then(Value::as_str)
+                .unwrap()
+                .to_string(),
+            nbt.get("Text4")
+                .and_then(Value::as_str)
+                .unwrap()
+                .to_string(),
         ]
     }
 

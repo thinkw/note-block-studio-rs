@@ -16,7 +16,9 @@ use crate::tr;
 
 pub fn show_windows(state: &mut EditorState, ctx: &Context) {
     show_modal(state, ctx);
-    let Some(kind) = state.window.clone() else { return; };
+    let Some(kind) = state.window.clone() else {
+        return;
+    };
     if kind == WindowKind::Greeting {
         // 原版 `draw_window(x1, y1, x1 + 700, y1 + 430)`（draw_window_greeting.gml:38）
         // 只画边框不写标题，欢迎窗不要标题栏。
@@ -119,7 +121,9 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
 /// 原版的 `message()` / `question()`：一次一个，答完才轮到下一个，
 /// 中途答「否」丢掉整个队列。窗口右上角的叉等价于「确定」/「否」。
 fn show_modal(state: &mut EditorState, ctx: &Context) {
-    let Some(modal) = state.modals.items.front().cloned() else { return };
+    let Some(modal) = state.modals.items.front().cloned() else {
+        return;
+    };
     let mut answer = None;
     let mut open = true;
     egui::Window::new(modal.title)
@@ -177,7 +181,15 @@ fn greet_hit(ui: &mut Ui, rect: Rect, id: Id) -> (egui::Response, usize) {
 
 /// 原版 `draw_text_center`（x 为中心）。重写版没有粗体字型，原版的
 /// `font_main_bold` / `font_info_med_bold` 用 0.5px 重叠双绘近似。
-fn greet_text_center(p: &egui::Painter, center_x: f32, y: f32, s: &str, font: f32, color: Color32, bold: bool) {
+fn greet_text_center(
+    p: &egui::Painter,
+    center_x: f32,
+    y: f32,
+    s: &str,
+    font: f32,
+    color: Color32,
+    bold: bool,
+) {
     let g = p.layout_no_wrap(s.to_string(), FontId::proportional(font), color);
     let px = center_x - g.size().x / 2.0;
     p.galley(egui::pos2(px, y), g.clone(), Color32::BLACK);
@@ -197,8 +209,11 @@ fn greet_text_left(p: &egui::Painter, at: Pos2, s: &str, font: f32, color: Color
 
 /// 原版 `string_truncate(str, maxwidth)`：逐字累加宽度，放不下补 `...`。
 fn greet_truncate(p: &egui::Painter, s: &str, max_w: f32, font: f32) -> String {
-    let width =
-        |t: &str| p.layout_no_wrap(t.to_string(), FontId::proportional(font), Color32::WHITE).size().x;
+    let width = |t: &str| {
+        p.layout_no_wrap(t.to_string(), FontId::proportional(font), Color32::WHITE)
+            .size()
+            .x
+    };
     if width(s) <= max_w {
         return s.to_string();
     }
@@ -230,12 +245,20 @@ fn greet_link(
     url: &str,
 ) {
     let w = p
-        .layout_no_wrap(s.to_string(), FontId::proportional(PREFS_FONT), Color32::WHITE)
+        .layout_no_wrap(
+            s.to_string(),
+            FontId::proportional(PREFS_FONT),
+            Color32::WHITE,
+        )
         .size()
         .x;
     // 原版 `mouse_rectangle(xx - width/2, yy, width, 12)`：命中区以 x 为中心、高 12。
     let rect = Rect::from_min_size(egui::pos2(center_x - w / 2.0, y), Vec2::new(w, 12.0));
-    let resp = ui.interact(rect, Id::new(("greet-link", center_x as i32, y as i32)), Sense::click());
+    let resp = ui.interact(
+        rect,
+        Id::new(("greet-link", center_x as i32, y as i32)),
+        Sense::click(),
+    );
     let color = if th.kind == ThemeKind::Fluent {
         if resp.is_pointer_button_down_on() {
             ggray(181)
@@ -337,17 +360,34 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
         bk.greeting_logo(&p, egui::pos2(x(64.0), y(50.0)), false, th.fdark);
     }
     // :43 标题（font_info_med_bold）。
-    greet_text_center(&p, x(132.0), y(213.0), "Note Block Studio", PREFS_FONT_MED, th.text, true);
+    greet_text_center(
+        &p,
+        x(132.0),
+        y(213.0),
+        "Note Block Studio",
+        PREFS_FONT_MED,
+        th.text,
+        true,
+    );
     // :68-100 更新状态行（font_main_bold）。update=0 那支原版没设颜色，用主题色。
     let status = state.update_check.lock().unwrap().status;
     let (line, color) = if state.prefs.check_update {
         if state.update_success {
-            (tr("Successfully updated!", "更新成功！"), Color32::from_rgb(0, 255, 0))
+            (
+                tr("Successfully updated!", "更新成功！"),
+                Color32::from_rgb(0, 255, 0),
+            )
         } else {
             match status {
-                -1 => (tr("Could not check for updates", "检查更新失败"), Color32::from_rgb(255, 0, 0)),
+                -1 => (
+                    tr("Could not check for updates", "检查更新失败"),
+                    Color32::from_rgb(255, 0, 0),
+                ),
                 0 => (tr("Checking for updates...", "正在检查更新……"), th.text),
-                1 => (tr("There is an update available!", "有新版本！"), Color32::from_rgb(255, 128, 0)),
+                1 => (
+                    tr("There is an update available!", "有新版本！"),
+                    Color32::from_rgb(255, 128, 0),
+                ),
                 _ => (
                     tr("You are using the latest version!", "已为最新版本！"),
                     if th.kind == ThemeKind::Dark {
@@ -359,7 +399,10 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
             }
         }
     } else {
-        (tr("Update checking disabled by user.", "检查更新未开启"), Color32::from_rgb(255, 0, 0))
+        (
+            tr("Update checking disabled by user.", "检查更新未开启"),
+            Color32::from_rgb(255, 0, 0),
+        )
     };
     greet_text_center(&p, x(132.0), y(248.0), line, PREFS_FONT, color, true);
     // :107-108 版本行（font_main_bold）。
@@ -376,34 +419,165 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
         &p,
         x(132.0),
         y(280.0),
-        tr("An open-source Minecraft music maker", "一个开源的 Minecraft 音乐制作软件"),
+        tr(
+            "An open-source Minecraft music maker",
+            "一个开源的 Minecraft 音乐制作软件",
+        ),
         PREFS_FONT,
         th.text,
         false,
     );
     // :117 官网链接。
-    greet_link(state, ui, &p, &th, x(132.0), y(296.0), "noteblock.studio", crate::LINK_WEBSITE);
+    greet_link(
+        state,
+        ui,
+        &p,
+        &th,
+        x(132.0),
+        y(296.0),
+        "noteblock.studio",
+        crate::LINK_WEBSITE,
+    );
     // :122-136 社区链接两行。竖线是 draw_text_dynamic（左对齐）。第二行两种语言
     // 布的点不一样：英文 GitHub 108 / 竖线 131 / Donate 156，中文 GitHub 88 /
     // 竖线 109 / QQ 群 133 / 竖线 153 / 捐赠 171，全部照原式
     // `108-(language=1)*20`、`131-(language=1)*22`、`156+15*(language=1)` 拆开写。
-    greet_text_center(&p, x(132.0), y(340.0), tr("Follow OpenNBS:", "关注 OpenNBS："), PREFS_FONT, th.text, false);
-    let off = if th.kind == ThemeKind::Fluent { 0.0 } else { 2.0 };
-    greet_link(state, ui, &p, &th, x(80.0), y(356.0), "Discord", crate::LINK_DISCORD);
-    greet_text_left(&p, egui::pos2(x(104.0 - off), y(356.0)), "|", PREFS_FONT, th.text, false);
-    greet_link(state, ui, &p, &th, x(128.0), y(356.0), "Twitter", crate::LINK_TWITTER);
-    greet_text_left(&p, egui::pos2(x(150.0 - off), y(356.0)), "|", PREFS_FONT, th.text, false);
-    greet_link(state, ui, &p, &th, x(180.0), y(356.0), "YouTube", crate::LINK_YOUTUBE);
-    if crate::lang() == 1 {
-        greet_link(state, ui, &p, &th, x(88.0), y(372.0), "GitHub", crate::LINK_GITHUB);
-        greet_text_left(&p, egui::pos2(x(109.0 - off), y(372.0)), "|", PREFS_FONT, th.text, false);
-        greet_link(state, ui, &p, &th, x(133.0), y(372.0), "QQ 群", crate::LINK_QQ_GROUP);
-        greet_text_left(&p, egui::pos2(x(153.0 - off), y(372.0)), "|", PREFS_FONT, th.text, false);
-        greet_link(state, ui, &p, &th, x(171.0), y(372.0), "捐赠", crate::LINK_DONATE);
+    greet_text_center(
+        &p,
+        x(132.0),
+        y(340.0),
+        tr("Follow OpenNBS:", "关注 OpenNBS："),
+        PREFS_FONT,
+        th.text,
+        false,
+    );
+    let off = if th.kind == ThemeKind::Fluent {
+        0.0
     } else {
-        greet_link(state, ui, &p, &th, x(108.0), y(372.0), "GitHub", crate::LINK_GITHUB);
-        greet_text_left(&p, egui::pos2(x(131.0 - off), y(372.0)), "|", PREFS_FONT, th.text, false);
-        greet_link(state, ui, &p, &th, x(156.0), y(372.0), "Donate", crate::LINK_DONATE);
+        2.0
+    };
+    greet_link(
+        state,
+        ui,
+        &p,
+        &th,
+        x(80.0),
+        y(356.0),
+        "Discord",
+        crate::LINK_DISCORD,
+    );
+    greet_text_left(
+        &p,
+        egui::pos2(x(104.0 - off), y(356.0)),
+        "|",
+        PREFS_FONT,
+        th.text,
+        false,
+    );
+    greet_link(
+        state,
+        ui,
+        &p,
+        &th,
+        x(128.0),
+        y(356.0),
+        "Twitter",
+        crate::LINK_TWITTER,
+    );
+    greet_text_left(
+        &p,
+        egui::pos2(x(150.0 - off), y(356.0)),
+        "|",
+        PREFS_FONT,
+        th.text,
+        false,
+    );
+    greet_link(
+        state,
+        ui,
+        &p,
+        &th,
+        x(180.0),
+        y(356.0),
+        "YouTube",
+        crate::LINK_YOUTUBE,
+    );
+    if crate::lang() == 1 {
+        greet_link(
+            state,
+            ui,
+            &p,
+            &th,
+            x(88.0),
+            y(372.0),
+            "GitHub",
+            crate::LINK_GITHUB,
+        );
+        greet_text_left(
+            &p,
+            egui::pos2(x(109.0 - off), y(372.0)),
+            "|",
+            PREFS_FONT,
+            th.text,
+            false,
+        );
+        greet_link(
+            state,
+            ui,
+            &p,
+            &th,
+            x(133.0),
+            y(372.0),
+            "QQ 群",
+            crate::LINK_QQ_GROUP,
+        );
+        greet_text_left(
+            &p,
+            egui::pos2(x(153.0 - off), y(372.0)),
+            "|",
+            PREFS_FONT,
+            th.text,
+            false,
+        );
+        greet_link(
+            state,
+            ui,
+            &p,
+            &th,
+            x(171.0),
+            y(372.0),
+            "捐赠",
+            crate::LINK_DONATE,
+        );
+    } else {
+        greet_link(
+            state,
+            ui,
+            &p,
+            &th,
+            x(108.0),
+            y(372.0),
+            "GitHub",
+            crate::LINK_GITHUB,
+        );
+        greet_text_left(
+            &p,
+            egui::pos2(x(131.0 - off), y(372.0)),
+            "|",
+            PREFS_FONT,
+            th.text,
+            false,
+        );
+        greet_link(
+            state,
+            ui,
+            &p,
+            &th,
+            x(156.0),
+            y(372.0),
+            "Donate",
+            crate::LINK_DONATE,
+        );
     }
     // :139-146 分隔线：先一条 1px 白线（Fluent 深色换黑），再一条 25% 主题色线。
     let line1 = if th.fdark && th.kind == ThemeKind::Fluent {
@@ -412,29 +586,53 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
         Color32::WHITE
     };
     p.line_segment(
-        [egui::pos2(x(270.0), y(24.0)), egui::pos2(x(270.0), y(396.0))],
+        [
+            egui::pos2(x(270.0), y(24.0)),
+            egui::pos2(x(270.0), y(396.0)),
+        ],
         Stroke::new(1.0_f32, line1),
     );
     let line2 = Color32::from_rgba_unmultiplied(th.text.r(), th.text.g(), th.text.b(), 64);
     p.line_segment(
-        [egui::pos2(x(269.0), y(24.0)), egui::pos2(x(269.0), y(396.0))],
+        [
+            egui::pos2(x(269.0), y(24.0)),
+            egui::pos2(x(269.0), y(396.0)),
+        ],
         Stroke::new(1.0_f32, line2),
     );
     // :148-149 右栏标题。
-    greet_text_left(&p, egui::pos2(x(290.0), y(20.0)), tr("What do you want to do?", "要做什么？"), PREFS_FONT, th.text, false);
+    greet_text_left(
+        &p,
+        egui::pos2(x(290.0), y(20.0)),
+        tr("What do you want to do?", "要做什么？"),
+        PREFS_FONT,
+        th.text,
+        false,
+    );
 
     // :152-175 创建歌曲。
     let mut c = 48.0;
     {
         let at = egui::pos2(x(300.0), y(c));
-        let (resp, m) = greet_hit(ui, Rect::from_min_size(at, Vec2::new(224.0, 32.0)), Id::new("greet-create"));
+        let (resp, m) = greet_hit(
+            ui,
+            Rect::from_min_size(at, Vec2::new(224.0, 32.0)),
+            Id::new("greet-create"),
+        );
         let pressed = m == 2;
         if let Some(bk) = &bank {
             bk.frame2_button(&p, at, &th, m);
             bk.big_icon(&p, at, &th, 0, pressed);
         }
         let push = if pressed { 1.0 } else { 0.0 };
-        greet_text_left(&p, at + Vec2::new(48.0 + push, 9.0 + push), tr("Create a new song", "创建歌曲"), PREFS_FONT, th.text, false);
+        greet_text_left(
+            &p,
+            at + Vec2::new(48.0 + push, 9.0 + push),
+            tr("Create a new song", "创建歌曲"),
+            PREFS_FONT,
+            th.text,
+            false,
+        );
         if resp.clicked() {
             state.emit(Command::CloseWindow);
         }
@@ -443,14 +641,25 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
     // :178-203 打开歌曲（load_song("", 0, 1) = 系统选框）。
     {
         let at = egui::pos2(x(300.0), y(c));
-        let (resp, m) = greet_hit(ui, Rect::from_min_size(at, Vec2::new(224.0, 32.0)), Id::new("greet-open"));
+        let (resp, m) = greet_hit(
+            ui,
+            Rect::from_min_size(at, Vec2::new(224.0, 32.0)),
+            Id::new("greet-open"),
+        );
         let pressed = m == 2;
         if let Some(bk) = &bank {
             bk.frame2_button(&p, at, &th, m);
             bk.big_icon(&p, at, &th, 1, pressed);
         }
         let push = if pressed { 1.0 } else { 0.0 };
-        greet_text_left(&p, at + Vec2::new(48.0 + push, 9.0 + push), tr("Load a song", "打开歌曲"), PREFS_FONT, th.text, false);
+        greet_text_left(
+            &p,
+            at + Vec2::new(48.0 + push, 9.0 + push),
+            tr("Load a song", "打开歌曲"),
+            PREFS_FONT,
+            th.text,
+            false,
+        );
         if resp.clicked() {
             state.emit(Command::OpenDialog(DialogAction::OpenSong));
         }
@@ -460,11 +669,22 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
     for (i, r) in state.recent_files.clone().iter().enumerate() {
         if i == 0 {
             c += 36.0;
-            greet_text_left(&p, egui::pos2(x(b - 20.0), y(c)), tr("Recent songs:", "最近歌曲："), PREFS_FONT, th.text, false);
+            greet_text_left(
+                &p,
+                egui::pos2(x(b - 20.0), y(c)),
+                tr("Recent songs:", "最近歌曲："),
+                PREFS_FONT,
+                th.text,
+                false,
+            );
             c += 16.0;
         }
         let at = egui::pos2(x(b), y(c));
-        let (resp, m) = greet_hit(ui, Rect::from_min_size(at, Vec2::new(320.0, 16.0)), Id::new(("greet-recent", i)));
+        let (resp, m) = greet_hit(
+            ui,
+            Rect::from_min_size(at, Vec2::new(320.0, 16.0)),
+            Id::new(("greet-recent", i)),
+        );
         let pressed = m == 2;
         if let Some(bk) = &bank {
             bk.frame5_row(&p, at, &th, m);
@@ -476,9 +696,19 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
         let name = greet_truncate(&p, &name, 220.0, PREFS_FONT);
-        greet_text_left(&p, at + Vec2::new(2.0 + push, 1.0 + push), &name, PREFS_FONT, th.text, false);
+        greet_text_left(
+            &p,
+            at + Vec2::new(2.0 + push, 1.0 + push),
+            &name,
+            PREFS_FONT,
+            th.text,
+            false,
+        );
         let ago = seconds_to_str(nbs_io::prefs::unix_now() - r.time);
-        let tw = p.layout_no_wrap(ago.clone(), FontId::proportional(PREFS_FONT), th.text).size().x;
+        let tw = p
+            .layout_no_wrap(ago.clone(), FontId::proportional(PREFS_FONT), th.text)
+            .size()
+            .x;
         // 原版 `draw_set_halign(fa_right)`：x 是右缘。
         greet_text_left(
             &p,
@@ -494,7 +724,11 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
             } else {
                 state.modals = ModalQueue::message(
                     tr("Error", "错误"),
-                    &format!("{}\n{}", tr("Could not find file:", "找不到文件："), r.path.display()),
+                    &format!(
+                        "{}\n{}",
+                        tr("Could not find file:", "找不到文件："),
+                        r.path.display()
+                    ),
                 );
                 state.remove_recent(&r.path);
                 state.emit(Command::SavePreferences);
@@ -509,7 +743,11 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
     // :250-291 Note Block World：底图横向拉伸 1.5 倍，NEW! 徽标和灰字都按原版坐标。
     {
         let at = egui::pos2(x(300.0), y(c));
-        let (resp, m) = greet_hit(ui, Rect::from_min_size(at, Vec2::new(336.0, 32.0)), Id::new("greet-world"));
+        let (resp, m) = greet_hit(
+            ui,
+            Rect::from_min_size(at, Vec2::new(336.0, 32.0)),
+            Id::new("greet-world"),
+        );
         let pressed = m == 2;
         if let Some(bk) = &bank {
             bk.frame2_button_wide(&p, at, &th, m);
@@ -526,11 +764,21 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
         );
         // :271-281 NEW! 徽标：accent[4] 圆角胶囊（(566, c+1)-(604, c+16)，r=15）+ 白字。
         p.rect_filled(
-            Rect::from_min_max(egui::pos2(x(566.0), y(c + 1.0)), egui::pos2(x(604.0), y(c + 16.0))),
+            Rect::from_min_max(
+                egui::pos2(x(566.0), y(c + 1.0)),
+                egui::pos2(x(604.0), y(c + 16.0)),
+            ),
             15.0,
             th.accent(4),
         );
-        greet_text_left(&p, egui::pos2(x(570.0), y(c + 2.0)), "NEW!", PREFS_FONT, Color32::WHITE, true);
+        greet_text_left(
+            &p,
+            egui::pos2(x(570.0), y(c + 2.0)),
+            "NEW!",
+            PREFS_FONT,
+            Color32::WHITE,
+            true,
+        );
         // :283-285 灰字。
         greet_text_left(
             &p,
@@ -548,14 +796,25 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
     // :294-317 从 MIDI 文件生成（open_midi("", 1) = 系统选框）。
     {
         let at = egui::pos2(x(300.0), y(c));
-        let (resp, m) = greet_hit(ui, Rect::from_min_size(at, Vec2::new(224.0, 32.0)), Id::new("greet-midi"));
+        let (resp, m) = greet_hit(
+            ui,
+            Rect::from_min_size(at, Vec2::new(224.0, 32.0)),
+            Id::new("greet-midi"),
+        );
         let pressed = m == 2;
         if let Some(bk) = &bank {
             bk.frame2_button(&p, at, &th, m);
             bk.big_icon(&p, at, &th, 2, pressed);
         }
         let push = if pressed { 1.0 } else { 0.0 };
-        greet_text_left(&p, at + Vec2::new(48.0 + push, 9.0 + push), tr("Generate song out of MIDI file", "从 MIDI 文件生成"), PREFS_FONT, th.text, false);
+        greet_text_left(
+            &p,
+            at + Vec2::new(48.0 + push, 9.0 + push),
+            tr("Generate song out of MIDI file", "从 MIDI 文件生成"),
+            PREFS_FONT,
+            th.text,
+            false,
+        );
         if resp.clicked() {
             state.emit(Command::OpenDialog(DialogAction::ImportMidi));
         }
@@ -620,44 +879,74 @@ fn donate_banner_window(state: &mut EditorState, ctx: &Context) {
 
 fn song_info(state: &mut EditorState, ui: &mut Ui) {
     let mut changed = false;
-    egui::Grid::new("song_info_grid").num_columns(2).show(ui, |ui| {
-        let m: &mut SongMeta = &mut state.doc.song.meta;
-        ui.label(tr("Name", "名称"));
-        if ui.text_edit_singleline(&mut m.name).changed() { changed = true; }
-        ui.end_row();
-        ui.label(tr("Author", "作者"));
-        if ui.text_edit_singleline(&mut m.author).changed() { changed = true; }
-        ui.end_row();
-        ui.label(tr("Original author", "原作者"));
-        if ui.text_edit_singleline(&mut m.original_author).changed() { changed = true; }
-        ui.end_row();
-        ui.label(tr("Description", "描述"));
-        if ui.add(egui::TextEdit::multiline(&mut m.description).desired_rows(3)).changed() { changed = true; }
-        ui.end_row();
-    });
+    egui::Grid::new("song_info_grid")
+        .num_columns(2)
+        .show(ui, |ui| {
+            let m: &mut SongMeta = &mut state.doc.song.meta;
+            ui.label(tr("Name", "名称"));
+            if ui.text_edit_singleline(&mut m.name).changed() {
+                changed = true;
+            }
+            ui.end_row();
+            ui.label(tr("Author", "作者"));
+            if ui.text_edit_singleline(&mut m.author).changed() {
+                changed = true;
+            }
+            ui.end_row();
+            ui.label(tr("Original author", "原作者"));
+            if ui.text_edit_singleline(&mut m.original_author).changed() {
+                changed = true;
+            }
+            ui.end_row();
+            ui.label(tr("Description", "描述"));
+            if ui
+                .add(egui::TextEdit::multiline(&mut m.description).desired_rows(3))
+                .changed()
+            {
+                changed = true;
+            }
+            ui.end_row();
+        });
     if changed {
         state.doc.song.dirty = true;
     }
     ui.separator();
-    ui.label(RichText::new(tr(
-        "These fields are saved with the .nbs file.",
-        "这些字段会随 .nbs 一起保存",
-    )).small().weak());
+    ui.label(
+        RichText::new(tr(
+            "These fields are saved with the .nbs file.",
+            "这些字段会随 .nbs 一起保存",
+        ))
+        .small()
+        .weak(),
+    );
     footer(state, ui);
 }
 
 fn properties(state: &mut EditorState, ui: &mut Ui) {
     let mut tempo = state.doc.song.meta.tempo as f64;
-    if ui.add(egui::Slider::new(&mut tempo, 0.25..=60.0).text(tr("Tempo (tick/s)", "速度 (tick/s)"))).changed() {
+    if ui
+        .add(egui::Slider::new(&mut tempo, 0.25..=60.0).text(tr("Tempo (tick/s)", "速度 (tick/s)")))
+        .changed()
+    {
         state.emit(Command::SetTempo(tempo as f32));
     }
-    ui.label(RichText::new(format!("= {:.0} BPM", tempo * 15.0)).small().weak());
+    ui.label(
+        RichText::new(format!("= {:.0} BPM", tempo * 15.0))
+            .small()
+            .weak(),
+    );
     let mut ts = state.doc.song.meta.time_signature as f32;
-    if ui.add(egui::Slider::new(&mut ts, 2.0..=8.0).text(tr("Time signature", "拍号"))).changed() {
+    if ui
+        .add(egui::Slider::new(&mut ts, 2.0..=8.0).text(tr("Time signature", "拍号")))
+        .changed()
+    {
         state.emit(Command::SetTimeSignature(ts as u8));
     }
     let mut looping = state.doc.song.meta.loop_enabled;
-    if ui.checkbox(&mut looping, tr("Enable looping", "启用循环")).changed() {
+    if ui
+        .checkbox(&mut looping, tr("Enable looping", "启用循环"))
+        .changed()
+    {
         state.emit(Command::ToggleLoop);
     }
     let loop_on = state.doc.song.meta.loop_enabled;
@@ -666,8 +955,15 @@ fn properties(state: &mut EditorState, ui: &mut Ui) {
             ui.label(tr("Loop start tick", "循环起点 tick"));
             let enda = state.doc.song.enda as f64;
             let mut start = state.doc.song.meta.loop_start as f64;
-            if ui.add(egui::DragValue::new(&mut start).range(0.0..=enda)).changed() {
-                state.doc.edit_meta("设置循环起点", |m| m.loop_start = start as u16);
+            if ui
+                .add(egui::DragValue::new(&mut start).range(0.0..=enda))
+                .changed()
+            {
+                state
+                    .doc
+                    .edit_meta(tr("Set loop start", "设置循环起点"), |m| {
+                        m.loop_start = start as u16
+                    });
                 state.sync_loop_params();
             }
         });
@@ -677,7 +973,10 @@ fn properties(state: &mut EditorState, ui: &mut Ui) {
             // 原版没有 loop_end 字段：循环终点就是歌曲长度，所以只能往上调，
             // 上调的效果是延长结尾。
             let mut end = len as f64;
-            if ui.add(egui::DragValue::new(&mut end).range(len as f64..=(len + 16) as f64)).changed() {
+            if ui
+                .add(egui::DragValue::new(&mut end).range(len as f64..=(len + 16) as f64))
+                .changed()
+            {
                 state.doc.extend_loop_end(end as u32);
                 state.sync_loop_params();
             }
@@ -693,8 +992,15 @@ fn properties(state: &mut EditorState, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.label(tr("Times to loop", "循环次数"));
             let mut max = state.doc.song.meta.loop_max as i32;
-            if ui.add(egui::DragValue::new(&mut max).range(0..=10)).changed() {
-                state.doc.edit_meta("设置循环次数", |m| m.loop_max = max as u8);
+            if ui
+                .add(egui::DragValue::new(&mut max).range(0..=10))
+                .changed()
+            {
+                state
+                    .doc
+                    .edit_meta(tr("Set loop count", "设置循环次数"), |m| {
+                        m.loop_max = max as u8
+                    });
                 state.sync_loop_params();
             }
             if state.doc.song.meta.loop_max == 0 {
@@ -736,8 +1042,7 @@ fn statistics(state: &mut EditorState, ui: &mut Ui) {
     let song = &state.doc.song;
     // 自定义乐器的编号从 FIRST_CUSTOM_INDEX 起，所以直方图要覆盖到它们，
     // 否则大工程里最常见的恰恰是被漏掉的（原版统计就包含全部乐器行）。
-    let slots = nbs_core::model::FIRST_CUSTOM_INDEX as usize
-        + song.custom_instruments.len().max(1);
+    let slots = nbs_core::model::FIRST_CUSTOM_INDEX as usize + song.custom_instruments.len().max(1);
     let mut per_ins = vec![0usize; slots];
     let mut min_key = 87u8;
     let mut max_key = 0u8;
@@ -751,26 +1056,63 @@ fn statistics(state: &mut EditorState, ui: &mut Ui) {
     }
     let seconds = song.song_length() as f32 / song.meta.tempo.max(0.01);
     egui::Grid::new("stats_grid").num_columns(2).show(ui, |ui| {
-        ui.label(tr("Total notes", "音符总数")); ui.label(song.total_blocks.to_string()); ui.end_row();
-        ui.label(tr("Song length", "歌曲长度")); ui.label(format!("{} ticks", song.song_length())); ui.end_row();
-        ui.label(tr("Duration", "时长")); ui.label(if crate::lang() == 1 { format!("{seconds:.1} 秒") } else { format!("{seconds:.1} s") }); ui.end_row();
-        ui.label(tr("Layers", "图层数")); ui.label(song.layers.len().to_string()); ui.end_row();
-        ui.label(tr("Locked layers", "已锁定图层")); ui.label(song.locked_layers().iter().filter(|x| **x).count().to_string()); ui.end_row();
-        ui.label(tr("Pitch range", "音高范围")); ui.label(format!("{} ~ {}", key_name(min_key, true, false), key_name(max_key, true, false))); ui.end_row();
-        ui.label(tr("Custom instruments", "自定义音色")); ui.label(song.custom_instruments.len().to_string()); ui.end_row();
-        ui.label(tr("History entries", "历史条目")); ui.label(state.doc.history.len().to_string()); ui.end_row();
+        ui.label(tr("Total notes", "音符总数"));
+        ui.label(song.total_blocks.to_string());
+        ui.end_row();
+        ui.label(tr("Song length", "歌曲长度"));
+        ui.label(format!("{} ticks", song.song_length()));
+        ui.end_row();
+        ui.label(tr("Duration", "时长"));
+        ui.label(if crate::lang() == 1 {
+            format!("{seconds:.1} 秒")
+        } else {
+            format!("{seconds:.1} s")
+        });
+        ui.end_row();
+        ui.label(tr("Layers", "图层数"));
+        ui.label(song.layers.len().to_string());
+        ui.end_row();
+        ui.label(tr("Locked layers", "已锁定图层"));
+        ui.label(
+            song.locked_layers()
+                .iter()
+                .filter(|x| **x)
+                .count()
+                .to_string(),
+        );
+        ui.end_row();
+        ui.label(tr("Pitch range", "音高范围"));
+        ui.label(format!(
+            "{} ~ {}",
+            key_name(min_key, true, false),
+            key_name(max_key, true, false)
+        ));
+        ui.end_row();
+        ui.label(tr("Custom instruments", "自定义音色"));
+        ui.label(song.custom_instruments.len().to_string());
+        ui.end_row();
+        ui.label(tr("History entries", "历史条目"));
+        ui.label(state.doc.history.len().to_string());
+        ui.end_row();
     });
     ui.separator();
     ui.label(RichText::new(tr("Notes per instrument", "各乐器音符数")).strong());
     let total = song.total_blocks.max(1);
-    egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
-        for (i, c) in per_ins.iter().enumerate() {
-            if *c > 0 {
-                let pct = *c as f32 * 100.0 / total as f32;
-                ui.label(format!("{:>6}  {:>5.1}%  {}", c, pct, instrument_name(i as u8)));
+    egui::ScrollArea::vertical()
+        .max_height(160.0)
+        .show(ui, |ui| {
+            for (i, c) in per_ins.iter().enumerate() {
+                if *c > 0 {
+                    let pct = *c as f32 * 100.0 / total as f32;
+                    ui.label(format!(
+                        "{:>6}  {:>5.1}%  {}",
+                        c,
+                        pct,
+                        instrument_name(i as u8)
+                    ));
+                }
             }
-        }
-    });
+        });
     footer(state, ui);
 }
 
@@ -796,10 +1138,7 @@ fn preferences(state: &mut EditorState, ui: &mut Ui) {
     // 内容原点 o 相当于原版的 (x1, y1 + 30)（Fluent）/ (x1, y1 + 26)（其余），
     // 所以原版窗口底边 y1 + 510 落到 o 系就是 480 / 484。
     let body_h = if fluent { 480.0 } else { 484.0 };
-    let body = ui.allocate_exact_size(
-        egui::vec2(500.0 - ml - mr, body_h),
-        egui::Sense::hover(),
-    );
+    let body = ui.allocate_exact_size(egui::vec2(500.0 - ml - mr, body_h), egui::Sense::hover());
     // allocate_exact_size 之后 cursor 已经移到这块区域的下面，原点必须取分配到的矩形。
     let o = body.0.min - egui::vec2(ml, 0.0);
     let ry = if fluent { -8.0 } else { -26.0 };
@@ -968,14 +1307,36 @@ fn prefs_general(state: &mut EditorState, pg: &mut Page) {
     let ink = if on { pg.ink() } else { ggray(128) };
     // 和「缩放」同一套：原版把 `"间隔:            分钟"` 画成一整串，数字叠在空格上，
     // 我们的空格更窄，照抄个数会让数字压住「分钟」，所以单位按最宽的数字（60）定死。
-    pg.text(pg.row(326.0, 110.0), tr("Interval:", "间隔:"), PREFS_FONT, ink);
-    let tip = tr("The amount of minutes between each auto-save.", "自动保存中间的间隔。");
+    pg.text(
+        pg.row(326.0, 110.0),
+        tr("Interval:", "间隔:"),
+        PREFS_FONT,
+        ink,
+    );
+    let tip = tr(
+        "The amount of minutes between each auto-save.",
+        "自动保存中间的间隔。",
+    );
     pg.tip_area(326.0, 110.0, 180.0, 16.0, tip);
     let mins = state.prefs.auto_save_minutes as i32;
-    let drag = pg.drag(375.0, 110.0, mins, 1.0, 1, 60, !on, tip, &mut state.prefs_drag);
+    let drag = pg.drag(
+        375.0,
+        110.0,
+        mins,
+        1.0,
+        1,
+        60,
+        !on,
+        tip,
+        &mut state.prefs_drag,
+    );
     let unit_x = 375.0 + pg.measure("60", PREFS_FONT) + 4.0;
     // 原版 `condstr(autosavemins > 1, "s")`。
-    let unit = if mins > 1 { tr("minutes", "分钟") } else { tr("minute", "分钟") };
+    let unit = if mins > 1 {
+        tr("minutes", "分钟")
+    } else {
+        tr("minute", "分钟")
+    };
     pg.text(pg.row(unit_x, 110.0), unit, PREFS_FONT, ink);
     if let Some(mins) = drag {
         state.prefs.auto_save_minutes = mins as u8;
@@ -1099,7 +1460,12 @@ fn prefs_interface(
     pg.header(258.0, 74.0, 220.0, 60.0, tr("Max. frame rate", "帧率限制"));
     pg.frame_box(274.0, 95.0, 374.0, 115.0);
     let rate = state.prefs.refresh_rate as usize % rate_items().len();
-    pg.text(pg.row(277.0, 98.0), rate_items()[rate], PREFS_FONT, pg.ink());
+    pg.text(
+        pg.row(277.0, 98.0),
+        rate_items()[rate],
+        PREFS_FONT,
+        pg.ink(),
+    );
     *rate_at = pg.row(274.0, 116.0);
     if pg.arrow(&state.icons, 357.0, 96.0) && !state.prefs_rate_menu {
         state.prefs_rate_menu = true;
@@ -1112,12 +1478,27 @@ fn prefs_interface(
     // 叠在中间那段空格上（14 个空格是源码里的原始个数）。我们的字体度量和
     // GameMaker 的 fnt_main 不一样，照抄空格数会让数字压住百分号，所以 % 按
     // 最宽的那个数字（400）定在数字右边，位置同样是固定的、不随数值跳动。
-    pg.text(pg.row(276.0, 166.0), tr("Scale:", "缩放:"), PREFS_FONT, pg.ink());
+    pg.text(
+        pg.row(276.0, 166.0),
+        tr("Scale:", "缩放:"),
+        PREFS_FONT,
+        pg.ink(),
+    );
     let pct = (state.prefs.effective_scale(native) * 100.0).round() as i32;
     // 原版灵敏度 `1 / window_scale^2`，而 `draw_dragvalue` 是拿它当除数用的：
     // 100% 时约 10 像素进 1 格，400% 时不到 1 像素就进 1 格，倍率越大拖得越快。
     let sens = 10000.0 / (pct * pct) as f32;
-    let drag = pg.drag(322.0, 166.0, pct, sens, 50, 400, false, "", &mut state.prefs_drag);
+    let drag = pg.drag(
+        322.0,
+        166.0,
+        pct,
+        sens,
+        50,
+        400,
+        false,
+        "",
+        &mut state.prefs_drag,
+    );
     let sign_x = 322.0 + pg.measure("400", PREFS_FONT) + 4.0;
     pg.text(pg.row(sign_x, 166.0), "%", PREFS_FONT, pg.ink());
     if let Some(pct) = drag {
@@ -1125,7 +1506,13 @@ fn prefs_interface(
         state.emit(Command::SavePreferences);
     }
     // 原版 `draw_button2(x1 + 394, y1 + 161, 72, "重置", window_scale == get_default_window_scale())`。
-    if pg.button(394.0, 161.0, 72.0, tr("Reset", "重置"), state.prefs.scale_is_default(native)) {
+    if pg.button(
+        394.0,
+        161.0,
+        72.0,
+        tr("Reset", "重置"),
+        state.prefs.scale_is_default(native),
+    ) {
         state.prefs.window_scale = None;
         state.emit(Command::SavePreferences);
     }
@@ -1167,7 +1554,15 @@ fn prefs_appearance(state: &mut EditorState, pg: &mut Page) {
         (250.0, Flag::RemoveEffect, "Show effect on removal", "显示删除效果", "Whether to show a fading border\nwhen removing a note block.", "删除音符时显示淡出边框效果。"),
     ];
     for (n, flag, label_en, label_zh, tip_en, tip_zh) in blocks {
-        if pg.check(40.0, n, flag.get(&state.flags), tr(label_en, label_zh), tr(tip_en, tip_zh), false, false) {
+        if pg.check(
+            40.0,
+            n,
+            flag.get(&state.flags),
+            tr(label_en, label_zh),
+            tr(tip_en, tip_zh),
+            false,
+            false,
+        ) {
             state.emit(Command::ToggleFlag(flag));
         }
     }
@@ -1177,32 +1572,68 @@ fn prefs_appearance(state: &mut EditorState, pg: &mut Page) {
     // 拖拽 x 原版两种语言不一样（EN 218 / CN 172）。
     pg.text(
         pg.row(60.0, 268.0),
-        tr("Selection highlight intensity:         %", "选择高亮显示强度:         %"),
+        tr(
+            "Selection highlight intensity:         %",
+            "选择高亮显示强度:         %",
+        ),
         PREFS_FONT,
         pg.ink(),
     );
     let strength = (state.prefs.selection_alpha * 100.0).round() as i32;
     let strength_x = if crate::lang() == 1 { 172.0 } else { 218.0 };
-    if let Some(v) = pg.drag(strength_x, 268.0, strength, 2.0, 10, 80, false, "", &mut state.prefs_drag) {
+    if let Some(v) = pg.drag(
+        strength_x,
+        268.0,
+        strength,
+        2.0,
+        10,
+        80,
+        false,
+        "",
+        &mut state.prefs_drag,
+    ) {
         state.prefs.selection_alpha = v as f32 / 100.0;
         state.emit(Command::SavePreferences);
     }
 
     pg.header(22.0, 294.0, 456.0, 171.0, tr("Piano", "琴键"));
     let piano = state.flags.show_piano;
-    if pg.check(40.0, 310.0, piano, tr("Show piano", "显示琴键"), tr("Whether the piano should be visible.", "钢琴键是否可见。"), true, false) {
+    if pg.check(
+        40.0,
+        310.0,
+        piano,
+        tr("Show piano", "显示琴键"),
+        tr("Whether the piano should be visible.", "钢琴键是否可见。"),
+        true,
+        false,
+    ) {
         state.emit(Command::ToggleFlag(Flag::ShowPiano));
     }
     // 「最多显示键数」：琴键隐藏时同样退化成灰色静态数字（原版 `if (!show_piano) draw_set_color(c_gray)`）。
     let ink = if piano { pg.ink() } else { ggray(128) };
-    pg.text(pg.row(70.0, 328.0), tr("Keys to show:", "最多显示键数:"), PREFS_FONT, ink);
+    pg.text(
+        pg.row(70.0, 328.0),
+        tr("Keys to show:", "最多显示键数:"),
+        PREFS_FONT,
+        ink,
+    );
     let tip = tr(
         "The amount of keys to show. A high number may\nslow down the program on old computers.",
         "同屏显示的琴键数。过多可能会在老电脑上造成卡顿。",
     );
     pg.tip_area(70.0, 328.0, 150.0, 21.0, tip);
     let keys = state.prefs.keys_to_show as i32;
-    let drag = pg.drag(150.0, 328.0, keys, 2.0, 20, 50, !piano, tip, &mut state.prefs_drag);
+    let drag = pg.drag(
+        150.0,
+        328.0,
+        keys,
+        2.0,
+        20,
+        50,
+        !piano,
+        tip,
+        &mut state.prefs_drag,
+    );
     if let Some(keys) = drag {
         state.prefs.keys_to_show = keys.clamp(20, 50) as u8;
         state.emit(Command::SavePreferences);
@@ -1216,7 +1647,15 @@ fn prefs_appearance(state: &mut EditorState, pg: &mut Page) {
         (450.0, Flag::Flats, "Use flat symbol", "使用降记号", "Whether to use the flat symbol (b) instead of\nthe sharp symbol (#) on keynames.", "是否为键名使用降记号（b）而不是升记号（#）。"),
     ];
     for (n, flag, label_en, label_zh, tip_en, tip_zh) in keys_rows {
-        if pg.check(40.0, n, flag.get(&state.flags), tr(label_en, label_zh), tr(tip_en, tip_zh), false, false) {
+        if pg.check(
+            40.0,
+            n,
+            flag.get(&state.flags),
+            tr(label_en, label_zh),
+            tr(tip_en, tip_zh),
+            false,
+            false,
+        ) {
             state.emit(Command::ToggleFlag(flag));
         }
     }
@@ -1228,12 +1667,40 @@ fn prefs_appearance(state: &mut EditorState, pg: &mut Page) {
 fn prefs_usability(state: &mut EditorState, pg: &mut Page) {
     pg.header(22.0, 74.0, 456.0, 120.0, tr("Mouse wheel", "鼠标滚轮"));
     let wheel_rows = [
-        (90.0, 0u8, "Use mouse wheel to scroll through the song", "使用鼠标滚轮移动位置", "Use the mouse wheel to scroll through\nthe song horizontally or vertically.", "使用鼠标滚轮横向或竖向移动编辑区域位置。"),
-        (110.0, 1, "Use mouse wheel to change instrument", "使用鼠标滚轮改变音色", "Use the mouse wheel to toggle between\nthe available instruments.", "使用鼠标滚轮切换可用音色。"),
-        (130.0, 2, "Use mouse wheel to change key", "使用鼠标滚轮改变音调", "Use the mouse wheel to toggle\nbetween the keys on the piano.", "使用鼠标滚轮改变目前使用的音调。"),
+        (
+            90.0,
+            0u8,
+            "Use mouse wheel to scroll through the song",
+            "使用鼠标滚轮移动位置",
+            "Use the mouse wheel to scroll through\nthe song horizontally or vertically.",
+            "使用鼠标滚轮横向或竖向移动编辑区域位置。",
+        ),
+        (
+            110.0,
+            1,
+            "Use mouse wheel to change instrument",
+            "使用鼠标滚轮改变音色",
+            "Use the mouse wheel to toggle between\nthe available instruments.",
+            "使用鼠标滚轮切换可用音色。",
+        ),
+        (
+            130.0,
+            2,
+            "Use mouse wheel to change key",
+            "使用鼠标滚轮改变音调",
+            "Use the mouse wheel to toggle\nbetween the keys on the piano.",
+            "使用鼠标滚轮改变目前使用的音调。",
+        ),
     ];
     for (n, value, label_en, label_zh, tip_en, tip_zh) in wheel_rows {
-        if pg.radio(40.0, n, state.prefs.mousewheel == value, tr(label_en, label_zh), tr(tip_en, tip_zh), false) {
+        if pg.radio(
+            40.0,
+            n,
+            state.prefs.mousewheel == value,
+            tr(label_en, label_zh),
+            tr(tip_en, tip_zh),
+            false,
+        ) {
             state.prefs.mousewheel = value;
             state.emit(Command::SavePreferences);
         }
@@ -1295,12 +1762,40 @@ fn prefs_playback(state: &mut EditorState, pg: &mut Page) {
     // 原版 `marker_pagebypage`：1 按页 / 0 按刻 / 2 按帧，跟随关掉时三格都锁定。
     let lock = !state.marker_follow;
     let follow_rows = [
-        (110.0, 1u8, "Page by page", "按页", "Scroll with the marker every page.", "跟随进度条翻页。"),
-        (130.0, 0, "Tick by tick", "按刻", "Scroll with the marker every tick.", "跟随进度条滚动。"),
-        (150.0, 2, "Frame by frame", "按帧", "Scroll with the marker every frame.", "跟随进度条逐帧滚动。"),
+        (
+            110.0,
+            1u8,
+            "Page by page",
+            "按页",
+            "Scroll with the marker every page.",
+            "跟随进度条翻页。",
+        ),
+        (
+            130.0,
+            0,
+            "Tick by tick",
+            "按刻",
+            "Scroll with the marker every tick.",
+            "跟随进度条滚动。",
+        ),
+        (
+            150.0,
+            2,
+            "Frame by frame",
+            "按帧",
+            "Scroll with the marker every frame.",
+            "跟随进度条逐帧滚动。",
+        ),
     ];
     for (n, value, label_en, label_zh, tip_en, tip_zh) in follow_rows {
-        if pg.radio(70.0, n, state.follow_mode == value, tr(label_en, label_zh), tr(tip_en, tip_zh), lock) {
+        if pg.radio(
+            70.0,
+            n,
+            state.follow_mode == value,
+            tr(label_en, label_zh),
+            tr(tip_en, tip_zh),
+            lock,
+        ) {
             state.follow_mode = value;
             state.emit(Command::SavePreferences);
         }
@@ -1312,14 +1807,25 @@ fn prefs_playback(state: &mut EditorState, pg: &mut Page) {
         260.0,
         state.prefs.show_layer_volumes,
         tr("Show layer volumes", "显示每层音量"),
-        tr("Whether to show the volume of layers.", "是否显示每层的音量。"),
+        tr(
+            "Whether to show the volume of layers.",
+            "是否显示每层的音量。",
+        ),
         false,
         false,
     ) {
         state.prefs.show_layer_volumes = !state.prefs.show_layer_volumes;
         state.emit(Command::SavePreferences);
     }
-    if pg.check(32.0, 280.0, state.prefs.mono, tr("Disable stereo", "关闭立体声"), tr("Disables stereo playback.", "关闭立体声音效。"), false, false) {
+    if pg.check(
+        32.0,
+        280.0,
+        state.prefs.mono,
+        tr("Disable stereo", "关闭立体声"),
+        tr("Disables stereo playback.", "关闭立体声音效。"),
+        false,
+        false,
+    ) {
         state.emit(Command::ToggleMono);
     }
     if pg.check(
@@ -1353,11 +1859,31 @@ fn prefs_playback(state: &mut EditorState, pg: &mut Page) {
     }
 
     pg.header(255.0, 244.0, 223.0, 60.0, tr("Tempo unit", "速度单位"));
-    if pg.radio(265.0, 260.0, !state.prefs.use_bpm, tr("Ticks per second (t/s)", "红石刻 / 秒 (t/s)"), tr("Display song tempos in ticks per second.", "使用每秒几刻显示速度。"), false) {
+    if pg.radio(
+        265.0,
+        260.0,
+        !state.prefs.use_bpm,
+        tr("Ticks per second (t/s)", "红石刻 / 秒 (t/s)"),
+        tr(
+            "Display song tempos in ticks per second.",
+            "使用每秒几刻显示速度。",
+        ),
+        false,
+    ) {
         state.prefs.use_bpm = false;
         state.emit(Command::SavePreferences);
     }
-    if pg.radio(265.0, 280.0, state.prefs.use_bpm, tr("Beats per minute (BPM)", "拍数 / 分钟 (BPM)"), tr("Display song tempos in beats per minute.", "使用每分钟多少拍显示速度。"), false) {
+    if pg.radio(
+        265.0,
+        280.0,
+        state.prefs.use_bpm,
+        tr("Beats per minute (BPM)", "拍数 / 分钟 (BPM)"),
+        tr(
+            "Display song tempos in beats per minute.",
+            "使用每分钟多少拍显示速度。",
+        ),
+        false,
+    ) {
         state.prefs.use_bpm = true;
         state.emit(Command::SavePreferences);
     }
@@ -1404,7 +1930,15 @@ fn theme_menu(state: &mut EditorState, ui: &Ui, at: Pos2) {
         .unwrap_or(usize::MAX);
     let th = state.theme.clone();
     let bank = state.icons.bank();
-    let (picked, dismissed) = popup_list(ui, "prefs_theme_menu", at, &names, sel, &th, bank.as_deref());
+    let (picked, dismissed) = popup_list(
+        ui,
+        "prefs_theme_menu",
+        at,
+        &names,
+        sel,
+        &th,
+        bank.as_deref(),
+    );
     if let Some(i) = picked {
         state.emit(Command::SetTheme(THEME_MENU_ORDER[i]));
     }
@@ -1420,7 +1954,8 @@ fn rate_menu(state: &mut EditorState, ui: &Ui, at: Pos2) {
     let items = rate_items();
     // 原版五项都有 `check(refreshrate = i)`，当前帧率那一项前面要打勾。
     let sel = state.prefs.refresh_rate as usize;
-    let (picked, dismissed) = popup_list(ui, "prefs_rate_menu", at, &items, sel, &th, bank.as_deref());
+    let (picked, dismissed) =
+        popup_list(ui, "prefs_rate_menu", at, &items, sel, &th, bank.as_deref());
     if let Some(i) = picked {
         state.prefs.refresh_rate = i as u8;
         state.emit(Command::SavePreferences);
@@ -1477,7 +2012,13 @@ fn prefs_tabs() -> [&'static str; 5] {
     if crate::lang() == 1 {
         ["通用", "界面", "外观", "访问", "播放"]
     } else {
-        ["General", "Interface", "Appearance", "Usability", "Playback"]
+        [
+            "General",
+            "Interface",
+            "Appearance",
+            "Usability",
+            "Playback",
+        ]
     }
 }
 
@@ -1583,7 +2124,11 @@ impl<'a> Page<'a> {
     /// 三套旧主题都在标题左上角挖一块底衬色（白 / (212,208,200) / c_dark）。
     /// `draw_frame` 依赖 `spr_interface4` 九宫格，这张图我们没导出，非 Fluent 用 1 像素边框近似。
     fn header(&self, x: f32, n: f32, w: f32, h: f32, label: &str) {
-        let font = if self.fluent { PREFS_FONT_MED } else { PREFS_FONT };
+        let font = if self.fluent {
+            PREFS_FONT_MED
+        } else {
+            PREFS_FONT
+        };
         if !self.fluent {
             let p = self.ui.painter().clone();
             let rect = Rect::from_min_size(self.row(x, n), Vec2::new(w, h));
@@ -1594,7 +2139,12 @@ impl<'a> Page<'a> {
                     p.rect_filled(rect, 10.0, Color32::from_rgb(213, 223, 229));
                 }
                 ThemeKind::Retro | ThemeKind::Dark => {
-                    p.rect_stroke(rect, 2.0, Stroke::new(1.0_f32, self.th.border), StrokeKind::Inside);
+                    p.rect_stroke(
+                        rect,
+                        2.0,
+                        Stroke::new(1.0_f32, self.th.border),
+                        StrokeKind::Inside,
+                    );
                 }
                 ThemeKind::Fluent => {}
             }
@@ -1618,7 +2168,14 @@ impl<'a> Page<'a> {
     fn frame_box(&self, x1: f32, n1: f32, x2: f32, n2: f32) {
         let rect = self.row_rect(x1, n1, x2 - 2.0, n2 - 2.0);
         let (line, r) = if self.fluent {
-            (if self.th.fdark { ggray(182) } else { ggray(165) }, 2.0)
+            (
+                if self.th.fdark {
+                    ggray(182)
+                } else {
+                    ggray(165)
+                },
+                2.0,
+            )
         } else {
             (self.th.border, 0.0)
         };
@@ -1632,7 +2189,16 @@ impl<'a> Page<'a> {
     /// `spr_textbox` 九宫格、主题 1/2 是 `draw_area`、Fluent 是 `spr_textbox_f`
     /// 九宫格（悬停换亮档、聚焦时底边吃强调色）。九宫格都没导出，统一近似成
     /// 主题描边；文字编辑区在 (x+3, y+3) 大小 (w-6, h-6)，交给 egui 的 TextEdit。
-    fn textarea(&mut self, x: f32, n: f32, w: f32, h: f32, buf: &mut String, hint: &str, salt: &str) {
+    fn textarea(
+        &mut self,
+        x: f32,
+        n: f32,
+        w: f32,
+        h: f32,
+        buf: &mut String,
+        hint: &str,
+        salt: &str,
+    ) {
         let at = self.row(x, n);
         let rect = Rect::from_min_size(at, Vec2::new(w, h));
         let on = self
@@ -1710,12 +2276,20 @@ impl<'a> Page<'a> {
     /// （实测 14×3 的圆条，水平居中于文字）；其余主题：`(b+6, 4)`，选中项是
     /// 一块压住面板线的矩形（原版 `spr_tabbuttons`，没导出，按同尺寸矩形近似）。
     fn tabs(&mut self, b0: f32, base: f32, labels: &[&str], tab: u8) -> u8 {
-        let font = if self.fluent { PREFS_FONT_MED } else { PREFS_FONT };
+        let font = if self.fluent {
+            PREFS_FONT_MED
+        } else {
+            PREFS_FONT
+        };
         let mut nsel = tab;
         let mut b = b0;
         for (i, name) in labels.iter().enumerate() {
             let tw = self.measure(name, font);
-            let (hy, hh) = if self.fluent { (0.0, 39.0) } else { (2.0, 18.0) };
+            let (hy, hh) = if self.fluent {
+                (0.0, 39.0)
+            } else {
+                (2.0, 18.0)
+            };
             let rect = Rect::from_min_size(self.at(b, base + hy), Vec2::new(tw + 12.0, hh));
             let resp = self.ui.interact(rect, Id::new(("tabs", i)), Sense::click());
             let sel = i as u8 == tab;
@@ -1744,7 +2318,10 @@ impl<'a> Page<'a> {
                 let p = self.ui.painter().clone();
                 if self.fluent {
                     p.rect_filled(
-                        Rect::from_min_size(self.at(b + tw / 2.0 - 1.0, base + 33.0), Vec2::new(14.0, 3.0)),
+                        Rect::from_min_size(
+                            self.at(b + tw / 2.0 - 1.0, base + 33.0),
+                            Vec2::new(14.0, 3.0),
+                        ),
                         1.5,
                         self.th.accent,
                     );
@@ -1757,8 +2334,10 @@ impl<'a> Page<'a> {
                     } else {
                         Color32::WHITE
                     };
-                    let body = Rect::from_min_size(self.at(b - 2.0, base), Vec2::new(tw + 15.0, 20.0));
-                    let line = Rect::from_min_size(self.at(b - 2.0, base), Vec2::new(tw + 15.0, 21.0));
+                    let body =
+                        Rect::from_min_size(self.at(b - 2.0, base), Vec2::new(tw + 15.0, 20.0));
+                    let line =
+                        Rect::from_min_size(self.at(b - 2.0, base), Vec2::new(tw + 15.0, 21.0));
                     p.rect_filled(body, 0.0, fill);
                     p.rect_stroke(
                         line,
@@ -1767,7 +2346,10 @@ impl<'a> Page<'a> {
                         StrokeKind::Inside,
                     );
                     p.rect_filled(
-                        Rect::from_min_size(self.at(b - 1.0, base + 20.0), Vec2::new(tw + 13.0, 1.0)),
+                        Rect::from_min_size(
+                            self.at(b - 1.0, base + 20.0),
+                            Vec2::new(tw + 13.0, 1.0),
+                        ),
                         0.0,
                         fill,
                     );
@@ -1786,16 +2368,31 @@ impl<'a> Page<'a> {
     /// Fluent 照 `draw_checkbox.gml` 的常量手绘方框 / 胶囊开关；
     /// 其余三套主题原版画的是 `spr_checkbox` / `spr_switch` 贴图（没导出），
     /// 所以退回 egui 原生复选框摆在同一行坐标上。
-    fn check(&mut self, x: f32, n: f32, on: bool, label: &str, tip: &str, switch: bool, lock: bool) -> bool {
+    fn check(
+        &mut self,
+        x: f32,
+        n: f32,
+        on: bool,
+        label: &str,
+        tip: &str,
+        switch: bool,
+        lock: bool,
+    ) -> bool {
         let tw = self.measure(label, PREFS_FONT);
         let id = Id::new(("prefs-check", x as i32, n as i32, label));
         if !self.fluent {
             return self.legacy_check(x, n, on, label, lock, tw);
         }
         let at = self.row(x, n);
-        let (resp, m) = self.hit(Rect::from_min_size(at, Vec2::new(26.0 + tw + 8.0, 13.0)), id, lock);
+        let (resp, m) = self.hit(
+            Rect::from_min_size(at, Vec2::new(26.0 + tw + 8.0, 13.0)),
+            id,
+            lock,
+        );
         let fdark = self.th.fdark;
-        let acc = self.th.accent(5 + if m == 1 { 2 } else { 0 } + if m == 2 { 3 } else { 0 });
+        let acc = self
+            .th
+            .accent(5 + if m == 1 { 2 } else { 0 } + if m == 2 { 3 } else { 0 });
         let fill = if on && !lock {
             acc
         } else if on {
@@ -1826,7 +2423,11 @@ impl<'a> Page<'a> {
             );
             if !on {
                 let line = if fdark {
-                    if lock { ggray(56) } else { ggray(204) }
+                    if lock {
+                        ggray(56)
+                    } else {
+                        ggray(204)
+                    }
                 } else if lock {
                     ggray(199)
                 } else {
@@ -1850,12 +2451,23 @@ impl<'a> Page<'a> {
                 (false, true, true) => ggray(56),
             };
             let (kx, ky) = if on {
-                (at.x + 15.0 - if m == 2 && !lock { 1.0 } else { 0.0 }, at.y + if lock { 3.0 } else { 2.0 })
+                (
+                    at.x + 15.0 - if m == 2 && !lock { 1.0 } else { 0.0 },
+                    at.y + if lock { 3.0 } else { 2.0 },
+                )
             } else {
                 (at.x + 2.0, at.y + 2.0)
             };
-            let kw = if on { 7.0 } else { 7.0 + if m == 2 && !lock { 1.0 } else { 0.0 } };
-            p.rect_filled(Rect::from_min_size(Pos2::new(kx, ky), Vec2::new(kw, 7.0)), 12.0, knob_fill);
+            let kw = if on {
+                7.0
+            } else {
+                7.0 + if m == 2 && !lock { 1.0 } else { 0.0 }
+            };
+            p.rect_filled(
+                Rect::from_min_size(Pos2::new(kx, ky), Vec2::new(kw, 7.0)),
+                12.0,
+                knob_fill,
+            );
         } else {
             let box_rect = Rect::from_min_size(at + Vec2::new(-1.0, -1.0), Vec2::new(13.0, 13.0));
             p.rect_filled(box_rect, 4.0, fill);
@@ -1871,7 +2483,12 @@ impl<'a> Page<'a> {
                 } else {
                     ggray(if m == 2 { 178 } else { 136 })
                 };
-                p.rect_stroke(box_rect, 2.0, Stroke::new(1.0_f32, line), StrokeKind::Inside);
+                p.rect_stroke(
+                    box_rect,
+                    2.0,
+                    Stroke::new(1.0_f32, line),
+                    StrokeKind::Inside,
+                );
             } else {
                 let mark = match (lock, fdark) {
                     (false, false) => ggray(243),
@@ -1902,7 +2519,11 @@ impl<'a> Page<'a> {
             return self.legacy_radio(x, n, on, label, lock);
         }
         let at = self.row(x, n);
-        let (resp, m) = self.hit(Rect::from_min_size(at, Vec2::new(12.0 + tw + 8.0, 12.0)), id, lock);
+        let (resp, m) = self.hit(
+            Rect::from_min_size(at, Vec2::new(12.0 + tw + 8.0, 12.0)),
+            id,
+            lock,
+        );
         let fdark = self.th.fdark;
         let c = at + Vec2::new(5.0, 6.0);
         let p = self.ui.painter().clone();
@@ -1946,10 +2567,19 @@ impl<'a> Page<'a> {
             } else {
                 ggray(243)
             };
-            let r = if lock { 3.0 } else { 3.0 + if m == 1 && on { 1.0 } else { 0.0 } };
+            let r = if lock {
+                3.0
+            } else {
+                3.0 + if m == 1 && on { 1.0 } else { 0.0 }
+            };
             p.circle_filled(c, r, dot);
         }
-        self.text(at + Vec2::new(18.0, -1.0), label, PREFS_FONT, if lock { ggray(204) } else { self.ink() });
+        self.text(
+            at + Vec2::new(18.0, -1.0),
+            label,
+            PREFS_FONT,
+            if lock { ggray(204) } else { self.ink() },
+        );
         resp.on_hover_text(tip).clicked()
     }
 
@@ -1974,8 +2604,11 @@ impl<'a> Page<'a> {
         let id = Id::new(("prefs-btn", x as i32, n as i32, label));
         if !self.fluent {
             return self.legacy_row(x, n, w, id, lock, |ui| {
-                ui.add_sized([w, 21.0], egui::Button::new(RichText::new(label).size(PREFS_FONT)))
-                    .clicked()
+                ui.add_sized(
+                    [w, 21.0],
+                    egui::Button::new(RichText::new(label).size(PREFS_FONT)),
+                )
+                .clicked()
             });
         }
         let at = self.row(x, n);
@@ -1997,10 +2630,7 @@ impl<'a> Page<'a> {
                 (ggray([252, 246, 246][m]), ggray([238, 229, 229][m]))
             }
         } else {
-            (
-                self.th.accent(5 - m),
-                self.th.accent([4, 5, 3][m]),
-            )
+            (self.th.accent(5 - m), self.th.accent([4, 5, 3][m]))
         };
         p.rect_filled(body, 4.0, fill);
         p.rect_stroke(body, 4.0, Stroke::new(1.0_f32, line), StrokeKind::Inside);
@@ -2043,7 +2673,10 @@ impl<'a> Page<'a> {
         let p = self.ui.painter().clone();
         let g = p.layout_no_wrap(val.to_string(), FontId::proportional(PREFS_FONT), ink);
         let size = g.size();
-        let rect = Rect::from_min_size(at + Vec2::new(-8.0, -4.0), Vec2::new(size.x + 16.0, size.y + 4.0));
+        let rect = Rect::from_min_size(
+            at + Vec2::new(-8.0, -4.0),
+            Vec2::new(size.x + 16.0, size.y + 4.0),
+        );
         let sense = if lock { Sense::hover() } else { Sense::drag() };
         let resp = self
             .ui
@@ -2100,7 +2733,11 @@ impl<'a> Page<'a> {
                 let ink = self.ink();
                 let p = self.ui.painter().clone();
                 p.add(egui::Shape::convex_polygon(
-                    vec![at + Vec2::new(4.0, 7.0), at + Vec2::new(13.0, 7.0), at + Vec2::new(8.5, 12.5)],
+                    vec![
+                        at + Vec2::new(4.0, 7.0),
+                        at + Vec2::new(13.0, 7.0),
+                        at + Vec2::new(8.5, 12.5),
+                    ],
                     ink,
                     Stroke::NONE,
                 ));
@@ -2119,7 +2756,11 @@ impl<'a> Page<'a> {
                 let ink = self.ink();
                 let p = self.ui.painter().clone();
                 p.add(egui::Shape::convex_polygon(
-                    vec![at + Vec2::new(23.0, 13.0), at + Vec2::new(23.0, 27.0), at + Vec2::new(15.0, 20.0)],
+                    vec![
+                        at + Vec2::new(23.0, 13.0),
+                        at + Vec2::new(23.0, 27.0),
+                        at + Vec2::new(15.0, 20.0),
+                    ],
                     ink,
                     Stroke::NONE,
                 ));
@@ -2133,7 +2774,15 @@ impl<'a> Page<'a> {
     /// 锁定的行走 `set_enabled(false)`，灰掉且不回报改动。
     /// 控件文字一律显式带 `PREFS_FONT`：默认字号是主题的 body 字号，比原版大一号，
     /// 长标签会在这 20 像素的一行里被折成两行。
-    fn legacy_row(&mut self, x: f32, n: f32, w: f32, id: Id, lock: bool, add: impl FnOnce(&mut Ui) -> bool) -> bool {
+    fn legacy_row(
+        &mut self,
+        x: f32,
+        n: f32,
+        w: f32,
+        id: Id,
+        lock: bool,
+        add: impl FnOnce(&mut Ui) -> bool,
+    ) -> bool {
         let rect = Rect::from_min_size(self.row(x, n), Vec2::new(w, 20.0));
         self.ui
             .allocate_new_ui(UiBuilder::new().id_salt(id).max_rect(rect), |ui| {
@@ -2147,35 +2796,54 @@ impl<'a> Page<'a> {
         let id = Id::new(("prefs-check", x as i32, n as i32, label));
         self.legacy_row(x, n, 18.0 + tw + 8.0, id, lock, |ui| {
             let mut v = on;
-            ui.checkbox(&mut v, RichText::new(label).size(PREFS_FONT)).changed()
+            ui.checkbox(&mut v, RichText::new(label).size(PREFS_FONT))
+                .changed()
         })
     }
 
     fn legacy_radio(&mut self, x: f32, n: f32, on: bool, label: &str, lock: bool) -> bool {
         let id = Id::new(("prefs-radio", x as i32, n as i32, label));
-        self.legacy_row(x, n - 3.0, 18.0 + self.measure(label, PREFS_FONT) + 24.0, id, lock, |ui| {
-            ui.radio(on, RichText::new(label).size(PREFS_FONT)).clicked() && !on
-        })
+        self.legacy_row(
+            x,
+            n - 3.0,
+            18.0 + self.measure(label, PREFS_FONT) + 24.0,
+            id,
+            lock,
+            |ui| {
+                ui.radio(on, RichText::new(label).size(PREFS_FONT))
+                    .clicked()
+                    && !on
+            },
+        )
     }
 }
 
 fn instruments_window(state: &mut EditorState, ui: &mut Ui) {
-    egui::Grid::new("instruments_grid").num_columns(2).show(ui, |ui| {
-        for (i, ins) in INSTRUMENTS.iter().enumerate() {
-            if ui.selectable_label(state.current.instrument == i as u8, ins.name).clicked() {
-                state.emit(Command::SetInstrument(i as u8));
+    egui::Grid::new("instruments_grid")
+        .num_columns(2)
+        .show(ui, |ui| {
+            for (i, ins) in INSTRUMENTS.iter().enumerate() {
+                if ui
+                    .selectable_label(state.current.instrument == i as u8, ins.name)
+                    .clicked()
+                {
+                    state.emit(Command::SetInstrument(i as u8));
+                }
+                // 原版只给前 16 个乐器绑了数字键（`control_draw.gml:822-843`），
+                // 铜块一族没有按键就留空，不能印一个按了没反应的组合键。
+                let hint = if i < crate::shortcuts::INSTRUMENT_HOTKEYS {
+                    if i < 9 {
+                        format!("Ctrl+{}", i + 1)
+                    } else {
+                        format!("Ctrl+Shift+{}", i - 8)
+                    }
+                } else {
+                    String::new()
+                };
+                ui.label(RichText::new(hint).small().weak());
+                ui.end_row();
             }
-            // 原版只给前 16 个乐器绑了数字键（`control_draw.gml:822-843`），
-            // 铜块一族没有按键就留空，不能印一个按了没反应的组合键。
-            let hint = if i < crate::shortcuts::INSTRUMENT_HOTKEYS {
-                if i < 9 { format!("Ctrl+{}", i + 1) } else { format!("Ctrl+Shift+{}", i - 8) }
-            } else {
-                String::new()
-            };
-            ui.label(RichText::new(hint).small().weak());
-            ui.end_row();
-        }
-    });
+        });
     ui.separator();
     ui.label(RichText::new(tr(
         &format!(
@@ -2196,7 +2864,13 @@ fn instruments_window(state: &mut EditorState, ui: &mut Ui) {
 
 #[derive(Clone, Copy)]
 enum Numeric {
-    Tempo, Velocity, Panning, Pitch, Transpose, Tremolo, Stereo,
+    Tempo,
+    Velocity,
+    Panning,
+    Pitch,
+    Transpose,
+    Tremolo,
+    Stereo,
 }
 
 fn numeric_window(state: &mut EditorState, ui: &mut Ui, which: Numeric) {
@@ -2236,10 +2910,14 @@ fn numeric_window(state: &mut EditorState, ui: &mut Ui, which: Numeric) {
 }
 
 fn clip_editor(state: &mut EditorState, ui: &mut Ui) {
-    ui.label(RichText::new(tr(
-        "OpenNBS-compatible selection RLE text, interchangeable with the original clipboard",
-        "OpenNBS 兼容的选区 RLE 文本，可与原版剪贴板互通",
-    )).small().weak());
+    ui.label(
+        RichText::new(tr(
+            "OpenNBS-compatible selection RLE text, interchangeable with the original clipboard",
+            "OpenNBS 兼容的选区 RLE 文本，可与原版剪贴板互通",
+        ))
+        .small()
+        .weak(),
+    );
     let mut text = state.doc.clipboard_text.clone();
     ui.add(
         egui::TextEdit::multiline(&mut text)
@@ -2248,7 +2926,10 @@ fn clip_editor(state: &mut EditorState, ui: &mut Ui) {
             .code_editor(),
     );
     ui.horizontal(|ui| {
-        if ui.button(tr("Generate from current selection", "从当前选区生成")).clicked() {
+        if ui
+            .button(tr("Generate from current selection", "从当前选区生成"))
+            .clicked()
+        {
             state.doc.copy_selection();
         }
         if ui.button(tr("Load and paste", "载入并粘贴")).clicked() {
@@ -2261,19 +2942,28 @@ fn clip_editor(state: &mut EditorState, ui: &mut Ui) {
 }
 
 fn shortcuts_help(ui: &mut Ui) {
-    ui.label(RichText::new(tr(
-        "Shortcuts match the original OpenNBS, plus audio and export combinations",
-        "快捷键对齐原版 OpenNBS，另增音频与导出相关组合键",
-    )).small().weak());
-    egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
-        egui::Grid::new("shortcut_grid").num_columns(2).striped(true).show(ui, |ui| {
-            for (k, v) in crate::shortcuts::shortcut_help() {
-                ui.label(RichText::new(k).monospace().strong());
-                ui.label(v);
-                ui.end_row();
-            }
+    ui.label(
+        RichText::new(tr(
+            "Shortcuts match the original OpenNBS, plus audio and export combinations",
+            "快捷键对齐原版 OpenNBS，另增音频与导出相关组合键",
+        ))
+        .small()
+        .weak(),
+    );
+    egui::ScrollArea::vertical()
+        .max_height(420.0)
+        .show(ui, |ui| {
+            egui::Grid::new("shortcut_grid")
+                .num_columns(2)
+                .striped(true)
+                .show(ui, |ui| {
+                    for (k, v) in crate::shortcuts::shortcut_help() {
+                        ui.label(RichText::new(k).monospace().strong());
+                        ui.label(v);
+                        ui.end_row();
+                    }
+                });
         });
-    });
 }
 
 fn file_dialog(state: &mut EditorState, ui: &mut Ui, save: bool) {
@@ -2292,7 +2982,11 @@ fn file_dialog(state: &mut EditorState, ui: &mut Ui, save: bool) {
                 "{}: *.{}   {}",
                 tr("File type", "文件类型"),
                 ext,
-                if action.is_save() { tr("(Save / Export)", "（保存 / 导出）") } else { tr("(Open / Import)", "（打开 / 导入）") }
+                if action.is_save() {
+                    tr("(Save / Export)", "（保存 / 导出）")
+                } else {
+                    tr("(Open / Import)", "（打开 / 导入）")
+                }
             ),
         })
         .small()
@@ -2315,27 +3009,49 @@ fn file_dialog(state: &mut EditorState, ui: &mut Ui, save: bool) {
                 ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(f32::INFINITY));
             });
         }
-        egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-            let entries = d.entries.clone();
-            for entry in entries {
-                let name = entry.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                let is_dir = entry.is_dir();
-                let label = if is_dir { format!("[{}] {}", tr("dir", "目录"), name) } else { name.clone() };
-                if ui.selectable_label(false, label).clicked() {
-                    if is_dir {
-                        d.dir = entry.clone();
-                        d.refresh();
+        egui::ScrollArea::vertical()
+            .max_height(260.0)
+            .show(ui, |ui| {
+                let entries = d.entries.clone();
+                for entry in entries {
+                    let name = entry
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let is_dir = entry.is_dir();
+                    let label = if is_dir {
+                        format!("[{}] {}", tr("dir", "目录"), name)
                     } else {
-                        d.name = name;
+                        name.clone()
+                    };
+                    if ui.selectable_label(false, label).clicked() {
+                        if is_dir {
+                            d.dir = entry.clone();
+                            d.refresh();
+                        } else {
+                            d.name = name;
+                        }
                     }
                 }
-            }
-        });
+            });
         ui.separator();
         ui.horizontal(|ui| {
-            if ui.button(if pick_folder { tr("Select", "选择") } else if save { tr("Save", "保存") } else { tr("Open", "打开") }).clicked() {
+            if ui
+                .button(if pick_folder {
+                    tr("Select", "选择")
+                } else if save {
+                    tr("Save", "保存")
+                } else {
+                    tr("Open", "打开")
+                })
+                .clicked()
+            {
                 // 原版「修改」拿的是 `filename_dir(a)`，即对话框当前显示的目录本身。
-                let path = if pick_folder { d.dir.clone() } else { d.selected_path() };
+                let path = if pick_folder {
+                    d.dir.clone()
+                } else {
+                    d.selected_path()
+                };
                 let path = if path.extension().is_none() && !pick_folder {
                     path.with_extension(ext)
                 } else {
@@ -2361,7 +3077,13 @@ fn file_dialog(state: &mut EditorState, ui: &mut Ui, save: bool) {
 
 fn layer_rename(state: &mut EditorState, ui: &mut Ui, layer: u32) {
     if state.editing_layer_name.is_none() {
-        let name = state.doc.song.layers.get(layer as usize).map(|l| l.name.clone()).unwrap_or_default();
+        let name = state
+            .doc
+            .song
+            .layers
+            .get(layer as usize)
+            .map(|l| l.name.clone())
+            .unwrap_or_default();
         state.editing_layer_name = Some((layer, name));
     }
     let mut cmd: Option<Command> = None;
@@ -2400,7 +3122,13 @@ fn event_tempo_window(state: &mut EditorState, ui: &mut Ui, tick: u32, layer: u3
     let ry = if fluent { -8.0 } else { -26.0 };
     let mut cmd = None;
     {
-        let mut pg = Page { ui, o, ry, th: &th, fluent };
+        let mut pg = Page {
+            ui,
+            o,
+            ry,
+            th: &th,
+            fluent,
+        };
         if th.kind == ThemeKind::Aqua {
             let p = pg.ui.painter().clone();
             let rect = pg.row_rect(6.0, 26.0, 134.0, 92.0);
@@ -2413,14 +3141,25 @@ fn event_tempo_window(state: &mut EditorState, ui: &mut Ui, tick: u32, layer: u3
             );
         }
         pg.header(10.0, 40.0, 120.0, 35.0, tr("Tempo (BPM)", "速度（BPM）"));
-        pg.textarea(15.0, 50.0, 113.0, 25.0, &mut state.event_edit.tempo, tr("Must be an integer larger than zero.", "必须是一个正整数。"), "ev-tempo");
+        pg.textarea(
+            15.0,
+            50.0,
+            113.0,
+            25.0,
+            &mut state.event_edit.tempo,
+            tr("Must be an integer larger than zero.", "必须是一个正整数。"),
+            "ev-tempo",
+        );
         if pg.button2(10.0, 98.0, 60.0, tr("OK", "确定"), false, false) {
             cmd = match state.event_edit.tempo.parse::<i64>() {
                 Ok(bpm) if bpm > 0 && bpm < 32768 => {
                     Some(Command::SetEventTempo { tick, layer, bpm })
                 }
                 _ => {
-                    state.modals = ModalQueue::message(tr("Set Tempo", "设置速度"), tr("Invalid value!", "非法数值！"));
+                    state.modals = ModalQueue::message(
+                        tr("Set Tempo", "设置速度"),
+                        tr("Invalid value!", "非法数值！"),
+                    );
                     None
                 }
             };
@@ -2450,7 +3189,13 @@ fn event_stopper_window(state: &mut EditorState, ui: &mut Ui, tick: u32, layer: 
     let ry = if fluent { -8.0 } else { -26.0 };
     let mut cmd = None;
     {
-        let mut pg = Page { ui, o, ry, th: &th, fluent };
+        let mut pg = Page {
+            ui,
+            o,
+            ry,
+            th: &th,
+            fluent,
+        };
         if th.kind == ThemeKind::Aqua {
             let p = pg.ui.painter().clone();
             let rect = pg.row_rect(6.0, 26.0, 134.0, 142.0);
@@ -2462,20 +3207,56 @@ fn event_stopper_window(state: &mut EditorState, ui: &mut Ui, tick: u32, layer: 
                 StrokeKind::Inside,
             );
         }
-        pg.header(10.0, 40.0, 120.0, 35.0, tr("Start Layer (inclusive)", "起始层（包含）"));
-        pg.textarea(15.0, 50.0, 113.0, 25.0, &mut state.event_edit.start, tr("Must be an integer larger than zero.", "必须是一个正整数。"), "ev-start");
-        pg.header(10.0, 90.0, 120.0, 35.0, tr("End Layer (inclusive)", "终止层（包含）"));
-        pg.textarea(15.0, 100.0, 113.0, 25.0, &mut state.event_edit.until, tr("Must be an integer larger than zero.", "必须是一个正整数。"), "ev-until");
+        pg.header(
+            10.0,
+            40.0,
+            120.0,
+            35.0,
+            tr("Start Layer (inclusive)", "起始层（包含）"),
+        );
+        pg.textarea(
+            15.0,
+            50.0,
+            113.0,
+            25.0,
+            &mut state.event_edit.start,
+            tr("Must be an integer larger than zero.", "必须是一个正整数。"),
+            "ev-start",
+        );
+        pg.header(
+            10.0,
+            90.0,
+            120.0,
+            35.0,
+            tr("End Layer (inclusive)", "终止层（包含）"),
+        );
+        pg.textarea(
+            15.0,
+            100.0,
+            113.0,
+            25.0,
+            &mut state.event_edit.until,
+            tr("Must be an integer larger than zero.", "必须是一个正整数。"),
+            "ev-until",
+        );
         if pg.button2(10.0, 148.0, 60.0, tr("OK", "确定"), false, false) {
             cmd = match (
                 state.event_edit.start.parse::<i64>(),
                 state.event_edit.until.parse::<i64>(),
             ) {
                 (Ok(s), Ok(u)) if (0..32768).contains(&s) && (0..32768).contains(&u) => {
-                    Some(Command::SetEventStopper { tick, layer, start: s, until: u as u64 })
+                    Some(Command::SetEventStopper {
+                        tick,
+                        layer,
+                        start: s,
+                        until: u as u64,
+                    })
                 }
                 _ => {
-                    state.modals = ModalQueue::message(tr("Set Stopping Range", "设置抑制范围"), tr("Invalid value!", "非法数值！"));
+                    state.modals = ModalQueue::message(
+                        tr("Set Stopping Range", "设置抑制范围"),
+                        tr("Invalid value!", "非法数值！"),
+                    );
                     None
                 }
             };
@@ -2491,7 +3272,10 @@ fn event_stopper_window(state: &mut EditorState, ui: &mut Ui, tick: u32, layer: 
 }
 
 fn confirm_new(state: &mut EditorState, ui: &mut Ui) {
-    ui.label(tr("The current song has unsaved changes. Create a new song anyway?", "当前歌曲有未保存的修改，确定新建？"));
+    ui.label(tr(
+        "The current song has unsaved changes. Create a new song anyway?",
+        "当前歌曲有未保存的修改，确定新建？",
+    ));
     ui.horizontal(|ui| {
         if ui.button(tr("OK", "确定")).clicked() {
             state.emit(Command::ConfirmNew);
@@ -2504,41 +3288,84 @@ fn confirm_new(state: &mut EditorState, ui: &mut Ui) {
 
 fn about(ui: &mut Ui) {
     ui.heading("nbs-rust");
-    ui.label(tr("A complete Rust rewrite of Open Note Block Studio 3.11.0 (GameMaker)", "Open Note Block Studio 3.11.0 (GameMaker) 的 Rust 完整重写版"));
+    ui.label(tr(
+        "A complete Rust rewrite of Open Note Block Studio 3.11.0 (GameMaker)",
+        "Open Note Block Studio 3.11.0 (GameMaker) 的 Rust 完整重写版",
+    ));
     ui.separator();
     ui.label(RichText::new(tr("A Data layer", "A 数据层")).strong());
     for line in [
-        tr("Sparse BTreeMap grid, full NBS v0–v5 read/write, custom instruments", "稀疏 BTreeMap 网格、NBS v0–v5 完整读写、自定义乐器"),
-        tr("Compact diff transactions (undo records only changed cells)", "紧凑 diff 事务（撤销只记录变化的格子）"),
+        tr(
+            "Sparse BTreeMap grid, full NBS v0–v5 read/write, custom instruments",
+            "稀疏 BTreeMap 网格、NBS v0–v5 完整读写、自定义乐器",
+        ),
+        tr(
+            "Compact diff transactions (undo records only changed cells)",
+            "紧凑 diff 事务（撤销只记录变化的格子）",
+        ),
     ] {
         ui.label(RichText::new(line).small());
     }
     ui.label(RichText::new(tr("B Audio / C Scheduler", "B 音频 / C 调度")).strong());
     for line in [
-        tr("The original 16 OGG samples, resampled to 44100/48000", "原版 16 个 OGG 采样，44100/48000 统一重采样"),
-        tr("pitch = 0.5·2^((key−33+pitch/100)/12), byte-identical to the original", "pitch = 0.5·2^((key−33+pitch/100)/12)，与原版逐字节对齐"),
-        tr("Voice pools of 256/1024, gain/pan, cpal realtime output, independent sample clock", "voice 池 256/1024、gain/pan、cpal 实时输出、独立采样时钟"),
-        tr("Offline multithreaded mixing exports WAV; MP3/AIFF/FLAC transcode via ffmpeg", "离线多线程混音导出 WAV，MP3/AIFF/FLAC 经 ffmpeg 转码"),
+        tr(
+            "The original 16 OGG samples, resampled to 44100/48000",
+            "原版 16 个 OGG 采样，44100/48000 统一重采样",
+        ),
+        tr(
+            "pitch = 0.5·2^((key−33+pitch/100)/12), byte-identical to the original",
+            "pitch = 0.5·2^((key−33+pitch/100)/12)，与原版逐字节对齐",
+        ),
+        tr(
+            "Voice pools of 256/1024, gain/pan, cpal realtime output, independent sample clock",
+            "voice 池 256/1024、gain/pan、cpal 实时输出、独立采样时钟",
+        ),
+        tr(
+            "Offline multithreaded mixing exports WAV; MP3/AIFF/FLAC transcode via ffmpeg",
+            "离线多线程混音导出 WAV，MP3/AIFF/FLAC 经 ffmpeg 转码",
+        ),
     ] {
         ui.label(RichText::new(line).small());
     }
     ui.label(RichText::new(tr("D Grid editor", "D 网格编辑器")).strong());
     for line in [
-        tr("Viewport culling, batched shape drawing, zoom/pan/edge auto-scroll", "视口剔除、批量形状绘制、缩放/平移/边缘自动滚动"),
-        tr("Box select/deselect, floating selection drag, eyedropper, full modifier keys", "框选/减选/浮动选区拖拽/吸管/全量修饰键"),
-        tr("Layer bar, instruments, timeline, piano, menus, dialogs, 4 themes, 15 macros", "图层栏、乐器、时间轴、钢琴、菜单、弹窗、4 套主题、15 个宏"),
+        tr(
+            "Viewport culling, batched shape drawing, zoom/pan/edge auto-scroll",
+            "视口剔除、批量形状绘制、缩放/平移/边缘自动滚动",
+        ),
+        tr(
+            "Box select/deselect, floating selection drag, eyedropper, full modifier keys",
+            "框选/减选/浮动选区拖拽/吸管/全量修饰键",
+        ),
+        tr(
+            "Layer bar, instruments, timeline, piano, menus, dialogs, 4 themes, 15 macros",
+            "图层栏、乐器、时间轴、钢琴、菜单、弹窗、4 套主题、15 个宏",
+        ),
     ] {
         ui.label(RichText::new(line).small());
     }
     ui.label(RichText::new(tr("E Import/export", "E 导入导出")).strong());
     for line in [
-        tr("MIDI SMF import/export, .nbp patterns, .schematic / structure NBT, PNG sheets", "MIDI SMF 导入/导出、.nbp 片段、.schematic / 结构 NBT、PNG 谱面"),
-        tr("JSON preferences, recent files, atomic saves, auto backups", "JSON 偏好、最近文件、原子保存、自动备份"),
+        tr(
+            "MIDI SMF import/export, .nbp patterns, .schematic / structure NBT, PNG sheets",
+            "MIDI SMF 导入/导出、.nbp 片段、.schematic / 结构 NBT、PNG 谱面",
+        ),
+        tr(
+            "JSON preferences, recent files, atomic saves, auto backups",
+            "JSON 偏好、最近文件、原子保存、自动备份",
+        ),
     ] {
         ui.label(RichText::new(line).small());
     }
     ui.separator();
-    ui.label(RichText::new(tr("egui 0.31 · glow (switchable to wgpu) · cpal · Rust 2021", "egui 0.31 · glow（可切 wgpu）· cpal · Rust 2021")).small().weak());
+    ui.label(
+        RichText::new(tr(
+            "egui 0.31 · glow (switchable to wgpu) · cpal · Rust 2021",
+            "egui 0.31 · glow（可切 wgpu）· cpal · Rust 2021",
+        ))
+        .small()
+        .weak(),
+    );
 }
 
 // ---------------------------------------------------------------- B/C/E 弹窗
@@ -2546,50 +3373,67 @@ fn about(ui: &mut Ui) {
 fn audio_export_window(state: &mut EditorState, ui: &mut Ui) {
     ui.label(tr("Same as the original: renders PCM s16 WAV offline first, then transcodes MP3/AIFF/FLAC via ffmpeg.", "与原版相同：先离线渲染 PCM s16 WAV，MP3/AIFF/FLAC 再交给 ffmpeg 转码。"));
     if let Some(s) = &state.export_status {
-        ui.label(RichText::new(s).small().color(egui::Color32::from_rgb(20, 130, 60)));
+        ui.label(
+            RichText::new(s)
+                .small()
+                .color(egui::Color32::from_rgb(20, 130, 60)),
+        );
     }
     ui.separator();
-    egui::Grid::new("audio_export_grid").num_columns(2).show(ui, |ui| {
-        // 原版四个选项：导出格式 / 采样率 / 通道 / 包括已静音的层。
-        ui.label(tr("Output format", "导出格式"));
-        let mut fmt = state.prefs.export_format.clone();
-        egui::ComboBox::from_id_salt("export_format")
-            .selected_text(fmt.clone())
-            .show_ui(ui, |ui| {
-                for f in nbs_io::audio_export::AudioFormat::ALL {
-                    ui.selectable_value(&mut fmt, f.name().into(), f.name());
-                }
-            });
-        if fmt != state.prefs.export_format {
-            state.prefs.export_format = fmt;
-        }
-        ui.end_row();
-        ui.label(tr("Sampling rate", "采样率"));
-        let mut rate = state.prefs.export_sample_rate;
-        egui::ComboBox::from_id_salt("export_rate")
-            .selected_text(hz_label(rate))
-            .show_ui(ui, |ui| {
-                for r in nbs_io::audio_export::SAMPLE_RATES {
-                    ui.selectable_value(&mut rate, r, hz_label(r));
-                }
-            });
-        if rate != state.prefs.export_sample_rate {
-            state.prefs.export_sample_rate = rate;
-        }
-        ui.end_row();
-        ui.label(tr("Channels", "通道"));
-        let mut ch = state.prefs.export_channels;
-        ui.radio_value(&mut ch, 1, tr("1 (mono)", "1（单声道）")).on_hover_text(tr("Export the track with a single channel.", "导出单声道的音频。"));
-        ui.radio_value(&mut ch, 2, tr("2 (stereo)", "2（立体声）")).on_hover_text(tr("Export the track with two channels.", "导出立体声的音频。"));
-        if ch != state.prefs.export_channels {
-            state.prefs.export_channels = ch;
-        }
-        ui.end_row();
-    });
+    egui::Grid::new("audio_export_grid")
+        .num_columns(2)
+        .show(ui, |ui| {
+            // 原版四个选项：导出格式 / 采样率 / 通道 / 包括已静音的层。
+            ui.label(tr("Output format", "导出格式"));
+            let mut fmt = state.prefs.export_format.clone();
+            egui::ComboBox::from_id_salt("export_format")
+                .selected_text(fmt.clone())
+                .show_ui(ui, |ui| {
+                    for f in nbs_io::audio_export::AudioFormat::ALL {
+                        ui.selectable_value(&mut fmt, f.name().into(), f.name());
+                    }
+                });
+            if fmt != state.prefs.export_format {
+                state.prefs.export_format = fmt;
+            }
+            ui.end_row();
+            ui.label(tr("Sampling rate", "采样率"));
+            let mut rate = state.prefs.export_sample_rate;
+            egui::ComboBox::from_id_salt("export_rate")
+                .selected_text(hz_label(rate))
+                .show_ui(ui, |ui| {
+                    for r in nbs_io::audio_export::SAMPLE_RATES {
+                        ui.selectable_value(&mut rate, r, hz_label(r));
+                    }
+                });
+            if rate != state.prefs.export_sample_rate {
+                state.prefs.export_sample_rate = rate;
+            }
+            ui.end_row();
+            ui.label(tr("Channels", "通道"));
+            let mut ch = state.prefs.export_channels;
+            ui.radio_value(&mut ch, 1, tr("1 (mono)", "1（单声道）"))
+                .on_hover_text(tr(
+                    "Export the track with a single channel.",
+                    "导出单声道的音频。",
+                ));
+            ui.radio_value(&mut ch, 2, tr("2 (stereo)", "2（立体声）"))
+                .on_hover_text(tr(
+                    "Export the track with two channels.",
+                    "导出立体声的音频。",
+                ));
+            if ch != state.prefs.export_channels {
+                state.prefs.export_channels = ch;
+            }
+            ui.end_row();
+        });
     let mut locked = state.prefs.include_locked_in_export;
     if ui
         .checkbox(&mut locked, tr("Include locked layers", "包括已静音的层"))
-        .on_hover_text(tr("Whether to export locked layers in the audio track.", "是否在音频内包含已静音的层。"))
+        .on_hover_text(tr(
+            "Whether to export locked layers in the audio track.",
+            "是否在音频内包含已静音的层。",
+        ))
         .changed()
     {
         state.prefs.include_locked_in_export = locked;
@@ -2607,9 +3451,19 @@ fn audio_export_window(state: &mut EditorState, ui: &mut Ui) {
         ui.label(RichText::new(line).small().weak());
     }
     let info = if crate::lang() == 1 {
-        format!("本曲 {} 音符 / {:.1} 秒 / {:.2} t/s", state.doc.song.total_blocks, state.doc.song.song_length() as f32 / state.doc.song.meta.tempo, state.doc.song.meta.tempo)
+        format!(
+            "本曲 {} 音符 / {:.1} 秒 / {:.2} t/s",
+            state.doc.song.total_blocks,
+            state.doc.song.song_length() as f32 / state.doc.song.meta.tempo,
+            state.doc.song.meta.tempo
+        )
     } else {
-        format!("This song: {} notes / {:.1} s / {:.2} t/s", state.doc.song.total_blocks, state.doc.song.song_length() as f32 / state.doc.song.meta.tempo, state.doc.song.meta.tempo)
+        format!(
+            "This song: {} notes / {:.1} s / {:.2} t/s",
+            state.doc.song.total_blocks,
+            state.doc.song.song_length() as f32 / state.doc.song.meta.tempo,
+            state.doc.song.meta.tempo
+        )
     };
     ui.label(RichText::new(info).small().weak());
     ui.separator();
@@ -2633,29 +3487,66 @@ fn hz_label(rate: u32) -> String {
 }
 
 fn audio_settings_window(state: &mut EditorState, ui: &mut Ui) {
-    ui.label(RichText::new(format!("{} {}", tr("Engine:", "引擎："), state.audio.name())).strong());
+    ui.label(
+        RichText::new(format!(
+            "{} {}",
+            tr("Engine:", "引擎："),
+            state.audio.name()
+        ))
+        .strong(),
+    );
     ui.label(RichText::new(state.audio.device_info()).small().weak());
     ui.label(RichText::new(state.audio.sample_status()).small().weak());
-    ui.label(RichText::new(format!("{} {}", tr("Active voices:", "当前活跃 voice："), state.audio.active_voices())).small().weak());
+    ui.label(
+        RichText::new(format!(
+            "{} {}",
+            tr("Active voices:", "当前活跃 voice："),
+            state.audio.active_voices()
+        ))
+        .small()
+        .weak(),
+    );
     ui.separator();
     let mut master = state.prefs.master_volume;
-    if ui.add(egui::Slider::new(&mut master, 0.0..=2.0).text(tr("Master volume", "主音量"))).changed() {
+    if ui
+        .add(egui::Slider::new(&mut master, 0.0..=2.0).text(tr("Master volume", "主音量")))
+        .changed()
+    {
         state.emit(Command::SetMasterVolume(master));
     }
     let mut speed = state.prefs.play_speed;
-    if ui.add(egui::Slider::new(&mut speed, 0.25..=4.0).text(tr("Playback speed", "播放速度"))).changed() {
+    if ui
+        .add(egui::Slider::new(&mut speed, 0.25..=4.0).text(tr("Playback speed", "播放速度")))
+        .changed()
+    {
         state.emit(Command::SetPlaySpeed(speed));
     }
     let mut metronome = state.prefs.metronome;
-    if ui.checkbox(&mut metronome, tr("Metronome (every 4 ticks)", "节拍器（每 4 tick）")).changed() {
+    if ui
+        .checkbox(
+            &mut metronome,
+            tr("Metronome (every 4 ticks)", "节拍器（每 4 tick）"),
+        )
+        .changed()
+    {
         state.emit(Command::ToggleMetronome);
     }
     // 「播放」那四个开关和速度单位属于首选项的播放页，这里不重复一份。
     ui.separator();
-    ui.label(tr("Built-in sounds directory (empty = auto-search)", "内置采样目录（留空 = 自动搜索）"));
+    ui.label(tr(
+        "Built-in sounds directory (empty = auto-search)",
+        "内置采样目录（留空 = 自动搜索）",
+    ));
     let mut dir = state.prefs.sounds_dir.clone().unwrap_or_default();
-    ui.add(egui::TextEdit::singleline(&mut dir).desired_width(f32::INFINITY).hint_text(tr("auto", "自动")));
-    if ui.button(tr("Apply and reload sounds", "应用并重新加载采样")).clicked() {
+    ui.add(
+        egui::TextEdit::singleline(&mut dir)
+            .desired_width(f32::INFINITY)
+            .hint_text(tr("auto", "自动")),
+    );
+    if ui
+        .button(tr("Apply and reload sounds", "应用并重新加载采样"))
+        .clicked()
+    {
         state.emit(Command::SetSoundsDir(dir));
     }
     ui.separator();
@@ -2697,9 +3588,21 @@ fn midi_cols(page: usize) -> &'static [(f32, &'static str, &'static str)] {
     const EN0: &[(f32, &str, &str)] = &[
         (50.0, "Channel", "The number of the channel."),
         (41.0, "Patch", "The patch (instrument) of the channel."),
-        (260.0, "Patch name", "The name of the patch (instrument) of the channel."),
-        (130.0, "Instrument", "The instrument the notes in the channel\nshould be translated to."),
-        (100.0, "Octave modifier", "The octave modifier for all sounds in this channel."),
+        (
+            260.0,
+            "Patch name",
+            "The name of the patch (instrument) of the channel.",
+        ),
+        (
+            130.0,
+            "Instrument",
+            "The instrument the notes in the channel\nshould be translated to.",
+        ),
+        (
+            100.0,
+            "Octave modifier",
+            "The octave modifier for all sounds in this channel.",
+        ),
     ];
     const CN0: &[(f32, &str, &str)] = &[
         (50.0, "通道", "通道的个数。"),
@@ -2711,7 +3614,11 @@ fn midi_cols(page: usize) -> &'static [(f32, &'static str, &'static str)] {
     const EN1: &[(f32, &str, &str)] = &[
         (50.0, "Note", "The note which represents the sound."),
         (220.0, "Sound name", "The name of the sound."),
-        (210.0, "Instrument", "The instrument the sound\nshould be translated to."),
+        (
+            210.0,
+            "Instrument",
+            "The instrument the sound\nshould be translated to.",
+        ),
         (100.0, "Pitch", "The pitch of the output."),
     ];
     const CN1: &[(f32, &str, &str)] = &[
@@ -2723,7 +3630,11 @@ fn midi_cols(page: usize) -> &'static [(f32, &'static str, &'static str)] {
     const EN2: &[(f32, &str, &str)] = &[
         (79.0, "Track number", "The number of the track."),
         (300.0, "Track name", "The name of the track."),
-        (200.0, "Amount of events", "The amount of events in the track."),
+        (
+            200.0,
+            "Amount of events",
+            "The amount of events in the track.",
+        ),
     ];
     const CN2: &[(f32, &str, &str)] = &[
         (79.0, "轨道序号", "轨道的序号。"),
@@ -2737,23 +3648,51 @@ fn midi_cols(page: usize) -> &'static [(f32, &'static str, &'static str)] {
         (151.0, "Note Duration", "Include duration for this part in the current file.\nNew MIDI files start with all melodic parts enabled."),
     ];
     const CN3: &[(f32, &str, &str)] = &[
-        (50.0, "轨道", "声部所在的轨道。\n将鼠标移到轨道序号上可查看名称。"),
-        (60.0, "通道", "声部使用的 MIDI 通道。\n不同轨道上的声部可分别设置音符长度。"),
+        (
+            50.0,
+            "轨道",
+            "声部所在的轨道。\n将鼠标移到轨道序号上可查看名称。",
+        ),
+        (
+            60.0,
+            "通道",
+            "声部使用的 MIDI 通道。\n不同轨道上的声部可分别设置音符长度。",
+        ),
         (320.0, "乐器名", "声部使用的 MIDI 乐器。"),
-        (151.0, "音符长度", "为当前文件中的此声部导入音符长度。\n新 MIDI 文件默认启用所有非打击乐声部。"),
+        (
+            151.0,
+            "音符长度",
+            "为当前文件中的此声部导入音符长度。\n新 MIDI 文件默认启用所有非打击乐声部。",
+        ),
     ];
     match page {
         0 => {
-            if crate::lang() == 1 { CN0 } else { EN0 }
+            if crate::lang() == 1 {
+                CN0
+            } else {
+                EN0
+            }
         }
         1 => {
-            if crate::lang() == 1 { CN1 } else { EN1 }
+            if crate::lang() == 1 {
+                CN1
+            } else {
+                EN1
+            }
         }
         2 => {
-            if crate::lang() == 1 { CN2 } else { EN2 }
+            if crate::lang() == 1 {
+                CN2
+            } else {
+                EN2
+            }
         }
         _ => {
-            if crate::lang() == 1 { CN3 } else { EN3 }
+            if crate::lang() == 1 {
+                CN3
+            } else {
+                EN3
+            }
         }
     }
 }
@@ -2834,11 +3773,7 @@ fn midi_import_window(state: &mut EditorState, ui: &mut Ui) {
             pg.ui.painter().clone().rect_filled(
                 pg.row_rect(8.0, 74.0 + abs_dy, 592.0, 176.0 + abs_dy),
                 16.0,
-                if th.fdark {
-                    ggray(51)
-                } else {
-                    ggray(204)
-                },
+                if th.fdark { ggray(51) } else { ggray(204) },
             );
         }
         if pg.check(
@@ -2846,7 +3781,10 @@ fn midi_import_window(state: &mut EditorState, ui: &mut Ui) {
             32.0 + set_dy,
             opt.remove_silent,
             tr("Remove silent parts at beginning", "去除开始时空部分"),
-            tr("Whether to remove any silent parts\nat the beginning of the song.", "是否移除歌曲开始时无音符的部分。"),
+            tr(
+                "Whether to remove any silent parts\nat the beginning of the song.",
+                "是否移除歌曲开始时无音符的部分。",
+            ),
             false,
             false,
         ) {
@@ -2857,7 +3795,10 @@ fn midi_import_window(state: &mut EditorState, ui: &mut Ui) {
             52.0 + set_dy,
             opt.name_layers,
             tr("Name layers...", "给每层命名......"),
-            tr("If the layers should be given names\ndepending on the data in the MIDI file.", "是否根据 MIDI 内数据为每层命名。"),
+            tr(
+                "If the layers should be given names\ndepending on the data in the MIDI file.",
+                "是否根据 MIDI 内数据为每层命名。",
+            ),
             false,
             false,
         ) {
@@ -2868,7 +3809,10 @@ fn midi_import_window(state: &mut EditorState, ui: &mut Ui) {
             72.0 + set_dy,
             opt.name_after_patch,
             tr("...after patches", "......根据乐器"),
-            tr("If the layers should be named\nafter the instruments in the MIDI file.", "是否根据 MIDI 中的乐器为每层命名。"),
+            tr(
+                "If the layers should be named\nafter the instruments in the MIDI file.",
+                "是否根据 MIDI 中的乐器为每层命名。",
+            ),
             !opt.name_layers,
         ) {
             opt.name_after_patch = true;
@@ -2878,7 +3822,10 @@ fn midi_import_window(state: &mut EditorState, ui: &mut Ui) {
             92.0 + set_dy,
             !opt.name_after_patch,
             tr("...channel numbers", "......根据层号"),
-            tr("If the layers should be named\nafter the channels in the MIDI file.", "是否根据 MIDI 中的层序号为每层命名。"),
+            tr(
+                "If the layers should be named\nafter the channels in the MIDI file.",
+                "是否根据 MIDI 中的层序号为每层命名。",
+            ),
             !opt.name_layers,
         ) {
             opt.name_after_patch = false;
@@ -2890,7 +3837,10 @@ fn midi_import_window(state: &mut EditorState, ui: &mut Ui) {
             32.0 + set_dy,
             opt.tempo_from_file,
             tr("Same tempo as in file", "导入速度"),
-            tr("Set the song's tempo to match\nthe one of the MIDI file.", "是否将速度设定为与 MIDI 文件中一样。"),
+            tr(
+                "Set the song's tempo to match\nthe one of the MIDI file.",
+                "是否将速度设定为与 MIDI 文件中一样。",
+            ),
             false,
             false,
         ) {
@@ -2933,9 +3883,22 @@ fn midi_import_window(state: &mut EditorState, ui: &mut Ui) {
             72.0 + set_dy,
             140.0,
             16.0,
-            tr("The maximum allowed layers per channel.\nClick and drag to adjust.", "每个通道所允许使用的最多层数。拖拽来更改。"),
+            tr(
+                "The maximum allowed layers per channel.\nClick and drag to adjust.",
+                "每个通道所允许使用的最多层数。拖拽来更改。",
+            ),
         );
-        if let Some(v) = pg.drag(if crate::lang() == 1 { 420.0 } else { 380.0 }, 72.0 + set_dy, opt.max_height as i32, 1.0, 1, 20, false, "", &mut drags[0]) {
+        if let Some(v) = pg.drag(
+            if crate::lang() == 1 { 420.0 } else { 380.0 },
+            72.0 + set_dy,
+            opt.max_height as i32,
+            1.0,
+            1,
+            20,
+            false,
+            "",
+            &mut drags[0],
+        ) {
             opt.max_height = v as u8;
         }
         if pg.check(
@@ -2954,7 +3917,10 @@ fn midi_import_window(state: &mut EditorState, ui: &mut Ui) {
             112.0 + set_dy,
             opt.use_velocity,
             tr("Read note velocity", "导入音符音量"),
-            tr("Whether to copy the volume data found\nin each MIDI note.", "是否将 MIDI 文件中音符音量应用到音符上。"),
+            tr(
+                "Whether to copy the volume data found\nin each MIDI note.",
+                "是否将 MIDI 文件中音符音量应用到音符上。",
+            ),
             false,
             false,
         ) {
@@ -2975,7 +3941,15 @@ fn midi_import_window(state: &mut EditorState, ui: &mut Ui) {
         let fade_locked = !opt.note_duration || !opt.note_duration_fade;
         let dim = ggray(128);
         let head_ink = if fade_locked { dim } else { pg.ink() };
-        pg.text(pg.row(if crate::lang() == 1 { 405.0 } else { 410.0 }, 111.0 + set_dy), tr("Start:", "起始:"), PREFS_FONT, head_ink);
+        pg.text(
+            pg.row(
+                if crate::lang() == 1 { 405.0 } else { 410.0 },
+                111.0 + set_dy,
+            ),
+            tr("Start:", "起始:"),
+            PREFS_FONT,
+            head_ink,
+        );
         let start_n = if fade_locked { 111.0 } else { 112.0 };
         if let Some(v) = pg.drag(
             445.0,
@@ -2991,7 +3965,12 @@ fn midi_import_window(state: &mut EditorState, ui: &mut Ui) {
             opt.note_duration_fade_start = v as u8;
         }
         pg.text(pg.row(466.0, 111.0 + set_dy), "%", PREFS_FONT, head_ink);
-        pg.text(pg.row(485.0, 111.0 + set_dy), tr("End:", "结束:"), PREFS_FONT, head_ink);
+        pg.text(
+            pg.row(485.0, 111.0 + set_dy),
+            tr("End:", "结束:"),
+            PREFS_FONT,
+            head_ink,
+        );
         if let Some(v) = pg.drag(
             if crate::lang() == 1 { 525.0 } else { 513.0 },
             start_n + set_dy,
@@ -3005,7 +3984,15 @@ fn midi_import_window(state: &mut EditorState, ui: &mut Ui) {
         ) {
             opt.note_duration_fade_end = v as u8;
         }
-        pg.text(pg.row(if crate::lang() == 1 { 546.0 } else { 534.0 }, 111.0 + set_dy), "%", PREFS_FONT, head_ink);
+        pg.text(
+            pg.row(
+                if crate::lang() == 1 { 546.0 } else { 534.0 },
+                111.0 + set_dy,
+            ),
+            "%",
+            PREFS_FONT,
+            head_ink,
+        );
         pg.tip_area(
             if crate::lang() == 1 { 403.0 } else { 408.0 },
             108.0 + set_dy,
@@ -3020,7 +4007,12 @@ fn midi_import_window(state: &mut EditorState, ui: &mut Ui) {
             20.0,
             tr("Velocity of the last generated tail note,\nas a percentage of the MIDI note velocity.\nClick and drag to adjust.", "最后一个尾音相对于 MIDI 音符音量的百分比。\n拖拽来更改。"),
         );
-        pg.text(pg.row(470.0, 52.0 + set_dy), tr("Time precision", "精准度"), PREFS_FONT, pg.ink());
+        pg.text(
+            pg.row(470.0, 52.0 + set_dy),
+            tr("Time precision", "精准度"),
+            PREFS_FONT,
+            pg.ink(),
+        );
         pg.tip_area(
             470.0,
             52.0 + set_dy,
@@ -3168,7 +4160,10 @@ fn midi_import_window(state: &mut EditorState, ui: &mut Ui) {
             374.0 + body_dy,
             ctx.opt.remember,
             tr("Remember changes", "记住我的更改"),
-            tr("Whether to use these settings the\nnext time you import a MIDI file.", "下次导入 MIDI 文件时是否使用同样的设定。"),
+            tr(
+                "Whether to use these settings the\nnext time you import a MIDI file.",
+                "下次导入 MIDI 文件时是否使用同样的设定。",
+            ),
             true,
             false,
         ) {
@@ -3177,10 +4172,24 @@ fn midi_import_window(state: &mut EditorState, ui: &mut Ui) {
         if pg.button(520.0, 368.0 + body_dy, 72.0, tr("Import", "导入"), false) {
             do_import = true;
         }
-        if pg.button2(440.0, 368.0 + body_dy, 72.0, tr("Cancel", "取消"), false, true) {
+        if pg.button2(
+            440.0,
+            368.0 + body_dy,
+            72.0,
+            tr("Cancel", "取消"),
+            false,
+            true,
+        ) {
             do_cancel = true;
         }
-        if pg.button2(360.0, 368.0 + body_dy, 72.0, tr("Use default", "使用默认值"), false, true) {
+        if pg.button2(
+            360.0,
+            368.0 + body_dy,
+            72.0,
+            tr("Use default", "使用默认值"),
+            false,
+            true,
+        ) {
             do_defaults = true;
         }
     }
@@ -3198,7 +4207,11 @@ fn midi_import_window(state: &mut EditorState, ui: &mut Ui) {
     }
     if do_defaults {
         // 原版 `question("你确定吗？", "确定")`：确认后才重查 GM 表并恢复 `w_midi_*`。
-        state.modals = ModalQueue::question(tr("Confirm", "确定"), tr("Are you sure?", "你确定吗？"), Command::MidiUseDefaults);
+        state.modals = ModalQueue::question(
+            tr("Confirm", "确定"),
+            tr("Are you sure?", "你确定吗？"),
+            Command::MidiUseDefaults,
+        );
     }
     if let Some(kind) = state.midi_menu {
         use crate::state::MidiMenu as M;
@@ -3252,7 +4265,12 @@ fn midi_panel_box(pg: &mut Page) {
     if retro {
         let outer = pg.row_rect(4.0, 145.0, 596.0, 364.0);
         p.rect_filled(outer, 0.0, ggray(200));
-        p.rect_stroke(outer, 0.0, Stroke::new(1.0_f32, pg.th.border), StrokeKind::Inside);
+        p.rect_stroke(
+            outer,
+            0.0,
+            Stroke::new(1.0_f32, pg.th.border),
+            StrokeKind::Inside,
+        );
     }
     let rect = if retro {
         pg.row_rect(9.0, 149.0, 589.0, 358.0)
@@ -3297,7 +4315,13 @@ const MIDI_VLINES: [&[f32]; 4] = [
 ];
 
 /// 原版试听热区：`(列左边界, y1 + 170 + 20a, 列宽 - 20, 20)`。
-fn midi_preview_rect(pg: &Page, cols: &[(f32, &str, &str)], k: usize, a: usize, body_dy: f32) -> Rect {
+fn midi_preview_rect(
+    pg: &Page,
+    cols: &[(f32, &str, &str)],
+    k: usize,
+    a: usize,
+    body_dy: f32,
+) -> Rect {
     let at = pg.row(
         midi_col_end(cols, k),
         170.0 + a as f32 * MIDI_ROW_H + body_dy,
@@ -3384,7 +4408,12 @@ fn midi_header_cell(pg: &mut Page, x: f32, w: f32, name: &str, tip: &str) {
     };
     let p = pg.ui.painter().clone();
     p.rect_filled(rect, 0.0, fill);
-    p.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, pg.th.border), StrokeKind::Inside);
+    p.rect_stroke(
+        rect,
+        0.0,
+        Stroke::new(1.0_f32, pg.th.border),
+        StrokeKind::Inside,
+    );
     pg.tip_area(x, top, w, 20.0, tip);
     pg.text(pg.row(x + 4.0, top + 3.0), name, PREFS_FONT, pg.ink());
 }
@@ -3461,7 +4490,11 @@ fn midi_scrollbar(pg: &mut Page, n: f32, total: usize, scroll: &mut f32) {
         if locked {
             break;
         }
-        let y = if above { n + 16.0 } else { n + 16.0 + bpos + bwh };
+        let y = if above {
+            n + 16.0
+        } else {
+            n + 16.0 + bpos + bwh
+        };
         let h = if above { bpos } else { TRACK - (bpos + bwh) };
         if h <= 0.0 {
             continue;
@@ -3475,16 +4508,21 @@ fn midi_scrollbar(pg: &mut Page, n: f32, total: usize, scroll: &mut f32) {
     // 拖滑块：原版 `sb_val += dy / (mwh / ms)`，松手取整。
     if !locked {
         let grip = Rect::from_min_size(pg.row(x, n + 16.0 + bpos), Vec2::new(16.0, bwh));
-        let resp = pg.ui.interact(grip, Id::new(("midi-sb-thumb", n as i32)), Sense::drag());
+        let resp = pg
+            .ui
+            .interact(grip, Id::new(("midi-sb-thumb", n as i32)), Sense::drag());
         if resp.dragged() {
-            *scroll = (*scroll + resp.drag_delta().y / (TRACK / total as f32)).clamp(0.0, max_scroll);
+            *scroll =
+                (*scroll + resp.drag_delta().y / (TRACK / total as f32)).clamp(0.0, max_scroll);
         } else if resp.drag_stopped() {
             *scroll = scroll.round().clamp(0.0, max_scroll);
         }
     }
     // 滚轮（悬停在整条上就算，见函数头第 ① 条）。
     let zone = Rect::from_min_size(pg.row(x, n), Vec2::new(17.0, TRACK + 32.0));
-    let hover = pg.ui.interact(zone, Id::new(("midi-sb-wheel", n as i32)), Sense::hover());
+    let hover = pg
+        .ui
+        .interact(zone, Id::new(("midi-sb-wheel", n as i32)), Sense::hover());
     if hover.hovered() {
         let d = pg.ui.input(|i| i.raw_scroll_delta.y);
         if d != 0.0 {
@@ -3503,7 +4541,12 @@ fn midi_row_ins(pg: &mut Page, ctx: &mut MidiCtx, b: usize, a: usize) {
     let n_box = 170.0 + a as f32 * MIDI_ROW_H + dy;
     let n_arrow = 172.0 + a as f32 * MIDI_ROW_H + dy;
     let ink = if b == 9 { ggray(120) } else { pg.ink() };
-    pg.text(pg.row(midi_col_x(cols, 0), n), &format!("{}", b + 1), PREFS_FONT, ink);
+    pg.text(
+        pg.row(midi_col_x(cols, 0), n),
+        &format!("{}", b + 1),
+        PREFS_FONT,
+        ink,
+    );
     if b == 9 {
         for (k, s) in [
             " - ",
@@ -3511,8 +4554,8 @@ fn midi_row_ins(pg: &mut Page, ctx: &mut MidiCtx, b: usize, a: usize) {
             tr("See \"Percussion\" tab", "请查看“打击乐”页面"),
             "-",
         ]
-            .iter()
-            .enumerate()
+        .iter()
+        .enumerate()
         {
             pg.text(pg.row(midi_col_x(cols, k + 1), n), s, PREFS_FONT, ink);
         }
@@ -3520,7 +4563,12 @@ fn midi_row_ins(pg: &mut Page, ctx: &mut MidiCtx, b: usize, a: usize) {
     }
     let c = b.min(15);
     let patch = ctx.midi.channel_patch[c] as usize;
-    pg.text(pg.row(midi_col_x(cols, 1), n), &format!("{}", patch + 1), PREFS_FONT, ink);
+    pg.text(
+        pg.row(midi_col_x(cols, 1), n),
+        &format!("{}", patch + 1),
+        PREFS_FONT,
+        ink,
+    );
     let pname = if patch < 128 {
         nbs_io::MidiGmTable::patch_name(patch as u8)
     } else {
@@ -3530,7 +4578,12 @@ fn midi_row_ins(pg: &mut Page, ctx: &mut MidiCtx, b: usize, a: usize) {
     let ins = ctx.opt.channel_ins[c];
     if ins < 0 {
         // 原版只把这一格涂成 c_gray，右边那列仍是主题色。
-        pg.text(pg.row(midi_col_x(cols, 3), n), tr("Ignore", "无"), PREFS_FONT, ggray(128));
+        pg.text(
+            pg.row(midi_col_x(cols, 3), n),
+            tr("Ignore", "无"),
+            PREFS_FONT,
+            ggray(128),
+        );
     } else {
         let name = ctx
             .names
@@ -3554,7 +4607,8 @@ fn midi_row_ins(pg: &mut Page, ctx: &mut MidiCtx, b: usize, a: usize) {
         if clicked {
             // 原版 `play_sound(instrument_list[| ins], 45 + midi_channeloctave[b] * 12, 100, 100, 0)`。
             let key = (45 + 12 * i32::from(ctx.opt.channel_octave[c])).clamp(0, 87) as u8;
-            ctx.previews.push(nbs_core::model::Note::new(ins as u8, key));
+            ctx.previews
+                .push(nbs_core::model::Note::new(ins as u8, key));
         }
     }
     if pg.arrow(ctx.icons, midi_col_end(cols, 4) - 20.0, n_arrow) {
@@ -3581,7 +4635,12 @@ fn midi_row_perc(pg: &mut Page, ctx: &mut MidiCtx, b: usize, a: usize) {
     let dy = ctx.body_dy;
     let n = 174.0 + a as f32 * MIDI_ROW_H + dy;
     let note = ctx.midi.perc_notes[b];
-    pg.text(pg.row(midi_col_x(cols, 0), n), &format!("{note}"), PREFS_FONT, pg.ink());
+    pg.text(
+        pg.row(midi_col_x(cols, 0), n),
+        &format!("{note}"),
+        PREFS_FONT,
+        pg.ink(),
+    );
     pg.text(
         pg.row(midi_col_x(cols, 1), n),
         nbs_io::MidiGmTable::drum_name(note),
@@ -3590,7 +4649,12 @@ fn midi_row_perc(pg: &mut Page, ctx: &mut MidiCtx, b: usize, a: usize) {
     );
     let ins = ctx.opt.perc_ins.get(b).copied().unwrap_or(-1);
     if ins < 0 {
-        pg.text(pg.row(midi_col_x(cols, 2), n), tr("Ignore", "无视"), PREFS_FONT, ggray(128));
+        pg.text(
+            pg.row(midi_col_x(cols, 2), n),
+            tr("Ignore", "无视"),
+            PREFS_FONT,
+            ggray(128),
+        );
     } else {
         let name = ctx
             .names
@@ -3611,10 +4675,15 @@ fn midi_row_perc(pg: &mut Page, ctx: &mut MidiCtx, b: usize, a: usize) {
         if clicked {
             // 原版直接拿界面上设定的音高来试听：`play_sound(ins, midi_percpitch[b], 100, 100, 0)`。
             let key = ctx.opt.perc_pitch.get(b).copied().unwrap_or(0).clamp(0, 87) as u8;
-            ctx.previews.push(nbs_core::model::Note::new(ins as u8, key));
+            ctx.previews
+                .push(nbs_core::model::Note::new(ins as u8, key));
         }
     }
-    if pg.arrow(ctx.icons, midi_col_end(cols, 3) - 19.0, 172.0 + a as f32 * MIDI_ROW_H + dy) {
+    if pg.arrow(
+        ctx.icons,
+        midi_col_end(cols, 3) - 19.0,
+        172.0 + a as f32 * MIDI_ROW_H + dy,
+    ) {
         ctx.open_menu(MidiMenu::PercIns(b));
     }
     let pitch = ctx.opt.perc_pitch.get(b).copied().unwrap_or(0);
@@ -3624,7 +4693,11 @@ fn midi_row_perc(pg: &mut Page, ctx: &mut MidiCtx, b: usize, a: usize) {
         PREFS_FONT,
         pg.ink(),
     );
-    if pg.arrow(ctx.icons, midi_col_end(cols, 4) - 35.0, 172.0 + a as f32 * MIDI_ROW_H + dy) {
+    if pg.arrow(
+        ctx.icons,
+        midi_col_end(cols, 4) - 35.0,
+        172.0 + a as f32 * MIDI_ROW_H + dy,
+    ) {
         ctx.open_menu(MidiMenu::PercPitch(b));
     }
 }
@@ -3634,7 +4707,12 @@ fn midi_row_track(pg: &mut Page, ctx: &mut MidiCtx, b: usize, a: usize) {
     let cols = midi_cols(2);
     let n = 174.0 + a as f32 * MIDI_ROW_H + ctx.body_dy;
     let track = &ctx.midi.tracks[b];
-    pg.text(pg.row(midi_col_x(cols, 0), n), &format!("{}", b + 1), PREFS_FONT, pg.ink());
+    pg.text(
+        pg.row(midi_col_x(cols, 0), n),
+        &format!("{}", b + 1),
+        PREFS_FONT,
+        pg.ink(),
+    );
     pg.text(
         pg.row(midi_col_x(cols, 1), n),
         &pg.truncate(&track.name, cols[1].0),
@@ -3668,7 +4746,13 @@ fn midi_row_part(pg: &mut Page, ctx: &mut MidiCtx, b: usize, a: usize) {
         .get(part.track)
         .map(|t| t.name.as_str())
         .unwrap_or("");
-    pg.tip_area(12.0, 172.0 + a as f32 * MIDI_ROW_H + dy, cols[0].0 - 4.0, 18.0, name);
+    pg.tip_area(
+        12.0,
+        172.0 + a as f32 * MIDI_ROW_H + dy,
+        cols[0].0 - 4.0,
+        18.0,
+        name,
+    );
     pg.text(
         pg.row(midi_col_x(cols, 1), n),
         &format!("{}", part.channel + 1),
@@ -3678,7 +4762,11 @@ fn midi_row_part(pg: &mut Page, ctx: &mut MidiCtx, b: usize, a: usize) {
     let label = if part.channel == 9 {
         tr("Percussion", "打击乐").to_string()
     } else if (part.patch as usize) < 128 {
-        format!("{}. {}", part.patch + 1, nbs_io::MidiGmTable::patch_name(part.patch as u8))
+        format!(
+            "{}. {}",
+            part.patch + 1,
+            nbs_io::MidiGmTable::patch_name(part.patch as u8)
+        )
     } else {
         tr("Unknown", "未知").to_string()
     };
@@ -3689,7 +4777,10 @@ fn midi_row_part(pg: &mut Page, ctx: &mut MidiCtx, b: usize, a: usize) {
         pg.ink(),
     );
     let tip = if part.channel == 9 {
-        tr("Percussion is imported as single notes.", "打击乐以单个音符导入。")
+        tr(
+            "Percussion is imported as single notes.",
+            "打击乐以单个音符导入。",
+        )
     } else {
         cols[3].2
     };
@@ -3777,14 +4868,20 @@ fn midi_menu_items(
 ) -> Vec<MidiMenuItem> {
     use crate::state::MidiMenu as M;
     match kind {
-        M::ChannelIns(b) => midi_ins_items(names, opt.channel_ins.get(b.min(15)).copied().unwrap_or(-1)),
+        M::ChannelIns(b) => {
+            midi_ins_items(names, opt.channel_ins.get(b.min(15)).copied().unwrap_or(-1))
+        }
         M::PercIns(b) => midi_ins_items(names, opt.perc_ins.get(b).copied().unwrap_or(-1)),
         M::ChannelOct(b) => {
             let cur = opt.channel_octave.get(b.min(15)).copied().unwrap_or(0);
             (-3..=3i16)
                 .map(|v| {
                     MidiMenuItem::item(
-                        if v > 0 { format!("+{v}") } else { v.to_string() },
+                        if v > 0 {
+                            format!("+{v}")
+                        } else {
+                            v.to_string()
+                        },
                         v,
                         v == i16::from(cur),
                     )
@@ -3807,7 +4904,14 @@ fn midi_menu_items(
                             .with_shortcut(if k < 33 || k > 57 { "(outside)" } else { "" })
                     })
                     .collect();
-                out.push(MidiMenuItem::head(if crate::lang() == 1 { format!("{oct} 八度") } else { format!("Octave {oct}") }, children));
+                out.push(MidiMenuItem::head(
+                    if crate::lang() == 1 {
+                        format!("{oct} 八度")
+                    } else {
+                        format!("Octave {oct}")
+                    },
+                    children,
+                ));
                 key += take;
                 if key >= 88 {
                     break;
@@ -3821,11 +4925,7 @@ fn midi_menu_items(
 
 /// 原版菜单的锚点：`(该列左边界, y1 + 190 + 20 × 可见行号)`，
 /// 可见行号 = 行号 - `floor(滚动量)`，和画那一行时用的是同一个数。
-fn midi_menu_pos(
-    kind: crate::state::MidiMenu,
-    scroll: &[f32; 4],
-    body_dy: f32,
-) -> (f32, f32) {
+fn midi_menu_pos(kind: crate::state::MidiMenu, scroll: &[f32; 4], body_dy: f32) -> (f32, f32) {
     use crate::state::MidiMenu as M;
     let (cols, page, b, k) = match kind {
         M::ChannelIns(b) => (midi_cols(0), 0, b, 3),
@@ -3834,10 +4934,7 @@ fn midi_menu_pos(
         M::PercPitch(b) => (midi_cols(1), 1, b, 3),
     };
     let a = (b as f32 - scroll[page].floor()).max(0.0);
-    (
-        midi_col_end(cols, k),
-        190.0 + a * MIDI_ROW_H + body_dy,
-    )
+    (midi_col_end(cols, k), 190.0 + a * MIDI_ROW_H + body_dy)
 }
 
 /// 原版 `show_menu_ext` 的 `menu_wid[a]`：最长的一条（文字 + 快捷字 + 七个空格）再加 56。
@@ -3962,7 +5059,11 @@ fn midi_menu_rows(
         // 原版 `menu_draw` 的图标层：勾在非 Fluent 完全不染色（精灵自带黑白，Dark 主题另取
         // 白字那帧），Fluent 是 `draw_sprite_ext(..., 选中 ? 选中文字色 : c_white)` 再叠一层
         // `spr_icons_col` 的 `accent[6 - 2 * !fdark]`（选中时这层也换成选中文字色）。
-        let check_tint = if fluent && sel { sel_text } else { Color32::WHITE };
+        let check_tint = if fluent && sel {
+            sel_text
+        } else {
+            Color32::WHITE
+        };
         let accent = fluent.then(|| if sel { sel_text } else { th.accent_icon() });
         if it.checked {
             if let Some(bank) = bank {
@@ -3971,7 +5072,14 @@ fn midi_menu_rows(
                 } else {
                     crate::icons::frame::CHECK
                 };
-                bank.menu_icon(&p, egui::pos2(org.x + 2.0, top - 1.0), frame, check_tint, accent, th);
+                bank.menu_icon(
+                    &p,
+                    egui::pos2(org.x + 2.0, top - 1.0),
+                    frame,
+                    check_tint,
+                    accent,
+                    th,
+                );
             } else {
                 // 精灵资源缺失：位置和形状照旧，只是不拿贴图冒充。
                 let b = egui::pos2(org.x + 5.0, top + 3.0);
@@ -4020,14 +5128,9 @@ fn midi_menu_rows(
                 Color32::BLACK
             };
             match bank {
-                Some(bank) => bank.menu_icon(
-                    &p,
-                    at,
-                    crate::icons::frame::SUB_MENU,
-                    col,
-                    accent,
-                    th,
-                ),
+                Some(bank) => {
+                    bank.menu_icon(&p, at, crate::icons::frame::SUB_MENU, col, accent, th)
+                }
                 None => {
                     let c = at + Vec2::splat(12.5);
                     p.add(egui::Shape::convex_polygon(
@@ -4078,7 +5181,11 @@ fn midi_popup(
         .map(|it| wid + midi_menu_wid(ui, th, &it.children) - 3.0)
         .fold(wid, f32::max);
     // 原版 `rootx = clamp(sx - (sx + menu_wid[0] > rw) * menu_wid[0], 0, rw - menu_wid[0])`。
-    let flip = if at.x + wid > screen.max.x { at.x - wid } else { at.x };
+    let flip = if at.x + wid > screen.max.x {
+        at.x - wid
+    } else {
+        at.x
+    };
     let mut x = flip.clamp(0.0, (screen.max.x - wid).max(0.0));
     if span <= screen.width() {
         let right = x.min(screen.max.x - span);
@@ -4125,7 +5232,16 @@ fn midi_popup(
                 // 子菜单下面没有第三层，命中状态用本地的，别把父层的 `open` 冲掉。
                 let mut deeper = None;
                 // 行号要和父菜单错开，否则同一帧里同一个 widget 出现在两个图层，egui 会直接 panic。
-                picked = midi_menu_rows(ui, th, bank, &format!("{id}/sub"), rect.min, kw, kids, &mut deeper);
+                picked = midi_menu_rows(
+                    ui,
+                    th,
+                    bank,
+                    &format!("{id}/sub"),
+                    rect.min,
+                    kw,
+                    kids,
+                    &mut deeper,
+                );
             });
     }
     (picked, dismissed)
@@ -4135,7 +5251,10 @@ fn midi_popup(
 fn schematic_export_window(state: &mut EditorState, ui: &mut Ui) {
     let mut tab = state.schematic_tab;
     ui.horizontal(|ui| {
-        for (i, name) in [tr("Design", "设计"), tr("Blocks", "方块")].iter().enumerate() {
+        for (i, name) in [tr("Design", "设计"), tr("Blocks", "方块")]
+            .iter()
+            .enumerate()
+        {
             if ui.selectable_label(tab == i as u8, *name).clicked() {
                 tab = i as u8;
             }
@@ -4155,11 +5274,21 @@ fn schematic_export_window(state: &mut EditorState, ui: &mut Ui) {
 
     ui.separator();
     ui.horizontal(|ui| {
-        ui.checkbox(&mut state.schematic_remember, tr("Remember changes", "记住我的更改"))
-            .on_hover_text(tr("Whether to use these settings the\nnext time you export a Schematic.", "下次导出 Schematic 时是否使用同样的设定。"));
+        ui.checkbox(
+            &mut state.schematic_remember,
+            tr("Remember changes", "记住我的更改"),
+        )
+        .on_hover_text(tr(
+            "Whether to use these settings the\nnext time you export a Schematic.",
+            "下次导出 Schematic 时是否使用同样的设定。",
+        ));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button(tr("Use default", "使用默认值")).clicked() {
-                state.modals = ModalQueue::question(tr("Confirm", "确定"), tr("Are you sure?", "你确定吗？"), Command::ResetSchematicOptions);
+                state.modals = ModalQueue::question(
+                    tr("Confirm", "确定"),
+                    tr("Are you sure?", "你确定吗？"),
+                    Command::ResetSchematicOptions,
+                );
             }
             if ui.button(tr("Cancel", "取消")).clicked() {
                 state.emit(Command::CloseWindow);
@@ -4184,26 +5313,36 @@ fn block_menu(
         .width(240.0)
         .selected_text(label)
         .show_ui(ui, |ui| {
-            egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
-                for sec in sections {
-                    if let Some(t) = sec.title {
-                        ui.label(RichText::new(t.to_string()).small().strong());
-                    }
-                    for m in &sec.items {
-                        let text =
-                            format!("{}, {}  {}", m.id, m.data, nbs_io::schematic::block_display_name(m.id, m.data));
-                        if ui.selectable_label(*m == current, text).clicked() {
-                            out = Some(*m);
-                            ui.memory_mut(|m| m.close_popup());
+            egui::ScrollArea::vertical()
+                .max_height(280.0)
+                .show(ui, |ui| {
+                    for sec in sections {
+                        if let Some(t) = sec.title {
+                            ui.label(RichText::new(t.to_string()).small().strong());
+                        }
+                        for m in &sec.items {
+                            let text = format!(
+                                "{}, {}  {}",
+                                m.id,
+                                m.data,
+                                nbs_io::schematic::block_display_name(m.id, m.data)
+                            );
+                            if ui.selectable_label(*m == current, text).clicked() {
+                                out = Some(*m);
+                                ui.memory_mut(|m| m.close_popup());
+                            }
                         }
                     }
-                }
-            });
+                });
         });
     out
 }
 
-fn design_tab(o: &mut nbs_io::schematic::SchematicOptions, st: &nbs_io::schematic::SchematicStats, ui: &mut Ui) {
+fn design_tab(
+    o: &mut nbs_io::schematic::SchematicOptions,
+    st: &nbs_io::schematic::SchematicStats,
+    ui: &mut Ui,
+) {
     use nbs_io::schematic::{calc_size, export_guard};
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
@@ -4310,39 +5449,40 @@ fn design_tab(o: &mut nbs_io::schematic::SchematicOptions, st: &nbs_io::schemati
     });
 }
 
-fn blocks_tab(
-    o: &mut nbs_io::schematic::SchematicOptions,
-    names: &[(u8, String)],
-    ui: &mut Ui,
-) {
-    use nbs_io::schematic::{block_display_name, instrument_block_menu, misc_block_menu, McBlock, INS_COUNT};
+fn blocks_tab(o: &mut nbs_io::schematic::SchematicOptions, names: &[(u8, String)], ui: &mut Ui) {
+    use nbs_io::schematic::{
+        block_display_name, instrument_block_menu, misc_block_menu, McBlock, INS_COUNT,
+    };
     let rows = names.len().min(INS_COUNT);
     let mut pick_ins: Option<(usize, McBlock)> = None;
-    egui::Grid::new("sch_ins_table").num_columns(3).striped(true).show(ui, |ui| {
-        ui.strong(tr("Instrument", "音色"));
-        ui.strong(tr("Block", "方块"));
-        ui.strong(tr("Block name", "方块名称"));
-        ui.end_row();
-        for b in 0..rows {
-            ui.label(&names[b].1);
-            let cur = McBlock {
-                id: o.ins_block.get(b).copied().unwrap_or(1),
-                data: o.ins_data.get(b).copied().unwrap_or(0),
-            };
-            let menu = instrument_block_menu(b);
-            if let Some(m) = block_menu(
-                ui,
-                &format!("schexport_insblock_{b}"),
-                cur,
-                &menu,
-                format!("{}, {}", cur.id, cur.data),
-            ) {
-                pick_ins = Some((b, m));
-            }
-            ui.label(block_display_name(cur.id, cur.data));
+    egui::Grid::new("sch_ins_table")
+        .num_columns(3)
+        .striped(true)
+        .show(ui, |ui| {
+            ui.strong(tr("Instrument", "音色"));
+            ui.strong(tr("Block", "方块"));
+            ui.strong(tr("Block name", "方块名称"));
             ui.end_row();
-        }
-    });
+            for b in 0..rows {
+                ui.label(&names[b].1);
+                let cur = McBlock {
+                    id: o.ins_block.get(b).copied().unwrap_or(1),
+                    data: o.ins_data.get(b).copied().unwrap_or(0),
+                };
+                let menu = instrument_block_menu(b);
+                if let Some(m) = block_menu(
+                    ui,
+                    &format!("schexport_insblock_{b}"),
+                    cur,
+                    &menu,
+                    format!("{}, {}", cur.id, cur.data),
+                ) {
+                    pick_ins = Some((b, m));
+                }
+                ui.label(block_display_name(cur.id, cur.data));
+                ui.end_row();
+            }
+        });
     if let Some((b, m)) = pick_ins {
         // 原版 `menu_click` 的 `schexport_insblock` 分支。
         if b < o.ins_block.len() {
@@ -4373,7 +5513,11 @@ fn blocks_tab(
             ) {
                 *slot = m;
             }
-            ui.label(RichText::new(format!("{}, {}", cur.id, cur.data)).small().weak());
+            ui.label(
+                RichText::new(format!("{}, {}", cur.id, cur.data))
+                    .small()
+                    .weak(),
+            );
         });
         ui.label(RichText::new(tip).small().weak());
     }
@@ -4384,36 +5528,115 @@ fn blocks_tab(
 /// 元组第三项写进命令的必须是英文内部值，界面标签只作显示。
 fn sound_sources() -> [(&'static str, &'static str, &'static str); 10] {
     [
-        ("ambient", tr("ambient", "环境"), tr("Controlled by Ambient/Environment slider", "由环境音量控制")),
-        ("block", tr("block", "方块"), tr("Controlled by Blocks slider", "由方块音量控制")),
-        ("hostile", tr("hostile", "敌对生物"), tr("Controlled by Hostile Creatures slider", "由敌对生物音量控制")),
-        ("master", tr("master", "主音量"), tr("Controlled by Master Volume slider", "由主音量控制")),
-        ("music", tr("music", "音乐"), tr("Controlled by Music slider", "由音乐音量控制")),
-        ("neutral", tr("neutral", "友好生物"), tr("Controlled by Friendly Creatures slider", "由友好生物音量控制")),
-        ("player", tr("player", "玩家"), tr("Controlled by Players slider", "由玩家音量控制")),
-        ("record", tr("record", "唱片机/音符盒"), tr("Controlled by Jukebox/Note Blocks slider", "由唱片机/音符盒音量控制")),
-        ("voice", tr("voice", "复述功能/语音"), tr("Controlled by Voice/Speech slider", "由复述功能/语音音量控制")),
-        ("weather", tr("weather", "天气"), tr("Controlled by Weather slider", "由天气音量控制")),
+        (
+            "ambient",
+            tr("ambient", "环境"),
+            tr("Controlled by Ambient/Environment slider", "由环境音量控制"),
+        ),
+        (
+            "block",
+            tr("block", "方块"),
+            tr("Controlled by Blocks slider", "由方块音量控制"),
+        ),
+        (
+            "hostile",
+            tr("hostile", "敌对生物"),
+            tr(
+                "Controlled by Hostile Creatures slider",
+                "由敌对生物音量控制",
+            ),
+        ),
+        (
+            "master",
+            tr("master", "主音量"),
+            tr("Controlled by Master Volume slider", "由主音量控制"),
+        ),
+        (
+            "music",
+            tr("music", "音乐"),
+            tr("Controlled by Music slider", "由音乐音量控制"),
+        ),
+        (
+            "neutral",
+            tr("neutral", "友好生物"),
+            tr(
+                "Controlled by Friendly Creatures slider",
+                "由友好生物音量控制",
+            ),
+        ),
+        (
+            "player",
+            tr("player", "玩家"),
+            tr("Controlled by Players slider", "由玩家音量控制"),
+        ),
+        (
+            "record",
+            tr("record", "唱片机/音符盒"),
+            tr(
+                "Controlled by Jukebox/Note Blocks slider",
+                "由唱片机/音符盒音量控制",
+            ),
+        ),
+        (
+            "voice",
+            tr("voice", "复述功能/语音"),
+            tr(
+                "Controlled by Voice/Speech slider",
+                "由复述功能/语音音量控制",
+            ),
+        ),
+        (
+            "weather",
+            tr("weather", "天气"),
+            tr("Controlled by Weather slider", "由天气音量控制"),
+        ),
     ]
 }
 
 /// 与 `VisType::ALL` 同序的双语标签。
 fn vis_types() -> [(&'static str, &'static str); 7] {
     [
-        (tr("Arc", "弧形"), tr("Use Arc visualizer.", "使用弧形效果器。")),
-        (tr("Fall", "下落"), tr("Use Fall visualizer.", "使用下落效果器。")),
-        (tr("Rise", "上升"), tr("Use Rise visualizer.", "使用上升效果器。")),
-        (tr("Bounce", "弹跳"), tr("Use Bounce visualizer.", "使用弹跳效果器。")),
-        (tr("Piano Roll", "钢琴"), tr("Use Piano Roll visualizer.", "使用钢琴式效果器。")),
-        (tr("Fountain", "喷泉"), tr("Use Fountain visualizer.", "使用喷泉效果器。")),
-        (tr("Rittai Onkyou", "立体"), tr("Use Rittai Onkyou visualizer.", "使用立体音效效果器。")),
+        (
+            tr("Arc", "弧形"),
+            tr("Use Arc visualizer.", "使用弧形效果器。"),
+        ),
+        (
+            tr("Fall", "下落"),
+            tr("Use Fall visualizer.", "使用下落效果器。"),
+        ),
+        (
+            tr("Rise", "上升"),
+            tr("Use Rise visualizer.", "使用上升效果器。"),
+        ),
+        (
+            tr("Bounce", "弹跳"),
+            tr("Use Bounce visualizer.", "使用弹跳效果器。"),
+        ),
+        (
+            tr("Piano Roll", "钢琴"),
+            tr("Use Piano Roll visualizer.", "使用钢琴式效果器。"),
+        ),
+        (
+            tr("Fountain", "喷泉"),
+            tr("Use Fountain visualizer.", "使用喷泉效果器。"),
+        ),
+        (
+            tr("Rittai Onkyou", "立体"),
+            tr("Use Rittai Onkyou visualizer.", "使用立体音效效果器。"),
+        ),
     ]
 }
 
 fn datapack_export_window(state: &mut EditorState, ui: &mut Ui) {
     ui.horizontal(|ui| {
-        for (i, tab) in [tr("Settings", "设置"), tr("Visualizer", "效果")].iter().enumerate() {
-            if ui.selectable_label(state.datapack_tab == i as u8, *tab).clicked() {
+        for (i, tab) in [tr("Settings", "设置"), tr("Visualizer", "效果")]
+            .iter()
+            .enumerate()
+        {
+            if ui
+                .selectable_label(state.datapack_tab == i as u8, *tab)
+                .clicked()
+            {
                 state.datapack_tab = i as u8;
             }
         }
@@ -4537,17 +5760,31 @@ fn datapack_export_window(state: &mut EditorState, ui: &mut Ui) {
         });
     } else {
         ui.checkbox(&mut o.visualizer, tr("Enable visualizer", "启用效果器"))
-            .on_hover_text(tr("NOTE: Please use a VOID world as falling blocks will pile up!", "注意：请使用一个虚空地图不然方块就会堆起来！"));
+            .on_hover_text(tr(
+                "NOTE: Please use a VOID world as falling blocks will pile up!",
+                "注意：请使用一个虚空地图不然方块就会堆起来！",
+            ));
         ui.label(tr("Visualizer type", "效果类型"));
         for (vis, (zh, tip)) in nbs_io::datapack::VisType::ALL.iter().zip(vis_types()) {
-            if ui.radio(o.vis_type == *vis, zh).on_hover_text(tip).clicked() {
+            if ui
+                .radio(o.vis_type == *vis, zh)
+                .on_hover_text(tip)
+                .clicked()
+            {
                 o.vis_type = *vis;
             }
         }
         ui.checkbox(&mut o.glow, tr("Add glow", "发光效果"))
-            .on_hover_text(tr("Whether to add a glowing effect to each note block.", "是否为每个音符盒添加发光效果。"));
+            .on_hover_text(tr(
+                "Whether to add a glowing effect to each note block.",
+                "是否为每个音符盒添加发光效果。",
+            ));
         ui.label(tr("Spawn height:", "生成高度:"));
-        ui.add(egui::DragValue::new(&mut o.y_val).range(0.0..=255.0).speed(0.5));
+        ui.add(
+            egui::DragValue::new(&mut o.y_val)
+                .range(0.0..=255.0)
+                .speed(0.5),
+        );
         ui.label(tr("Position in map:", "地图中位置:"));
         ui.horizontal(|ui| {
             ui.label(tr("X value:", "X值:"));
@@ -4559,16 +5796,28 @@ fn datapack_export_window(state: &mut EditorState, ui: &mut Ui) {
         });
         if o.visualizer {
             let line = if crate::lang() == 1 {
-                format!("效果器类型：{}，音符盒生成在 y = {}", o.vis_type.gml_name(), o.y_val)
+                format!(
+                    "效果器类型：{}，音符盒生成在 y = {}",
+                    o.vis_type.gml_name(),
+                    o.y_val
+                )
             } else {
-                format!("Visualizer type: {}, note blocks spawn at y = {}", o.vis_type.gml_name(), o.y_val)
+                format!(
+                    "Visualizer type: {}, note blocks spawn at y = {}",
+                    o.vis_type.gml_name(),
+                    o.y_val
+                )
             };
             ui.label(RichText::new(line).small().weak());
         }
     }
 
     if loop_start != state.doc.song.meta.loop_start as f32 {
-        state.doc.edit_meta("设置循环起点", |m| m.loop_start = loop_start as u16);
+        state
+            .doc
+            .edit_meta(tr("Set loop start", "设置循环起点"), |m| {
+                m.loop_start = loop_start as u16
+            });
         state.sync_loop_params();
     }
     if save_pack {
@@ -4582,13 +5831,18 @@ fn datapack_export_window(state: &mut EditorState, ui: &mut Ui) {
     ui.separator();
     ui.horizontal(|ui| {
         if ui.button(tr("Export", "导出")).clicked() {
-            state.emit(Command::OpenDialog(crate::state::DialogAction::ExportDatapack));
+            state.emit(Command::OpenDialog(
+                crate::state::DialogAction::ExportDatapack,
+            ));
         }
         if ui.button(tr("Use default", "使用默认值")).clicked() {
             // 原版是 dat_reset(1) + 一个确认框；这里直接重置并给出提示。
             state.datapack_options = nbs_io::datapack::DatapackOptions::default();
             state.export_status = None;
-            state.set_message(tr("Data pack export defaults restored", "已恢复数据包导出默认设置"));
+            state.set_message(tr(
+                "Data pack export defaults restored",
+                "已恢复数据包导出默认设置",
+            ));
         }
         if ui.button(tr("Close", "关闭")).clicked() {
             state.emit(Command::CloseWindow);
@@ -4619,45 +5873,64 @@ fn macro_editor_window(state: &mut EditorState, ui: &mut Ui) {
     let macros = Macro::all();
     // 原版菜单里 Macros... 的锁定条件是 `selected = 0 || selection_l = 0`，
     // 宏本体也全部空选区早退 —— 这里如实显示作用对象。
-    ui.label(RichText::new(if state.doc.selection.is_empty() {
-        tr("Target: no selection (apply is a no-op)", "作用对象：无选区（应用无效）").to_string()
-    } else {
-        tr(
-            &format!("Target: floating selection of {} notes", state.doc.selection.len()),
-            &format!("作用对象：浮动选区 {} 音符", state.doc.selection.len()),
-        )
-        .to_string()
-    })
-    .small()
-    .weak());
+    ui.label(
+        RichText::new(if state.doc.selection.is_empty() {
+            tr(
+                "Target: no selection (apply is a no-op)",
+                "作用对象：无选区（应用无效）",
+            )
+            .to_string()
+        } else {
+            tr(
+                &format!(
+                    "Target: floating selection of {} notes",
+                    state.doc.selection.len()
+                ),
+                &format!("作用对象：浮动选区 {} 音符", state.doc.selection.len()),
+            )
+            .to_string()
+        })
+        .small()
+        .weak(),
+    );
     ui.separator();
-    egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
-        for (i, m) in macros.iter().enumerate() {
-            if ui.selectable_label(state.macro_index == i, m.name()).clicked() {
-                state.macro_index = i;
-                state.macro_amount = match i {
-                    6 => 2.0,   // Tremolo spacing
-                    7 => 60.0,  // Stereo width
-                    8 => 0.0,   // Arpeggio 用 pattern
-                    9 => 300.0, // Portamento cents
-                    12 => 100.0,
-                    15 => 0.0,
-                    _ => 20.0,
-                };
+    egui::ScrollArea::vertical()
+        .max_height(180.0)
+        .show(ui, |ui| {
+            for (i, m) in macros.iter().enumerate() {
+                if ui
+                    .selectable_label(state.macro_index == i, m.label())
+                    .clicked()
+                {
+                    state.macro_index = i;
+                    state.macro_amount = match i {
+                        6 => 2.0,   // Tremolo spacing
+                        7 => 60.0,  // Stereo width
+                        8 => 0.0,   // Arpeggio 用 pattern
+                        9 => 300.0, // Portamento cents
+                        12 => 100.0,
+                        15 => 0.0,
+                        _ => 20.0,
+                    };
+                }
             }
-        }
-    });
+        });
     ui.separator();
-    ui.add(egui::Slider::new(&mut state.macro_amount, -1200.0..=1200.0).text(tr("Amount", "参数值")));
+    ui.add(
+        egui::Slider::new(&mut state.macro_amount, -1200.0..=1200.0).text(tr("Amount", "参数值")),
+    );
     ui.horizontal(|ui| {
         ui.label(tr("Pattern (| separated)", "序列 (| 分隔)"));
         ui.add(egui::TextEdit::singleline(&mut state.macro_pattern).desired_width(160.0));
     });
-    ui.checkbox(&mut state.macro_reverse, tr("Reverse / overlay mode", "反转 / 叠加模式"));
+    ui.checkbox(
+        &mut state.macro_reverse,
+        tr("Reverse / overlay mode", "反转 / 叠加模式"),
+    );
     ui.label(
         RichText::new(tr(
             &format!("Current: {}", state.current_macro().name()),
-            &format!("当前：{}", state.current_macro().name()),
+            &format!("当前：{}", state.current_macro().name_zh()),
         ))
         .small()
         .weak(),
@@ -4675,27 +5948,45 @@ fn macro_editor_window(state: &mut EditorState, ui: &mut Ui) {
 
 fn autosaves_window(state: &mut EditorState, ui: &mut Ui) {
     let files = nbs_io::prefs::list_autosaves();
-    ui.label(RichText::new(tr(
-        &format!("Backup folder: {}", nbs_io::prefs::Preferences::backup_dir().display()),
-        &format!("备份目录：{}", nbs_io::prefs::Preferences::backup_dir().display()),
-    )).small().weak());
+    ui.label(
+        RichText::new(tr(
+            &format!(
+                "Backup folder: {}",
+                nbs_io::prefs::Preferences::backup_dir().display()
+            ),
+            &format!(
+                "备份目录：{}",
+                nbs_io::prefs::Preferences::backup_dir().display()
+            ),
+        ))
+        .small()
+        .weak(),
+    );
     ui.separator();
     if files.is_empty() {
         ui.label(tr("No autosaves yet", "暂无自动备份"));
     }
-    egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
-        for p in files {
-            let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
-            if ui.button(&name).clicked() {
-                state.emit(Command::RestoreAutosave(p.clone()));
+    egui::ScrollArea::vertical()
+        .max_height(240.0)
+        .show(ui, |ui| {
+            for p in files {
+                let name = p
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                if ui.button(&name).clicked() {
+                    state.emit(Command::RestoreAutosave(p.clone()));
+                }
             }
-        }
-    });
+        });
     ui.separator();
-    ui.add(egui::Slider::new(&mut state.prefs.auto_save_minutes, 0..=60).text(tr(
-        "Autosave interval (minutes, 0 = off)",
-        "自动保存间隔 (分钟，0=关闭)",
-    )));
+    ui.add(
+        egui::Slider::new(&mut state.prefs.auto_save_minutes, 0..=60).text(tr(
+            "Autosave interval (minutes, 0 = off)",
+            "自动保存间隔 (分钟，0=关闭)",
+        )),
+    );
     footer(state, ui);
 }
 
@@ -4758,7 +6049,13 @@ fn minecraft_compat_window(state: &mut EditorState, ui: &mut Ui) {
     let red = Color32::from_rgb(255, 0, 0);
     let orange = Color32::from_rgb(255, 140, 0);
 
-    let mut pg = Page { ui: &mut *ui, o, ry, th: &th, fluent };
+    let mut pg = Page {
+        ui: &mut *ui,
+        o,
+        ry,
+        th: &th,
+        fluent,
+    };
 
     // 原版 Fluent 只有一块盖住标题区的灰卡（`draw_roundrect(x1+1, y1+1, x1+488, y1+98, 0)`），
     // 内容区不再画面板框；其余主题反过来：灰卡不画，`yy + 46 .. yy + 350` 那一块画白底 +
@@ -4769,10 +6066,19 @@ fn minecraft_compat_window(state: &mut EditorState, ui: &mut Ui) {
         pg.ui.painter().rect_filled(card, 0.0, fill);
     } else {
         let panel = Rect::from_min_max(pg.row(6.0, 96.0), pg.row(484.0, 400.0));
-        let fill = if th.kind == ThemeKind::Dark { th.window_bg } else { Color32::WHITE };
+        let fill = if th.kind == ThemeKind::Dark {
+            th.window_bg
+        } else {
+            Color32::WHITE
+        };
         let p = pg.ui.painter();
         p.rect_filled(panel, 0.0, fill);
-        p.rect_stroke(panel, 0.0, Stroke::new(1.0_f32, Color32::from_rgb(137, 140, 149)), StrokeKind::Inside);
+        p.rect_stroke(
+            panel,
+            0.0,
+            Stroke::new(1.0_f32, Color32::from_rgb(137, 140, 149)),
+            StrokeKind::Inside,
+        );
     }
 
     // 原版在窗口标题下面还有一行说明（`draw_text_dynamic(x1 + 16, y1 + 32, …)`）。
@@ -4801,7 +6107,11 @@ fn minecraft_compat_window(state: &mut EditorState, ui: &mut Ui) {
             pg.text(pg.row(b + 6.0, 80.0), name, font, ink);
         }
         let rect = Rect::from_min_size(pg.row(b, 78.0), Vec2::new(tw + 12.0, 18.0));
-        if pg.ui.interact(rect, Id::new(("mc-tab", i)), Sense::click()).clicked() {
+        if pg
+            .ui
+            .interact(rect, Id::new(("mc-tab", i)), Sense::click())
+            .clicked()
+        {
             nsel = i as u8;
         }
         b += tw + 12.0;
@@ -4815,7 +6125,11 @@ fn minecraft_compat_window(state: &mut EditorState, ui: &mut Ui) {
         Rect::from_min_size(pg.row(stabx, 76.0), Vec2::new(stabw, 20.0))
     };
     let sel_fill = if fluent {
-        if th.fdark { ggray(32) } else { ggray(243) }
+        if th.fdark {
+            ggray(32)
+        } else {
+            ggray(243)
+        }
     } else if th.kind == ThemeKind::Dark {
         th.window_bg
     } else {
@@ -4824,7 +6138,12 @@ fn minecraft_compat_window(state: &mut EditorState, ui: &mut Ui) {
     let p = pg.ui.painter();
     p.rect_filled(sel_rect, 0.0, sel_fill);
     if !fluent {
-        p.rect_stroke(sel_rect, 0.0, Stroke::new(1.0_f32, Color32::from_rgb(137, 140, 149)), StrokeKind::Inside);
+        p.rect_stroke(
+            sel_rect,
+            0.0,
+            Stroke::new(1.0_f32, Color32::from_rgb(137, 140, 149)),
+            StrokeKind::Inside,
+        );
         p.rect_filled(
             Rect::from_min_max(pg.row(stabx + 1.0, 96.0), pg.row(stabx + stabw - 1.0, 97.0)),
             0.0,
@@ -4851,9 +6170,20 @@ fn minecraft_compat_window(state: &mut EditorState, ui: &mut Ui) {
         } else {
             format!("The tempo is {tempo} ticks per second.")
         };
-        pg.text(pg.row(45.0, 131.0), &cur, font, if tempo_ok { green } else { red });
+        pg.text(
+            pg.row(45.0, 131.0),
+            &cur,
+            font,
+            if tempo_ok { green } else { red },
+        );
         if !tempo_ok
-            && pg.button(45.0, 149.0, 140.0, tr("Fix tempo for schematic", "针对 Schematic 调整速度"), false)
+            && pg.button(
+                45.0,
+                149.0,
+                140.0,
+                tr("Fix tempo for schematic", "针对 Schematic 调整速度"),
+                false,
+            )
         {
             state.emit(Command::FixTempoSchematic);
         }
@@ -4877,13 +6207,37 @@ fn minecraft_compat_window(state: &mut EditorState, ui: &mut Ui) {
                 format!("There are {outside} blocks outside the 2 octave range.")
             };
             pg.text(pg.row(45.0, 221.0), &n, font, red);
-            if pg.button(45.0, 239.0, 120.0, tr("Select lower blocks", "选择过低的音符"), false) {
-                state.emit(Command::SelectOutside { lower: true, higher: false });
+            if pg.button(
+                45.0,
+                239.0,
+                120.0,
+                tr("Select lower blocks", "选择过低的音符"),
+                false,
+            ) {
+                state.emit(Command::SelectOutside {
+                    lower: true,
+                    higher: false,
+                });
             }
-            if pg.button(175.0, 239.0, 120.0, tr("Select higher blocks", "选择过高的音符"), false) {
-                state.emit(Command::SelectOutside { lower: false, higher: true });
+            if pg.button(
+                175.0,
+                239.0,
+                120.0,
+                tr("Select higher blocks", "选择过高的音符"),
+                false,
+            ) {
+                state.emit(Command::SelectOutside {
+                    lower: false,
+                    higher: true,
+                });
             }
-            if pg.button(305.0, 239.0, 100.0, tr("Transpose notes", "转换音符"), false) {
+            if pg.button(
+                305.0,
+                239.0,
+                100.0,
+                tr("Transpose notes", "转换音符"),
+                false,
+            ) {
                 state.emit(Command::TransposeToMinecraft);
             }
         } else {
@@ -4901,7 +6255,10 @@ fn minecraft_compat_window(state: &mut EditorState, ui: &mut Ui) {
         mc_status_icon(&pg, bank.as_deref(), 295.0, usize::from(custom == 0));
         pg.text(
             pg.row(45.0, 295.0),
-            tr("No custom instruments may be used.", "不可使用任何自定义音色。"),
+            tr(
+                "No custom instruments may be used.",
+                "不可使用任何自定义音色。",
+            ),
             font,
             ink,
         );
@@ -4914,7 +6271,13 @@ fn minecraft_compat_window(state: &mut EditorState, ui: &mut Ui) {
                 format!("There are {custom} blocks with custom instruments.")
             };
             pg.text(pg.row(45.0, 311.0), &n, font, red);
-            if pg.button(45.0, 329.0, 160.0, tr("Select affected blocks", "选择所指音符"), false) {
+            if pg.button(
+                45.0,
+                329.0,
+                160.0,
+                tr("Select affected blocks", "选择所指音符"),
+                false,
+            ) {
                 state.emit(Command::SelectCustom);
             }
         } else {
@@ -4955,9 +6318,20 @@ fn minecraft_compat_window(state: &mut EditorState, ui: &mut Ui) {
         } else {
             format!("The tempo is {tempo} ticks per second.")
         };
-        pg.text(pg.row(45.0, 147.0), &cur, font, if good { green } else { orange });
+        pg.text(
+            pg.row(45.0, 147.0),
+            &cur,
+            font,
+            if good { green } else { orange },
+        );
         if !good
-            && pg.button(45.0, 165.0, 180.0, tr("Optimize tempo for data pack", "针对数据包调整速度"), false)
+            && pg.button(
+                45.0,
+                165.0,
+                180.0,
+                tr("Optimize tempo for data pack", "针对数据包调整速度"),
+                false,
+            )
         {
             state.emit(Command::FixTempoDatapack);
         }
@@ -4991,15 +6365,39 @@ fn minecraft_compat_window(state: &mut EditorState, ui: &mut Ui) {
             };
             pg.text(pg.row(45.0, 237.0), &n, font, orange);
             if pg.button(45.0, 255.0, 80.0, tr("Select lower", "选择过低音符"), false) {
-                state.emit(Command::SelectOutside { lower: true, higher: false });
+                state.emit(Command::SelectOutside {
+                    lower: true,
+                    higher: false,
+                });
             }
-            if pg.button(135.0, 255.0, 80.0, tr("Select higher", "选择过高音符"), false) {
-                state.emit(Command::SelectOutside { lower: false, higher: true });
+            if pg.button(
+                135.0,
+                255.0,
+                80.0,
+                tr("Select higher", "选择过高音符"),
+                false,
+            ) {
+                state.emit(Command::SelectOutside {
+                    lower: false,
+                    higher: true,
+                });
             }
-            if pg.button(225.0, 255.0, 100.0, tr("Transpose notes", "转换音符"), false) {
+            if pg.button(
+                225.0,
+                255.0,
+                100.0,
+                tr("Transpose notes", "转换音符"),
+                false,
+            ) {
                 state.emit(Command::TransposeToMinecraft);
             }
-            if pg.button(335.0, 255.0, 120.0, tr("Save resource pack", "保存资源包"), false) {
+            if pg.button(
+                335.0,
+                255.0,
+                120.0,
+                tr("Save resource pack", "保存资源包"),
+                false,
+            ) {
                 state.emit(Command::SaveExtraNotesPack);
             }
         } else {
@@ -5043,7 +6441,13 @@ fn minecraft_compat_window(state: &mut EditorState, ui: &mut Ui) {
                 format!("There are {custom} blocks with custom instruments.")
             };
             pg.text(pg.row(45.0, 327.0), &n, font, orange);
-            if pg.button(45.0, 345.0, 160.0, tr("Select affected blocks", "选择所指音符"), false) {
+            if pg.button(
+                45.0,
+                345.0,
+                160.0,
+                tr("Select affected blocks", "选择所指音符"),
+                false,
+            ) {
                 state.emit(Command::SelectCustom);
             }
         } else {

@@ -355,11 +355,9 @@ impl Song {
     }
 
     pub fn iter_notes(&self) -> impl Iterator<Item = (u32, u32, Note)> + '_ {
-        self.columns.iter().flat_map(|(&t, c)| {
-            c.notes
-                .iter()
-                .map(move |(&l, &n)| (t, l, n))
-        })
+        self.columns
+            .iter()
+            .flat_map(|(&t, c)| c.notes.iter().map(move |(&l, &n)| (t, l, n)))
     }
 
     /// 可见区间内的音符迭代器 —— 这是视口剔除的核心。
@@ -406,14 +404,31 @@ impl Song {
 
     /// 生成一首用于演示的测试曲（也方便打开程序就能看到效果）。
     pub fn demo() -> Self {
+        Self::demo_in(crate::lang())
+    }
+
+    /// 按指定语言生成演示曲：手里有 `prefs.language` 的调用方（`EditorState::new()`）
+    /// 走这条，别为了描述那一句去翻全局语言开关。
+    pub fn demo_in(lang: u8) -> Self {
         let mut song = Self::new();
         song.meta.name = "Rust Rewrite Demo".into();
         song.meta.author = "nbs-rust".into();
-        song.meta.description = "从 D 模块（UI + 网格编辑器）开始重写".into();
+        song.meta.description = crate::tr_at(
+            lang,
+            "Rewriting starts from module D (UI + grid editor)",
+            "从 D 模块（UI + 网格编辑器）开始重写",
+        )
+        .into();
         song.meta.tempo = 10.0;
         song.layers[0].name = "Lead".into();
-        song.layers.push(Layer { name: "Bass".into(), ..Default::default() });
-        song.layers.push(Layer { name: "Drums".into(), ..Default::default() });
+        song.layers.push(Layer {
+            name: "Bass".into(),
+            ..Default::default()
+        });
+        song.layers.push(Layer {
+            name: "Drums".into(),
+            ..Default::default()
+        });
 
         // 一段简单的 C 大调音阶 + 低音 + 鼓点
         let scale = [45u8, 47, 49, 50, 52, 54, 56, 57];
@@ -425,7 +440,11 @@ impl Song {
             song.set(t, 1, Note::new(1, 33 + (bar % 2) as u8 * 5));
             song.set(t + 8, 1, Note::new(1, 38));
             for beat in 0..4u32 {
-                song.set(t + beat * 4, 2, Note::new(if beat % 2 == 0 { 2 } else { 3 }, 45));
+                song.set(
+                    t + beat * 4,
+                    2,
+                    Note::new(if beat % 2 == 0 { 2 } else { 3 }, 45),
+                );
             }
         }
         song.recalculate();
@@ -443,7 +462,11 @@ const KEY_NAMES_FLAT: [&str; 12] = [
 
 /// 音名换算，与原版 `get_keyname` 一致：0 = 最低，33 = MC 最低，57 = MC 最高。
 pub fn key_name(key: u8, show_octave: bool, flats: bool) -> String {
-    let names = if flats { KEY_NAMES_FLAT } else { KEY_NAMES_SHARP };
+    let names = if flats {
+        KEY_NAMES_FLAT
+    } else {
+        KEY_NAMES_SHARP
+    };
     let name = names[(key as usize) % 12];
     if show_octave {
         let octave = (key as i32 - 3).div_euclid(12) + 1;
@@ -485,7 +508,10 @@ impl Song {
     pub fn instrument_name(&self, index: u8) -> &str {
         match index.checked_sub(FIRST_CUSTOM_INDEX) {
             None => crate::instruments::instrument(index).map_or("", |i| i.name),
-            Some(i) => self.custom_instruments.get(i as usize).map_or("", |c| c.name.as_str()),
+            Some(i) => self
+                .custom_instruments
+                .get(i as usize)
+                .map_or("", |c| c.name.as_str()),
         }
     }
 }

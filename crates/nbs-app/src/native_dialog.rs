@@ -18,11 +18,8 @@ use winapi::shared::minwindef::{DWORD, UINT};
 use winapi::shared::windef::HWND;
 use winapi::shared::winerror::{RPC_E_CHANGED_MODE, S_FALSE, S_OK};
 use winapi::shared::wtypesbase::CLSCTX_INPROC_SERVER;
-use winapi::um::combaseapi::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
-};
+use winapi::um::combaseapi::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize};
 use winapi::um::objbase::COINIT_APARTMENTTHREADED;
-use winapi::um::shtypes::COMDLG_FILTERSPEC;
 use winapi::um::shobjidl::{
     IFileDialog, IFileOpenDialog, IFileSaveDialog, FOS_CREATEPROMPT, FOS_FILEMUSTEXIST,
     FOS_FORCEFILESYSTEM, FOS_NOREADONLYRETURN, FOS_OVERWRITEPROMPT, FOS_PATHMUSTEXIST,
@@ -31,6 +28,7 @@ use winapi::um::shobjidl_core::{
     CLSID_FileOpenDialog, CLSID_FileSaveDialog, IShellItem, SHCreateItemFromParsingName,
     SIGDN_FILESYSPATH,
 };
+use winapi::um::shtypes::COMDLG_FILTERSPEC;
 use winapi::um::winuser::{GetActiveWindow, GetForegroundWindow, GetWindowThreadProcessId};
 
 /// 用户按「取消」时 `IFileDialog::Show` 的返回值，即 `HRESULT_FROM_WIN32(ERROR_CANCELLED)`。
@@ -114,7 +112,10 @@ unsafe fn configure(dlg: &FileDialog, fd: *mut IFileDialog) {
     let entries: Vec<COMDLG_FILTERSPEC> = names
         .iter()
         .zip(specs.iter())
-        .map(|(n, s)| COMDLG_FILTERSPEC { pszName: n.as_ptr(), pszSpec: s.as_ptr() })
+        .map(|(n, s)| COMDLG_FILTERSPEC {
+            pszName: n.as_ptr(),
+            pszSpec: s.as_ptr(),
+        })
         .collect();
     if !entries.is_empty() {
         (*fd).SetFileTypes(entries.len() as UINT, entries.as_ptr());
@@ -135,7 +136,11 @@ unsafe fn configure(dlg: &FileDialog, fd: *mut IFileDialog) {
         let name = wide(&dlg.name);
         (*fd).SetFileName(name.as_ptr());
         // 用户没打扩展名时由系统补上，和 GameMaker 一致。多个类型时没有「那一个」扩展名，就不补。
-        if let Some(only) = spec.filters.first().map(|f| f.patterns.trim_start_matches("*.")) {
+        if let Some(only) = spec
+            .filters
+            .first()
+            .map(|f| f.patterns.trim_start_matches("*."))
+        {
             if !only.contains(';') && !only.is_empty() && spec.filters.len() == 1 {
                 let ext = wide(only);
                 (*fd).SetDefaultExtension(ext.as_ptr());
@@ -162,7 +167,11 @@ unsafe fn pick_now(request: &FileDialog) -> PickResult {
     let must_uninit = hr_init == S_OK || hr_init == S_FALSE;
 
     let mut obj: *mut c_void = null_mut();
-    let clsid = if request.save { &CLSID_FileSaveDialog } else { &CLSID_FileOpenDialog };
+    let clsid = if request.save {
+        &CLSID_FileSaveDialog
+    } else {
+        &CLSID_FileOpenDialog
+    };
     let iid = if request.save {
         <IFileSaveDialog as winapi::Interface>::uuidof()
     } else {
@@ -216,7 +225,11 @@ pub(crate) unsafe fn probe(request: &FileDialog) -> Result<String, String> {
     }
     let must_uninit = hr_init == S_OK || hr_init == S_FALSE;
     let mut obj: *mut c_void = null_mut();
-    let clsid = if request.save { &CLSID_FileSaveDialog } else { &CLSID_FileOpenDialog };
+    let clsid = if request.save {
+        &CLSID_FileSaveDialog
+    } else {
+        &CLSID_FileOpenDialog
+    };
     let iid = if request.save {
         <IFileSaveDialog as winapi::Interface>::uuidof()
     } else {

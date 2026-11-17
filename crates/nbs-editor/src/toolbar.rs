@@ -15,7 +15,7 @@ use egui::{pos2, Align2, Color32, FontId, Id, OpenUrl, Pos2, Rect, Sense, Ui, Ve
 
 use crate::commands::Command;
 use crate::icons::{frame, Bank, IconHit};
-use crate::state::{EditorState, EditMode, WindowKind};
+use crate::state::{EditMode, EditorState, WindowKind};
 use crate::theme::{Theme, ThemeKind};
 use crate::tr;
 
@@ -33,14 +33,36 @@ impl Bar {
         self.x > rw - 312.0
     }
 
-    fn icon(&mut self, ui: &mut Ui, index: usize, tip: &str, locked: bool, pressed: bool) -> IconHit {
-        let hit = self.bank.icon(ui, pos2(self.x, self.y), index, tip, locked, pressed, &self.th);
+    fn icon(
+        &mut self,
+        ui: &mut Ui,
+        index: usize,
+        tip: &str,
+        locked: bool,
+        pressed: bool,
+    ) -> IconHit {
+        let hit = self.bank.icon(
+            ui,
+            pos2(self.x, self.y),
+            index,
+            tip,
+            locked,
+            pressed,
+            &self.th,
+        );
         self.x += 25.0;
         hit
     }
 
     /// 段尾按钮：原版写成 `xx += 25 + 4`。
-    fn icon_end(&mut self, ui: &mut Ui, index: usize, tip: &str, locked: bool, pressed: bool) -> IconHit {
+    fn icon_end(
+        &mut self,
+        ui: &mut Ui,
+        index: usize,
+        tip: &str,
+        locked: bool,
+        pressed: bool,
+    ) -> IconHit {
         let hit = self.icon(ui, index, tip, locked, pressed);
         self.x += 4.0;
         hit
@@ -65,10 +87,28 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
         // 移植版自己加的条目（PNG 谱面 / 自动备份 / 清空所有音符 / 快捷宏）没有
         // 原版文案，英文按字面直译。
         ui.menu_button(tr("File", "文件"), |ui| {
-            if ui.button(tr("New song  Ctrl+N", "新建  Ctrl+N")).clicked() { state.emit(Command::New); ui.close_menu(); }
-            if ui.button(tr("Open song...  Ctrl+O", "打开  Ctrl+O")).clicked() { state.emit(Command::Open); ui.close_menu(); }
-            if ui.button(tr("Save song  Ctrl+S", "保存  Ctrl+S")).clicked() { state.emit(Command::Save); ui.close_menu(); }
-            if ui.button(tr("Save song as a new file...", "另存为")).clicked() { state.emit(Command::SaveAs); ui.close_menu(); }
+            if ui.button(tr("New song  Ctrl+N", "新建  Ctrl+N")).clicked() {
+                state.emit(Command::New);
+                ui.close_menu();
+            }
+            if ui
+                .button(tr("Open song...  Ctrl+O", "打开  Ctrl+O"))
+                .clicked()
+            {
+                state.emit(Command::Open);
+                ui.close_menu();
+            }
+            if ui.button(tr("Save song  Ctrl+S", "保存  Ctrl+S")).clicked() {
+                state.emit(Command::Save);
+                ui.close_menu();
+            }
+            if ui
+                .button(tr("Save song as a new file...", "另存为"))
+                .clicked()
+            {
+                state.emit(Command::SaveAs);
+                ui.close_menu();
+            }
             ui.separator();
             ui.menu_button(tr("Recent songs...", "最近打开"), |ui| {
                 if state.recent_files.is_empty() {
@@ -85,38 +125,132 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
             });
             ui.separator();
             ui.menu_button(tr("Import...", "导入"), |ui| {
-                if ui.button(tr("MIDI...", "从 MIDI 导入…")).clicked() { state.emit(Command::OpenDialog(crate::state::DialogAction::ImportMidi)); ui.close_menu(); }
-                if ui.button(tr("Schematic...", "从 Schematic 导入…")).clicked() { state.emit(Command::OpenDialog(crate::state::DialogAction::ImportSchematic)); ui.close_menu(); }
-                if ui.button(tr("Pattern...", "导入片段 (.nbp)…")).clicked() { state.emit(Command::OpenDialog(crate::state::DialogAction::ImportPattern)); ui.close_menu(); }
+                if ui.button(tr("MIDI...", "从 MIDI 导入…")).clicked() {
+                    state.emit(Command::OpenDialog(crate::state::DialogAction::ImportMidi));
+                    ui.close_menu();
+                }
+                if ui
+                    .button(tr("Schematic...", "从 Schematic 导入…"))
+                    .clicked()
+                {
+                    state.emit(Command::OpenDialog(
+                        crate::state::DialogAction::ImportSchematic,
+                    ));
+                    ui.close_menu();
+                }
+                if ui.button(tr("Pattern...", "导入片段 (.nbp)…")).clicked() {
+                    state.emit(Command::OpenDialog(
+                        crate::state::DialogAction::ImportPattern,
+                    ));
+                    ui.close_menu();
+                }
             });
             ui.menu_button(tr("Export...", "导出"), |ui| {
-                if ui.button(tr("Audio track...", "音频轨道…")).clicked() { state.emit(Command::ShowWindow(WindowKind::AudioExport)); ui.close_menu(); }
-                if ui.button(tr("MIDI...", "MIDI…")).clicked() { state.emit(Command::OpenDialog(crate::state::DialogAction::ExportMidi)); ui.close_menu(); }
-                if ui.button(tr("PNG sheet...", "PNG 谱面…")).clicked() { state.emit(Command::ShowWindow(WindowKind::PngExport)); ui.close_menu(); }
-                if ui.button(tr("Schematic...", "Minecraft 原理图…")).clicked() { state.emit(Command::OpenSchematicExport); ui.close_menu(); }
-                if ui.button(tr("Data pack...", "Minecraft 数据包…")).clicked() { state.emit(Command::ShowWindow(WindowKind::DatapackExport)); ui.close_menu(); }
-                if ui.button(tr("Pattern...", "片段 (.nbp)…")).clicked() { state.emit(Command::OpenDialog(crate::state::DialogAction::ExportPattern)); ui.close_menu(); }
+                if ui.button(tr("Audio track...", "音频轨道…")).clicked() {
+                    state.emit(Command::ShowWindow(WindowKind::AudioExport));
+                    ui.close_menu();
+                }
+                if ui.button(tr("MIDI...", "MIDI…")).clicked() {
+                    state.emit(Command::OpenDialog(crate::state::DialogAction::ExportMidi));
+                    ui.close_menu();
+                }
+                if ui.button(tr("PNG sheet...", "PNG 谱面…")).clicked() {
+                    state.emit(Command::ShowWindow(WindowKind::PngExport));
+                    ui.close_menu();
+                }
+                if ui.button(tr("Schematic...", "Minecraft 原理图…")).clicked() {
+                    state.emit(Command::OpenSchematicExport);
+                    ui.close_menu();
+                }
+                if ui.button(tr("Data pack...", "Minecraft 数据包…")).clicked() {
+                    state.emit(Command::ShowWindow(WindowKind::DatapackExport));
+                    ui.close_menu();
+                }
+                if ui.button(tr("Pattern...", "片段 (.nbp)…")).clicked() {
+                    state.emit(Command::OpenDialog(
+                        crate::state::DialogAction::ExportPattern,
+                    ));
+                    ui.close_menu();
+                }
             });
-            if ui.button(tr("Restore unsaved files...", "自动保存 / 备份…")).clicked() { state.emit(Command::ShowWindow(WindowKind::Autosaves)); ui.close_menu(); }
+            if ui
+                .button(tr("Restore unsaved files...", "自动保存 / 备份…"))
+                .clicked()
+            {
+                state.emit(Command::ShowWindow(WindowKind::Autosaves));
+                ui.close_menu();
+            }
             ui.separator();
-            if ui.button(tr("Clear all notes", "清空所有音符")).clicked() { state.emit(Command::ClearSong); ui.close_menu(); }
+            if ui.button(tr("Clear all notes", "清空所有音符")).clicked() {
+                state.emit(Command::ClearSong);
+                ui.close_menu();
+            }
         });
 
         ui.menu_button(tr("Edit", "编辑"), |ui| {
-            let undo = state.doc.history.undo_label().unwrap_or(tr("Undo", "撤销")).to_string();
-            let redo = state.doc.history.redo_label().unwrap_or(tr("Redo", "重做")).to_string();
+            let undo = state
+                .doc
+                .history
+                .undo_label()
+                .unwrap_or(tr("Undo", "撤销"))
+                .to_string();
+            let redo = state
+                .doc
+                .history
+                .redo_label()
+                .unwrap_or(tr("Redo", "重做"))
+                .to_string();
             // 动作名出自 nbs-core 的历史记录（那边还没接入多语言），固定前缀走 tr。
-            if ui.button(format!("{}: {undo}  Ctrl+Z", tr("Undo", "撤销"))).clicked() { state.emit(Command::Undo); ui.close_menu(); }
-            if ui.button(format!("{}: {redo}  Ctrl+Y", tr("Redo", "重做"))).clicked() { state.emit(Command::Redo); ui.close_menu(); }
+            if ui
+                .button(format!("{}: {undo}  Ctrl+Z", tr("Undo", "撤销")))
+                .clicked()
+            {
+                state.emit(Command::Undo);
+                ui.close_menu();
+            }
+            if ui
+                .button(format!("{}: {redo}  Ctrl+Y", tr("Redo", "重做")))
+                .clicked()
+            {
+                state.emit(Command::Redo);
+                ui.close_menu();
+            }
             ui.separator();
-            if ui.button(tr("Copy  Ctrl+C", "复制  Ctrl+C")).clicked() { state.emit(Command::Copy); ui.close_menu(); }
-            if ui.button(tr("Cut  Ctrl+X", "剪切  Ctrl+X")).clicked() { state.emit(Command::Cut); ui.close_menu(); }
-            if ui.button(tr("Paste  Ctrl+V", "粘贴  Ctrl+V")).clicked() { state.emit(Command::Paste); ui.close_menu(); }
-            if ui.button(tr("Delete  Delete", "删除  Delete")).clicked() { state.emit(Command::Delete); ui.close_menu(); }
+            if ui.button(tr("Copy  Ctrl+C", "复制  Ctrl+C")).clicked() {
+                state.emit(Command::Copy);
+                ui.close_menu();
+            }
+            if ui.button(tr("Cut  Ctrl+X", "剪切  Ctrl+X")).clicked() {
+                state.emit(Command::Cut);
+                ui.close_menu();
+            }
+            if ui.button(tr("Paste  Ctrl+V", "粘贴  Ctrl+V")).clicked() {
+                state.emit(Command::Paste);
+                ui.close_menu();
+            }
+            if ui.button(tr("Delete  Delete", "删除  Delete")).clicked() {
+                state.emit(Command::Delete);
+                ui.close_menu();
+            }
             ui.separator();
-            if ui.button(tr("Select all  Ctrl+A", "全选  Ctrl+A")).clicked() { state.emit(Command::SelectAll); ui.close_menu(); }
-            if ui.button(tr("Deselect all", "取消选择")).clicked() { state.emit(Command::Deselect); ui.close_menu(); }
-            if ui.button(tr("Invert selection  Ctrl+I", "反选  Ctrl+I")).clicked() { state.emit(Command::InvertSelection); ui.close_menu(); }
+            if ui
+                .button(tr("Select all  Ctrl+A", "全选  Ctrl+A"))
+                .clicked()
+            {
+                state.emit(Command::SelectAll);
+                ui.close_menu();
+            }
+            if ui.button(tr("Deselect all", "取消选择")).clicked() {
+                state.emit(Command::Deselect);
+                ui.close_menu();
+            }
+            if ui
+                .button(tr("Invert selection  Ctrl+I", "反选  Ctrl+I"))
+                .clicked()
+            {
+                state.emit(Command::InvertSelection);
+                ui.close_menu();
+            }
             ui.separator();
             // 原版右键菜单里模式操作（升/降调）和「更改音色」「Macros...」都带
             // `inactive(current_song.selected = 0)`：没有选区就置灰；批量设置 /
@@ -151,9 +285,15 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                 ui.close_menu();
             }
             ui.menu_button(tr("Set properties...", "批量设置"), |ui| {
-                if ui.button(tr("Velocity...", "力度…")).clicked() { state.emit(Command::ShowWindow(WindowKind::SetVelocity)); }
-                if ui.button(tr("Panning...", "声像…")).clicked() { state.emit(Command::ShowWindow(WindowKind::SetPanning)); }
-                if ui.button(tr("Pitch...", "微调…")).clicked() { state.emit(Command::ShowWindow(WindowKind::SetPitch)); }
+                if ui.button(tr("Velocity...", "力度…")).clicked() {
+                    state.emit(Command::ShowWindow(WindowKind::SetVelocity));
+                }
+                if ui.button(tr("Panning...", "声像…")).clicked() {
+                    state.emit(Command::ShowWindow(WindowKind::SetPanning));
+                }
+                if ui.button(tr("Pitch...", "微调…")).clicked() {
+                    state.emit(Command::ShowWindow(WindowKind::SetPitch));
+                }
             });
             ui.separator();
             instrument_menus(state, ui);
@@ -161,7 +301,10 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
             // 原版没有给 Macros... 绑键盘快捷键（get_hotkey 里没有这一项），
             // 菜单文案不标 Ctrl+M。
             if ui
-                .add_enabled(has_sel, egui::Button::new(tr("Macros... (15 macros)", "宏编辑器（15 种宏）…")))
+                .add_enabled(
+                    has_sel,
+                    egui::Button::new(tr("Macros... (15 macros)", "宏编辑器（15 种宏）…")),
+                )
                 .clicked()
             {
                 state.emit(Command::ShowWindow(WindowKind::MacroEditor));
@@ -176,7 +319,9 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                     nbs_core::Macro::Reset,
                     nbs_core::Macro::ReplaceKey,
                 ] {
-                    if ui.button(m.name()).clicked() { state.emit(Command::RunMacro(m)); }
+                    if ui.button(m.label()).clicked() {
+                        state.emit(Command::RunMacro(m));
+                    }
                 }
             });
         });
@@ -186,27 +331,68 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
         ui.menu_button(tr("Settings", "设置"), |ui| {
             let names = state.instrument_list();
             ui.menu_button(tr("Instrument", "音色"), |ui| {
-                egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
-                    for (idx, name) in &names {
-                        if ui.selectable_label(state.current.instrument == *idx, name).clicked() {
-                            state.emit(Command::SetInstrument(*idx));
+                egui::ScrollArea::vertical()
+                    .max_height(340.0)
+                    .show(ui, |ui| {
+                        for (idx, name) in &names {
+                            if ui
+                                .selectable_label(state.current.instrument == *idx, name)
+                                .clicked()
+                            {
+                                state.emit(Command::SetInstrument(*idx));
+                            }
                         }
-                    }
-                });
+                    });
             });
             ui.separator();
-            if ui.button(tr("Instrument settings...", "音色设置…")).clicked() { state.emit(Command::ShowWindow(WindowKind::Instruments)); ui.close_menu(); }
-            if ui.button(tr("Song info...", "歌曲信息…")).clicked() { state.emit(Command::ShowWindow(WindowKind::SongInfo)); ui.close_menu(); }
-            if ui.button(tr("Song properties...", "歌曲属性…")).clicked() { state.emit(Command::ShowWindow(WindowKind::Properties)); ui.close_menu(); }
-            if ui.button(tr("Song stats...", "歌曲统计…")).clicked() { state.emit(Command::ShowWindow(WindowKind::Statistics)); ui.close_menu(); }
+            if ui
+                .button(tr("Instrument settings...", "音色设置…"))
+                .clicked()
+            {
+                state.emit(Command::ShowWindow(WindowKind::Instruments));
+                ui.close_menu();
+            }
+            if ui.button(tr("Song info...", "歌曲信息…")).clicked() {
+                state.emit(Command::ShowWindow(WindowKind::SongInfo));
+                ui.close_menu();
+            }
+            if ui.button(tr("Song properties...", "歌曲属性…")).clicked() {
+                state.emit(Command::ShowWindow(WindowKind::Properties));
+                ui.close_menu();
+            }
+            if ui.button(tr("Song stats...", "歌曲统计…")).clicked() {
+                state.emit(Command::ShowWindow(WindowKind::Statistics));
+                ui.close_menu();
+            }
             ui.separator();
-            if ui.button(tr("Audio & sample settings...", "音频与采样设置…")).clicked() { state.emit(Command::ShowWindow(WindowKind::AudioSettings)); ui.close_menu(); }
-            if ui.button(tr("Preferences...  Ctrl+P", "首选项…  Ctrl+P")).clicked() { state.emit(Command::ShowWindow(WindowKind::Preferences)); ui.close_menu(); }
+            if ui
+                .button(tr("Audio & sample settings...", "音频与采样设置…"))
+                .clicked()
+            {
+                state.emit(Command::ShowWindow(WindowKind::AudioSettings));
+                ui.close_menu();
+            }
+            if ui
+                .button(tr("Preferences...  Ctrl+P", "首选项…  Ctrl+P"))
+                .clicked()
+            {
+                state.emit(Command::ShowWindow(WindowKind::Preferences));
+                ui.close_menu();
+            }
         });
 
         ui.menu_button(tr("Help", "帮助"), |ui| {
-            if ui.button(tr("Shortcut list  F1", "快捷键一览  F1")).clicked() { state.emit(Command::ShowWindow(WindowKind::Shortcuts)); ui.close_menu(); }
-            if ui.button(tr("About nbs-rust", "关于 nbs-rust")).clicked() { state.emit(Command::ShowWindow(WindowKind::About)); ui.close_menu(); }
+            if ui
+                .button(tr("Shortcut list  F1", "快捷键一览  F1"))
+                .clicked()
+            {
+                state.emit(Command::ShowWindow(WindowKind::Shortcuts));
+                ui.close_menu();
+            }
+            if ui.button(tr("About nbs-rust", "关于 nbs-rust")).clicked() {
+                state.emit(Command::ShowWindow(WindowKind::About));
+                ui.close_menu();
+            }
         });
     });
 }
@@ -216,34 +402,49 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
 pub fn instrument_menus(state: &mut EditorState, ui: &mut Ui) {
     let names = state.instrument_list();
     ui.menu_button(tr("Select all of instrument", "按乐器选择"), |ui| {
-        egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
-            for (idx, name) in &names {
-                if ui.button(format!("{} {name}", tr("Only", "仅"))).clicked() {
-                    state.emit(Command::SelectByInstrument { instrument: *idx, invert: false });
+        egui::ScrollArea::vertical()
+            .max_height(340.0)
+            .show(ui, |ui| {
+                for (idx, name) in &names {
+                    if ui.button(format!("{} {name}", tr("Only", "仅"))).clicked() {
+                        state.emit(Command::SelectByInstrument {
+                            instrument: *idx,
+                            invert: false,
+                        });
+                    }
                 }
-            }
-        });
+            });
     });
     ui.menu_button(tr("Select all but instrument", "选择除乐器…"), |ui| {
-        egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
-            for (idx, name) in &names {
-                if ui.button(format!("{} {name}", tr("All but", "除…外"))).clicked() {
-                    state.emit(Command::SelectByInstrument { instrument: *idx, invert: true });
+        egui::ScrollArea::vertical()
+            .max_height(340.0)
+            .show(ui, |ui| {
+                for (idx, name) in &names {
+                    if ui
+                        .button(format!("{} {name}", tr("All but", "除…外")))
+                        .clicked()
+                    {
+                        state.emit(Command::SelectByInstrument {
+                            instrument: *idx,
+                            invert: true,
+                        });
+                    }
                 }
-            }
-        });
+            });
     });
     // 原版「更改音色......」在无选区时置灰（`inactive(current_song.selected = 0)`）。
     let has_sel = !state.doc.selection.is_empty();
     ui.add_enabled_ui(has_sel, |ui| {
         ui.menu_button(tr("Change instrument to...", "更改乐器到…"), |ui| {
-            egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
-                for (idx, name) in &names {
-                    if ui.button(name).clicked() {
-                        state.emit(Command::SetAllInstrument(*idx));
+            egui::ScrollArea::vertical()
+                .max_height(340.0)
+                .show(ui, |ui| {
+                    for (idx, name) in &names {
+                        if ui.button(name).clicked() {
+                            state.emit(Command::SetAllInstrument(*idx));
+                        }
                     }
-                }
-            });
+                });
         });
     });
 }
@@ -260,14 +461,21 @@ pub fn show_toolbar(state: &mut EditorState, ui: &mut Ui) {
     // 横向拉伸的条做背景，Fluent 主题不画（露出面板底色）。
     // 条本身只有 30 高，面板下方 4px 是原版留给窗口底色的空带，不能被拉伸填满。
     if th.kind != ThemeKind::Fluent {
-        let strip =
-            Rect::from_min_size(area.min, Vec2::new(area.width(), crate::viewport::TOOLBAR_STRIP_HEIGHT));
+        let strip = Rect::from_min_size(
+            area.min,
+            Vec2::new(area.width(), crate::viewport::TOOLBAR_STRIP_HEIGHT),
+        );
         bank.icon_strip_bg(ui.painter(), strip);
     }
     let rw = area.width();
     let y = area.min.y + 3.0;
     let compat = state.compatibility();
-    let mut bar = Bar { bank, th, x: area.min.x + 6.0, y };
+    let mut bar = Bar {
+        bank,
+        th,
+        x: area.min.x + 6.0,
+        y,
+    };
 
     sequence(state, ui, &mut bar, rw);
     if let Some(v) = master_bar(state, ui, &mut bar, area) {
@@ -318,7 +526,14 @@ fn sequence(state: &mut EditorState, ui: &mut Ui, bar: &mut Bar, rw: f32) {
     bar.separator(ui);
 
     let play_icon = if playing { frame::PAUSE } else { frame::PLAY };
-    if draw!(play_icon, tr("Play / Pause song", "播放 / 暂停"), false, false).clicked {
+    if draw!(
+        play_icon,
+        tr("Play / Pause song", "播放 / 暂停"),
+        false,
+        false
+    )
+    .clicked
+    {
         state.emit(Command::PlayPause);
     }
     if draw!(frame::STOP, tr("Stop song", "停止歌曲"), false, false).clicked {
@@ -326,14 +541,24 @@ fn sequence(state: &mut EditorState, ui: &mut Ui, bar: &mut Bar, rw: f32) {
     }
     // 原版的快退 / 快进返回「按住」，所以是连续滚动而不是单击。
     let back = draw!(frame::BACK, tr("Rewind song", "快退"), false, false);
-    let fwd = draw!(frame::FORWARD, tr("Fast-forward song", "快进"), false, false);
+    let fwd = draw!(
+        frame::FORWARD,
+        tr("Fast-forward song", "快进"),
+        false,
+        false
+    );
     // 原版 790-791 行：按住 ← / → 就是 `forward = ∓1`，和这两个按钮共用同一个变量。
     // 同样受「窗口开着 / 光标在输入框」闸门约束：那时 ←/→ 归窗口翻页签使用。
     let busy = state.window.is_some() || ui.memory(|m| m.focused().is_some());
     let (kbd_back, kbd_fwd) = if busy {
         (false, false)
     } else {
-        ui.input(|i| (i.key_down(egui::Key::ArrowLeft), i.key_down(egui::Key::ArrowRight)))
+        ui.input(|i| {
+            (
+                i.key_down(egui::Key::ArrowLeft),
+                i.key_down(egui::Key::ArrowRight),
+            )
+        })
     };
     state.scrub = if back.held || kbd_back {
         -1
@@ -342,12 +567,24 @@ fn sequence(state: &mut EditorState, ui: &mut Ui, bar: &mut Bar, rw: f32) {
     } else {
         0
     };
-    if draw!(frame::RECORD, tr("Record key presses", "录制按键"), false, (playing || state.record_armed) && state.record)
-        .clicked
+    if draw!(
+        frame::RECORD,
+        tr("Record key presses", "录制按键"),
+        false,
+        (playing || state.record_armed) && state.record
+    )
+    .clicked
     {
         state.emit(Command::ToggleRecord);
     }
-    if draw!(frame::LOOP_INACTIVE + loop_on as usize, tr("Toggle looping", "开关循环"), false, loop_on).clicked {
+    if draw!(
+        frame::LOOP_INACTIVE + loop_on as usize,
+        tr("Toggle looping", "开关循环"),
+        false,
+        loop_on
+    )
+    .clicked
+    {
         state.emit(Command::ToggleLoop);
     }
     // 原版：节拍器响的那一拍用 METRONOME_1，其余用 METRONOME_2。
@@ -358,16 +595,40 @@ fn sequence(state: &mut EditorState, ui: &mut Ui, bar: &mut Bar, rw: f32) {
     } else {
         frame::METRONOME_2
     };
-    if draw!(metricon, tr("Toggle metronome", "开关节拍器"), false, false, end).clicked {
+    if draw!(
+        metricon,
+        tr("Toggle metronome", "开关节拍器"),
+        false,
+        false,
+        end
+    )
+    .clicked
+    {
         state.emit(Command::ToggleMetronome);
     }
     bar.separator(ui);
 
     for (i, (icon, tip, mode)) in [
-        (frame::EDITMODE_KEY, tr("Edit note key", "音调模式"), EditMode::Key),
-        (frame::EDITMODE_VEL, tr("Edit note velocity", "音量模式"), EditMode::Velocity),
-        (frame::EDITMODE_PAN, tr("Edit note panning", "声道模式"), EditMode::Panning),
-        (frame::EDITMODE_PIT, tr("Edit note pitch", "音高模式"), EditMode::Pitch),
+        (
+            frame::EDITMODE_KEY,
+            tr("Edit note key", "音调模式"),
+            EditMode::Key,
+        ),
+        (
+            frame::EDITMODE_VEL,
+            tr("Edit note velocity", "音量模式"),
+            EditMode::Velocity,
+        ),
+        (
+            frame::EDITMODE_PAN,
+            tr("Edit note panning", "声道模式"),
+            EditMode::Panning,
+        ),
+        (
+            frame::EDITMODE_PIT,
+            tr("Edit note pitch", "音高模式"),
+            EditMode::Pitch,
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -386,47 +647,130 @@ fn sequence(state: &mut EditorState, ui: &mut Ui, bar: &mut Bar, rw: f32) {
     instrument_box(state, ui, bar, rw);
     bar.separator_gap(ui);
 
-    if draw!(frame::UNDO, tr("Undo the last change", "撤销"), !can_undo, false).clicked {
+    if draw!(
+        frame::UNDO,
+        tr("Undo the last change", "撤销"),
+        !can_undo,
+        false
+    )
+    .clicked
+    {
         state.emit(Command::Undo);
     }
-    if draw!(frame::REDO, tr("Redo the last undo", "重做"), !can_redo, false).clicked {
+    if draw!(
+        frame::REDO,
+        tr("Redo the last undo", "重做"),
+        !can_redo,
+        false
+    )
+    .clicked
+    {
         state.emit(Command::Redo);
     }
-    if draw!(frame::COPY, tr("Copy the selected note blocks", "复制"), no_selection, false).clicked {
+    if draw!(
+        frame::COPY,
+        tr("Copy the selected note blocks", "复制"),
+        no_selection,
+        false
+    )
+    .clicked
+    {
         state.emit(Command::Copy);
     }
-    if draw!(frame::CUT, tr("Cut the selected note blocks", "剪切"), no_selection, false).clicked {
+    if draw!(
+        frame::CUT,
+        tr("Cut the selected note blocks", "剪切"),
+        no_selection,
+        false
+    )
+    .clicked
+    {
         state.emit(Command::Cut);
     }
-    if draw!(frame::PASTE, tr("Paste the copied note blocks", "粘贴"), no_clip, false).clicked {
+    if draw!(
+        frame::PASTE,
+        tr("Paste the copied note blocks", "粘贴"),
+        no_clip,
+        false
+    )
+    .clicked
+    {
         state.emit(Command::Paste);
     }
-    if draw!(frame::DELETE, tr("Delete the selected note blocks", "删除"), no_selection, false).clicked {
+    if draw!(
+        frame::DELETE,
+        tr("Delete the selected note blocks", "删除"),
+        no_selection,
+        false
+    )
+    .clicked
+    {
         state.emit(Command::Delete);
     }
     bar.separator_gap(ui);
 
-    if draw!(frame::INFORMATION, tr("View song info", "歌曲信息"), false, false).clicked {
+    if draw!(
+        frame::INFORMATION,
+        tr("View song info", "歌曲信息"),
+        false,
+        false
+    )
+    .clicked
+    {
         state.emit(Command::ShowWindow(WindowKind::SongInfo));
     }
-    if draw!(frame::PROPERTIES, tr("Edit song properties", "歌曲属性"), false, false).clicked {
+    if draw!(
+        frame::PROPERTIES,
+        tr("Edit song properties", "歌曲属性"),
+        false,
+        false
+    )
+    .clicked
+    {
         state.emit(Command::ShowWindow(WindowKind::Properties));
     }
-    if draw!(frame::INSTRUMENTS, tr("Edit instruments", "音色设置"), false, false).clicked {
+    if draw!(
+        frame::INSTRUMENTS,
+        tr("Edit instruments", "音色设置"),
+        false,
+        false
+    )
+    .clicked
+    {
         state.emit(Command::ShowWindow(WindowKind::Instruments));
     }
     bar.separator_gap(ui);
 
-    if draw!(frame::HELP, tr("Watch tutorial videos", "教程视频"), false, false).clicked {
+    if draw!(
+        frame::HELP,
+        tr("Watch tutorial videos", "教程视频"),
+        false,
+        false
+    )
+    .clicked
+    {
         open_link(ui, "https://www.bilibili.com/video/BV1Mx411a76p");
     }
-    if draw!(frame::INTERNET, tr("Visit the Note Block Studio website", "访问 Note Block Studio 官方网站"), false, false).clicked {
+    if draw!(
+        frame::INTERNET,
+        tr(
+            "Visit the Note Block Studio website",
+            "访问 Note Block Studio 官方网站"
+        ),
+        false,
+        false
+    )
+    .clicked
+    {
         open_link(ui, "https://opennbs.org/");
     }
 }
 
 fn open_link(ui: &Ui, url: &str) {
-    ui.ctx().open_url(OpenUrl { url: url.into(), new_tab: true });
+    ui.ctx().open_url(OpenUrl {
+        url: url.into(),
+        new_tab: true,
+    });
 }
 
 /// 原版 `draw_icon_insbox` 的两种形态：收起时是图标条里的一行，
@@ -446,14 +790,24 @@ fn instrument_box(state: &mut EditorState, ui: &mut Ui, bar: &mut Bar, rw: f32) 
         let at = pos2(bar.x, bar.y);
         draw_insbox_open(state, ui, &bank, &th, &ins, at, ins_icons, ins_rows);
         bar.x += ins_icons as f32 * 25.0;
-        if bank.action_icon(ui, pos2(bar.x, bar.y), frame::INSBOX_COLLAPSE, tr("Less instruments", "收回音色"), false, &th) {
+        if bank.action_icon(
+            ui,
+            pos2(bar.x, bar.y),
+            frame::INSBOX_COLLAPSE,
+            tr("Less instruments", "收回音色"),
+            false,
+            &th,
+        ) {
             state.insbox_open = false;
         }
         bar.x += 25.0;
         return;
     }
     // 保证当前音色落在这一行里（原版 `insbox_start`）。
-    let cur = ins.iter().position(|(i, _)| *i == state.current.instrument).unwrap_or(0);
+    let cur = ins
+        .iter()
+        .position(|(i, _)| *i == state.current.instrument)
+        .unwrap_or(0);
     if cur < state.insbox_start {
         state.insbox_start = state.insbox_start.saturating_sub(ins_icons) / ins_icons * ins_icons;
     } else if cur > state.insbox_start + ins_icons - 1 {
@@ -467,13 +821,29 @@ fn instrument_box(state: &mut EditorState, ui: &mut Ui, bar: &mut Bar, rw: f32) 
         }
         let tip = format!("{}{}", tr("Change instrument to ", "更改音色为"), ins[i].1);
         let pressed = state.current.instrument == ins[i].0;
-        if bank.instrument_icon(ui, pos2(bar.x, bar.y), i, first_custom, &ins[i].1, &tip, pressed, &th) {
+        if bank.instrument_icon(
+            ui,
+            pos2(bar.x, bar.y),
+            i,
+            first_custom,
+            &ins[i].1,
+            &tip,
+            pressed,
+            &th,
+        ) {
             state.emit(Command::SetInstrument(ins[i].0));
         }
         bar.x += 25.0;
     }
     if ins_icons < count {
-        if bank.action_icon(ui, pos2(bar.x, bar.y), frame::INSBOX_EXPAND, tr("More instruments...", "展开音色......"), false, &th) {
+        if bank.action_icon(
+            ui,
+            pos2(bar.x, bar.y),
+            frame::INSBOX_EXPAND,
+            tr("More instruments...", "展开音色......"),
+            false,
+            &th,
+        ) {
             state.insbox_open = true;
         }
         // 原版：只有画了展开按钮才走这 25px。
@@ -502,7 +872,10 @@ fn draw_insbox_open(
     let clicked_away = egui::Area::new(Id::new("insbox_blocker"))
         .order(egui::Order::Foreground)
         .fixed_pos(Pos2::ZERO)
-        .show(ctx, |ui| ui.allocate_rect(ctx.screen_rect(), Sense::click()).clicked())
+        .show(ctx, |ui| {
+            ui.allocate_rect(ctx.screen_rect(), Sense::click())
+                .clicked()
+        })
         .inner;
     let first_custom = nbs_core::model::FIRST_CUSTOM_INDEX;
     let mut chosen: Option<usize> = None;
@@ -526,7 +899,8 @@ fn draw_insbox_open(
                     let pos = rect.min + Vec2::new(2.0 + b as f32 * 25.0, 2.0 + a as f32 * 25.0);
                     let tip = format!("{}{}", tr("Change instrument to ", "更改音色为"), ins[i].1);
                     let pressed = state.current.instrument == ins[i].0;
-                    if bank.instrument_icon(ui, pos, i, first_custom, &ins[i].1, &tip, pressed, th) {
+                    if bank.instrument_icon(ui, pos, i, first_custom, &ins[i].1, &tip, pressed, th)
+                    {
                         chosen = Some(i);
                     }
                 }
@@ -557,9 +931,21 @@ fn master_bar(state: &EditorState, ui: &mut Ui, bar: &mut Bar, area: Rect) -> Op
         let fluent = th.kind == ThemeKind::Fluent;
         let end = x + value * len;
         let h = if fluent { 3.0 } else { 2.0 };
-        p.rect_filled(Rect::from_min_size(pos2(x, y), Vec2::new(len, h)), 0.0, if fluent { Color32::from_gray(154) } else { th.text });
+        p.rect_filled(
+            Rect::from_min_size(pos2(x, y), Vec2::new(len, h)),
+            0.0,
+            if fluent {
+                Color32::from_gray(154)
+            } else {
+                th.text
+            },
+        );
         if fluent {
-            p.rect_filled(Rect::from_min_size(pos2(x, y), Vec2::new((end - x).max(0.0), h)), 0.0, th.accent);
+            p.rect_filled(
+                Rect::from_min_size(pos2(x, y), Vec2::new((end - x).max(0.0), h)),
+                0.0,
+                th.accent,
+            );
         }
         let knob = pos2(end, y + 1.0);
         if fluent {
@@ -567,11 +953,16 @@ fn master_bar(state: &EditorState, ui: &mut Ui, bar: &mut Bar, area: Rect) -> Op
             p.circle_filled(knob, 5.0, th.accent);
         } else {
             // 经典主题的手柄就是 `spr_icons` 的第 9 帧。
-            bar.bank.icon_glyph(p, knob - Vec2::new(12.0, 11.0), frame::DRAG_KNOB);
+            bar.bank
+                .icon_glyph(p, knob - Vec2::new(12.0, 11.0), frame::DRAG_KNOB);
         }
         let track = Rect::from_min_size(pos2(x - 3.0, y - 2.0), Vec2::new(len + 6.0, 6.0));
         let hot = Rect::from_center_size(knob, Vec2::splat(13.0));
-        let resp = ui.interact(track.union(hot), Id::new("master_volume"), Sense::click_and_drag());
+        let resp = ui.interact(
+            track.union(hot),
+            Id::new("master_volume"),
+            Sense::click_and_drag(),
+        );
         if resp.dragged() || resp.clicked() {
             if let Some(pt) = resp.interact_pointer_pos() {
                 out = Some(((pt.x - x) / len).clamp(0.0, 1.0));
@@ -583,7 +974,11 @@ fn master_bar(state: &EditorState, ui: &mut Ui, bar: &mut Bar, area: Rect) -> Op
                 out = Some((value + wheel.signum() * 0.02).clamp(0.0, 1.0));
             }
         }
-        resp.on_hover_text(format!("{}{}", tr("Master Volume: ", "主音量："), (value * 100.0).floor()));
+        resp.on_hover_text(format!(
+            "{}{}",
+            tr("Master Volume: ", "主音量："),
+            (value * 100.0).floor()
+        ));
     }
     out
 }
@@ -596,12 +991,33 @@ fn compat_cluster(state: &mut EditorState, ui: &mut Ui, bar: &Bar, compat: u8, a
     // 原版三档：c_green / c_orange / c_red，其中绿色在深色底（主题 2、Fluent fdark）换成 c_lime。
     let lime = bar.th.kind == ThemeKind::Dark || (bar.th.kind == ThemeKind::Fluent && bar.th.fdark);
     let (left, right, text, color) = match compat {
-        1 => (0, 0, tr("Fully compatible", "完全兼容"), if lime { Color32::from_rgb(0, 255, 0) } else { Color32::from_rgb(0, 176, 0) }),
-        2 => (1, 0, tr("Data pack only", "仅限数据包"), Color32::from_rgb(255, 140, 0)),
-        _ => (1, 2, tr("Resource pack only", "仅限资源包"), Color32::from_rgb(255, 0, 0)),
+        1 => (
+            0,
+            0,
+            tr("Fully compatible", "完全兼容"),
+            if lime {
+                Color32::from_rgb(0, 255, 0)
+            } else {
+                Color32::from_rgb(0, 176, 0)
+            },
+        ),
+        2 => (
+            1,
+            0,
+            tr("Data pack only", "仅限数据包"),
+            Color32::from_rgb(255, 140, 0),
+        ),
+        _ => (
+            1,
+            2,
+            tr("Resource pack only", "仅限资源包"),
+            Color32::from_rgb(255, 0, 0),
+        ),
     };
-    bar.bank.compat_icon(p, pos2(rw - 59.0, area.min.y + 5.0), left, &bar.th);
-    bar.bank.compat_icon(p, pos2(rw - 30.0, area.min.y + 5.0), right, &bar.th);
+    bar.bank
+        .compat_icon(p, pos2(rw - 59.0, area.min.y + 5.0), left, &bar.th);
+    bar.bank
+        .compat_icon(p, pos2(rw - 30.0, area.min.y + 5.0), right, &bar.th);
     p.text(
         pos2(rw - 65.0, area.min.y + 15.0),
         Align2::RIGHT_CENTER,
@@ -627,10 +1043,23 @@ fn compat_cluster(state: &mut EditorState, ui: &mut Ui, bar: &Bar, compat: u8, a
     };
     // 原版 `if (a && window = 0)`：已经有窗口开着时这颗不响应，光标也不变手型。
     let clickable = state.window.is_none();
-    let resp = ui.interact(hot, Id::new("compat_badge"), if clickable { Sense::click() } else { Sense::hover() })
+    let resp = ui
+        .interact(
+            hot,
+            Id::new("compat_badge"),
+            if clickable {
+                Sense::click()
+            } else {
+                Sense::hover()
+            },
+        )
         .on_hover_text(tip);
     // 原版命中时 `curs = cr_handpoint`。
-    let resp = if clickable { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
+    let resp = if clickable {
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        resp
+    };
     if clickable && resp.clicked() {
         state.emit(Command::ShowCompat);
     }
@@ -639,19 +1068,46 @@ fn compat_cluster(state: &mut EditorState, ui: &mut Ui, bar: &Bar, compat: u8, a
 /// 精灵图缺失时的兜底：顺序和功能完全一样，只是画成文字按钮。
 fn show_toolbar_text(state: &mut EditorState, ui: &mut Ui) {
     egui::menu::bar(ui, |ui| {
-        if ui.button(tr("New song", "新文件")).clicked() { state.emit(Command::New); }
-        if ui.button(tr("Open song", "打开歌曲")).clicked() { state.emit(Command::Open); }
-        if ui.button(tr("Save song", "保存歌曲")).clicked() { state.emit(Command::Save); }
+        if ui.button(tr("New song", "新文件")).clicked() {
+            state.emit(Command::New);
+        }
+        if ui.button(tr("Open song", "打开歌曲")).clicked() {
+            state.emit(Command::Open);
+        }
+        if ui.button(tr("Save song", "保存歌曲")).clicked() {
+            state.emit(Command::Save);
+        }
         ui.separator();
         let playing = state.is_playing();
-        if ui.button(if playing { tr("Pause", "暂停") } else { tr("Play", "播放") }).clicked() { state.emit(Command::PlayPause); }
-        if ui.button(tr("Stop", "停止")).clicked() { state.emit(Command::Stop); }
+        if ui
+            .button(if playing {
+                tr("Pause", "暂停")
+            } else {
+                tr("Play", "播放")
+            })
+            .clicked()
+        {
+            state.emit(Command::PlayPause);
+        }
+        if ui.button(tr("Stop", "停止")).clicked() {
+            state.emit(Command::Stop);
+        }
         let loop_on = state.doc.song.meta.loop_enabled;
-        if ui.selectable_label(loop_on, tr("Loop", "循环")).clicked() { state.emit(Command::ToggleLoop); }
-        if ui.selectable_label(state.prefs.metronome, tr("Metronome", "节拍器")).clicked() { state.emit(Command::ToggleMetronome); }
+        if ui.selectable_label(loop_on, tr("Loop", "循环")).clicked() {
+            state.emit(Command::ToggleLoop);
+        }
+        if ui
+            .selectable_label(state.prefs.metronome, tr("Metronome", "节拍器"))
+            .clicked()
+        {
+            state.emit(Command::ToggleMetronome);
+        }
         ui.separator();
         for mode in EditMode::ALL {
-            if ui.selectable_label(state.tool == mode, mode.name()).clicked() {
+            if ui
+                .selectable_label(state.tool == mode, mode.name())
+                .clicked()
+            {
                 state.emit(Command::SetEditMode(mode));
             }
         }
@@ -659,29 +1115,62 @@ fn show_toolbar_text(state: &mut EditorState, ui: &mut Ui) {
         let names = state.instrument_list();
         let current = state.current.instrument;
         egui::ComboBox::from_id_salt("ins_text")
-            .selected_text(names.iter().find(|(i, _)| *i == current).map(|(_, n)| n.clone()).unwrap_or_default())
+            .selected_text(
+                names
+                    .iter()
+                    .find(|(i, _)| *i == current)
+                    .map(|(_, n)| n.clone())
+                    .unwrap_or_default(),
+            )
             .show_ui(ui, |ui| {
                 for (idx, name) in &names {
-                    if ui.selectable_value(&mut state.current.instrument, *idx, name).changed() {
+                    if ui
+                        .selectable_value(&mut state.current.instrument, *idx, name)
+                        .changed()
+                    {
                         state.emit(Command::SetInstrument(*idx));
                     }
                 }
             });
         ui.separator();
-        if ui.button(tr("Undo", "撤销")).clicked() { state.emit(Command::Undo); }
-        if ui.button(tr("Redo", "重做")).clicked() { state.emit(Command::Redo); }
-        if ui.button(tr("Copy", "复制")).clicked() { state.emit(Command::Copy); }
-        if ui.button(tr("Cut", "剪切")).clicked() { state.emit(Command::Cut); }
-        if ui.button(tr("Paste", "粘贴")).clicked() { state.emit(Command::Paste); }
-        if ui.button(tr("Delete", "删除")).clicked() { state.emit(Command::Delete); }
+        if ui.button(tr("Undo", "撤销")).clicked() {
+            state.emit(Command::Undo);
+        }
+        if ui.button(tr("Redo", "重做")).clicked() {
+            state.emit(Command::Redo);
+        }
+        if ui.button(tr("Copy", "复制")).clicked() {
+            state.emit(Command::Copy);
+        }
+        if ui.button(tr("Cut", "剪切")).clicked() {
+            state.emit(Command::Cut);
+        }
+        if ui.button(tr("Paste", "粘贴")).clicked() {
+            state.emit(Command::Paste);
+        }
+        if ui.button(tr("Delete", "删除")).clicked() {
+            state.emit(Command::Delete);
+        }
         ui.separator();
-        if ui.button(tr("Song info", "歌曲信息")).clicked() { state.emit(Command::ShowWindow(WindowKind::SongInfo)); }
-        if ui.button(tr("Song properties", "歌曲属性")).clicked() { state.emit(Command::ShowWindow(WindowKind::Properties)); }
-        if ui.button(tr("Instruments", "音色设置")).clicked() { state.emit(Command::ShowWindow(WindowKind::Instruments)); }
+        if ui.button(tr("Song info", "歌曲信息")).clicked() {
+            state.emit(Command::ShowWindow(WindowKind::SongInfo));
+        }
+        if ui.button(tr("Song properties", "歌曲属性")).clicked() {
+            state.emit(Command::ShowWindow(WindowKind::Properties));
+        }
+        if ui.button(tr("Instruments", "音色设置")).clicked() {
+            state.emit(Command::ShowWindow(WindowKind::Instruments));
+        }
         ui.separator();
         let mut vol = state.prefs.master_volume.clamp(0.0, 1.0);
         let w = (ui.available_width() - 60.0).clamp(60.0, 100.0);
-        if ui.add_sized(Vec2::new(w, 18.0), egui::Slider::new(&mut vol, 0.0..=1.0).show_value(false)).changed() {
+        if ui
+            .add_sized(
+                Vec2::new(w, 18.0),
+                egui::Slider::new(&mut vol, 0.0..=1.0).show_value(false),
+            )
+            .changed()
+        {
             state.emit(Command::SetMasterVolume(vol));
         }
     });

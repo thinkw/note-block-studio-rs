@@ -32,7 +32,7 @@ pub mod viewport;
 pub mod windows;
 
 pub use app::show;
-pub use state::{EditorState, EditMode, Flag, UiFlags, WindowKind};
+pub use state::{EditMode, EditorState, Flag, UiFlags, WindowKind};
 pub use theme::{Theme, ThemeKind};
 pub use viewport::Viewport;
 
@@ -59,39 +59,20 @@ pub const LINK_QQ_GROUP: &str = "http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=9iT2J
 
 // ---- 多语言。原版只有 0 = English / 1 = 简体中文两种，全部文案都是
 // `if (language != 1) { 英文 } else { 中文 }`（condstr 的封装）。
-// 这里用一个进程级原子量做同一个开关：app::show 每帧把 prefs.language
-// 同步进来，文案侧统一写 tr(英文, 中文)。
+// 开关本体在 nbs-core（内核的历史标签、读档报错要用同一个），app::show 每帧
+// 把 prefs.language 同步进去，文案侧统一写 tr(英文, 中文)。
 
-use std::sync::atomic::{AtomicU8, Ordering};
-
-static LANGUAGE: AtomicU8 = AtomicU8::new(0);
-
-/// 等价原版读 `language` 全局变量：0 = English，1 = 简体中文。
-pub fn lang() -> u8 {
-    LANGUAGE.load(Ordering::Relaxed)
-}
-
-/// 等价原版 `condstr(language != 1, 英文, 中文)`：两种文案按当前语言二选一。
-/// 原版 GML 里文案逐条手写这个判定，这里统一成函数，调用点写法一一对应。
-pub fn tr<'a>(en: &'a str, zh: &'a str) -> &'a str {
-    if lang() == 1 {
-        zh
-    } else {
-        en
-    }
-}
+pub use nbs_core::{lang, tr};
 
 /// app::show 每帧从 prefs 同步；原版 language 只在设置菜单和读档时赋值，
 /// 效果等价（开关在下一帧生效，帧内不跳变）。
 pub fn set_language(l: u8) {
-    LANGUAGE.store(l, Ordering::Relaxed);
-    // IO 层的错误文案读同一开关（原版深层脚本同样读 `language` 全局）。
-    nbs_io::set_language(l);
+    nbs_core::set_language(l);
 }
 
-/// 跑帧的测试互相串行：show() 每帧开头把全局语言对齐到 prefs，两个测试并发
-/// 跑帧会互相翻转对方正在绘制的语言；直接读 lang() 的纯函数测试也拿这把锁。
-/// 可重入场景不存在——帧入口内部不再嵌套拿锁。
+/// 跑帧的测试互相串行。语言已经改成按线程钉（见 `nbs_core::lang`），不再需要这把锁
+/// 防串台；现在它只起「一次只跑一个 GUI 用例」的作用，红了好复现。
+/// 等 #7 死代码清理时再决定要不要撤掉。
 #[cfg(test)]
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -165,8 +146,9 @@ mod tests {
     /// 用原版自带的大曲子验证「一帧只绘制屏幕内音符」这一硬性要求。
     #[test]
     fn real_song_frame_is_culled() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../NoteBlockStudio/datafiles/Songs/Megalovania - Super Smash Bros. Ultimate.nbs");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../../NoteBlockStudio/datafiles/Songs/Megalovania - Super Smash Bros. Ultimate.nbs",
+        );
         if !path.exists() {
             return;
         }
@@ -203,7 +185,8 @@ mod tests {
     fn culling_range_stays_small_for_huge_song() {
         let mut s = EditorState::new();
         for i in 0..2000u32 {
-            s.doc.place_note(i * 50, 0, nbs_core::model::Note::new(0, 45));
+            s.doc
+                .place_note(i * 50, 0, nbs_core::model::Note::new(0, 45));
         }
         s.viewport.size = egui::vec2(1200.0, 600.0);
         let (t0, t1, _, _) = s.viewport.visible_range();
@@ -219,7 +202,11 @@ mod tests {
         let s = EditorState::new();
         // donate_banner_time 出厂 0（= 原版 −1），now > 0 → 横幅亮
         assert!(s.donate_banner, "出厂应亮捐赠横幅");
-        assert_eq!(s.window, Some(WindowKind::Greeting), "show_welcome 出厂为真");
+        assert_eq!(
+            s.window,
+            Some(WindowKind::Greeting),
+            "show_welcome 出厂为真"
+        );
         assert!(!s.update_success, "首次运行不算「更新成功」");
     }
 
@@ -302,7 +289,11 @@ mod gui_export_tests {
         state.prefs.export_format = "WAV".into();
         state.prefs.export_sample_rate = 22050;
         state.prefs.export_channels = 1;
-        dispatch(&mut state, crate::commands::Command::OpenDialog(state::DialogAction::ExportAudio), &ctx);
+        dispatch(
+            &mut state,
+            crate::commands::Command::OpenDialog(state::DialogAction::ExportAudio),
+            &ctx,
+        );
         let dialog = state.file_dialog.as_ref().expect("对话框已打开");
         assert_eq!(dialog.ext, "wav", "扩展名跟着格式走");
         assert_eq!(state.window, Some(WindowKind::FileSave));
@@ -311,16 +302,28 @@ mod gui_export_tests {
         let _ = std::fs::remove_file(&out);
         // dispatch 与随后的文案断言整段持帧锁，理由同 gui_imports。
         let _lock = crate::frame_lock();
-        dispatch(&mut state, crate::commands::Command::DialogConfirm(out.clone()), &ctx);
+        dispatch(
+            &mut state,
+            crate::commands::Command::DialogConfirm(out.clone()),
+            &ctx,
+        );
 
         let bytes = std::fs::read(&out).expect("GUI 导出必须写出真实文件");
         assert!(bytes.len() > 1000, "产物只有 {} 字节", bytes.len());
         assert_eq!(&bytes[..4], b"RIFF");
         let rate = u32::from_le_bytes(bytes[24..28].try_into().unwrap());
         let ch = u16::from_le_bytes(bytes[22..24].try_into().unwrap());
-        assert_eq!((rate, ch), (22050, 1), "采样率/声道必须按窗口里的选项写进头部");
+        assert_eq!(
+            (rate, ch),
+            (22050, 1),
+            "采样率/声道必须按窗口里的选项写进头部"
+        );
         assert!(
-            state.export_status.as_deref().unwrap_or_default().contains("WAV 已导出"),
+            state
+                .export_status
+                .as_deref()
+                .unwrap_or_default()
+                .contains("WAV 已导出"),
             "实际状态：{:?}（全局语言 {}）",
             state.export_status,
             crate::lang()
@@ -349,7 +352,11 @@ mod gui_export_tests {
             crate::commands::Command::OpenDialog(state::DialogAction::ExportAudio),
             &ctx,
         );
-        dispatch(&mut state, crate::commands::Command::DialogConfirm(out.clone()), &ctx);
+        dispatch(
+            &mut state,
+            crate::commands::Command::DialogConfirm(out.clone()),
+            &ctx,
+        );
         assert!(state.export_status.is_none(), "失败却写了成功状态");
         assert!(!out.exists(), "转码失败不应留下产物");
         if let Some(v) = saved {
@@ -397,7 +404,10 @@ mod gui_window_tests {
         let mut state = EditorState::new();
         // 开机流程会开欢迎窗（窗口开着快捷键全被门槛拦掉）；Ctrl+P 的靶子是裸编辑器。
         state.window = None;
-        let ctrl = egui::Modifiers { ctrl: true, ..Default::default() };
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
         let tap = |events: Vec<egui::Event>| egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::pos2(0.0, 0.0),
@@ -499,10 +509,7 @@ mod gui_window_tests {
     }
 
     fn scratch(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "nbs-gui-{tag}-{}",
-            std::process::id()
-        ));
+        let d = std::env::temp_dir().join(format!("nbs-gui-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).expect("临时目录可建");
         d
@@ -581,21 +588,24 @@ mod gui_window_tests {
         assert_eq!(dialog.name, "Rust Rewrite Demo");
 
         let pack = dir.join("pack_folder");
-        dispatch(&mut state, commands::Command::DialogConfirm(pack.clone()), &ctx);
-        assert_eq!(state.window, Some(WindowKind::DatapackExport), "原版导出后回到本窗口");
+        dispatch(
+            &mut state,
+            commands::Command::DialogConfirm(pack.clone()),
+            &ctx,
+        );
+        assert_eq!(
+            state.window,
+            Some(WindowKind::DatapackExport),
+            "原版导出后回到本窗口"
+        );
 
         let mut files = Vec::new();
         collect(&pack, &pack, &mut files);
-        let plan = nbs_io::datapack::generate(
-            &state.doc.song,
-            &state.datapack_options,
-            "pack_folder",
-        );
+        let plan =
+            nbs_io::datapack::generate(&state.doc.song, &state.datapack_options, "pack_folder");
         assert_eq!(files.len(), plan.files.len(), "落盘文件数与计划不一致");
-        let got: std::collections::BTreeMap<&str, String> = files
-            .iter()
-            .map(|(p, c)| (p.as_str(), c.clone()))
-            .collect();
+        let got: std::collections::BTreeMap<&str, String> =
+            files.iter().map(|(p, c)| (p.as_str(), c.clone())).collect();
         for f in &plan.files {
             assert_eq!(
                 got.get(f.path.as_str()).map(|s| s.as_str()),
@@ -605,14 +615,21 @@ mod gui_window_tests {
             );
         }
         // 窗口里填的三项要真的决定包内结构（消毒后：命名空间 my_pack，路径 songs/jazz）。
-        assert!(got.contains_key("data/my_pack/function/songs/jazz/rust_rewrite_demo/play.mcfunction"));
+        assert!(
+            got.contains_key("data/my_pack/function/songs/jazz/rust_rewrite_demo/play.mcfunction")
+        );
         assert!(got.contains_key("data/minecraft/tags/function/load.json"));
         // 目录分支的卸载命令不带 `file/` 前缀（原版按 dat_usezip 分两支），
         // 包名取对话框里选中的文件名。
-        assert!(got["data/my_pack/function/songs/jazz/rust_rewrite_demo/uninstall.mcfunction"]
-            .contains("datapack disable \"pack_folder\""));
+        assert!(
+            got["data/my_pack/function/songs/jazz/rust_rewrite_demo/uninstall.mcfunction"]
+                .contains("datapack disable \"pack_folder\"")
+        );
         let status = state.export_status.clone().unwrap_or_default();
-        assert!(status.contains("/function my_pack:songs/jazz/rust_rewrite_demo/play"), "{status}");
+        assert!(
+            status.contains("/function my_pack:songs/jazz/rust_rewrite_demo/play"),
+            "{status}"
+        );
 
         // ZIP 分支：文件名没写 .zip 时原版会补上，产物必须是真 ZIP。
         let zip_in = dir.join("pack_zip");
@@ -622,7 +639,11 @@ mod gui_window_tests {
             &ctx,
         );
         state.datapack_options.use_zip = true;
-        dispatch(&mut state, commands::Command::DialogConfirm(zip_in.clone()), &ctx);
+        dispatch(
+            &mut state,
+            commands::Command::DialogConfirm(zip_in.clone()),
+            &ctx,
+        );
         let bytes = std::fs::read(dir.join("pack_zip.zip")).expect("补扩展名后写出 ZIP");
         assert_eq!(&bytes[..4], b"PK\x03\x04", "本地文件头魔数");
         assert!(bytes
@@ -664,7 +685,11 @@ mod gui_window_tests {
             &ctx,
         );
         let _lock = crate::frame_lock();
-        dispatch(&mut state, commands::Command::DialogConfirm(out.clone()), &ctx);
+        dispatch(
+            &mut state,
+            commands::Command::DialogConfirm(out.clone()),
+            &ctx,
+        );
         assert!(state.export_status.is_none(), "失败却写了成功状态");
         assert!(!out.exists(), "报错时不应留下产物");
         assert!(
@@ -698,7 +723,11 @@ mod gui_window_tests {
             commands::Command::OpenDialog(state::DialogAction::ExportDatapack),
             &ctx,
         );
-        dispatch(&mut state, commands::Command::DialogConfirm(ok.clone()), &ctx);
+        dispatch(
+            &mut state,
+            commands::Command::DialogConfirm(ok.clone()),
+            &ctx,
+        );
         assert!(ok.is_file(), "五个子文件夹应通过原版的闸门");
 
         state.datapack_options.path = "a/b/c/d/e/f".into();
@@ -709,7 +738,11 @@ mod gui_window_tests {
             &ctx,
         );
         let _lock = crate::frame_lock();
-        dispatch(&mut state, commands::Command::DialogConfirm(out.clone()), &ctx);
+        dispatch(
+            &mut state,
+            commands::Command::DialogConfirm(out.clone()),
+            &ctx,
+        );
         assert!(!out.exists());
         assert!(msg(&state).contains("路径最多只能套五个文件夹"));
         drop(_lock);
@@ -738,7 +771,10 @@ mod gui_window_tests {
         assert_eq!(state.datapack_tab, 1, "点页签没有切过去");
         let glow_before = state.datapack_options.glow;
         click_text(&mut state, &ctx, "发光效果");
-        assert_ne!(state.datapack_options.glow, glow_before, "效果器页的复选框没接上");
+        assert_ne!(
+            state.datapack_options.glow, glow_before,
+            "效果器页的复选框没接上"
+        );
 
         click_text(&mut state, &ctx, "设置");
         assert_eq!(state.datapack_tab, 0);
@@ -751,7 +787,11 @@ mod gui_window_tests {
 
         let dir = scratch("clicked");
         let pack = dir.join("by_click");
-        dispatch(&mut state, commands::Command::DialogConfirm(pack.clone()), &ctx);
+        dispatch(
+            &mut state,
+            commands::Command::DialogConfirm(pack.clone()),
+            &ctx,
+        );
         assert!(pack.is_dir(), "非 ZIP 分支要写出目录");
         assert_eq!(
             std::fs::read_to_string(pack.join("pack.mcmeta")).expect("pack.mcmeta"),
@@ -789,9 +829,16 @@ mod gui_window_tests {
         click_text(&mut state, &ctx, "导出");
         click_text(&mut state, &ctx, "Minecraft 原理图…");
         answer_all_modals(&mut state, &ctx);
-        assert_eq!(state.window, Some(WindowKind::SchematicExport), "提问答完才开窗");
+        assert_eq!(
+            state.window,
+            Some(WindowKind::SchematicExport),
+            "提问答完才开窗"
+        );
         assert_eq!(state.schematic_tab, 0, "开窗固定在「设计」页");
-        assert!(state.schematic_stats.totalblocks[0] > 0, "演示曲应有可导出的音符");
+        assert!(
+            state.schematic_stats.totalblocks[0] > 0,
+            "演示曲应有可导出的音符"
+        );
 
         click_text(&mut state, &ctx, "环形过道");
         assert_eq!(state.schematic_options.layout, 0, "布局单选没接上选项");
@@ -812,7 +859,10 @@ mod gui_window_tests {
         click_text(&mut state, &ctx, "是");
         assert_eq!(state.schematic_options.layout, 1, "答是才还原成默认");
         assert!(!state.schematic_options.include_locked);
-        assert!(state.schematic_options.command_block, "command_block 不在原版默认值表里");
+        assert!(
+            state.schematic_options.command_block,
+            "command_block 不在原版默认值表里"
+        );
         assert!(state.schematic_options.structure, "structure 同样不在表里");
 
         // 方块页：第一个乐器默认是 3, 0（泥土），改成 2, 0（草方块）。
@@ -820,16 +870,27 @@ mod gui_window_tests {
         assert_eq!(state.schematic_tab, 1);
         click_at(&mut state, &ctx, |t| t == "3, 0");
         click_at(&mut state, &ctx, |t| t.starts_with("2, 0  "));
-        assert_eq!(state.schematic_options.ins_block[0], 2, "下拉选择没写回选项");
+        assert_eq!(
+            state.schematic_options.ins_block[0], 2,
+            "下拉选择没写回选项"
+        );
         assert_eq!(state.schematic_options.ins_data[0], 0);
 
         click_text(&mut state, &ctx, "导出");
-        assert_eq!(state.window, Some(WindowKind::FileSave), "点「导出」应打开保存对话框");
+        assert_eq!(
+            state.window,
+            Some(WindowKind::FileSave),
+            "点「导出」应打开保存对话框"
+        );
         let dir = scratch("schematic");
         let out = dir.join("by_click.nbt");
         // dispatch 与随后的文案断言整段持帧锁，理由同 gui_imports。
         let _lock = crate::frame_lock();
-        dispatch(&mut state, commands::Command::DialogConfirm(out.clone()), &ctx);
+        dispatch(
+            &mut state,
+            commands::Command::DialogConfirm(out.clone()),
+            &ctx,
+        );
         assert!(out.is_file(), "结构方块分支应写出 {}", out.display());
         let bytes = std::fs::read(&out).expect("导出必须写出真实文件");
         assert_eq!(&bytes[..2], &[0x1f, 0x8b], "前两端应是 gzip 魔数");
@@ -876,7 +937,10 @@ mod gui_window_tests {
         click_text(&mut state, &ctx, "从 Schematic 导入…");
         let d = state.file_dialog.as_ref().expect("导入要弹文件对话框");
         assert!(!d.save, "导入用的是打开式对话框");
-        assert_eq!(d.ext, "schematic", "原版过滤器是 Minecraft Schematics (*.schematic)");
+        assert_eq!(
+            d.ext, "schematic",
+            "原版过滤器是 Minecraft Schematics (*.schematic)"
+        );
         assert_eq!(state.window, Some(WindowKind::FileOpen));
 
         state.doc.replace_song(nbs_core::Song::new());
@@ -884,13 +948,28 @@ mod gui_window_tests {
         // dispatch 与随后的文案断言要整段持帧锁：字符串在 dispatch 线程上构建，
         // 并行用例的帧会把全局语言翻走（生产是单主线程，没有这个窗口）。
         let _lock = crate::frame_lock();
-        dispatch(&mut state, commands::Command::DialogConfirm(file.clone()), &ctx);
+        dispatch(
+            &mut state,
+            commands::Command::DialogConfirm(file.clone()),
+            &ctx,
+        );
         assert!(state.file_dialog.is_none());
         assert_eq!(state.window, None);
         assert!(state.doc.song.total_blocks > 0, "读回来应该是有音符的谱面");
-        assert!(msg(&state).starts_with("Schematic 导入完成"), "{}", msg(&state));
-        assert_eq!(state.doc.song.filename, None, "不学原版把 filename 指向 .schematic");
-        assert_eq!(state.recent_files.len(), recents, "原版 open_schematic() 不写最近列表");
+        assert!(
+            msg(&state).starts_with("Schematic 导入完成"),
+            "{}",
+            msg(&state)
+        );
+        assert_eq!(
+            state.doc.song.filename, None,
+            "不学原版把 filename 指向 .schematic"
+        );
+        assert_eq!(
+            state.recent_files.len(),
+            recents,
+            "原版 open_schematic() 不写最近列表"
+        );
         drop(_lock);
 
         // 打开分流：.schematic 走导入，不会被当成 NBS 解析。
@@ -916,9 +995,14 @@ mod gui_window_tests {
         dispatch(&mut s2, commands::Command::DialogConfirm(bad), &ctx);
         assert_eq!(s2.modals.items.len(), 1, "失败要弹模态，不只是状态栏一行字");
         assert_eq!(s2.modals.items[0].title, "Error");
-        assert_eq!(s2.modals.items[0].yes_no, false, "原版这里是 message()，只有确定键");
+        assert_eq!(
+            s2.modals.items[0].yes_no, false,
+            "原版这里是 message()，只有确定键"
+        );
         assert!(
-            s2.modals.items[0].text.contains("ERROR: Not a Schematic file."),
+            s2.modals.items[0]
+                .text
+                .contains("ERROR: Not a Schematic file."),
             "{}",
             s2.modals.items[0].text
         );
@@ -938,7 +1022,11 @@ mod gui_window_tests {
         let ctx = egui::Context::default();
         let mut state = EditorState::new();
         state.prefs.language = 1;
-        dispatch(&mut state, commands::Command::ShowWindow(WindowKind::Instruments), &ctx);
+        dispatch(
+            &mut state,
+            commands::Command::ShowWindow(WindowKind::Instruments),
+            &ctx,
+        );
         assert_eq!(state.window, Some(WindowKind::Instruments));
         // 刚 dispatch 完的第一帧只登记窗口，正文要第二帧才画出来。
         frame(&mut state, &ctx);
@@ -964,12 +1052,18 @@ mod gui_window_tests {
             );
         }
         assert_eq!(
-            texts.iter().filter(|t| t.starts_with("Ctrl+Shift+")).count(),
+            texts
+                .iter()
+                .filter(|t| t.starts_with("Ctrl+Shift+"))
+                .count(),
             7,
             "Ctrl+Shift+数字应当只有 7 个"
         );
         assert_eq!(
-            texts.iter().filter(|t| t.starts_with("Ctrl+") && !t.contains("Shift")).count(),
+            texts
+                .iter()
+                .filter(|t| t.starts_with("Ctrl+") && !t.contains("Shift"))
+                .count(),
             9,
             "Ctrl+数字应当只有 9 个"
         );
@@ -1022,10 +1116,17 @@ mod gui_window_tests {
             "一个开源的 Minecraft 音乐制作软件",
             "版本 0.1.0 - 发布于 2026-11-16",
         ] {
-            assert!(texts.iter().any(|s| *s == t), "欢迎窗缺少「{t}」，当前文本：{}", texts.join(" | "));
+            assert!(
+                texts.iter().any(|s| *s == t),
+                "欢迎窗缺少「{t}」，当前文本：{}",
+                texts.join(" | ")
+            );
         }
         // 更新状态行：出厂 check_update=true、还没查完 → 正在检查更新……
-        assert!(texts.iter().any(|s| *s == "正在检查更新……"), "更新状态行缺失");
+        assert!(
+            texts.iter().any(|s| *s == "正在检查更新……"),
+            "更新状态行缺失"
+        );
         // 真点「创建歌曲」→ 关窗（原版 windowclose=1）。
         click_text(&mut state, &ctx, "创建歌曲");
         assert_eq!(state.window, None, "创建歌曲应当关掉欢迎窗");
@@ -1066,10 +1167,20 @@ mod gui_window_tests {
             "Version 0.1.0 - Released 2026-11-16",
             "Checking for updates...",
         ] {
-            assert!(texts.iter().any(|s| *s == t), "英文欢迎窗缺少「{t}」，当前文本：{}", texts.join(" | "));
+            assert!(
+                texts.iter().any(|s| *s == t),
+                "英文欢迎窗缺少「{t}」，当前文本：{}",
+                texts.join(" | ")
+            );
         }
         // 中文专属的行和文案在英文分支不存在。
-        for t in ["要做什么？", "创建歌曲", "QQ 群", "捐赠", "版本 0.1.0 - 发布于 2026-11-16"] {
+        for t in [
+            "要做什么？",
+            "创建歌曲",
+            "QQ 群",
+            "捐赠",
+            "版本 0.1.0 - 发布于 2026-11-16",
+        ] {
             assert!(!texts.iter().any(|s| *s == t), "英文分支不该出现「{t}」");
         }
         // 检查失败一行（-1）：英文原文没有句号，别改成带句号的形式。
@@ -1131,7 +1242,11 @@ mod gui_window_tests {
             })
             .collect();
         for t in ["启动", "显示欢迎界面", "检查更新", "检查开发版本"] {
-            assert!(texts.iter().any(|s| s == t), "启动组缺少「{t}」，当前文本：{}", texts.join(" | "));
+            assert!(
+                texts.iter().any(|s| s == t),
+                "启动组缺少「{t}」，当前文本：{}",
+                texts.join(" | ")
+            );
         }
         // 出厂 check_update=true：勾「检查开发版本」先弹原版警告问句，答「是」才真正打开。
         assert!(!state.prefs.check_prerelease);
@@ -1168,7 +1283,11 @@ mod gui_window_tests {
         };
         let out = frame_out(&mut state, &ctx, base_input());
         let t = texts(&out);
-        assert!(t.iter().any(|s| s == "Language"), "英文界面标题应是 Language: {}", t.join(" | "));
+        assert!(
+            t.iter().any(|s| s == "Language"),
+            "英文界面标题应是 Language: {}",
+            t.join(" | ")
+        );
         assert!(t.iter().any(|s| s == "English"), "当前值行印的是语言专名");
 
         // 箭头是图标按钮，主题 / 帧率下拉的既有路径同样直接置位开菜单。
@@ -1178,14 +1297,22 @@ mod gui_window_tests {
         let out = frame_out(&mut state, &ctx, base_input());
         let t = texts(&out);
         for s in ["English", "简体中文"] {
-            assert!(t.iter().any(|x| x == s), "菜单缺少「{s}」: {}", t.join(" | "));
+            assert!(
+                t.iter().any(|x| x == s),
+                "菜单缺少「{s}」: {}",
+                t.join(" | ")
+            );
         }
         click_text(&mut state, &ctx, "简体中文");
         assert_eq!(state.prefs.language, 1, "选中要写回偏好");
         assert!(!state.prefs_language_menu, "选完菜单要收起");
         let out = frame_out(&mut state, &ctx, base_input());
         let t = texts(&out);
-        assert!(t.iter().any(|s| s == "语言"), "切到中文后标题应是「语言」: {}", t.join(" | "));
+        assert!(
+            t.iter().any(|s| s == "语言"),
+            "切到中文后标题应是「语言」: {}",
+            t.join(" | ")
+        );
         // 还原全局开关（测试并行跑，别把其它用例的语言污染成中文）。
         state.prefs.language = 0;
         frame_out(&mut state, &ctx, base_input());
@@ -1223,16 +1350,23 @@ mod gui_encoder_tests {
         let tmp_wav = out.with_extension("nbs-export-tmp.wav");
         let _ = std::fs::remove_file(&out);
         let _ = std::fs::remove_file(&tmp_wav);
-        dispatch(&mut state, crate::commands::Command::DialogConfirm(out.clone()), &ctx);
+        dispatch(
+            &mut state,
+            crate::commands::Command::DialogConfirm(out.clone()),
+            &ctx,
+        );
 
         let bytes = std::fs::read(&out).unwrap_or_else(|e| panic!("{ffmpeg:?} 转码失败: {e}"));
         assert_eq!(&bytes[..4], b"fLaC", "产物不是 FLAC");
         assert!(!tmp_wav.exists(), "中间 WAV 必须清掉");
-        assert!(state.export_status.as_deref().unwrap_or_default().contains("FLAC 已导出"));
+        assert!(state
+            .export_status
+            .as_deref()
+            .unwrap_or_default()
+            .contains("FLAC 已导出"));
         let _ = std::fs::remove_file(&out);
     }
 }
-
 
 /// 底部钢琴：几何、点击、边缘平移，全部对着原版 `draw_piano` 的绝对像素。
 #[cfg(test)]
@@ -1261,6 +1395,10 @@ mod gui_piano_tests {
         state.flags.show_piano = true;
         state.flags.show_keyboard = true;
         state.prefs.keys_to_show = 30;
+        // 这三条断言量的是原版绝对像素（键宽 40、步进 39、y=746），用户盘里存着
+        // 缩放档（比如 150%）的话整帧都被等比放大，一根键都筛不出来。测试环境里
+        // `Context::default()` 的系统倍率是 1.0，钉成出厂值就恒等于 1.0。
+        state.prefs.window_scale = None;
         // 开机流程会开欢迎窗；钢琴测试断言整帧的形状/贴图，欢迎窗和它最近的
         // 歌曲行（frame5 是 320×16 贴图）会混进来，靶子必须是裸编辑器。
         state.window = None;
@@ -1310,7 +1448,11 @@ mod gui_piano_tests {
 
         let mut whites: Vec<f32> = quads
             .iter()
-            .filter(|r| (r.width() - 40.0).abs() < 0.6 && (r.height() - 121.0).abs() < 0.6 && (r.min.y - 746.0).abs() < 0.6)
+            .filter(|r| {
+                (r.width() - 40.0).abs() < 0.6
+                    && (r.height() - 121.0).abs() < 0.6
+                    && (r.min.y - 746.0).abs() < 0.6
+            })
             .map(|r| r.min.x)
             .collect();
         whites.sort_by(|a, b| a.total_cmp(b));
@@ -1321,7 +1463,11 @@ mod gui_piano_tests {
 
         let mut blacks: Vec<f32> = quads
             .iter()
-            .filter(|r| (r.width() - 40.0).abs() < 0.6 && (r.height() - 121.0).abs() < 0.6 && (r.min.y - 739.0).abs() < 0.6)
+            .filter(|r| {
+                (r.width() - 40.0).abs() < 0.6
+                    && (r.height() - 121.0).abs() < 0.6
+                    && (r.min.y - 739.0).abs() < 0.6
+            })
             .map(|r| r.min.x)
             .collect();
         blacks.sort_by(|a, b| a.total_cmp(b));
@@ -1332,7 +1478,10 @@ mod gui_piano_tests {
         assert_eq!(blacks.first().copied(), Some(135.0 + 39.0 - 19.0));
 
         let t = texts(&out);
-        assert!(t.iter().any(|s| s == "F2"), "最左白键是 20 号键 = F2，实际文本 {t:?}");
+        assert!(
+            t.iter().any(|s| s == "F2"),
+            "最左白键是 20 号键 = F2，实际文本 {t:?}"
+        );
         assert!(t.iter().any(|s| s == "G6"), "最右白键是 70 号键 = G6");
         assert!(
             !t.iter().any(|s| s == "<" || s == ">"),
@@ -1375,7 +1524,9 @@ mod gui_piano_tests {
         assert_eq!(start, 12, "默认 startkey = 27 - keysshow/2");
 
         let mut hover = input();
-        hover.events.push(egui::Event::PointerMoved(egui::pos2(150.0, 800.0)));
+        hover
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(150.0, 800.0)));
         for _ in 0..60 {
             run(&mut state, &ctx, hover.clone());
         }
@@ -1390,7 +1541,9 @@ mod gui_piano_tests {
         let start = state.piano_start;
         let mut hover = input();
         // 最右一根白键：x = 135 + 29*39 = 1266，宽 39。
-        hover.events.push(egui::Event::PointerMoved(egui::pos2(1280.0, 800.0)));
+        hover
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(1280.0, 800.0)));
         for _ in 0..60 {
             run(&mut state, &ctx, hover.clone());
         }
@@ -1411,7 +1564,9 @@ mod gui_piano_tests {
         state.flags.show_notechart = true;
         run(&mut state, &ctx, input());
         let mut hover = input();
-        hover.events.push(egui::Event::PointerMoved(egui::pos2(150.0, 800.0)));
+        hover
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(150.0, 800.0)));
         let out = run(&mut state, &ctx, hover);
 
         let quads = images(&out);
@@ -1439,7 +1594,12 @@ mod gui_piano_tests {
                     && (p[1].x - 409.0).abs() < 0.6
                     && (p[1].y - y).abs() < 0.6
             });
-            assert_eq!(hit, a != 5, "五线谱横线 a={a} 应当{}", if a == 5 { "被跳过" } else { "存在" });
+            assert_eq!(
+                hit,
+                a != 5,
+                "五线谱横线 a={a} 应当{}",
+                if a == 5 { "被跳过" } else { "存在" }
+            );
         }
         // 左括号两条实线：y 464..528 与 560..624（中缝留给中加线）。
         for (y0, y1) in [(464.0, 528.0), (560.0, 624.0)] {
@@ -1476,7 +1636,9 @@ mod gui_piano_tests {
         assert!(!state.flags.show_notechart, "出厂默认应当是关");
         run(&mut state, &ctx, input());
         let mut hover = input();
-        hover.events.push(egui::Event::PointerMoved(egui::pos2(150.0, 800.0)));
+        hover
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(150.0, 800.0)));
         let out = run(&mut state, &ctx, hover);
         assert!(
             !images(&out).iter().any(|r| (r.width() - 320.0).abs() < 0.6),

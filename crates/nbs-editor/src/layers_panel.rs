@@ -67,8 +67,21 @@ pub fn show_layers_panel(state: &mut EditorState, ui: &mut Ui) {
         let exists = (idx as usize) < layers.len();
         let y1 = rows_start.y + (idx - l0) as f32 * cell - ROW_LIFT;
         row(
-            state, ui, &bank, &th, pos2(start.x, y1), cell, yo, idx, layer, &editing, idle, shift,
-            show_vol, mono, exists,
+            state,
+            ui,
+            &bank,
+            &th,
+            pos2(start.x, y1),
+            cell,
+            yo,
+            idx,
+            layer,
+            &editing,
+            idle,
+            shift,
+            show_vol,
+            mono,
+            exists,
         );
     }
 
@@ -84,7 +97,9 @@ pub(crate) fn macro_bar_over_grid(state: &mut EditorState, ui: &mut Ui, area: Re
     if state.flags.show_layers {
         return;
     }
-    let Some(bank) = state.icons.bank() else { return };
+    let Some(bank) = state.icons.bank() else {
+        return;
+    };
     let th = state.theme.clone();
     let cell = state.viewport.cell();
     let full = (((area.height() - TIMELINE_HEIGHT - SCROLLBAR_SIZE) / cell).floor() as u32).max(1);
@@ -103,13 +118,20 @@ fn header(
     width: f32,
 ) {
     let p = ui.painter();
-    p.rect_filled(Rect::from_min_size(start, vec2(width, TIMELINE_HEIGHT)), 0.0, th.panel);
+    p.rect_filled(
+        Rect::from_min_size(start, vec2(width, TIMELINE_HEIGHT)),
+        0.0,
+        th.panel,
+    );
 
     let song = &state.doc.song;
     let bpm_on = state.prefs.use_bpm;
     let tempo = state.doc.song.meta.tempo.max(0.25);
     // 拖速度框时先按 0.25 量化预览，松手才写进歌曲（原版 `tempo = floor(tempodrag * 4) / 4`）。
-    let shown = state.tempo_drag.map(|raw| (raw * 4.0).floor() / 4.0).unwrap_or(tempo) as f64;
+    let shown = state
+        .tempo_drag
+        .map(|raw| (raw * 4.0).floor() / 4.0)
+        .unwrap_or(tempo) as f64;
     let marker = state.marker();
     let total = song.song_length() as f64;
     let fluent = th.kind == ThemeKind::Fluent;
@@ -118,11 +140,35 @@ fn header(
     let elapsed = time_str(marker / shown);
     let length = format!("/ {}", time_str(total / shown));
     if fluent {
-        p.text(pos2(start.x + 9.0, band - 2.0), Align2::LEFT_TOP, elapsed, FontId::proportional(11.0), th.text);
-        p.text(pos2(start.x + 26.0, band + 15.0), Align2::LEFT_TOP, length, FontId::proportional(8.0), th.text);
+        p.text(
+            pos2(start.x + 9.0, band - 2.0),
+            Align2::LEFT_TOP,
+            elapsed,
+            FontId::proportional(11.0),
+            th.text,
+        );
+        p.text(
+            pos2(start.x + 26.0, band + 15.0),
+            Align2::LEFT_TOP,
+            length,
+            FontId::proportional(8.0),
+            th.text,
+        );
     } else {
-        p.text(pos2(start.x + 93.0, band - 2.0), Align2::RIGHT_TOP, elapsed, FontId::proportional(11.0), th.text);
-        p.text(pos2(start.x + 93.0, band + 15.0), Align2::RIGHT_TOP, length, FontId::proportional(8.0), th.text);
+        p.text(
+            pos2(start.x + 93.0, band - 2.0),
+            Align2::RIGHT_TOP,
+            elapsed,
+            FontId::proportional(11.0),
+            th.text,
+        );
+        p.text(
+            pos2(start.x + 93.0, band + 15.0),
+            Align2::RIGHT_TOP,
+            length,
+            FontId::proportional(8.0),
+            th.text,
+        );
     }
 
     // 小节·拍·十六分：原版只画，不给交互（悬停出说明）。
@@ -132,18 +178,40 @@ fn header(
     for (x, t) in [
         (215.0, ".".to_string()),
         (230.0, ".".to_string()),
-        (210.0, ((marker / (sig * 4.0)).floor() as i64 + 1).to_string()),
-        (225.0, (((marker / 4.0) % sig).floor() as i64 + 1).to_string()),
+        (
+            210.0,
+            ((marker / (sig * 4.0)).floor() as i64 + 1).to_string(),
+        ),
+        (
+            225.0,
+            (((marker / 4.0) % sig).floor() as i64 + 1).to_string(),
+        ),
         (240.0, ((marker % 4.0).floor() as i64 + 1).to_string()),
     ] {
-        p.text(pos2(start.x + x, band + 6.0), Align2::RIGHT_TOP, t, digits.clone(), th.text);
+        p.text(
+            pos2(start.x + x, band + 6.0),
+            Align2::RIGHT_TOP,
+            t,
+            digits.clone(),
+            th.text,
+        );
     }
 
     // 速度框：精灵宽 74，原版判定和文字定位都用左边 108（BPM 时往左挪 7px 画框）。
     let box_x = if bpm_on { 101.0 } else { 108.0 };
     bank.tempo_box(p, pos2(start.x + box_x, band + 3.0), bpm_on, th);
-    let value = if bpm_on { format!("{:.2} BPM", shown * 15.0) } else { format!("{:.2} t / s", shown) };
-    p.text(pos2(start.x + 136.0, band + 6.0), Align2::CENTER_TOP, value, digits, th.text);
+    let value = if bpm_on {
+        format!("{:.2} BPM", shown * 15.0)
+    } else {
+        format!("{:.2} t / s", shown)
+    };
+    p.text(
+        pos2(start.x + 136.0, band + 6.0),
+        Align2::CENTER_TOP,
+        value,
+        digits,
+        th.text,
+    );
 
     let idle = state.window.is_none() && state.context_menu.is_none();
     let bars_rect = Rect::from_min_size(pos2(start.x + 184.0, band + 3.0), vec2(64.0, 22.0));
@@ -158,7 +226,12 @@ fn header(
     let clicked = idle && resp.clicked();
     let started = idle && resp.drag_started();
     let rclicked = idle && resp.secondary_clicked();
-    let (dragged, stopped, dy, hover_pos) = (resp.dragged(), resp.drag_stopped(), resp.drag_delta().y, resp.hover_pos());
+    let (dragged, stopped, dy, hover_pos) = (
+        resp.dragged(),
+        resp.drag_stopped(),
+        resp.drag_delta().y,
+        resp.hover_pos(),
+    );
     if clicked {
         state.emit(Command::ShowWindow(WindowKind::SetTempo));
     }
@@ -188,7 +261,11 @@ fn header(
     }
     // 原版两语言的括号句式不同：EN 是 "measured in …"，CN 是「（…）」。
     let tip = if crate::lang() == 1 {
-        let unit = if bpm_on { "拍数/分钟" } else { "红石刻/秒" };
+        let unit = if bpm_on {
+            "拍数/分钟"
+        } else {
+            "红石刻/秒"
+        };
         format!("歌曲的速度（{unit}）\n拖拽来大致更改，点击来手动输入，右键查看更多选项。")
     } else if bpm_on {
         "Tempo of the song (measured in beats per minute).\nClick and drag to change. Click to enter value. Right-click for more options.".to_string()
@@ -196,7 +273,11 @@ fn header(
         "Tempo of the song (measured in ticks per second).\nClick and drag to change. Click to enter value. Right-click for more options.".to_string()
     };
     resp.on_hover_text(tip)
-        .on_hover_cursor(if state.tempo_drag.is_some() { CursorIcon::ResizeNorth } else { CursorIcon::PointingHand });
+        .on_hover_cursor(if state.tempo_drag.is_some() {
+            CursorIcon::ResizeNorth
+        } else {
+            CursorIcon::PointingHand
+        });
 }
 
 /// 一行图层。`at` 是原版行底左上角（已含 `ROW_LIFT`），`yo` 是行高变化后的纵向居中量。
@@ -237,7 +318,10 @@ fn row(
     let name_clicked = idle && name_resp.clicked();
     let name_right = idle && name_resp.secondary_clicked();
     let name_pos = name_resp.hover_pos();
-    let buf = editing.as_ref().filter(|(i, _)| *i == idx).map(|(_, s)| s.clone());
+    let buf = editing
+        .as_ref()
+        .filter(|(i, _)| *i == idx)
+        .map(|(_, s)| s.clone());
     if let Some(text) = buf {
         let (nx, ny, nw, nh) = if fluent {
             (x1 + 9.0, y1 + 4.0 + yo, 72.0, 24.0)
@@ -245,7 +329,10 @@ fn row(
             (x1 + 11.0, y1 + 10.0 + yo, 72.0, 14.0)
         };
         let focus_id = Id::new(("layername_focus", idx));
-        let had_focus = ui.ctx().data(|d| d.get_temp::<bool>(focus_id)).unwrap_or(false);
+        let had_focus = ui
+            .ctx()
+            .data(|d| d.get_temp::<bool>(focus_id))
+            .unwrap_or(false);
         let mut text = text;
         // 嵌套 ui 给一个跟滚动无关的稳定 id，否则逐行 id 会随滚动串到别的图层上。
         let nested = ui.allocate_new_ui(
@@ -256,7 +343,10 @@ fn row(
             |ui| {
                 let re = ui.add(
                     TextEdit::singleline(&mut text)
-                        .hint_text(format!("{}", tr(&format!("Layer {}", idx + 1), &format!("第 {} 层", idx + 1))))
+                        .hint_text(format!(
+                            "{}",
+                            tr(&format!("Layer {}", idx + 1), &format!("第 {} 层", idx + 1))
+                        ))
                         .desired_width(nw)
                         .font(font),
                 );
@@ -281,15 +371,30 @@ fn row(
         } else if changed {
             state.editing_layer_name = Some((idx, text));
         }
-        let active = state.editing_layer_name.as_ref().is_some_and(|(i, _)| *i == idx);
+        let active = state
+            .editing_layer_name
+            .as_ref()
+            .is_some_and(|(i, _)| *i == idx);
         ui.ctx().data_mut(|d| d.insert_temp(focus_id, active));
     } else {
         let (label, color) = if layer.name.is_empty() {
-            (format!("{}", tr(&format!("Layer {}", idx + 1), &format!("第 {} 层", idx + 1))), Color32::from_gray(if th.dark { 160 } else { 128 }))
+            (
+                format!(
+                    "{}",
+                    tr(&format!("Layer {}", idx + 1), &format!("第 {} 层", idx + 1))
+                ),
+                Color32::from_gray(if th.dark { 160 } else { 128 }),
+            )
         } else {
             (layer.name.clone(), th.text)
         };
-        ui.painter().text(pos2(x1 + 11.0, y1 + 10.0 + yo), Align2::LEFT_TOP, label, font, color);
+        ui.painter().text(
+            pos2(x1 + 11.0, y1 + 10.0 + yo),
+            Align2::LEFT_TOP,
+            label,
+            font,
+            color,
+        );
         if exists && name_clicked {
             state.editing_layer_name = Some((idx, layer.name.clone()));
         }
@@ -313,9 +418,19 @@ fn row(
         let hit = Rect::from_min_size(pos2(x1 + 88.0, y1 + 5.0 + yo), vec2(16.0, 25.0));
         let resp = ui.interact(hit, Id::new(("layervol", idx)), Sense::drag());
         let active = resp.hovered() || resp.dragged();
-        let (started, dragged, stopped, delta) =
-            (resp.drag_started(), resp.dragged(), resp.drag_stopped(), resp.drag_delta().y);
-        bank.volume_glyph(ui.painter(), pos2(x1 + 91.0, y1 + 11.0 + yo), vol, active, th);
+        let (started, dragged, stopped, delta) = (
+            resp.drag_started(),
+            resp.dragged(),
+            resp.drag_stopped(),
+            resp.drag_delta().y,
+        );
+        bank.volume_glyph(
+            ui.painter(),
+            pos2(x1 + 91.0, y1 + 11.0 + yo),
+            vol,
+            active,
+            th,
+        );
         if active {
             ui.painter().text(
                 pos2(x1 + 98.0, y1 + 18.0 + yo),
@@ -326,12 +441,21 @@ fn row(
             );
         }
         if idle && exists && started {
-            state.layer_drag = Some(LayerDrag { index: idx, stereo: false, value: vol, raw: vol as f32 });
+            state.layer_drag = Some(LayerDrag {
+                index: idx,
+                stereo: false,
+                value: vol,
+                raw: vol as f32,
+            });
         }
         if let Some(mut d) = state.layer_drag.filter(|d| d.index == idx && !d.stereo) {
             if dragged {
                 d.raw = (d.raw - delta).clamp(0.0, 100.0);
-                d.value = if shift { d.raw.round() as u8 } else { (d.raw / 10.0).floor() as u8 * 10 };
+                d.value = if shift {
+                    d.raw.round() as u8
+                } else {
+                    (d.raw / 10.0).floor() as u8 * 10
+                };
                 state.layer_drag = Some(d);
             }
             if stopped {
@@ -339,8 +463,13 @@ fn row(
                 state.emit(Command::SetLayerVolume(idx, d.value));
             }
         }
-        resp.on_hover_text(format!("{}{}%\n{}", tr("Volume of this layer: ", "本层的音量: "), vol, tr("(Click and drag to change)", "（拖拽来修改）")))
-            .on_hover_cursor(CursorIcon::ResizeNorth);
+        resp.on_hover_text(format!(
+            "{}{}%\n{}",
+            tr("Volume of this layer: ", "本层的音量: "),
+            vol,
+            tr("(Click and drag to change)", "（拖拽来修改）")
+        ))
+        .on_hover_cursor(CursorIcon::ResizeNorth);
     }
 
     // 原版 `realstereo` 是「关闭立体声」：为真时不画声道字形，播放也归到中央。
@@ -352,9 +481,19 @@ fn row(
         let hit = Rect::from_min_size(pos2(x1 + 108.0, y1 + 5.0 + yo), vec2(16.0, 25.0));
         let resp = ui.interact(hit, Id::new(("layerpan", idx)), Sense::drag());
         let active = resp.hovered() || resp.dragged();
-        let (started, dragged, stopped, delta) =
-            (resp.drag_started(), resp.dragged(), resp.drag_stopped(), resp.drag_delta().y);
-        bank.stereo_glyph(ui.painter(), pos2(x1 + 110.0, y1 + 11.0 + yo), pan, active, th);
+        let (started, dragged, stopped, delta) = (
+            resp.drag_started(),
+            resp.dragged(),
+            resp.drag_stopped(),
+            resp.drag_delta().y,
+        );
+        bank.stereo_glyph(
+            ui.painter(),
+            pos2(x1 + 110.0, y1 + 11.0 + yo),
+            pan,
+            active,
+            th,
+        );
         let (tip, label) = pan_label(pan);
         if active {
             ui.painter().text(
@@ -366,12 +505,21 @@ fn row(
             );
         }
         if idle && exists && started {
-            state.layer_drag = Some(LayerDrag { index: idx, stereo: true, value: pan, raw: pan as f32 });
+            state.layer_drag = Some(LayerDrag {
+                index: idx,
+                stereo: true,
+                value: pan,
+                raw: pan as f32,
+            });
         }
         if let Some(mut d) = state.layer_drag.filter(|d| d.index == idx && d.stereo) {
             if dragged {
                 d.raw = (d.raw - delta).clamp(0.0, 200.0);
-                d.value = if shift { d.raw.round() as u8 } else { (d.raw / 10.0).floor() as u8 * 10 };
+                d.value = if shift {
+                    d.raw.round() as u8
+                } else {
+                    (d.raw / 10.0).floor() as u8 * 10
+                };
                 state.layer_drag = Some(d);
             }
             if stopped {
@@ -384,18 +532,48 @@ fn row(
             tr("Stereo pan: ", "立体声声道: "),
             tr("(Click and drag to change)", "（拖拽来修改）")
         ))
-            .on_hover_cursor(CursorIcon::ResizeNorth);
+        .on_hover_cursor(CursorIcon::ResizeNorth);
     }
 
     // ---- 7 个功能按钮（原版下标 0..6）----
     // 原版在空白行上同样画全 7 个图标，点了却没有图层可改；只有「新建层」在空白行仍有意义。
     let by = y1 + 8.0 + yo;
-    if exists && idle && bank.layer_button(ui, pos2(bx(126.0), by), 0, idx, tr("Lock this layer", "静音本层\n（拖拽可批量操作）"), layer.lock == LockMode::Locked, th) {
-        let next = if layer.lock == LockMode::Locked { LockMode::Normal } else { LockMode::Locked };
+    if exists
+        && idle
+        && bank.layer_button(
+            ui,
+            pos2(bx(126.0), by),
+            0,
+            idx,
+            tr("Lock this layer", "静音本层\n（拖拽可批量操作）"),
+            layer.lock == LockMode::Locked,
+            th,
+        )
+    {
+        let next = if layer.lock == LockMode::Locked {
+            LockMode::Normal
+        } else {
+            LockMode::Locked
+        };
         state.emit(Command::SetLayerLock(idx, next));
     }
-    if exists && idle && bank.layer_button(ui, pos2(bx(144.0), by), 1, idx, tr("Solo this layer", "独奏本层\n（拖拽可批量操作）"), layer.lock == LockMode::Solo, th) {
-        let next = if layer.lock == LockMode::Solo { LockMode::Normal } else { LockMode::Solo };
+    if exists
+        && idle
+        && bank.layer_button(
+            ui,
+            pos2(bx(144.0), by),
+            1,
+            idx,
+            tr("Solo this layer", "独奏本层\n（拖拽可批量操作）"),
+            layer.lock == LockMode::Solo,
+            th,
+        )
+    {
+        let next = if layer.lock == LockMode::Solo {
+            LockMode::Normal
+        } else {
+            LockMode::Solo
+        };
         state.emit(Command::SetLayerLock(idx, next));
     }
     if exists && idle && bank.layer_button(ui, pos2(bx(162.0), by), 2, idx, tr(
@@ -404,31 +582,75 @@ fn row(
     ), false, th) {
         state.emit(Command::SelectLayer(idx));
     }
-    if idle && bank.layer_button(ui, pos2(bx(180.0), by), 3, idx, tr(
-        "Add empty layer here\n(Click and drag to add multiple layers)",
-        "新建层\n（拖拽可批量添加）",
-    ), false, th) {
+    if idle
+        && bank.layer_button(
+            ui,
+            pos2(bx(180.0), by),
+            3,
+            idx,
+            tr(
+                "Add empty layer here\n(Click and drag to add multiple layers)",
+                "新建层\n（拖拽可批量添加）",
+            ),
+            false,
+            th,
+        )
+    {
         state.emit(Command::InsertLayer(idx));
     }
-    if exists && idle && bank.layer_button(ui, pos2(bx(198.0), by), 4, idx, tr(
-        "Remove this layer\n(Click and drag to remove multiple layers)",
-        "删除层\n（拖拽可批量删除）",
-    ), false, th) {
+    if exists
+        && idle
+        && bank.layer_button(
+            ui,
+            pos2(bx(198.0), by),
+            4,
+            idx,
+            tr(
+                "Remove this layer\n(Click and drag to remove multiple layers)",
+                "删除层\n（拖拽可批量删除）",
+            ),
+            false,
+            th,
+        )
+    {
         state.emit(Command::RemoveLayer(idx));
     }
     // 原版第 0 层不画上移按钮（`if ((startb + b > 0) && draw_layericon(...))`）。
-    if exists && idx > 0 && idle && bank.layer_button(ui, pos2(bx(216.0), by), 5, idx, tr(
-        "Shift layer up\n(Click and drag to shift multiple layers)",
-        "上移本层\n（拖拽可上移多层）",
-    ), false, th) {
+    if exists
+        && idx > 0
+        && idle
+        && bank.layer_button(
+            ui,
+            pos2(bx(216.0), by),
+            5,
+            idx,
+            tr(
+                "Shift layer up\n(Click and drag to shift multiple layers)",
+                "上移本层\n（拖拽可上移多层）",
+            ),
+            false,
+            th,
+        )
+    {
         state.emit(Command::MoveLayerUp(idx));
     }
     // 原版在最底层把下移按钮左挪 8px（少画的上移按钮位置就空在那儿）。
     let down_x = bx(234.0) - if idx == 0 { 8.0 } else { 0.0 };
-    if exists && idle && bank.layer_button(ui, pos2(down_x, by), 6, idx, tr(
-        "Shift layer down\n(Click and drag to shift multiple layers)",
-        "下移本层\n（拖拽可下移多层）",
-    ), false, th) {
+    if exists
+        && idle
+        && bank.layer_button(
+            ui,
+            pos2(down_x, by),
+            6,
+            idx,
+            tr(
+                "Shift layer down\n(Click and drag to shift multiple layers)",
+                "下移本层\n（拖拽可下移多层）",
+            ),
+            false,
+            th,
+        )
+    {
         state.emit(Command::MoveLayerDown(idx));
     }
 }
@@ -537,21 +759,126 @@ struct MacroBtn {
 use nbs_core::Macro as M;
 
 const MACRO_BTNS: [MacroBtn; 15] = [
-    MacroBtn { index: 0, tip_en: "Tremolo...", tip_zh: "Tremolo...", label_en: "Tremolo...", label_zh: "颤音…", action: MacroAction::Window(WindowKind::Tremolo) },
-    MacroBtn { index: 1, tip_en: "Stereo...", tip_zh: "Stereo...", label_en: "Stereo...", label_zh: "立体声…", action: MacroAction::Window(WindowKind::Stereo) },
-    MacroBtn { index: 2, tip_en: "Arpeggio...", tip_zh: "Arpeggio...", label_en: "Arpeggio...", label_zh: "琶音…", action: MacroAction::Editor(8) },
-    MacroBtn { index: 3, tip_en: "Portamento...", tip_zh: "Portamento...", label_en: "Portamento...", label_zh: "滑音…", action: MacroAction::Editor(9) },
-    MacroBtn { index: 4, tip_en: "Vibrato", tip_zh: "Vibrato", label_en: "Vibrato", label_zh: "震音", action: MacroAction::Run(M::Vibrato) },
-    MacroBtn { index: 5, tip_en: "Stagger...", tip_zh: "Stagger...", label_en: "Stagger...", label_zh: "错开…", action: MacroAction::Editor(10) },
-    MacroBtn { index: 6, tip_en: "Chorus", tip_zh: "Chorus", label_en: "Chorus", label_zh: "合唱", action: MacroAction::Run(M::Chorus { detune: 5 }) },
-    MacroBtn { index: 7, tip_en: "Volume LFO", tip_zh: "Volume LFO", label_en: "Volume LFO", label_zh: "音量 LFO", action: MacroAction::Run(M::VelocityLfo) },
-    MacroBtn { index: 8, tip_en: "Fade in", tip_zh: "淡入", label_en: "Fade in", label_zh: "淡入", action: MacroAction::Run(M::FadeIn) },
-    MacroBtn { index: 9, tip_en: "Fade out", tip_zh: "淡出", label_en: "Fade out", label_zh: "淡出", action: MacroAction::Run(M::FadeOut) },
-    MacroBtn { index: 10, tip_en: "Replace key", tip_zh: "替换音", label_en: "Replace key", label_zh: "替换音", action: MacroAction::Run(M::ReplaceKey) },
-    MacroBtn { index: 11, tip_en: "Set velocity...", tip_zh: "设定音量......", label_en: "Set velocity...", label_zh: "设定音量…", action: MacroAction::Window(WindowKind::SetVelocity) },
-    MacroBtn { index: 12, tip_en: "Set panning...", tip_zh: "设定声道......", label_en: "Set panning...", label_zh: "设定声道…", action: MacroAction::Window(WindowKind::SetPanning) },
-    MacroBtn { index: 13, tip_en: "Set pitch...", tip_zh: "设定音高......", label_en: "Set pitch...", label_zh: "设定音高…", action: MacroAction::Window(WindowKind::SetPitch) },
-    MacroBtn { index: 14, tip_en: "Reset all properties", tip_zh: "重置所有属性", label_en: "Reset all properties", label_zh: "重置所有属性", action: MacroAction::Run(M::Reset) },
+    MacroBtn {
+        index: 0,
+        tip_en: "Tremolo...",
+        tip_zh: "Tremolo...",
+        label_en: "Tremolo...",
+        label_zh: "Tremolo…",
+        action: MacroAction::Window(WindowKind::Tremolo),
+    },
+    MacroBtn {
+        index: 1,
+        tip_en: "Stereo...",
+        tip_zh: "Stereo...",
+        label_en: "Stereo...",
+        label_zh: "Stereo…",
+        action: MacroAction::Window(WindowKind::Stereo),
+    },
+    MacroBtn {
+        index: 2,
+        tip_en: "Arpeggio...",
+        tip_zh: "Arpeggio...",
+        label_en: "Arpeggio...",
+        label_zh: "Arpeggio…",
+        action: MacroAction::Editor(8),
+    },
+    MacroBtn {
+        index: 3,
+        tip_en: "Portamento...",
+        tip_zh: "Portamento...",
+        label_en: "Portamento...",
+        label_zh: "Portamento…",
+        action: MacroAction::Editor(9),
+    },
+    MacroBtn {
+        index: 4,
+        tip_en: "Vibrato",
+        tip_zh: "Vibrato",
+        label_en: "Vibrato",
+        label_zh: "Vibrato",
+        action: MacroAction::Run(M::Vibrato),
+    },
+    MacroBtn {
+        index: 5,
+        tip_en: "Stagger...",
+        tip_zh: "Stagger...",
+        label_en: "Stagger...",
+        label_zh: "Stagger…",
+        action: MacroAction::Editor(10),
+    },
+    MacroBtn {
+        index: 6,
+        tip_en: "Chorus",
+        tip_zh: "Chorus",
+        label_en: "Chorus",
+        label_zh: "Chorus",
+        action: MacroAction::Run(M::Chorus { detune: 5 }),
+    },
+    MacroBtn {
+        index: 7,
+        tip_en: "Volume LFO",
+        tip_zh: "Volume LFO",
+        label_en: "Volume LFO",
+        label_zh: "Volume LFO",
+        action: MacroAction::Run(M::VelocityLfo),
+    },
+    MacroBtn {
+        index: 8,
+        tip_en: "Fade in",
+        tip_zh: "淡入",
+        label_en: "Fade in",
+        label_zh: "淡入",
+        action: MacroAction::Run(M::FadeIn),
+    },
+    MacroBtn {
+        index: 9,
+        tip_en: "Fade out",
+        tip_zh: "淡出",
+        label_en: "Fade out",
+        label_zh: "淡出",
+        action: MacroAction::Run(M::FadeOut),
+    },
+    MacroBtn {
+        index: 10,
+        tip_en: "Replace key",
+        tip_zh: "替换音",
+        label_en: "Replace key",
+        label_zh: "替换音",
+        action: MacroAction::Run(M::ReplaceKey),
+    },
+    MacroBtn {
+        index: 11,
+        tip_en: "Set velocity...",
+        tip_zh: "设定音量......",
+        label_en: "Set velocity...",
+        label_zh: "设定音量…",
+        action: MacroAction::Window(WindowKind::SetVelocity),
+    },
+    MacroBtn {
+        index: 12,
+        tip_en: "Set panning...",
+        tip_zh: "设定声道......",
+        label_en: "Set panning...",
+        label_zh: "设定声道…",
+        action: MacroAction::Window(WindowKind::SetPanning),
+    },
+    MacroBtn {
+        index: 13,
+        tip_en: "Set pitch...",
+        tip_zh: "设定音高......",
+        label_en: "Set pitch...",
+        label_zh: "设定音高…",
+        action: MacroAction::Window(WindowKind::SetPitch),
+    },
+    MacroBtn {
+        index: 14,
+        tip_en: "Reset all properties",
+        tip_zh: "重置所有属性",
+        label_en: "Reset all properties",
+        label_zh: "重置所有属性",
+        action: MacroAction::Run(M::Reset),
+    },
 ];
 
 /// 精灵图缺失时的退路：同样的功能用普通控件摆一遍，不留不能用的按钮。
@@ -560,7 +887,11 @@ fn show_layers_text(state: &mut EditorState, ui: &mut Ui) {
     let tempo = state.doc.song.meta.tempo.max(0.25) as f64;
     let marker = state.marker();
     ui.horizontal(|ui| {
-        ui.label(format!("{} / {}", time_str(marker / tempo), time_str(song_len / tempo)));
+        ui.label(format!(
+            "{} / {}",
+            time_str(marker / tempo),
+            time_str(song_len / tempo)
+        ));
         if ui.button(tr("Tempo...", "速度…")).clicked() {
             state.emit(Command::ShowWindow(WindowKind::SetTempo));
         }
@@ -576,24 +907,51 @@ fn show_layers_text(state: &mut EditorState, ui: &mut Ui) {
             let re = ui.add(
                 TextEdit::singleline(&mut name)
                     .desired_width(90.0)
-                    .hint_text(format!("{}", tr(&format!("Layer {}", idx + 1), &format!("第 {} 层", idx + 1)))),
+                    .hint_text(format!(
+                        "{}",
+                        tr(&format!("Layer {}", idx + 1), &format!("第 {} 层", idx + 1))
+                    )),
             );
             if re.lost_focus() && name != layer.name {
                 state.emit(Command::RenameLayer(idx, name));
             }
-            if ui.selectable_label(layer.lock == LockMode::Locked, tr("Mute", "静音")).clicked() {
-                let next = if layer.lock == LockMode::Locked { LockMode::Normal } else { LockMode::Locked };
+            if ui
+                .selectable_label(layer.lock == LockMode::Locked, tr("Mute", "静音"))
+                .clicked()
+            {
+                let next = if layer.lock == LockMode::Locked {
+                    LockMode::Normal
+                } else {
+                    LockMode::Locked
+                };
                 state.emit(Command::SetLayerLock(idx, next));
             }
-            if ui.selectable_label(layer.lock == LockMode::Solo, tr("Solo", "独奏")).clicked() {
-                let next = if layer.lock == LockMode::Solo { LockMode::Normal } else { LockMode::Solo };
+            if ui
+                .selectable_label(layer.lock == LockMode::Solo, tr("Solo", "独奏"))
+                .clicked()
+            {
+                let next = if layer.lock == LockMode::Solo {
+                    LockMode::Normal
+                } else {
+                    LockMode::Solo
+                };
                 state.emit(Command::SetLayerLock(idx, next));
             }
-            if ui.button(tr("Select", "选层")).clicked() { state.emit(Command::SelectLayer(idx)); }
-            if ui.button(tr("Add", "加层")).clicked() { state.emit(Command::InsertLayer(idx)); }
-            if ui.button(tr("Remove", "删层")).clicked() { state.emit(Command::RemoveLayer(idx)); }
-            if idx > 0 && ui.button(tr("Up", "上移")).clicked() { state.emit(Command::MoveLayerUp(idx)); }
-            if ui.button(tr("Down", "下移")).clicked() { state.emit(Command::MoveLayerDown(idx)); }
+            if ui.button(tr("Select", "选层")).clicked() {
+                state.emit(Command::SelectLayer(idx));
+            }
+            if ui.button(tr("Add", "加层")).clicked() {
+                state.emit(Command::InsertLayer(idx));
+            }
+            if ui.button(tr("Remove", "删层")).clicked() {
+                state.emit(Command::RemoveLayer(idx));
+            }
+            if idx > 0 && ui.button(tr("Up", "上移")).clicked() {
+                state.emit(Command::MoveLayerUp(idx));
+            }
+            if ui.button(tr("Down", "下移")).clicked() {
+                state.emit(Command::MoveLayerDown(idx));
+            }
             if show_vol {
                 text_drag_value(state, ui, idx, false, layer.volume, 100);
             }
@@ -615,7 +973,14 @@ fn show_layers_text(state: &mut EditorState, ui: &mut Ui) {
 }
 
 /// 退路里的音量 / 声道框：拖拽期间只改预览，松手才提交一条历史。
-fn text_drag_value(state: &mut EditorState, ui: &mut Ui, idx: u32, stereo: bool, current: u8, max: u8) {
+fn text_drag_value(
+    state: &mut EditorState,
+    ui: &mut Ui,
+    idx: u32,
+    stereo: bool,
+    current: u8,
+    max: u8,
+) {
     let mut value = state
         .layer_drag
         .filter(|d| d.index == idx && d.stereo == stereo)
@@ -628,10 +993,18 @@ fn text_drag_value(state: &mut EditorState, ui: &mut Ui, idx: u32, stereo: bool,
             .speed(1),
     );
     if resp.changed() {
-        state.layer_drag = Some(LayerDrag { index: idx, stereo, value, raw: value as f32 });
+        state.layer_drag = Some(LayerDrag {
+            index: idx,
+            stereo,
+            value,
+            raw: value as f32,
+        });
     }
     if ui.input(|i| i.pointer.any_released())
-        && state.layer_drag.filter(|d| d.index == idx && d.stereo == stereo).is_some()
+        && state
+            .layer_drag
+            .filter(|d| d.index == idx && d.stereo == stereo)
+            .is_some()
     {
         if let Some(d) = state.layer_drag.take() {
             state.emit(if d.stereo {

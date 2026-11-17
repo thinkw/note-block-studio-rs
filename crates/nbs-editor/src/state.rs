@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use egui::{Context, Pos2};
-use nbs_audio::{AudioEngine, CpalEngine, SoundBank, EXTENDED_MAX_VOICES, DEFAULT_MAX_VOICES};
+use nbs_audio::{AudioEngine, CpalEngine, SoundBank, DEFAULT_MAX_VOICES, EXTENDED_MAX_VOICES};
 use nbs_core::model::Note;
 use nbs_core::{Document, Macro, TremoloFade};
 use nbs_io::datapack::DatapackOptions;
@@ -310,7 +310,13 @@ impl ModalQueue {
     /// 单个原版 `question(正文, 标题)`：答「是」才执行 `then`。
     pub fn question(title: &'static str, text: &str, then: Command) -> Self {
         Self {
-            items: [Modal { title, text: text.into(), yes_no: true }].into_iter().collect(),
+            items: [Modal {
+                title,
+                text: text.into(),
+                yes_no: true,
+            }]
+            .into_iter()
+            .collect(),
             then: Some(then),
         }
     }
@@ -318,14 +324,21 @@ impl ModalQueue {
     /// 单个原版 `message(正文, 标题)`。
     pub fn message(title: &'static str, text: &str) -> Self {
         Self {
-            items: [Modal { title, text: text.into(), yes_no: false }].into_iter().collect(),
+            items: [Modal {
+                title,
+                text: text.into(),
+                yes_no: false,
+            }]
+            .into_iter()
+            .collect(),
             then: None,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ContextKind {    Grid,
+pub enum ContextKind {
+    Grid,
     Timeline,
     Layer(u32),
     /// 图层栏顶部的速度框（原版右键：单位切换 + 8 个预设速度）。
@@ -515,7 +528,9 @@ impl FileDialog {
             let renamed = if ext.is_empty() {
                 p.file_stem().map(|s| s.to_string_lossy().into_owned())
             } else {
-                p.with_extension(ext).file_name().map(|s| s.to_string_lossy().into_owned())
+                p.with_extension(ext)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
             };
             if let Some(f) = renamed {
                 self.name = f;
@@ -552,25 +567,36 @@ impl FileDialog {
             // 原版 `load_song.gml:20` 的过滤器还有 `Zipped Files (*.zip)` 和
             // `MIDI Sequences (*.mid)`；这两条路我们还没接通（带自定义音色的 .nbs 压缩包
             // 读不了，.mid 要先开 MIDI 导入窗口），列出来只会让人选了以后报错，所以先不列。
-            DialogAction::OpenSong => (tr("Load song", "打开歌曲"), vec![
-                filter("Note Block Songs (*.nbs)", "*.nbs"),
-                filter("Minecraft Schematics (*.schematic)", "*.schematic"),
-            ]),
+            DialogAction::OpenSong => (
+                tr("Load song", "打开歌曲"),
+                vec![
+                    filter("Note Block Songs (*.nbs)", "*.nbs"),
+                    filter("Minecraft Schematics (*.schematic)", "*.schematic"),
+                ],
+            ),
             // 原版 `save_song.gml:27`。
-            DialogAction::SaveSong => (tr("Save song", "保存歌曲"), vec![
-                filter("Note Block Songs (*.nbs)", "*.nbs"),
-            ]),
+            DialogAction::SaveSong => (
+                tr("Save song", "保存歌曲"),
+                vec![filter("Note Block Songs (*.nbs)", "*.nbs")],
+            ),
             // 原版 `audio_export.gml:24`：`audio_exp_format + " files (*" + output_ext + ")"`。
-            DialogAction::ExportAudio => (tr("Export audio track", "导出音频文件"), vec![
-                filter(&format!("{} files (*.{ext})", ext.to_uppercase()), &format!("*.{ext}")),
-            ]),
+            DialogAction::ExportAudio => (
+                tr("Export audio track", "导出音频文件"),
+                vec![filter(
+                    &format!("{} files (*.{ext})", ext.to_uppercase()),
+                    &format!("*.{ext}"),
+                )],
+            ),
             DialogAction::ExportDatapack => {
                 if ext.is_empty() {
                     // 原版 `datapack_export.gml:29-32`：目录选择框标题；过滤器串只有一个词、
                     // 没有 `|通配符`，传进系统组件就是一个空白模式；导出的目录名来自文件名栏，
                     // 不是选中的目录。
                     (
-                        tr("Choose where to create the data pack folder", "选择数据包文件夹的保存位置"),
+                        tr(
+                            "Choose where to create the data pack folder",
+                            "选择数据包文件夹的保存位置",
+                        ),
                         vec![filter(tr("Data pack folder", "数据包目录"), "")],
                     )
                 } else {
@@ -582,12 +608,14 @@ impl FileDialog {
                 }
             }
             // 原版 `open_midi.gml:14/15`。
-            DialogAction::ExportMidi => (tr("Export MIDI", "导出 MIDI"), vec![
-                filter("MIDI Sequences (*.mid)", "*.mid"),
-            ]),
-            DialogAction::ExportPng => (tr("Export image", "导出图片"), vec![
-                filter("PNG image (*.png)", "*.png"),
-            ]),
+            DialogAction::ExportMidi => (
+                tr("Export MIDI", "导出 MIDI"),
+                vec![filter("MIDI Sequences (*.mid)", "*.mid")],
+            ),
+            DialogAction::ExportPng => (
+                tr("Export image", "导出图片"),
+                vec![filter("PNG image (*.png)", "*.png")],
+            ),
             DialogAction::ExportSchematic => {
                 // 原版 `schematic_export.gml:7/8`：结构方块存的是 .nbt，过滤器名也不同；
                 // 标题原文两种语言都是 "Export Schematic"（原版没翻译这句）。
@@ -604,21 +632,25 @@ impl FileDialog {
                 }
             }
             // 原版 `pattern_export.gml:12`。
-            DialogAction::ExportPattern => (tr("Save pattern", "保存分段"), vec![
-                filter("Note Block Pattern (*.nbp)", "*.nbp"),
-            ]),
+            DialogAction::ExportPattern => (
+                tr("Save pattern", "保存分段"),
+                vec![filter("Note Block Pattern (*.nbp)", "*.nbp")],
+            ),
             // 原版 `open_midi.gml:14/15`。
-            DialogAction::ImportMidi => (tr("Import from MIDI", "从 MIDI 导入"), vec![
-                filter("MIDI Sequences (*.mid)", "*.midi;*.mid"),
-            ]),
+            DialogAction::ImportMidi => (
+                tr("Import from MIDI", "从 MIDI 导入"),
+                vec![filter("MIDI Sequences (*.mid)", "*.midi;*.mid")],
+            ),
             // 原版 `pattern_import.gml:23`。
-            DialogAction::ImportPattern => (tr("Load pattern", "打开分段"), vec![
-                filter("Note Block Pattern (*.nbp)", "*.nbp"),
-            ]),
+            DialogAction::ImportPattern => (
+                tr("Load pattern", "打开分段"),
+                vec![filter("Note Block Pattern (*.nbp)", "*.nbp")],
+            ),
             // 原版 `open_schematic.gml:11`：标题原文两种语言都是 "Import from Schematic"。
-            DialogAction::ImportSchematic => ("Import from Schematic", vec![
-                filter("Minecraft Schematics (*.schematic)", "*.schematic"),
-            ]),
+            DialogAction::ImportSchematic => (
+                "Import from Schematic",
+                vec![filter("Minecraft Schematics (*.schematic)", "*.schematic")],
+            ),
             // 原版 `datapack_getextranotes.gml:6`：过滤器名和标题都是照抄的这一句。
             DialogAction::SaveExtraNotes => (
                 tr("Save extra notes for data pack", "为数据包保存音符盒资源包"),
@@ -629,7 +661,10 @@ impl FileDialog {
             // （换算回来见 `EditorState::run_pending_dialog`）。不是目录选择器。
             DialogAction::PickFolder(f) => (f.title(), Vec::new()),
         };
-        PickerSpec { title: title.to_string(), filters }
+        PickerSpec {
+            title: title.to_string(),
+            filters,
+        }
     }
 }
 
@@ -667,7 +702,10 @@ pub struct PickerSpec {
 }
 
 fn filter(name: &str, patterns: &str) -> FilterSpec {
-    FilterSpec { name: name.to_string(), patterns: patterns.to_string() }
+    FilterSpec {
+        name: name.to_string(),
+        patterns: patterns.to_string(),
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -853,7 +891,9 @@ impl Default for EditorState {
 /// 原版 Schematic 只认这三档速度（`compatible = 1` 的前半个条件，也是兼容性窗口
 /// Schematic 页第一行的判据——那一行不看音符微调）。
 pub fn tempo_schematic_ok(tempo: f32) -> bool {
-    [10.0_f32, 5.0, 2.5].iter().any(|v| (tempo - v).abs() < 1e-3)
+    [10.0_f32, 5.0, 2.5]
+        .iter()
+        .any(|v| (tempo - v).abs() < 1e-3)
 }
 
 /// 原版数据包页第一行说「更佳」的那十档。数据包本身任意速度都能导，
@@ -867,7 +907,10 @@ pub fn tempo_datapack_good(tempo: f32) -> bool {
 impl EditorState {
     pub fn new() -> Self {
         let prefs = Preferences::load();
-        let song = nbs_core::model::Song::demo();
+        // 演示曲的说明是「生成那一刻」定型的文案，按 prefs 的语言显式传进去；
+        // 这里不翻全局开关——new() 会加载采样、开音频设备，占着全局会把并行跑的
+        // 单测串台（其余状态串都是绘制时现翻的）。
+        let song = nbs_core::model::Song::demo_in(prefs.language);
         let bank = SoundBank::load_auto(prefs.sounds_dir_path().as_deref());
         let mut audio: Box<dyn AudioEngine> = Box::new(CpalEngine::with_bank(bank));
         audio.prepare(&song);
@@ -907,7 +950,10 @@ impl EditorState {
         let recent_files = prefs
             .recent_files
             .iter()
-            .map(|r| RecentPath { path: PathBuf::from(&r.path), time: r.time })
+            .map(|r| RecentPath {
+                path: PathBuf::from(&r.path),
+                time: r.time,
+            })
             .collect();
         let follow_marker = prefs.follow_marker;
         let follow_mode = prefs.follow_mode;
@@ -985,7 +1031,10 @@ impl EditorState {
             prefs_rate_menu: false,
             prefs_language_menu: false,
             prefs_drag: 0.0,
-            png_options: ImageOptions { dark: png_dark, ..ImageOptions::default() },
+            png_options: ImageOptions {
+                dark: png_dark,
+                ..ImageOptions::default()
+            },
             export_status: None,
             piano_start: 12,
             piano_keys_shown: 0,
@@ -1074,7 +1123,11 @@ impl EditorState {
         } else {
             let save = dialog.save;
             self.dialog_return = self.window.clone();
-            self.window = Some(if save { WindowKind::FileSave } else { WindowKind::FileOpen });
+            self.window = Some(if save {
+                WindowKind::FileSave
+            } else {
+                WindowKind::FileOpen
+            });
         }
         self.file_dialog = Some(dialog);
         self.context_menu = None;
@@ -1085,8 +1138,12 @@ impl EditorState {
     /// 返回 true 表示真的处理了一个请求（调用方据此催一次重绘）。
     /// COM 起不来时回落到自绘选框，功能不断。
     pub fn run_pending_dialog(&mut self) -> bool {
-        let Some(dialog) = self.pending_dialog.take() else { return false };
-        let Some(picker) = self.picker.clone() else { return false };
+        let Some(dialog) = self.pending_dialog.take() else {
+            return false;
+        };
+        let Some(picker) = self.picker.clone() else {
+            return false;
+        };
         match picker.pick(&dialog) {
             PickResult::Picked(path) => {
                 // 原版选文件夹取的是 `filename_dir(a)`（`draw_window_preferences.gml:279`）：
@@ -1108,7 +1165,11 @@ impl EditorState {
             PickResult::Unavailable => {
                 // 自绘兜底框会把原窗口顶掉，记住顶掉的是哪个，选完放回去。
                 self.dialog_return = self.window.clone();
-                self.window = Some(if dialog.save { WindowKind::FileSave } else { WindowKind::FileOpen });
+                self.window = Some(if dialog.save {
+                    WindowKind::FileSave
+                } else {
+                    WindowKind::FileOpen
+                });
                 self.file_dialog = Some(dialog);
             }
         }
@@ -1132,9 +1193,7 @@ impl EditorState {
         for cmd in cmds {
             // 原版 `message()` / `question()` 会冻结整个游戏循环：模态队列没答完之前，
             // 背景界面产生的命令一律丢弃，只接受「回答当前模态框」这一条。
-            if !self.modals.is_empty()
-                && !matches!(cmd, crate::commands::Command::AnswerModal(_))
-            {
+            if !self.modals.is_empty() && !matches!(cmd, crate::commands::Command::AnswerModal(_)) {
                 continue;
             }
             crate::commands::dispatch(self, cmd, ctx);
@@ -1160,9 +1219,12 @@ impl EditorState {
     pub fn sync_loop_params(&mut self) {
         let s = &self.doc.song;
         let end = s.song_length().max(1) as f64;
-        self.audio
-            .clock_mut()
-            .set_loop(s.meta.loop_enabled, s.meta.loop_start as f64, end, s.meta.loop_max);
+        self.audio.clock_mut().set_loop(
+            s.meta.loop_enabled,
+            s.meta.loop_start as f64,
+            end,
+            s.meta.loop_max,
+        );
     }
 
     /// 原版 `control_draw.gml:11-12`：`rw = 窗口物理宽 / window_scale` —— 窗口尺寸不动，
@@ -1184,7 +1246,9 @@ impl EditorState {
         const STEPS: [f32; 14] = [
             0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0,
         ];
-        let cur = self.prefs.effective_scale(ctx.native_pixels_per_point().unwrap_or(1.0));
+        let cur = self
+            .prefs
+            .effective_scale(ctx.native_pixels_per_point().unwrap_or(1.0));
         let next = if up {
             STEPS.iter().find(|s| **s > cur + 1e-4).copied()
         } else {
@@ -1192,14 +1256,23 @@ impl EditorState {
         };
         let Some(next) = next else { return };
         self.prefs.window_scale = Some(next);
-        self.set_message(format!("窗口缩放 => {}%", (next * 100.0).round()));
+        // 原版 `control_draw.gml:666`：`condstr(language = 1, "窗口缩放", "Window scale") + " => " + … + "%"`。
+        self.set_message(format!(
+            "{} => {}%",
+            crate::tr("Window scale", "窗口缩放"),
+            (next * 100.0).round()
+        ));
     }
 
     /// 原版 `control_draw.gml:732-735`：Ctrl+0 回到 `get_default_window_scale()`（= 系统 DPI / 96）。
     pub fn reset_window_scale(&mut self, ctx: &Context) {
         self.prefs.window_scale = None;
         let native = ctx.native_pixels_per_point().unwrap_or(1.0);
-        self.set_message(format!("窗口缩放 => {}%", (native * 100.0).round()));
+        self.set_message(format!(
+            "{} => {}%",
+            crate::tr("Window scale", "窗口缩放"),
+            (native * 100.0).round()
+        ));
     }
 
     /// 原版 `control_draw.gml:27-31` + `control_step.gml:21-29`：`window_icon` 一变就重设窗口图标。
@@ -1211,7 +1284,9 @@ impl EditorState {
         if self.applied_window_icon == Some(want) {
             return;
         }
-        let Some(icon) = self.icons.window_icon(want) else { return };
+        let Some(icon) = self.icons.window_icon(want) else {
+            return;
+        };
         ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(icon)));
         self.applied_window_icon = Some(want);
     }
@@ -1222,9 +1297,9 @@ impl EditorState {
     pub fn toggle_rainbow(&mut self) {
         self.rainbow = !self.rainbow;
         if self.rainbow {
-            self.set_message("炫彩模式 => ON");
+            self.set_message(format!("{} => ON", crate::tr("Rainbow mode", "炫彩模式")));
         } else {
-            self.set_message("炫彩模式 => OFF");
+            self.set_message(format!("{} => OFF", crate::tr("Rainbow mode", "炫彩模式")));
             self.theme.accent_init();
         }
     }
@@ -1304,7 +1379,8 @@ impl EditorState {
             let dt = ctx.input(|i| i.stable_dt).clamp(0.0, 0.1) as f32;
             let advanced = self.rainbow_hue + 120.0 * dt;
             self.rainbow_hue = if advanced < 360.0 { advanced } else { 1.0 };
-            self.theme.set_accent_table(Theme::hsb_to_rgb(self.rainbow_hue, 100.0, 100.0));
+            self.theme
+                .set_accent_table(Theme::hsb_to_rgb(self.rainbow_hue, 100.0, 100.0));
             accent_changed = true;
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(
                 1.0 / self.prefs.refresh_limit(),
@@ -1343,13 +1419,14 @@ impl EditorState {
         }
         // 定时自动保存（只写备份，不改动当前文件名与脏标记）
         let mins = self.prefs.autosave_interval() as u64;
-        if mins > 0
-            && self.doc.song.dirty
-            && self.last_autosave.elapsed().as_secs() >= mins * 60
-        {
+        if mins > 0 && self.doc.song.dirty && self.last_autosave.elapsed().as_secs() >= mins * 60 {
             self.last_autosave = Instant::now();
             if let Ok(p) = nbs_io::prefs::autosave(&self.doc.song, &self.prefs) {
-                let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                let name = p
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
                 self.set_message(if crate::lang() == 1 {
                     format!("已自动备份 {name}")
                 } else {
@@ -1429,8 +1506,8 @@ impl EditorState {
     /// 再按落点列起播（取落点速度并整列派发，见 [`AudioEngine::start`]）。
     /// 「播放 / 暂停」与录音待命首键两条起播路径都必须走这里。
     pub fn begin_playback(&mut self) {
-        let end_stop = self.doc.song.song_length() as f64
-            + nbs_audio::scheduler::END_STOP_MARGIN_TICKS;
+        let end_stop =
+            self.doc.song.song_length() as f64 + nbs_audio::scheduler::END_STOP_MARGIN_TICKS;
         if self.audio.clock().position() >= end_stop {
             self.audio.clock_mut().seek(0.0);
         }
@@ -1464,7 +1541,13 @@ impl EditorState {
 
     pub fn add_recent(&mut self, path: PathBuf) {
         self.recent_files.retain(|p| p.path != path);
-        self.recent_files.insert(0, RecentPath { path: path.clone(), time: nbs_io::prefs::unix_now() });
+        self.recent_files.insert(
+            0,
+            RecentPath {
+                path: path.clone(),
+                time: nbs_io::prefs::unix_now(),
+            },
+        );
         self.recent_files.truncate(11);
         self.prefs.add_recent(&path);
     }
@@ -1481,7 +1564,9 @@ impl EditorState {
         apply_audio_prefs(&mut *self.audio, &self.prefs);
         // 实时播放此前从不遵守"包含锁定层"，只有导出遵守；这里补齐。
         let include = self.prefs.include_locked_in_export;
-        self.audio.clock_mut().set_include_locked(include, &self.doc.song);
+        self.audio
+            .clock_mut()
+            .set_include_locked(include, &self.doc.song);
         self.audio_rev = self.doc.song.rev;
     }
 
@@ -1529,7 +1614,10 @@ impl EditorState {
         self.prefs.recent_files = self
             .recent_files
             .iter()
-            .map(|r| RecentFile { path: r.path.to_string_lossy().into_owned(), time: r.time })
+            .map(|r| RecentFile {
+                path: r.path.to_string_lossy().into_owned(),
+                time: r.time,
+            })
             .collect();
     }
 
@@ -1571,18 +1659,40 @@ impl EditorState {
             5 => Macro::ReplaceKey,
             6 => Macro::Tremolo {
                 spacing: a.clamp(1.0, 8.0) as u32,
-                fade: if self.macro_reverse { TremoloFade::Out } else { TremoloFade::None },
+                fade: if self.macro_reverse {
+                    TremoloFade::Out
+                } else {
+                    TremoloFade::None
+                },
                 amount: a as i32,
             },
-            7 => Macro::Stereo { width: a.clamp(0.0, 100.0) as u8, reverse: self.macro_reverse },
+            7 => Macro::Stereo {
+                width: a.clamp(0.0, 100.0) as u8,
+                reverse: self.macro_reverse,
+            },
             8 => Macro::Arpeggio { pattern },
-            9 => Macro::Portamento { cents: a as i32, reverse: self.macro_reverse },
-            10 => Macro::Stagger { pattern: pattern.iter().map(|&x| x.max(0) as u32).collect() },
+            9 => Macro::Portamento {
+                cents: a as i32,
+                reverse: self.macro_reverse,
+            },
+            10 => Macro::Stagger {
+                pattern: pattern.iter().map(|&x| x.max(0) as u32).collect(),
+            },
             11 => Macro::Chorus { detune: a as i32 },
-            12 => Macro::SetVelocity { value: a.clamp(0.0, 100.0) as u8, percent: self.macro_reverse },
-            13 => Macro::SetPanning { value: a.clamp(-100.0, 100.0) as i16 },
-            14 => Macro::SetPitch { value: a as i16, additive: self.macro_reverse },
-            15 => Macro::SetInstrument { value: a.clamp(0.0, 15.0) as u8 },
+            12 => Macro::SetVelocity {
+                value: a.clamp(0.0, 100.0) as u8,
+                percent: self.macro_reverse,
+            },
+            13 => Macro::SetPanning {
+                value: a.clamp(-100.0, 100.0) as i16,
+            },
+            14 => Macro::SetPitch {
+                value: a as i16,
+                additive: self.macro_reverse,
+            },
+            15 => Macro::SetInstrument {
+                value: a.clamp(0.0, 15.0) as u8,
+            },
             _ => Macro::Reset,
         }
     }
@@ -1674,7 +1784,10 @@ mod tests {
         // 结构方块导出的不是 schematic 而是 .nbt（`schematic_export.gml:6`）。
         let mut sch = FileDialog::for_action(DialogAction::ExportSchematic, None, None);
         sch.set_ext("nbt");
-        assert_eq!(sch.picker_spec().filters[0].name, "Minecraft Structures (*.nbt)");
+        assert_eq!(
+            sch.picker_spec().filters[0].name,
+            "Minecraft Structures (*.nbt)"
+        );
 
         // 首选项里的「修改」：原版是过滤器为空串的保存框，文件名栏塞占位串
         // （`draw_window_preferences.gml:278`），选完由调用处取它所在的目录。
@@ -1704,7 +1817,10 @@ mod tests {
             assert!(tempo_datapack_good(t), "{t} 应是数据包的好速度");
         }
         for t in [20.0_f32, 4.0, 2.0, 1.25, 1.0, 0.5, 0.25] {
-            assert!(!tempo_schematic_ok(t), "数据包的好速度不等于能导 Schematic: {t}");
+            assert!(
+                !tempo_schematic_ok(t),
+                "数据包的好速度不等于能导 Schematic: {t}"
+            );
             assert!(tempo_datapack_good(t), "{t} 应是数据包的好速度");
         }
         for t in [23.45_f32, 9.0, 3.0, 1.5, 0.3] {
@@ -1726,7 +1842,10 @@ mod tests {
     }
 
     fn state_with(answer: PickResult) -> (EditorState, std::sync::Arc<FakePicker>) {
-        let picker = std::sync::Arc::new(FakePicker { answer, seen: std::sync::Mutex::new(Vec::new()) });
+        let picker = std::sync::Arc::new(FakePicker {
+            answer,
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
         let mut st = EditorState::new();
         // dispatch 按各自 state 的 prefs 同步全局语言；钉中文让「保存歌曲」断言稳定。
         st.prefs.language = 1;
@@ -1754,7 +1873,10 @@ mod tests {
 
         st.run_pending_dialog();
         assert!(st.pending_dialog.is_none());
-        assert_eq!(picker.seen.lock().unwrap().as_slice(), &["保存歌曲".to_string()]);
+        assert_eq!(
+            picker.seen.lock().unwrap().as_slice(),
+            &["保存歌曲".to_string()]
+        );
         // DialogConfirm(SaveSong) → SavePath：真的把歌曲写到选定的路径上。
         st.flush(&ctx);
         assert!(out.is_file(), "选完路径必须真的保存，实测 {:?}", out);
@@ -1802,7 +1924,11 @@ mod tests {
         ));
         st.run_pending_dialog();
         st.flush(&ctx);
-        assert_eq!(st.prefs.song_folder.as_deref(), Some(dir.to_str().unwrap()), "实测 {picked:?}");
+        assert_eq!(
+            st.prefs.song_folder.as_deref(),
+            Some(dir.to_str().unwrap()),
+            "实测 {picked:?}"
+        );
         assert_eq!(st.window, Some(WindowKind::Preferences));
     }
 }

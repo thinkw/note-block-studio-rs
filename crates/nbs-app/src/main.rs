@@ -24,11 +24,11 @@ use eframe::egui;
 use nbs_editor::EditorState;
 
 #[cfg(windows)]
-mod window_icon;
-#[cfg(windows)]
 mod native_dialog;
 #[cfg(windows)]
 mod update;
+#[cfg(windows)]
+mod window_icon;
 
 struct NbsApp {
     state: EditorState,
@@ -43,6 +43,9 @@ struct NbsApp {
 
 impl NbsApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // 语言要在建状态之前定好：演示曲描述、下面这条启动就写进状态栏的提示，
+        // 都是「生成那一刻」定型的（原版同样在 load_settings 里先把 language 读好）。
+        nbs_editor::set_language(nbs_io::prefs::Preferences::load().language);
         let mut state = EditorState::new();
         // 文件选择交给系统组件（原版的选框就是 Win32 的），编辑器只提请求。
         #[cfg(windows)]
@@ -74,9 +77,16 @@ impl NbsApp {
                         state.doc.replace_song(song);
                         state.prepare_audio();
                         state.add_recent(path);
-                        state.set_message("已从命令行载入歌曲");
+                        state.set_message(nbs_editor::tr(
+                            "Song loaded from command line",
+                            "已从命令行载入歌曲",
+                        ));
                     }
-                    Err(e) => state.set_message(format!("载入失败: {e}")),
+                    Err(e) => state.set_message(if nbs_core::lang() == 1 {
+                        format!("载入失败: {e}")
+                    } else {
+                        format!("Load failed: {e}")
+                    }),
                 }
             }
         }
@@ -160,7 +170,13 @@ fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|a| a.starts_with("--")) {
         if let Err(e) = run_cli(&args) {
-            eprintln!("错误: {e}");
+            // 前缀跟着语言走；`{e}` 本身（NbsError 的 Display）在 run_cli 里已经钉过语言了。
+            let msg = if nbs_core::lang() == 1 {
+                format!("错误: {e}")
+            } else {
+                format!("Error: {e}")
+            };
+            eprintln!("{msg}");
             std::process::exit(1);
         }
         return Ok(());
@@ -175,10 +191,15 @@ fn main() -> eframe::Result<()> {
         .with_inner_size([1440.0, 900.0])
         .with_min_inner_size([960.0, 620.0])
         .with_title("nbs-rust");
-    if let Some(icon) = nbs_editor::icons::load_window_icon(if prefs.window_icon { "old" } else { "new" }) {
+    if let Some(icon) =
+        nbs_editor::icons::load_window_icon(if prefs.window_icon { "old" } else { "new" })
+    {
         viewport = viewport.with_icon(icon);
     }
-    let options = eframe::NativeOptions { viewport, ..Default::default() };
+    let options = eframe::NativeOptions {
+        viewport,
+        ..Default::default()
+    };
     eframe::run_native(
         "nbs-rust",
         options,
@@ -188,6 +209,10 @@ fn main() -> eframe::Result<()> {
 
 /// 无界面批处理：便于 CI / 脚本批量转换，不需要音频设备或显示器。
 fn run_cli(args: &[String]) -> Result<(), String> {
+    // 报错文字（`NbsError` 的 Display 等）按语言开关出词，先按 prefs 把本线程钉好，
+    // 别让设了中文的用户看到半句英文。CLI 自己的用法说明是移植附带的工具，原版没有，
+    // 保持中文一种。
+    nbs_editor::set_language(nbs_io::prefs::Preferences::load().language);
     let cmd = args[0].as_str();
     if cmd == "--help" || cmd == "-h" {
         println!(
@@ -236,20 +261,30 @@ fn run_cli(args: &[String]) -> Result<(), String> {
 
     if cmd == "--import-midi" {
         // precision=0 → deltapertick = PPQ/4 = 120，与本程序导出的 MIDI 1:1 对应
-        let opts = nbs_io::midi::MidiImportOptions { precision: 0, ..Default::default() };
+        let opts = nbs_io::midi::MidiImportOptions {
+            precision: 0,
+            ..Default::default()
+        };
         let song = nbs_io::midi::import_midi_path(input, &opts)?;
-        nbs_core::nbs::save(output, &song, nbs_core::nbs::NBS_VERSION).map_err(|e| e.to_string())?;
+        nbs_core::nbs::save(output, &song, nbs_core::nbs::NBS_VERSION)
+            .map_err(|e| e.to_string())?;
         println!("已导入 {} 个音符 → {}", song.total_blocks, output.display());
         return Ok(());
     }
 
     if cmd == "--import-schematic" {
         let info = nbs_io::schematic::import_schematic(input).map_err(|e| e.to_string())?;
-        nbs_core::nbs::save(output, &info.song, nbs_core::nbs::NBS_VERSION).map_err(|e| e.to_string())?;
+        nbs_core::nbs::save(output, &info.song, nbs_core::nbs::NBS_VERSION)
+            .map_err(|e| e.to_string())?;
         println!(
             "图样 {}×{}×{}：{} 个输入 / {} 个音符盒 / 落子 {} → {}",
-            info.width, info.length, info.height, info.inputs, info.note_blocks,
-            info.added_notes, output.display()
+            info.width,
+            info.length,
+            info.height,
+            info.inputs,
+            info.note_blocks,
+            info.added_notes,
+            output.display()
         );
         return Ok(());
     }
@@ -259,15 +294,15 @@ fn run_cli(args: &[String]) -> Result<(), String> {
         "--export-wav" => {
             let mut bank = nbs_audio::SoundBank::discover();
             bank.extend_for_song(&song);
-            let st = nbs_audio::export_wav(
-                &song,
-                &bank,
-                output,
-                &nbs_audio::ExportOptions::default(),
-            )?;
+            let st =
+                nbs_audio::export_wav(&song, &bank, output, &nbs_audio::ExportOptions::default())?;
             println!(
                 "已导出 {} 音符 / {:.1}s / {} 线程 / 峰值 {:.2} → {}",
-                st.notes, st.duration_seconds, st.threads, st.peak, output.display()
+                st.notes,
+                st.duration_seconds,
+                st.threads,
+                st.peak,
+                output.display()
             );
         }
         // 与原版一样：先渲染 WAV，再交给 ffmpeg 转目标格式。格式由输出扩展名决定。
@@ -331,7 +366,11 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             )?;
             println!(
                 "已导出原理图 {}×{}×{} / {} 音符盒 → {}",
-                info.length, info.width, info.height, info.note_blocks, output.display()
+                info.length,
+                info.width,
+                info.height,
+                info.note_blocks,
+                output.display()
             );
         }
         "--export-datapack" => {
