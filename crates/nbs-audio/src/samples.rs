@@ -68,8 +68,22 @@ pub struct SoundBank {
     pub samples: Vec<Sample>,
     pub missing: Vec<String>,
     pub source: Option<PathBuf>,
-    /// 节拍器采样（可选）。
+    /// 节拍器采样（可选）。原版 `soundmetronome` = `ui/metronome.ogg`
+    /// （`control_create.gml:316-319`），不在乐器表里。
     pub metronome: Option<Sample>,
+    /// 小节第一拍的重音采样。原版 `soundmetronomeclick` = `ui/metronome_click.ogg`
+    /// （`control_create.gml:324-327`）。
+    pub metronome_click: Option<Sample>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SampleSource {
+    /// 乐器表下标（0..19 内置，>= 20 自定义）。
+    Instrument(usize),
+    /// `soundmetronome`。
+    Metronome,
+    /// `soundmetronomeclick`：小节第一拍的重音。
+    MetronomeClick,
 }
 
 impl SoundBank {
@@ -124,6 +138,17 @@ impl SoundBank {
         ]) {
             bank.metronome = Some(Sample { pcm, base_key: BASE_KEY, name: "节拍器".into() });
         }
+        if let Ok(pcm) = decode_ogg_any(&[
+            dir.join("metronome_click.ogg"),
+            dir.join("UI/metronome_click.ogg"),
+        ]) {
+            bank.metronome_click =
+                Some(Sample { pcm, base_key: BASE_KEY, name: "节拍器重音".into() });
+        } else if let Some(m) = bank.metronome.clone() {
+            // 原版两个采样一起打在 datafiles 里，不存在「只有普通拍、没有重音」的装机；
+            // 端口读的是用户自选目录，缺重音时退回普通拍，免得小节头反而变成静音。
+            bank.metronome_click = Some(m);
+        }
         bank
     }
 
@@ -148,6 +173,17 @@ impl SoundBank {
 
     pub fn get(&self, index: usize) -> Option<&Sample> {
         self.samples.get(index)
+    }
+
+    /// 按来源取采样。节拍器两声在原版是独立的声音资产
+    /// （`control_create.gml:316-327`），不占乐器表的索引，所以采样定位不能只看
+    /// `samples`；`Voice` 因此存来源而不是存下标。
+    pub fn resolve(&self, source: SampleSource) -> Option<&Sample> {
+        match source {
+            SampleSource::Instrument(i) => self.get(i),
+            SampleSource::Metronome => self.metronome.as_ref(),
+            SampleSource::MetronomeClick => self.metronome_click.as_ref(),
+        }
     }
 
     pub fn loaded_count(&self) -> usize {
@@ -293,5 +329,32 @@ mod tests {
         let src: Vec<f32> = (0..48000).map(|i| (i as f32 * 0.01).sin()).collect();
         let dst = resample_linear(&src, 48000, 44100);
         assert_eq!(dst.len(), 44100);
+    }
+
+    /// 原版把节拍器两声放在 `Data/Sounds/UI/` 下
+    /// （`control_create.gml:316-327`：`ui/metronome.ogg` / `ui/metronome_click.ogg`），
+    /// 文件名拼错就是「响不了」或「响错音」，所以按真实目录验一次。
+    #[test]
+    fn metronome_samples_come_from_the_ui_folder() {
+        let bank = SoundBank::discover();
+        let m = bank.metronome.as_ref().expect("节拍器采样应能载到");
+        let c = bank
+            .metronome_click
+            .as_ref()
+            .expect("节拍器重音采样应能载到");
+        assert!(!m.is_empty() && !c.is_empty(), "两个采样都不能是空壳");
+        assert_eq!(m.base_key, BASE_KEY);
+        assert_eq!(c.base_key, BASE_KEY);
+        // resolve 必须按来源取到对应那一份，取错就会把重音放成普通拍。
+        assert!(std::ptr::eq(
+            bank.resolve(SampleSource::Metronome).unwrap(),
+            m
+        ));
+        assert!(std::ptr::eq(
+            bank.resolve(SampleSource::MetronomeClick).unwrap(),
+            c
+        ));
+        assert!(bank.resolve(SampleSource::Instrument(0)).is_some());
+        assert!(bank.resolve(SampleSource::Instrument(9999)).is_none());
     }
 }

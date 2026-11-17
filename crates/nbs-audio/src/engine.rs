@@ -32,6 +32,9 @@ pub trait AudioEngine {
     /// 按 `control_draw.gml:256-263`，它们是「图层音量 / 图层声道」，
     /// 与音符自身的力度、声像一起进 [`crate::mixer::Voice::gains`]。
     fn preview_note_vp(&mut self, note: &Note, layer_volume: u8, layer_stereo: u8);
+    /// 原版 `play_sound(soundmetronome, 45, 100, 100, 0)`：速度测量器打点那一声。
+    /// 它不走乐器表，用的是独立采样（`crate::samples::SoundBank::metronome`）。
+    fn preview_metronome(&mut self, key: u8);
     fn start(&mut self, from_tick: f64);
     fn stop(&mut self);
     fn is_playing(&self) -> bool;
@@ -246,6 +249,21 @@ impl AudioEngine for CpalEngine {
         st.mixer
             .spawn(note, layer_volume, layer_stereo, &bank, 0, -1);
     }
+    fn preview_metronome(&mut self, key: u8) {
+        let mut st = self.shared.lock();
+        let bank = st.bank.clone();
+        // 原版这一声用的是声音资产本身，乐器下标只是 Note 结构里的占位。
+        let click = nbs_core::model::Note::new(0, key);
+        st.mixer.spawn_source(
+            crate::samples::SampleSource::Metronome,
+            &click,
+            100,
+            100,
+            &bank,
+            0,
+            -1,
+        );
+    }
     fn start(&mut self, from_tick: f64) {
         self.clock.seek(from_tick);
         self.clock.play();
@@ -417,6 +435,7 @@ impl AudioEngine for SilentEngine {
     fn preview_note_vp(&mut self, _note: &Note, _layer_volume: u8, _layer_stereo: u8) {
         // 没有输出设备，试听无处可去；时钟照常推进。
     }
+    fn preview_metronome(&mut self, _key: u8) {}
     fn start(&mut self, from_tick: f64) {
         self.clock.seek(from_tick);
         self.clock.play();

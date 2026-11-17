@@ -3,7 +3,7 @@
 
 use nbs_core::model::{Note, PAN_CENTER};
 
-use crate::samples::{SoundBank, SAMPLE_RATE};
+use crate::samples::{SampleSource, SoundBank, SAMPLE_RATE};
 
 /// 默认 voice 上限（原版 `channels = 256`，勾选更多通道后 1024）。
 pub const DEFAULT_MAX_VOICES: usize = 256;
@@ -23,7 +23,7 @@ pub const REALTIME_TICK_JITTER_MS: f64 = 5.0;
 
 #[derive(Clone, Debug)]
 pub struct Voice {
-    pub sample_index: usize,
+    pub source: SampleSource,
     /// 采样内的浮点读头。
     pub pos: f64,
     /// 每个输出采样推进的源采样数（= pitch × 源率/输出率）。
@@ -88,7 +88,7 @@ impl Voice {
             self.pre -= 1.0;
             return 0.0;
         }
-        let Some(sample) = bank.get(self.sample_index) else {
+        let Some(sample) = bank.resolve(self.source) else {
             self.alive = false;
             return 0.0;
         };
@@ -189,8 +189,32 @@ impl Mixer {
         layer: u32,
         tick: i64,
     ) {
-        let idx = note.instrument as usize;
-        let Some(sample) = bank.get(idx) else { return };
+        self.spawn_source(
+            SampleSource::Instrument(note.instrument as usize),
+            note,
+            layer_volume,
+            layer_stereo,
+            bank,
+            layer,
+            tick,
+        );
+    }
+
+    /// 按指定采样来源派发一个音。原版 `play_sound(ins, ...)` 的 `ins` 本来就是
+    /// 「某个 obj_instrument」，乐器表里的音色和节拍器那两个声音资产走的是同一条路
+    /// （`control_create.gml:316-327` 给节拍器单独 create 了两个 obj_instrument），
+    /// 所以这里用来源区分，而不是硬套一个乐器下标。
+    pub fn spawn_source(
+        &mut self,
+        source: SampleSource,
+        note: &Note,
+        layer_volume: u8,
+        layer_stereo: u8,
+        bank: &SoundBank,
+        layer: u32,
+        tick: i64,
+    ) {
+        let Some(sample) = bank.resolve(source) else { return };
         if sample.is_empty() {
             return;
         }
@@ -200,7 +224,7 @@ impl Mixer {
         let (gl, gr) = Voice::gains(note, layer_volume, layer_stereo, self.master, self.mono);
         self.serial += 1;
         self.voices.push(Voice {
-            sample_index: idx,
+            source,
             pos: 0.0,
             ratio: Voice::playback_ratio(note, sample.base_key, self.output_rate),
             gain_l: gl,

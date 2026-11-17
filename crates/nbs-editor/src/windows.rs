@@ -3185,12 +3185,8 @@ fn tempo_tapper_window(state: &mut EditorState, ui: &mut Ui) {
     let tapped = ui.input(|i| i.key_pressed(egui::Key::T))
         && state.tapper.register_tap(crate::state::tap_clock_ms());
     if tapped {
-        // 原版 `play_sound(soundmetronome, 45, 100, 100, 0)` 用的是 ui/metronome.ogg；
-        // 端口的节拍器采样落在采样库 4 号（click）上，和播放时的节拍器同一个音，
-        // 力度按原版取 100。
-        let mut click = nbs_core::model::Note::new(4, 45);
-        click.velocity = 100;
-        state.audio.preview_note(&click);
+        // 原版 `play_sound(soundmetronome, 45, 100, 100, 0)`：100 力度、居中、无微调。
+        state.audio.preview_metronome(45);
     }
     let mut apply: Option<Command> = None;
     let mut close = false;

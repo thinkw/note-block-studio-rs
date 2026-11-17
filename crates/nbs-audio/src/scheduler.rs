@@ -13,7 +13,7 @@ use parking_lot::Mutex;
 use nbs_core::model::{Note, Song, FIRST_CUSTOM_INDEX};
 
 use crate::mixer::{Mixer, DEFAULT_MAX_VOICES};
-use crate::samples::SoundBank;
+use crate::samples::{SampleSource, SoundBank};
 
 /// 播放到该列时要做的事。事件乐器不发声音——原版 control_step.gml:283-296
 /// 的 else-if 链在 `play_sound` 之前就把它们拦截了。
@@ -366,19 +366,44 @@ impl SharedState {
         }
     }
 
+    /// 原版 `control_draw.gml:991-1010` 的节拍器段：每 4 tick 一响，小节第一拍
+    /// 换成 `soundmetronomeclick`，其余拍用 `soundmetronome`，两边都是
+    /// `play_sound(ins, 45, 100, 100, 0)`；采样没载到就不响（`if (ins.loaded)`）。
     fn trigger_metronome(&mut self, position: f64) {
-        if !self.params.metronome || self.bank.metronome.is_none() {
+        if !self.params.metronome {
             return;
         }
-        // 原版：pos = floor(marker_pos - 0.1)，每 4 tick 一响
-        let pos = (position - 0.1).floor() as i64;
-        if pos >= 0 && pos % 4 == 0 && self.metronome_played < pos {
-            let mut click = Note::new(4, 45);
-            click.velocity = 60;
-            self.mixer.master = self.params.master;
-            self.mixer.spawn(&click, 100, 100, &self.bank, 0, -1);
-            self.metronome_played = pos + 1;
+        // 原版按 room_speed 挑偏移（>= 60 用 -0.1，30 帧用 -0.4）。端口的位置是
+        // 按音频回调连续推进的，没有「一帧一跳」的量化，恒走 -0.1 那一支。
+        let mut pos = (position - 0.1).floor() as i64;
+        // 原版 `if (current_song.tempo = 30) pos -= 1`：30 t/s（= 450 BPM）时让开一列。
+        if self.params.tempo == 30.0 {
+            pos -= 1;
         }
+        if pos < 0 || pos % 4 != 0 || self.metronome_played >= pos {
+            return;
+        }
+        // 原版 `pos mod (4 * timesignature) == 0`：每小节第一拍。
+        let bar = 4i64 * i64::from(self.params.time_signature.max(1));
+        let accent = bar > 0 && pos.rem_euclid(bar) == 0;
+        // 循环播放时掐掉歌尾那一拍的重音（原版 `if (!loop || pos < enda + 1)`）：
+        // 回绕后紧接着又是一拍重音，两响会叠在一起。闸门只挡发声，
+        // metronome_played 照旧推进 —— 原版它就写在 if 外面。
+        let in_loop = self.params.loop_enabled;
+        let at_song_end = pos >= self.params.song_length as i64;
+        if !accent || !in_loop || !at_song_end {
+            let source = if accent {
+                SampleSource::MetronomeClick
+            } else {
+                SampleSource::Metronome
+            };
+            let mut click = Note::new(0, 45);
+            click.velocity = 100;
+            self.mixer.master = self.params.master;
+            self.mixer
+                .spawn_source(source, &click, 100, 100, &self.bank, 0, -1);
+        }
+        self.metronome_played = pos + 1;
     }
 
     /// 渲染一个输出采样帧（同时推进调度时钟）。
@@ -635,6 +660,7 @@ pub fn make_shared(bank: SoundBank, sample_rate: u32) -> Shared {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::samples::Sample;
     use nbs_core::model::Note;
 
     fn song_ticks(ticks: u32) -> Song {
@@ -1058,5 +1084,108 @@ mod tests {
         st.seek(7.0);
         st.dispatch_landing_column(7.0);
         assert_eq!(st.take_visual_events(), vec![VisualEvent::AccentColor([0x0a, 0x0b, 0x0c])]);
+    }
+
+    /// 原版节拍器两个采样是独立声音资产（`control_create.gml:316-327`），
+    /// 两条采样给不同长度，好把「这一拍用了哪一个」读出来。
+    fn metronome_bank() -> SoundBank {
+        let mut bank = SoundBank::default();
+        bank.samples
+            .push(Sample { pcm: vec![0.0; 8], base_key: 45, name: "harp".into() });
+        bank.metronome = Some(Sample {
+            pcm: vec![0.0; 16],
+            base_key: 45,
+            name: "metronome".into(),
+        });
+        bank.metronome_click = Some(Sample {
+            pcm: vec![0.0; 32],
+            base_key: 45,
+            name: "metronome_click".into(),
+        });
+        bank
+    }
+
+    fn metronome_state(bank: SoundBank) -> SharedState {
+        let mut st = SharedState::new(Arc::new(bank), 44100);
+        st.params.metronome = true;
+        st.params.time_signature = 4;
+        st
+    }
+
+    /// 原版 `control_draw.gml:991-1010`：每 4 tick 一响，小节头（`pos mod
+    /// 4*timesignature == 0`）用 metronome_click，其余用 metronome，
+    /// 两边都是 `play_sound(ins, 45, 100, 100, 0)` = 力度 100。
+    #[test]
+    fn metronome_uses_its_own_samples_and_accents_the_bar_head() {
+        let mut st = metronome_state(metronome_bank());
+        st.trigger_metronome(0.5);
+        assert_eq!(
+            st.mixer.voices.len(),
+            1,
+            "第 0 列是整小节，应有一记重音"
+        );
+        let v = &st.mixer.voices[0];
+        assert_eq!(v.source, SampleSource::MetronomeClick, "小节头用重音采样");
+        // 力度 100、声道 100、master 1.0 → 左右各 0.5（旧的 60 力度会是 0.3）。
+        assert_eq!((v.gain_l, v.gain_r), (0.5, 0.5), "原版 play_sound 力度写死 100");
+        assert_eq!(v.layer, 0, "节拍器不带层号，消音器掐不到它");
+        assert_eq!(v.pre, 0.0, "tick -1：不参与整列抖动");
+
+        st.trigger_metronome(2.0);
+        assert_eq!(st.mixer.voices.len(), 1, "metronome_played 已推进，同一拍不双响");
+
+        st.trigger_metronome(4.5);
+        assert_eq!(st.mixer.voices.len(), 2, "第 4 列该再响一记");
+        assert_eq!(
+            st.mixer.voices[1].source,
+            SampleSource::Metronome,
+            "小节内非第一拍用普通采样"
+        );
+
+        st.trigger_metronome(16.5);
+        assert_eq!(
+            st.mixer.voices.last().unwrap().source,
+            SampleSource::MetronomeClick,
+            "下一小节头又是重音"
+        );
+
+        st.trigger_metronome(5.5);
+        assert_eq!(st.mixer.voices.len(), 3, "非 4 的倍数不响");
+    }
+
+    /// 原版 `if (current_song.tempo = 30) pos -= 1` 和循环末尾的重音闸门
+    /// `if (!current_song.loop || pos < current_song.enda + 1)`。
+    #[test]
+    fn metronome_follows_the_tempo_30_shift_and_the_loop_guard() {
+        // 30 t/s（= 450 BPM）时 pos 让开一列：4.5 这一帧本来落在第 4 列，
+        // 让位之后是 3，不成拍 → 不响。换个 tempo 就不让。
+        let mut st = metronome_state(metronome_bank());
+        st.params.tempo = 30.0;
+        st.trigger_metronome(4.5);
+        assert!(st.mixer.voices.is_empty(), "tempo = 30 要按原版让开一列");
+
+        let mut st = metronome_state(metronome_bank());
+        st.trigger_metronome(4.5);
+        assert_eq!(st.mixer.voices.len(), 1, "其余 tempo 不让位，同一拍照响");
+
+        // 循环开着、这拍又是小节头重音、又到达歌尾（`pos >= enda + 1`）：
+        // 原版把发声挡掉，但 metronome_played 写在 if 外面，照旧推进。
+        let mut st = metronome_state(metronome_bank());
+        st.params.loop_enabled = true;
+        st.params.song_length = 4.0;
+        st.trigger_metronome(16.5);
+        assert!(st.mixer.voices.is_empty(), "循环中的歌尾重音被原版闸门挡掉");
+        assert_eq!(
+            st.metronome_played, 17,
+            "挡掉的是发声，metronome_played 仍要推进（它在原版写在 if 外面）"
+        );
+        st.trigger_metronome(20.5);
+        assert_eq!(st.mixer.voices.len(), 1, "闸门只挡重音，小节内普通拍照响");
+        // 反向确认闸门确实来自 loop 开关：同一个 pos 关掉循环就响。
+        let mut st = metronome_state(metronome_bank());
+        st.params.loop_enabled = false;
+        st.params.song_length = 4.0;
+        st.trigger_metronome(16.5);
+        assert_eq!(st.mixer.voices.len(), 1, "循环关掉后同一拍的重音照响");
     }
 }
