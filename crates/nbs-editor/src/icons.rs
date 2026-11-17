@@ -784,10 +784,6 @@ impl Bank {
         self.piano.blit(p, at, index, Vec2::new(self.piano.fw, self.piano.fh), tint);
     }
 
-    /// `spr_piano` 一帧的原始尺寸（40×121），调用方据此算命中区。
-    pub fn piano_key_size(&self) -> Vec2 {
-        Vec2::new(self.piano.fw, self.piano.fh)
-    }
 
     /// 原版 `draw_block` 的方块精灵：`draw_sprite_ext(sprite, frame, xx, yy, 1, 1, 0, -1, alpha)`。
     /// 颜色不染色（-1），只按 `alpha` 乘透明度；帧号就是乐器在列表里的下标。
@@ -929,10 +925,6 @@ impl Bank {
         );
     }
 
-    /// 方块精灵的原生边长（32）。
-    pub fn block_size(&self) -> Vec2 {
-        Vec2::new(self.block_color.fw, self.block_color.fh)
-    }
 
     /// 欢迎窗动作按钮底图 spr_frame2 按主题方言取哪条：原版帧号
     /// `m + 3*theme + 3*(fdark && theme=3)`，拆条后每条 3 帧，m 直接当帧号。
@@ -1067,10 +1059,6 @@ impl Icons {
         self.bank.clone()
     }
 
-    /// 资源确实找不到（而不是还没加载）时为真，调用方据此退回文字按钮。
-    pub fn unavailable(&self) -> bool {
-        self.bank.is_none() && self.missing
-    }
 
     /// 原版 `control_create.gml:59-60` + `control_draw.gml:27-31`：`window_icon` 为真时把窗口
     /// 图标换成 `Data\icon.ico`，为假时还原成程序自带的那份。读不到文件就返回 `None`，

@@ -366,11 +366,6 @@ pub struct MidiImportPrefs {
 }
 
 impl MidiImportPrefs {
-    /// 出厂值 = `control_create.gml`（tag v3.12.0-rc.1）那套 `w_midi_*`。
-    pub fn factory() -> Self {
-        Self::from_options(&MidiImportOptions::default())
-    }
-
     pub fn from_options(o: &MidiImportOptions) -> Self {
         Self {
             remember: o.remember,

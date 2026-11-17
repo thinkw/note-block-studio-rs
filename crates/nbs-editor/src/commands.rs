@@ -1894,19 +1894,6 @@ fn export_datapack(state: &mut EditorState, path: &std::path::Path) {
     }
 }
 
-/// 供菜单与状态栏显示的当前画笔描述。
-pub fn current_note_label(state: &EditorState) -> String {
-    let c: Note = state.current;
-    format!(
-        "{} | {} | V{} | P{} | {}¢",
-        nbs_core::instruments::instrument_name(c.instrument),
-        nbs_core::model::key_name(c.key, true, state.flags.flats),
-        c.velocity,
-        c.panning,
-        c.pitch
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

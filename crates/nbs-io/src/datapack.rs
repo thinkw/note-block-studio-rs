@@ -17,12 +17,6 @@ use nbs_core::model::{Song, FIRST_CUSTOM_INDEX};
 
 use crate::schematic::{legacy_block_name, INSTRUMENT_BLOCKS};
 
-/// 原版 `dat_source` 的 10 个取值（窗口里两列的顺序）。
-pub const SOUND_SOURCES: [&str; 10] = [
-    "ambient", "block", "hostile", "master", "music", "neutral", "player", "record", "voice",
-    "weather",
-];
-
 /// 原版 `dat_instrument`：内置音色对应的 `minecraft:block.note_block.*` 事件。
 /// 16..19 是装机版新增的铜块一族，事件名取自装机版自带的
 /// `Data/instrumenttextures.zip → assets/minecraft/sounds.json`。
@@ -83,10 +77,6 @@ impl VisType {
             Self::Fountain => "Fountain",
             Self::RittaiOnkyou => "Rittai Onkyou",
         }
-    }
-
-    pub fn from_gml_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|t| t.gml_name() == name)
     }
 }
 

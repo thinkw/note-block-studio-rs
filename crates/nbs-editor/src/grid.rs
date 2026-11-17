@@ -1243,7 +1243,7 @@ fn push_note(
     }
 
     // 不兼容：自定义乐器、或超出 MC 音域的键，画一圈红框（原版 draw_rectangle(..., 1)）。
-    if flags.show_incompatible && (iscustom || note.key < MC_KEY_MIN || note.key > MC_KEY_MAX) {
+    if flags.show_incompatible && note.is_out_of_range() {
         let r = Rect::from_min_max(pos2(at.x + 1.0, at.y + 1.0), pos2(at.x + 32.0, at.y + 32.0));
         p.rect_stroke(r, 0.0, Stroke::new(1.0_f32, C_RED), StrokeKind::Inside);
     }

@@ -52,22 +52,6 @@ impl Value {
             _ => None,
         }
     }
-    pub fn as_i64(&self) -> Option<i64> {
-        match self {
-            Value::Long(v) => Some(*v),
-            Value::Int(v) => Some(*v as i64),
-            Value::Short(v) => Some(*v as i64),
-            Value::Byte(v) => Some(*v as i64),
-            _ => None,
-        }
-    }
-    pub fn as_f64(&self) -> Option<f64> {
-        match self {
-            Value::Double(v) => Some(*v),
-            Value::Float(v) => Some(*v as f64),
-            _ => None,
-        }
-    }
     pub fn as_str(&self) -> Option<&str> {
         if let Value::String(s) = self {
             Some(s)
@@ -103,10 +87,6 @@ impl Value {
         } else {
             None
         }
-    }
-    /// 取整数并转成 usize（负数按 0）。
-    pub fn as_count(&self) -> Option<usize> {
-        self.as_i32().map(|v| v.max(0) as usize)
     }
 }
 

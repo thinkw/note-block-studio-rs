@@ -122,13 +122,6 @@ impl History {
     pub fn cursor(&self) -> usize {
         self.cursor
     }
-    pub fn capacity(&self) -> usize {
-        self.capacity
-    }
-    pub fn set_capacity(&mut self, capacity: usize) {
-        self.capacity = capacity.max(1);
-        self.trim();
-    }
     pub fn can_undo(&self) -> bool {
         self.cursor > 0
     }

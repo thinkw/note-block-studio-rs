@@ -60,10 +60,6 @@ impl<'a> Tx<'a> {
         self.watch_notes(&cells);
     }
 
-    pub fn watch_rect_existing_i(&mut self, x0: u32, y0: u32, x1: u32, y1: u32) {
-        self.watch_rect_existing(x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1));
-    }
-
     pub fn track_layers(&mut self) {
         self.layers_before = Some(self.doc.song.layers.clone());
     }
@@ -315,10 +311,6 @@ impl Document {
         }
         tx.selection().merge_absolute(&collected);
         tx.commit();
-    }
-
-    pub fn select_point(&mut self, tick: u32, layer: u32, additive: bool) {
-        self.select_rect(tick, layer, tick, layer, false, additive, false);
     }
 
     pub fn select_all(&mut self) {

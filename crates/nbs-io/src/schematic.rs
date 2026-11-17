@@ -687,11 +687,6 @@ impl SchematicOptions {
             data: self.ins_data.get(index).copied().unwrap_or(0),
         }
     }
-
-    /// 原界面里 20 个内置乐器 + 自定义乐器的方块设置行数。
-    pub fn instrument_rows(&self, custom: usize) -> usize {
-        (nbs_core::model::FIRST_CUSTOM_INDEX as usize + custom).min(INS_COUNT)
-    }
 }
 
 // ------------------------------------------------------------------ 歌曲统计

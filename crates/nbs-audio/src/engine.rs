@@ -196,14 +196,6 @@ impl CpalEngine {
         &self.shared
     }
 
-    pub fn set_export_options(&mut self, opts: ExportOptions) {
-        self.export_options = opts;
-    }
-
-    pub fn export_options(&self) -> &ExportOptions {
-        &self.export_options
-    }
-
     pub fn export_with_options(&self, song: &Song, path: &Path) -> Result<ExportStats, String> {
         export_wav(song, &self.bank, path, &self.export_options)
     }
