@@ -188,6 +188,9 @@ pub enum Command {
     ResetPrefsFolder(PrefsFolder),
     /// 原版首选项目录行的「修改」：先 `message()` 说明一句，再弹目录选择框。
     ChangePrefsFolder(PrefsFolder),
+    /// 原版取色器「使用默认值」：`accent1/2/3 = 0,120,215` + `draw_accent_init()`
+    /// + `resetcolor = true`（`draw_window_set_accent.gml:132-137`）。不落盘。
+    AccentUseDefault,
     /// 原版 `menu_click` 的导出 Schematic 入口：先过 `calculate_size()` 的提示与提问。
     OpenSchematicExport,
     /// 原版「导出」按钮：两道闸门都过才弹保存框。
@@ -1258,6 +1261,12 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             PrefsFolder::Song => state.prefs.song_folder = None,
             PrefsFolder::Pattern => state.prefs.pattern_folder = None,
         },
+        Command::AccentUseDefault => {
+            // :133-136：这支「默认」是 (0,120,215)，和 control_create.gml:202-204 的
+            // 出厂值 (0,120,212) 不一样。原版两处本来就不同，照抄不改。
+            state.theme.set_accent_base([0, 120, 215]);
+            state.accent_pick = Some(crate::state::AccentPick::from_rgb([0, 120, 215]));
+        }
         Command::ChangePrefsFolder(folder) => {
             // 原版按钮里先 `message(说明, "")`，再弹 `get_save_filename_ext`。
             state.modals = ModalQueue {

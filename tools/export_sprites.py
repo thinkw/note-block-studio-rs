@@ -59,6 +59,9 @@ ALL_SPRITES = [
     # 和最近歌曲行 320x16（帧 = 按下态 + 3*主题 + 3*(主题 3 且 fdark)，同 15 帧），
     # 以及 32x32 的动作图标 bigicons（0 创建 / 1 打开 / 2 MIDI / 6 社区，Fluent 另有 _f/_d）。
     "spr_frame2", "spr_frame5", "spr_bigicons", "spr_bigicons_f", "spr_bigicons_d",
+    # 主题色取色器（draw_window_set_accent）：色相/饱和方块 187x225、明度条 240x8
+    # （按当前色相/饱和整条调制），两个游标取 spr_radiobox 的第 18、21 帧。
+    "spr_hsv", "spr_value", "spr_radiobox",
 ]
 
 

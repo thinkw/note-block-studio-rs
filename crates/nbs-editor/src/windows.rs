@@ -10,7 +10,9 @@ use nbs_core::model::{key_name, SongMeta};
 use nbs_core::{Macro, TremoloFade};
 
 use crate::commands::Command;
-use crate::state::{DialogAction, EditorState, Flag, ModalQueue, PrefsFolder, WindowKind};
+use crate::state::{
+    AccentPick, DialogAction, EditorState, Flag, ModalQueue, PrefsFolder, WindowKind,
+};
 use crate::theme::{Theme, ThemeKind};
 use crate::tr;
 
@@ -60,6 +62,8 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             }
         }
         WindowKind::Shortcuts => 460.0,
+        // 原版 `draw_window(x1, y1, x1 + 280, y1 + 440)`（draw_window_set_accent.gml:10）。
+        WindowKind::SetAccent => 280.0,
         WindowKind::FileOpen | WindowKind::FileSave => 520.0,
         WindowKind::ClipEditor => 500.0,
         // 原版数据包导出窗口 550×430，两列布局。
@@ -102,6 +106,7 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
                 | WindowKind::SetPitch
                 | WindowKind::Stereo
                 | WindowKind::Tremolo
+                | WindowKind::SetAccent
                 | WindowKind::EditTempoChanger(..)
                 | WindowKind::EditSoundStopper(..)
         ))
@@ -147,6 +152,7 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::EditSoundStopper(tick, layer) => {
                 event_stopper_window(state, ui, *tick, *layer)
             }
+            WindowKind::SetAccent => set_accent_window(state, ui),
             // Greeting 在上面已提前 return，这个分支实际到不了。
             WindowKind::Greeting => {}
         });
@@ -1402,9 +1408,9 @@ fn folder_row(state: &mut EditorState, pg: &mut Page, which: PrefsFolder, text_n
     }
 }
 
-/// 原版页 1「界面」：主题下拉 + 暗色 / 全黑两个开关 + 帧率限制 + 窗口缩放 + 旧图标
-/// + 语言下拉。同页的取色器（`w_setaccent`）、「为高分辨率优化」（要 `*_hires`
-/// 那套纹理）没有对应实现，整行不画。
+/// 原版页 1「界面」：主题下拉 + 暗色 / 全黑两个开关 + Fluent 那一支主题色块（点开
+/// 取色器）+ 帧率限制 + 窗口缩放 + 旧图标 + 语言下拉。同页的「为高分辨率优化」
+/// （要 `*_hires` 那套纹理）没有对应实现，整行不画。
 fn prefs_interface(
     state: &mut EditorState,
     pg: &mut Page,
@@ -1450,6 +1456,52 @@ fn prefs_interface(
         false,
     ) {
         state.emit(Command::ToggleFlag(Flag::Blackout));
+    }
+
+    // 原版 :299-323「主题色取色器」：整块的条件是 `theme == 3`，只有 Fluent 画得出。
+    // 位置 `xx = x1 + 160`、`yy = y1 + 98 + (theme = 3) * 22`，压在主题下拉右边。外层
+    // 17x17 先用主题底色填一遍再描一圈（圆角半径 4），内层 13x13 才是那支色，档位是
+    // `accent[3 + (accentclick = 1) * 3 - (accentclick = 2) * 3]`：常态 accent[3]、
+    // 悬停 accent[6]、按下 accent[0]。抬手开 `w_setaccent` 并置 `resetcolor = true`；
+    // 紧跟的那句 `play_sound(soundinvoke)` 属于「界面音效」，那个开关端口没实现，不响。
+    if state.theme.kind == ThemeKind::Fluent {
+        let at = pg.row(160.0, 98.0);
+        let box_rect = Rect::from_min_size(at - Vec2::splat(2.0), Vec2::new(17.0, 17.0));
+        let (resp, click) = pg.hit(box_rect, Id::new("accent-click"), false);
+        let resp = resp.on_hover_text(tr(
+            "Click to change the theme's accent color.",
+            "点击更改此主题的主题色。",
+        ));
+        let p = pg.ui.painter().clone();
+        p.rect_filled(
+            box_rect,
+            4.0,
+            if state.theme.fdark {
+                ggray(32)
+            } else {
+                ggray(243)
+            },
+        );
+        p.rect_stroke(
+            box_rect,
+            4.0,
+            Stroke::new(1.0_f32, pg.ink()),
+            StrokeKind::Inside,
+        );
+        let tier = match click {
+            1 => 6,
+            2 => 0,
+            _ => 3,
+        };
+        p.rect_filled(
+            Rect::from_min_size(at, Vec2::new(13.0, 13.0)),
+            4.0,
+            state.theme.accent(tier),
+        );
+        if resp.clicked() {
+            state.accent_pick = Some(AccentPick::from_rgb(state.theme.accent_base));
+            state.emit(Command::ShowWindow(WindowKind::SetAccent));
+        }
     }
 
     // 原版 `draw_window_preferences.gml:412-421`：左列下方的语言下拉。
@@ -2254,6 +2306,7 @@ impl<'a> Page<'a> {
     /// `spr_textbox` 九宫格、主题 1/2 是 `draw_area`、Fluent 是 `spr_textbox_f`
     /// 九宫格（悬停换亮档、聚焦时底边吃强调色）。九宫格都没导出，统一近似成
     /// 主题描边；文字编辑区在 (x+3, y+3) 大小 (w-6, h-6)，交给 egui 的 TextEdit。
+    /// 返回值是本帧文本真的被改过（对应原版的 `text_focus` 那一档）。
     fn textarea(
         &mut self,
         x: f32,
@@ -2263,7 +2316,7 @@ impl<'a> Page<'a> {
         buf: &mut String,
         hint: &str,
         salt: &str,
-    ) {
+    ) -> bool {
         let at = self.row(x, n);
         let rect = Rect::from_min_size(at, Vec2::new(w, h));
         let on = self
@@ -2299,6 +2352,7 @@ impl<'a> Page<'a> {
                 .margin(egui::Margin::ZERO)
                 .font(FontId::proportional(PREFS_FONT)),
         );
+        let typed = resp.changed();
         if self.fluent && resp.has_focus() {
             // `spr_textbox_f` 聚焦时底边 2 像素换成强调色（`accent[6] * focus`）。
             p.rect_filled(
@@ -2307,6 +2361,7 @@ impl<'a> Page<'a> {
                 self.th.accent,
             );
         }
+        typed
     }
 
     /// 非 Fluent 主题那一整块面板：原版
@@ -2927,6 +2982,220 @@ fn instruments_window(state: &mut EditorState, ui: &mut Ui) {
     footer(state, ui);
 }
 
+/// 原版 `draw_set_halign(fa_center) + draw_text_dynamic(x, y, str)`：`cx` 是文字的中心。
+fn center_text(pg: &Page, cx: f32, n: f32, s: &str, color: Color32) {
+    let at = pg.row(cx - pg.measure(s, PREFS_FONT) / 2.0, n);
+    pg.text(at, s, PREFS_FONT, color);
+}
+
+/// 取色器里的 HSV 转 RGB。原版这三处用的是内建 `make_color_hsv`（三个分量都 0..255），
+/// 端口统一走 `scr_HSBtoRGB` 那条换算（色相 0..360、饱和明度 0..100），同一套 HSV 模型。
+fn hsv_color(h: f32, s: f32, v: f32) -> Color32 {
+    let [r, g, b] = Theme::hsb_to_rgb(h, s, v);
+    Color32::from_rgb(r, g, b)
+}
+
+/// 原版 `draw_window_set_accent.gml`：Fluent 首选项里点主题色块开进来的取色器。
+/// 上面 `spr_hsv`（187x225）挑色相/饱和，紧挨着的 `spr_value`（240x8）挑明度（整条按
+/// 当前色相/饱和调制），两个游标是 `spr_radiobox` 的第 18、21 帧；右侧两片圆角色块是
+/// 「正在挑的色 / 当前生效的 accent[3]」，下面四格是这支色铺在深浅底上的预览，再往下
+/// 是 RGB 三个文本框和「使用默认值 / 取消 / 确定」。
+/// 原版把鼠标判定放在绘制之后（:44-73），所以方块、色块、游标用的是上一帧的值，
+/// 预览格用的是本帧的——端口按同样顺序排，不提前刷新。
+fn set_accent_window(state: &mut EditorState, ui: &mut Ui) {
+    let th = state.theme.clone();
+    let fluent = th.kind == ThemeKind::Fluent;
+    // :14-22：原版靠 `resetcolor` 在开窗第一帧把 rr/gg/bb 复位成 accent1/2/3；
+    // 端口用「还没有编辑态」当同一个条件（首选项点色块时新建、用默认值时重建）。
+    let mut pick = state
+        .accent_pick
+        .clone()
+        .unwrap_or_else(|| AccentPick::from_rgb(state.theme.accent_base));
+    // :8-10：`draw_window(x1, y1, x1 + 280, y1 + 440)`。
+    let margin = ui.spacing().window_margin;
+    let (ml, mr) = (margin.left as f32, margin.right as f32);
+    let body = ui.allocate_exact_size(
+        egui::vec2(280.0 - ml - mr, if fluent { 432.0 } else { 414.0 }),
+        Sense::hover(),
+    );
+    let o = body.0.min - egui::vec2(ml, 0.0);
+    let ry = if fluent { -8.0 } else { -26.0 };
+    let mut pg = Page {
+        ui,
+        o,
+        ry,
+        th: &th,
+        fluent,
+    };
+    let p = pg.ui.painter().clone();
+    let sq = pg.row_rect(20.0, 43.0, 207.0, 268.0);
+    let bar = pg.row_rect(20.0, 278.0, 260.0, 286.0);
+    // :27-32 那块白底面板的条件是 `theme = 0`，而这扇只有 Fluent 才开得到（色块只画在
+    // `draw_window_preferences.gml:313` 的 theme 3 分支里），原版那段到不了，不跟。
+    if let Some(bk) = state.icons.bank() {
+        // :33-34：方块原图不上色；明度条按 `make_color_hsv(h / 360 * 255, s * 2.55, 255)`
+        // 调制，也就是「这支色相/饱和的满明度版本」当色带。
+        bk.hsv_square(&p, sq.min);
+        bk.value_bar(&p, bar.min, hsv_color(pick.hsv[0], pick.hsv[1], 100.0));
+    }
+    // :35-39：右侧两片色块，上面是正在挑的 rr/gg/bb，下面是当前生效的 accent[3]。
+    // 原版走 rectircle 着色器画连续圆角（半径取默认 16），egui 只有普通圆角，近似。
+    let picked = Color32::from_rgb(pick.rgb[0], pick.rgb[1], pick.rgb[2]);
+    p.rect_filled(
+        Rect::from_min_max(pg.row(217.0, 42.0), pg.row(260.0, 154.0)),
+        16.0,
+        picked,
+    );
+    p.rect_filled(
+        Rect::from_min_max(pg.row(217.0, 155.0), pg.row(260.0, 267.0)),
+        16.0,
+        th.accent(3),
+    );
+    if let Some(bk) = state.icons.bank() {
+        // :42 方块上的游标：横 `floor(187 * h / 360)`、纵从下往上 `floor(225 * s / 100)`，
+        // 精灵是 12x12，各减 5 让它居中在取到的点上。
+        bk.picker_cursor(
+            &p,
+            pg.row(
+                20.0 + (187.0 * pick.hsv[0] / 360.0).floor() - 5.0,
+                43.0 + 225.0 - (225.0 * pick.hsv[1] / 100.0).floor() - 5.0,
+            ),
+            18,
+        );
+        // :43 明度条上的竖标：横向行程原版写的是 232，而判定区宽 240（:56）——
+        // 原版自己的不一致，拖到最右端游标离右边缘还差 8 像素，照抄不改。
+        bk.picker_cursor(
+            &p,
+            pg.row(20.0 + (232.0 * pick.hsv[2] / 100.0).floor(), 276.0),
+            21,
+        );
+    }
+    // :44-73：两块判定区各认一条，按下落在哪块就认死那块，滑出判定区也继续按那块算，
+    // 松手才清零；两块都没沾上是 `nocdrag`，什么都不做。egui 的 `Sense::drag` 只有
+    // 「按下 originating 的那个控件才拖得动」这一种语义，跟原版完全对得上。
+    let hs = pg.ui.interact(sq, Id::new("accent-hs"), Sense::drag());
+    let vv = pg.ui.interact(bar, Id::new("accent-v"), Sense::drag());
+    if let Some(pt) = pg.ui.input(|i| i.pointer.interact_pos()) {
+        if hs.dragged() {
+            // :46-47 那两串的括号展开后就是「夹进方块再换算」：色相看横向，饱和看纵向取反。
+            let dx = (pt.x - sq.min.x).clamp(0.0, 187.0);
+            let dy = (pt.y - sq.min.y).clamp(0.0, 225.0);
+            pick.hsv[0] = dx / 187.0 * 360.0;
+            pick.hsv[1] = (1.0 - dy / 225.0) * 100.0;
+            // :48-54：拖一步就重算 rr/gg/bb，并把三个文本框刷成新的数字。
+            pick.apply_hsv();
+        } else if vv.dragged() {
+            // :57-64：明度只看横向 0..240。
+            let dx = (pt.x - bar.min.x).clamp(0.0, 240.0);
+            pick.hsv[2] = dx / 240.0 * 100.0;
+            pick.apply_hsv();
+        }
+    }
+    // :74-98：四个预览格。整段用 fa_center，给的横坐标都是格心。第一格铺 rr/gg/bb、
+    // 字用白；第二格铺「明度按饱和折一档」的那支、字用 rr/gg/bb；第三、四格铺近黑
+    // (9,9,9) 和近白 (221,221,221)，字都用 rr/gg/bb。
+    // :82 那条公式换成 0..100 就是「饱和过半取半明度，不足取双明度」，超过 255 的
+    // 部分原版交给 make_color_hsv 夹住；端口换算没有输入夹取，先 `min(100)` 再转。
+    let col = Color32::from_rgb(pick.rgb[0], pick.rgb[1], pick.rgb[2]);
+    let bright = if pick.hsv[1] >= 50.0 {
+        pick.hsv[2] * 0.5
+    } else {
+        (pick.hsv[2] * 2.0).min(100.0)
+    };
+    p.rect_filled(pg.row_rect(20.0, 298.0, 141.0, 318.0), 0.0, col);
+    p.rect_filled(
+        pg.row_rect(142.0, 298.0, 260.0, 318.0),
+        0.0,
+        hsv_color(pick.hsv[0], pick.hsv[1], bright),
+    );
+    p.rect_filled(pg.row_rect(20.0, 319.0, 141.0, 339.0), 0.0, ggray(9));
+    p.rect_filled(pg.row_rect(142.0, 319.0, 260.0, 339.0), 0.0, ggray(221));
+    let label = tr("Preview", "预览");
+    center_text(&pg, 80.0, 302.0, label, Color32::WHITE);
+    center_text(&pg, 202.0, 302.0, label, col);
+    center_text(&pg, 80.0, 323.0, label, col);
+    center_text(&pg, 202.0, 323.0, label, col);
+    // :99-100 分组标题，:102-110 三个 71x25 的文本框（`x1 + 20`、`+85`、`+170`）。
+    pg.header(10.0, 353.0, 220.0, 35.0, tr("RGB color", "RGB 调色"));
+    let t0 = pg.textarea(
+        20.0,
+        360.0,
+        71.0,
+        25.0,
+        &mut pick.text[0],
+        tr("Set red amount.", "设置红色值。"),
+        "setaccent-60",
+    );
+    let t1 = pg.textarea(
+        105.0,
+        360.0,
+        71.0,
+        25.0,
+        &mut pick.text[1],
+        tr("Set green amount.", "设置绿色值。"),
+        "setaccent-61",
+    );
+    let t2 = pg.textarea(
+        190.0,
+        360.0,
+        71.0,
+        25.0,
+        &mut pick.text[2],
+        tr("Set blue amount.", "设置蓝色值。"),
+        "setaccent-62",
+    );
+    // :111-127：三个框都有内容才整批转数字，任何一个转不了就这批作废（`err = 1`，
+    // 原版这里不弹提示）。端口把 rr/gg/bb 存成 0..=255 的整数，超范围和小数都按原版
+    // `make_color_rgb` 的取整方式夹住、截断。:125 那句 `if (text_focus)` 只在焦点还在
+    // 文本框上时才反推 hsv；端口用「这一帧文本真的被改过」当同一条件，否则每帧从文本
+    // 往返一次颜色， hsv 会被整数化，游标跟着跳一格。
+    if pick.text.iter().all(|t| !t.is_empty()) {
+        let nums = std::array::from_fn(|i| pick.text[i].parse::<f32>().ok());
+        if let [Some(dr), Some(dg), Some(db)] = nums {
+            let to = |v: f32| v.clamp(0.0, 255.0).floor() as u8;
+            pick.rgb = [to(dr), to(dg), to(db)];
+            if t0 || t1 || t2 {
+                pick.hsv = Theme::rgb_to_hsb(pick.rgb[0], pick.rgb[1], pick.rgb[2]);
+            }
+        }
+    }
+    // :131-139「使用默认值」：次按钮，先问一句，点头才把基色写成 (0,120,215)、重算 9 档
+    // 表并复位取色器，全在 `Command::AccentUseDefault` 里。那句 `&& wmenu = 0` 是「没有
+    // 别的弹出菜单开着」，端口没有对应全局，不跟。
+    if pg.button2(
+        10.0,
+        408.0,
+        72.0,
+        tr("Use default", "使用默认值"),
+        false,
+        true,
+    ) {
+        state.modals = ModalQueue::question(
+            tr("Confirm", "确定"),
+            tr("Are you sure?", "你确定吗？"),
+            Command::AccentUseDefault,
+        );
+    }
+    // :140 取消：回首选项，不改基色。
+    if pg.button2(104.0, 408.0, 72.0, tr("Cancel", "取消"), false, true) {
+        state.window = Some(WindowKind::Preferences);
+    }
+    // :141-153 确定（主按钮）：把正在挑的色写成 accent1/2/3、重算 9 档表，回首选项。
+    // 原版那句 `&& (windowopen = 1)`：GML 表达式里的 `=` 是比较，这条是「开窗动画放完
+    // 了才认这次点击」（端口没有开窗动画，等价于恒真），不跟着复刻。外面那个 catch 只在
+    // rr/gg/bb 不是数字时才弹「请输入一个有效的数字！」，端口的 rr/gg/bb 恒是整数，
+    // 那条走不到。原版也只改运行时基色，落盘要等首选项自己按「确定」。
+    if pg.button2(198.0, 408.0, 72.0, tr("OK", "确定"), false, false) {
+        state.theme.set_accent_base(pick.rgb);
+        state.window = Some(WindowKind::Preferences);
+    }
+    // `draw_windows.gml:100-101`：这扇的 Escape 不是关窗，是退回首选项。
+    if pg.ui.input(|i| i.key_released(egui::Key::Escape)) {
+        state.window = Some(WindowKind::Preferences);
+    }
+    state.accent_pick = Some(pick);
+}
+
 /// 原版 `draw_window_update.gml`，`w_changelist` 与 `w_update` 共用一份绘制：
 /// 正文是随程序的 `changelog.txt` 逐行列出，`w_update` 多一句谢词，「确认」的
 /// 去处也不同（前者回欢迎窗并 `save_settings()`，后者直接关窗）。
@@ -3023,8 +3292,9 @@ fn changelog_window(state: &mut EditorState, ui: &mut Ui) {
         state.emit(Command::OpenUrl(crate::LINK_CHANGELOG.to_string()));
     }
     // :88-95：`w_update` 的确认是「回欢迎窗 + 把新版本号写回设置」，
-    // 帮助菜单进来的那版只是关窗。原版那句 `&& (windowopen = 1 || theme != 3)`
-    // 是赋值不是比较，恒真，这里不跟着复刻。
+    // 帮助菜单进来的那版只是关窗。原版那句 `&& (windowopen = 1 || theme != 3)` 里的
+    // `=` 是比较（Fluent 要等开窗动画放完才认点击），端口没有开窗动画，等价于恒真，
+    // 所以不跟着复刻。
     if pg.button2(
         487.0 - 72.0 + off,
         365.0,

@@ -2182,6 +2182,506 @@ mod gui_window_tests {
         frame(&mut state, &ctx);
         assert_eq!(state.window, None, "无选区时开不了宏窗口");
     }
+
+    // ---- 主题色取色器 `w_setaccent`（draw_window_set_accent.gml）----
+
+    /// 屏幕上某个尺寸的实心矩形，按绘制顺序返回。
+    fn filled_rects(out: &egui::FullOutput, w: f32, h: f32) -> Vec<egui::epaint::RectShape> {
+        out.shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Rect(r)
+                    if (r.rect.width() - w).abs() < 0.5 && (r.rect.height() - h).abs() < 0.5 =>
+                {
+                    Some(r.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 让开窗的淡入跑完再取形状：`Window::open` 默认带 `fade_out`，动画期间整窗
+    /// 形状的颜色都被透明度乘过一遍（实测两帧只剩 0.51、三帧 0.99），
+    /// 直接比对原色会假失败。
+    fn settle(state: &mut EditorState, ctx: &egui::Context) -> egui::FullOutput {
+        let mut out = frame_out(state, ctx, base_input());
+        for _ in 0..15 {
+            out = frame_out(state, ctx, base_input());
+        }
+        out
+    }
+
+    /// 取色器右侧那上下两片色块（`:35-40`：`y1 + 42..154` 与 `y1 + 155..267`，
+    /// 中间留着原版那 1 像素缝）。窗口后画、形状排在整帧末尾，所以从末尾取，
+    /// 并要求两片同列且正好相接，免得拿错别处的同尺寸矩形。
+    fn accent_chips(
+        state: &mut EditorState,
+        ctx: &egui::Context,
+    ) -> (egui::epaint::RectShape, egui::epaint::RectShape) {
+        let out = settle(state, ctx);
+        let chips = filled_rects(&out, 43.0, 112.0);
+        assert!(chips.len() >= 2, "取色器右侧应有上下两片色块");
+        let top = chips[chips.len() - 2].clone();
+        let bottom = chips[chips.len() - 1].clone();
+        assert_eq!(
+            top.rect.min.x, bottom.rect.min.x,
+            "两片色块同在 x1 + 217 那一列"
+        );
+        assert!(
+            (bottom.rect.min.y - top.rect.max.y - 1.0).abs() < 0.01,
+            "原版两片之间留 1 像素"
+        );
+        (top, bottom)
+    }
+
+    /// 取色器两块拖拽判定区在屏幕上的实际位置：方块 187x225（`:46` 的
+    /// `mouse_rectangle(x1 + 20, y1 + 43, 187, 225)`）、明度条 240x8（`:56`）。
+    /// 上面那片色块的左上角是源码的 `pg.row(217, 42)`，Fluent 下 `row(x, n)`
+    /// 就是 `o + (x, n - 8)`，减回去即页面原点。
+    fn accent_zones(state: &mut EditorState, ctx: &egui::Context) -> (egui::Rect, egui::Rect) {
+        let (top, _) = accent_chips(state, ctx);
+        let o = top.rect.min - egui::vec2(217.0, 34.0);
+        (
+            egui::Rect::from_min_size(o + egui::vec2(20.0, 35.0), egui::vec2(187.0, 225.0)),
+            egui::Rect::from_min_size(o + egui::vec2(20.0, 270.0), egui::vec2(240.0, 8.0)),
+        )
+    }
+
+    /// 裸坐标点一下：按下、抬起各占一帧。
+    fn click_pos_at(state: &mut EditorState, ctx: &egui::Context, p: egui::Pos2) {
+        for pressed in [true, false] {
+            let mut raw = base_input();
+            raw.events.push(egui::Event::PointerMoved(p));
+            raw.events.push(egui::Event::PointerButton {
+                pos: p,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            });
+            frame_out(state, ctx, raw);
+        }
+    }
+
+    /// 按住 → 移到终点 → 松手，三段各占一帧。原版的 `hsdrag` / `vdrag` 正是这个
+    /// 语义：按下落在哪块就认死那块，滑出判定区也照那块算，松手才清零。
+    fn drag_between(
+        state: &mut EditorState,
+        ctx: &egui::Context,
+        from: egui::Pos2,
+        to: egui::Pos2,
+    ) {
+        let btn = |pos: egui::Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let mut press = base_input();
+        press.events.push(egui::Event::PointerMoved(from));
+        press.events.push(btn(from, true));
+        frame_out(state, ctx, press);
+        let mut slide = base_input();
+        slide.events.push(egui::Event::PointerMoved(to));
+        frame_out(state, ctx, slide);
+        let mut lift = base_input();
+        lift.events.push(egui::Event::PointerMoved(to));
+        lift.events.push(btn(to, false));
+        frame_out(state, ctx, lift);
+    }
+
+    /// 按一次键：按下 + 抬起挤在同一帧（取色器认的是原版的
+    /// `keyboard_check_released(vk_escape)`）。
+    fn press_key(state: &mut EditorState, ctx: &egui::Context, key: egui::Key) {
+        let mk = |pressed: bool| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Default::default(),
+        };
+        let mut raw = base_input();
+        raw.events.push(mk(true));
+        raw.events.push(mk(false));
+        frame_out(state, ctx, raw);
+    }
+
+    /// 直接开扇取色器，并把编辑态按当前基色复位一遍——原版靠 `resetcolor`
+    /// 在开窗第一帧做同一件事（`draw_window_preferences.gml:320`）。
+    fn open_accent_picker(state: &mut EditorState, ctx: &egui::Context) {
+        state.prefs.language = 1;
+        state.window = Some(WindowKind::SetAccent);
+        let base = state.theme.accent_base;
+        state.accent_pick = Some(crate::state::AccentPick::from_rgb(base));
+        settle(state, ctx);
+    }
+
+    fn picked(state: &EditorState) -> crate::state::AccentPick {
+        state.accent_pick.clone().expect("取色器应当带着编辑态")
+    }
+
+    /// 原版 `draw_window_preferences.gml:299-323`：Fluent 界面页「主题」那一组里，
+    /// 下拉右边压一块 17x17，内层 13x13 才是色，常态档位 `accent[3]`。
+    /// 点它开 `w_setaccent`，并按当前 accent1/2/3 复位。
+    #[test]
+    fn fluent_preferences_swatch_opens_the_accent_picker() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.theme.accent_base = [200, 20, 60];
+        state.theme.accent_init();
+        state.window = Some(WindowKind::Preferences);
+        state.prefs_tab = 1;
+        frame(&mut state, &ctx);
+        let out = settle(&mut state, &ctx);
+        let all13 = filled_rects(&out, 13.0, 13.0);
+        let swatch: Vec<_> = all13
+            .iter()
+            .filter(|r| r.fill == state.theme.accent(3))
+            .collect();
+        assert_eq!(
+            swatch.len(),
+            1,
+            "界面页应当只有一块 13x13、填 accent[3] 的主题色，实有 {:?}，accent[3] = {:?}",
+            all13.iter().map(|r| (r.rect, r.fill)).collect::<Vec<_>>(),
+            state.theme.accent(3)
+        );
+        click_pos_at(&mut state, &ctx, swatch[0].rect.center());
+        frame(&mut state, &ctx);
+        assert_eq!(
+            state.window,
+            Some(WindowKind::SetAccent),
+            "点主题色块要开取色器"
+        );
+        let p = picked(&state);
+        assert_eq!(p.rgb, [200, 20, 60], "开窗先按 accent1/2/3 复位");
+        assert_eq!(
+            p.text,
+            ["200".to_string(), "20".to_string(), "60".to_string()],
+            "三个文本框跟着灌上十进制数"
+        );
+        assert_eq!(p.hsv, Theme::rgb_to_hsb(200, 20, 60));
+    }
+
+    /// 这扇窗画出来的东西：右侧两片色块（正在挑的 / 生效中的）、下面四格预览、
+    /// 「RGB 调色」分组、三个数字框和三个按钮，逐条对 `:35-40`、`:74-98`、
+    /// `:99-110`、`:131-153`。
+    #[test]
+    fn accent_picker_draws_the_original_pieces() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        open_accent_picker(&mut state, &ctx);
+        let out = frame_out(&mut state, &ctx, base_input());
+
+        let (top, bottom) = accent_chips(&mut state, &ctx);
+        assert_eq!(
+            top.fill,
+            egui::Color32::from_rgb(0, 120, 212),
+            "上面那片是正在挑的 rr/gg/bb"
+        );
+        assert_eq!(
+            bottom.fill,
+            state.theme.accent(3),
+            "下面那片是生效中的 accent[3]"
+        );
+
+        let left = filled_rects(&out, 121.0, 20.0);
+        let right = filled_rects(&out, 118.0, 20.0);
+        assert_eq!(
+            (left.len(), right.len()),
+            (2, 2),
+            "四格预览：左列两格、右列两格"
+        );
+        assert_eq!(
+            left[0].fill,
+            egui::Color32::from_rgb(0, 120, 212),
+            "左上铺 rr/gg/bb"
+        );
+        assert_eq!(
+            left[1].fill,
+            egui::Color32::from_rgb(9, 9, 9),
+            "左下铺近黑底"
+        );
+        assert_eq!(
+            right[1].fill,
+            egui::Color32::from_rgb(221, 221, 221),
+            "右下铺近白底"
+        );
+
+        let mut texts: Vec<String> = out
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        texts.sort_unstable();
+        for want in [
+            "设置主题颜色",
+            "RGB 调色",
+            "0",
+            "120",
+            "212",
+            "使用默认值",
+            "取消",
+            "确定",
+        ] {
+            assert!(
+                texts.iter().any(|t| t == want),
+                "界面上没有「{want}」：{texts:?}"
+            );
+        }
+        assert_eq!(
+            texts.iter().filter(|t| t.as_str() == "预览").count(),
+            4,
+            "原版四格各写一次 Preview"
+        );
+    }
+
+    /// 原版 `:46-54`：色相 = 方块内横向 / 187 * 360，饱和 = (1 - 纵向 / 225) * 100
+    /// （越靠下越灰），每拖一步反算 rr/gg/bb 并把三个文本框刷掉。
+    /// 滑出判定区仍认死这一块，但横纵都先夹进 0..187 / 0..225。
+    #[test]
+    fn accent_picker_square_drag_sets_hue_and_saturation() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        open_accent_picker(&mut state, &ctx);
+        let (sq, _bar) = accent_zones(&mut state, &ctx);
+
+        drag_between(
+            &mut state,
+            &ctx,
+            sq.center(),
+            sq.min + egui::vec2(46.75, 112.5),
+        );
+        let p = picked(&state);
+        assert!(
+            (p.hsv[0] - 90.0).abs() < 0.01,
+            "横向 46.75px = 187 的四分之一，色相应当是 90°，实得 {}",
+            p.hsv[0]
+        );
+        assert!(
+            (p.hsv[1] - 50.0).abs() < 0.01,
+            "纵向 112.5px = 225 的正中，饱和应当是 50%，实得 {}",
+            p.hsv[1]
+        );
+        assert_eq!(
+            p.rgb,
+            Theme::hsb_to_rgb(p.hsv[0], p.hsv[1], p.hsv[2]),
+            "rr/gg/bb 由这一步的 hsv 反算"
+        );
+        assert_eq!(
+            p.text,
+            std::array::from_fn(|i| p.rgb[i].to_string()),
+            "拖一步就把三个文本框刷成新数字"
+        );
+
+        // 判定区外的点仍按这一块算，只是先夹住（原版那串括号展开就是这个）。
+        drag_between(
+            &mut state,
+            &ctx,
+            sq.center(),
+            sq.min + egui::vec2(400.0, -30.0),
+        );
+        let p = picked(&state);
+        assert!((p.hsv[0] - 360.0).abs() < 0.01, "横向夹进 0..187");
+        assert!(
+            (p.hsv[1] - 100.0).abs() < 0.01,
+            "纵向夹进 0..225，最上缘是饱和 100"
+        );
+    }
+
+    /// 原版 `:56-64`：明度条只认横向，判定区宽 240，左端 0、右端 100，出了区也夹住。
+    /// 这一条不动色相和饱和。
+    #[test]
+    fn accent_picker_value_bar_drag_uses_the_240_travel() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        open_accent_picker(&mut state, &ctx);
+        let (_sq, bar) = accent_zones(&mut state, &ctx);
+        let before = picked(&state);
+
+        drag_between(&mut state, &ctx, bar.center(), bar.min);
+        let p = picked(&state);
+        assert!(p.hsv[2] < 0.01, "拖到判定区左端是明度 0，实得 {}", p.hsv[2]);
+
+        drag_between(
+            &mut state,
+            &ctx,
+            bar.center(),
+            bar.max + egui::vec2(60.0, 0.0),
+        );
+        let p = picked(&state);
+        assert!(
+            (p.hsv[2] - 100.0).abs() < 0.01,
+            "判定区右端以外仍夹在 240，实得 {}",
+            p.hsv[2]
+        );
+        assert_eq!(
+            [p.hsv[0], p.hsv[1]],
+            [before.hsv[0], before.hsv[1]],
+            "明度条不该动色相和饱和"
+        );
+    }
+
+    /// 原版 `:111-127`：三框都有内容才整批转数字，任何一框转不了就整批作废
+    /// （`err = 1`，这一层不弹提示）。端口把 rr/gg/bb 存成 0..=255 整数，
+    /// 所以超范围夹住、带小数截断；hsv 不在这里反推，否则每帧从文本往返一次
+    /// 会把数字整数化、游标跳一格（对应原版的 `text_focus`）。
+    #[test]
+    fn accent_picker_rgb_boxes_commit_as_a_batch() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        open_accent_picker(&mut state, &ctx);
+        let before = picked(&state).hsv;
+
+        let mut p = state.accent_pick.take().expect("取色器已开窗");
+        p.text = ["300", "12.7", "255"].map(String::from);
+        state.accent_pick = Some(p);
+        frame(&mut state, &ctx);
+        let p = picked(&state);
+        assert_eq!(p.rgb, [255, 12, 255], "300 夹成 255、12.7 截成 12");
+        assert_eq!(p.hsv, before, "没在框里打字就不反推 hsv");
+
+        let mut p = state.accent_pick.take().expect("取色器已开窗");
+        p.text = ["1", "", "x"].map(String::from);
+        state.accent_pick = Some(p);
+        frame(&mut state, &ctx);
+        assert_eq!(
+            picked(&state).rgb,
+            [255, 12, 255],
+            "空框和「x」都不合格，整批不生效"
+        );
+    }
+
+    /// 真的在绿框里敲一个字：TextEdit 拿到焦点后 `changed()` 为真，也就是原版的
+    /// `text_focus`，这时才按新的 rr/gg/bb 反推 hsv、游标跟着挪。
+    #[test]
+    fn accent_picker_typed_box_rederives_the_hsv() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        open_accent_picker(&mut state, &ctx);
+        let out = frame_out(&mut state, &ctx, base_input());
+        let green = text_center_if(&out.shapes, |t| t == "120");
+
+        click_pos_at(&mut state, &ctx, green);
+        let mut raw = base_input();
+        raw.events.push(egui::Event::Text("7".into()));
+        frame_out(&mut state, &ctx, raw);
+
+        let p = picked(&state);
+        assert_ne!(p.text[1], "120", "敲进去的字要真的落在框里：{:?}", p.text);
+        let typed: f32 = p.text[1].parse().expect("框里应当还是数字");
+        assert_eq!(
+            p.rgb[1],
+            typed.clamp(0.0, 255.0).floor() as u8,
+            "rgb 跟着文本框走"
+        );
+        assert_eq!(
+            p.hsv,
+            Theme::rgb_to_hsb(p.rgb[0], p.rgb[1], p.rgb[2]),
+            "改过字才反推 hsv"
+        );
+    }
+
+    /// 三个出口（`:140-153` 和 `draw_windows.gml:100-101`）：确定把挑的色写成
+    /// accent1/2/3 并重算 9 档表后回首选项；取消和 Escape 都只回首选项、不碰基色。
+    /// 原版这一层不落盘，写盘要等首选项自己按「确定」。
+    #[test]
+    fn accent_picker_close_paths() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        open_accent_picker(&mut state, &ctx);
+        state.accent_pick = Some(crate::state::AccentPick::from_rgb([7, 8, 9]));
+
+        click_text(&mut state, &ctx, "确定");
+        assert_eq!(state.theme.accent_base, [7, 8, 9], "确定才写 accent1/2/3");
+        assert_eq!(
+            state.theme.accent(3),
+            egui::Color32::from_rgb(7, 8, 9),
+            "9 档表跟着重算（draw_accent_init）"
+        );
+        assert_eq!(state.window, Some(WindowKind::Preferences));
+        assert_eq!(
+            nbs_io::prefs::Preferences::load().accent,
+            [0, 120, 212],
+            "取色器自己不该写盘"
+        );
+
+        // 取消：基色保持刚确定的这支，只是退回首选项。
+        state.accent_pick = Some(crate::state::AccentPick::from_rgb([1, 2, 3]));
+        state.window = Some(WindowKind::SetAccent);
+        click_text(&mut state, &ctx, "取消");
+        assert_eq!(state.theme.accent_base, [7, 8, 9], "取消不改基色");
+        assert_eq!(state.window, Some(WindowKind::Preferences));
+
+        // Escape：同「取消」，是退回首选项而不是关窗。
+        state.accent_pick = Some(crate::state::AccentPick::from_rgb([4, 5, 6]));
+        state.window = Some(WindowKind::SetAccent);
+        press_key(&mut state, &ctx, egui::Key::Escape);
+        assert_eq!(state.theme.accent_base, [7, 8, 9], "Escape 不改基色");
+        assert_eq!(
+            state.window,
+            Some(WindowKind::Preferences),
+            "原版这扇的 Escape 是退回首选项"
+        );
+    }
+
+    /// 原版 `:131-139`「使用默认值」：先问一句「你确定吗？」，答「是」才把基色写成
+    /// (0,120,215)。注意这跟 `control_create.gml:202-204` 的出厂值 (0,120,212) 差 1，
+    /// 原版两处本来就不同，端口照抄；答「否」整条不改，取色器也不关。
+    #[test]
+    fn accent_picker_use_default_asks_before_writing() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        state.theme.accent_base = [200, 20, 60];
+        state.theme.accent_init();
+        open_accent_picker(&mut state, &ctx);
+
+        click_text(&mut state, &ctx, "使用默认值");
+        assert_eq!(state.modals.items.len(), 1, "原版这里先弹一句确认");
+        assert!(state.modals.items[0].yes_no);
+        assert_eq!(state.theme.accent_base, [200, 20, 60], "答之前不改");
+        click_text(&mut state, &ctx, "否");
+        frame(&mut state, &ctx);
+        assert_eq!(state.theme.accent_base, [200, 20, 60], "答「否」不还原");
+
+        click_text(&mut state, &ctx, "使用默认值");
+        click_text(&mut state, &ctx, "是");
+        frame(&mut state, &ctx);
+        assert_eq!(
+            state.theme.accent_base,
+            [0, 120, 215],
+            "答「是」才写原版那组默认值"
+        );
+        let p = picked(&state);
+        assert_eq!(p.rgb, [0, 120, 215], "取色器按新基色复位（resetcolor）");
+        assert_eq!(
+            p.text,
+            ["0".to_string(), "120".to_string(), "215".to_string()]
+        );
+        assert_eq!(
+            state.window,
+            Some(WindowKind::SetAccent),
+            "原版用完默认值仍停在这扇窗"
+        );
+    }
 }
 
 #[cfg(test)]

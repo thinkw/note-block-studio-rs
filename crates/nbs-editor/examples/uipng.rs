@@ -180,6 +180,7 @@ fn main() -> Result<(), String> {
             "about" => WindowKind::About,
             "changelist" => WindowKind::Changelist,
             "update" => WindowKind::Update,
+            "accent" => WindowKind::SetAccent,
             "set-velocity" => WindowKind::SetVelocity,
             "set-panning" => WindowKind::SetPanning,
             "set-pitch" => WindowKind::SetPitch,

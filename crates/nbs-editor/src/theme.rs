@@ -122,10 +122,12 @@ impl Theme {
 
     /// 原版 `scr_HSBtoRGB`（h 0..360，s/b 0..100）的逐行移植。
     /// 彩虹循环每帧喂 `hsb_to_rgb(hue, 100, 100)`（draw_accent_rainbow）。
+    /// 中间量用 f64：GML 的数全是双精度，而结果要 `floor`，差最后一位就会少一整格。
     pub fn hsb_to_rgb(h: f32, s: f32, b: f32) -> [u8; 3] {
+        let (h, s, b) = (h as f64, s as f64, b as f64);
         let s = s / 100.0;
         let b = b / 100.0;
-        let fl = |x: f32| (x * 255.0).floor() as u8;
+        let fl = |x: f64| (x * 255.0).floor() as u8;
         if s == 0.0 {
             let v = fl(b);
             return [v, v, v];
@@ -147,6 +149,42 @@ impl Theme {
             _ => [b, temp1, temp2],
         };
         [fl(rgb[0]), fl(rgb[1]), fl(rgb[2])]
+    }
+
+    /// 原版 `scr_RGBtoHSB`：h 0..360、s 和 b 0..100，三个分量一律 `floor`。
+    /// 取色器（`draw_window_set_accent`）开窗复位游标、以及往文本框里打字之后
+    /// 反推 hsv 都走它，所以取整方向必须和原版一致。
+    /// 同 `hsb_to_rgb`：中间量按 GML 的双精度算，纯绿 (0,255,0) 用 f32 会算成 119 度。
+    pub fn rgb_to_hsb(r: u8, g: u8, b: u8) -> [f32; 3] {
+        let (r, g, b) = (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
+        let max = r.max(g).max(b);
+        let del = max - r.min(g).min(b);
+        if del == 0.0 {
+            // `delMax = 0`：没有色度，h 和 s 都是 0，只剩亮度。
+            return [0.0, 0.0, (max * 100.0).floor() as f32];
+        }
+        let s = del / max;
+        let del_r = ((max - r) / 6.0 + del / 2.0) / del;
+        let del_g = ((max - g) / 6.0 + del / 2.0) / del;
+        let del_b = ((max - b) / 6.0 + del / 2.0) / del;
+        let mut h = if r == max {
+            del_b - del_g
+        } else if g == max {
+            (1.0 / 3.0) + del_r - del_b
+        } else {
+            (2.0 / 3.0) + del_g - del_r
+        };
+        if h < 0.0 {
+            h += 1.0;
+        }
+        if h > 1.0 {
+            h -= 1.0;
+        }
+        [
+            (h * 360.0).floor() as f32,
+            (s * 100.0).floor() as f32,
+            (max * 100.0).floor() as f32,
+        ]
     }
 
     /// 第 i 档强调色（原版界面各处直接读 `accent[i]`）。
@@ -324,5 +362,29 @@ mod tests {
         );
         assert_eq!(Theme::hsb_to_rgb(200.0, 0.0, 100.0), [255, 255, 255], "S=0 全灰");
         assert_eq!(Theme::hsb_to_rgb(90.0, 100.0, 50.0), [63, 127, 0], "b 折半，floor(127.5)=127");
+    }
+
+    /// 原版 `scr_RGBtoHSB` 的抽样：三个分量都 `floor`，青色走 `G == max` 那一支。
+    #[test]
+    fn rgb_to_hsb_matches_original_samples() {
+        assert_eq!(
+            Theme::rgb_to_hsb(255, 0, 0),
+            [0.0, 100.0, 100.0],
+            "红 = 0 度"
+        );
+        assert_eq!(Theme::rgb_to_hsb(0, 255, 0), [120.0, 100.0, 100.0]);
+        assert_eq!(Theme::rgb_to_hsb(0, 0, 255), [240.0, 100.0, 100.0]);
+        assert_eq!(
+            Theme::rgb_to_hsb(0, 255, 255),
+            [180.0, 100.0, 100.0],
+            "青 = 180 度，取的是 G==max 分支"
+        );
+        assert_eq!(
+            Theme::rgb_to_hsb(128, 128, 128),
+            [0.0, 0.0, 50.0],
+            "delMax=0 时色相和饱和都归 0"
+        );
+        // 出厂基色 (0,120,212)：h = floor(0.572339 * 360) = 206，s = 100，b = floor(83.13) = 83。
+        assert_eq!(Theme::rgb_to_hsb(0, 120, 212), [206.0, 100.0, 83.0]);
     }
 }

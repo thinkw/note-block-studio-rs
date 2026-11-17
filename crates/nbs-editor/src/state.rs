@@ -209,6 +209,9 @@ pub enum WindowKind {
     EditTempoChanger(u32, u32),
     /// 原版 `w_edit_sound_stopper`：落消音器时弹出，参数同上。
     EditSoundStopper(u32, u32),
+    /// 原版 `w_setaccent`（`macros.gml:118`）：首选项「主题」组里那个 17x17 色块
+    /// 点开的取色器（`draw_window_preferences.gml:313-322`），只有 Fluent 主题画得出这一行。
+    SetAccent,
     /// 原版 `w_changelist`（`macros.gml:86`）：帮助菜单「更新历史……」打开的那扇，
     /// 和 `w_update` 共用 `draw_window_update.gml`，只有标题、「谢词」和「确认」的去处不同。
     Changelist,
@@ -234,6 +237,8 @@ impl WindowKind {
             // 「更新」，从帮助菜单进的「更新历史」走 else 那支。
             Self::Changelist => tr("Changelist", "更新历史"),
             Self::Update => tr("Update", "更新"),
+            // 原版 `draw_window_set_accent.gml:13-14` 的粗体标题。
+            Self::SetAccent => tr("Set accent color", "设置主题颜色"),
             // 原版 `draw_window_tempo_tapper` 的标题（`condstr(language != 1, "Tempo tapper", "速度测量器")`）。
             Self::TempoTapper => tr("Tempo tapper", "速度测量器"),
             // 原版 `draw_window_save_options:13-14` 的正文粗体标题。
@@ -275,6 +280,40 @@ impl WindowKind {
             // 原版欢迎窗没有标题文字（draw_window 只画边框），这里仅供窗口 id 用。
             Self::Greeting => "Note Block Studio",
         }
+    }
+}
+
+/// 原版 `w_setaccent` 的编辑态：全局 `hsv[0..3]`、`rr`/`gg`/`bb`、`text_str[60..62]`。
+/// 原版另有一组 `hsdrag`/`vdrag`/`nocdrag` 拖拽标志（在某一块上按下就认死这一块，
+/// 滑出判定区也继续跟，松手才清零），egui 的 `Sense::drag` 天生就是这个语义，不再存。
+/// 原版的这些全局是常驻的，但每次从首选项点色块进来都会置 `resetcolor = true`
+/// （`draw_window_preferences.gml:320`），下一帧就按当前 accent1/2/3 全部复位，
+/// 所以「开窗即初始化」与原版的观感等价。
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccentPick {
+    /// 原版 `hsv`：色相 0..=360、饱和和明度 0..=100；复位时是整数，拖动中是小数。
+    pub hsv: [f32; 3],
+    /// 原版 `rr`/`gg`/`bb`：正在挑的这支颜色。
+    pub rgb: [u8; 3],
+    /// 原版 `text_str[60..62]`：RGB 调色区那三个文本框，拖动时实时跟着刷新。
+    pub text: [String; 3],
+}
+
+impl AccentPick {
+    /// 原版 `resetcolor` 那一段：`rr/gg/bb = accent1/2/3`，再反推 hsv 和三个文本框。
+    pub fn from_rgb(rgb: [u8; 3]) -> Self {
+        Self {
+            hsv: crate::theme::Theme::rgb_to_hsb(rgb[0], rgb[1], rgb[2]),
+            rgb,
+            text: std::array::from_fn(|i| rgb[i].to_string()),
+        }
+    }
+
+    /// 原版每拖一步的收尾：`dhsv = scr_HSBtoRGB(hsv[0], hsv[1], hsv[2])`，
+    /// 把 rr/gg/bb 和三个文本框一起刷新。
+    pub fn apply_hsv(&mut self) {
+        self.rgb = crate::theme::Theme::hsb_to_rgb(self.hsv[0], self.hsv[1], self.hsv[2]);
+        self.text = std::array::from_fn(|i| self.rgb[i].to_string());
     }
 }
 
@@ -882,6 +921,9 @@ pub struct EditorState {
     pub changelog: Option<String>,
     /// 原版 `sb_val[update_scrollbar]`：更新历史那根竖滚动条的读数，单位是行。
     pub update_scroll: f32,
+    /// 原版 `w_setaccent` 的编辑态（`hsv` / `rr,gg,bb` / `text_str[60..62]`）。
+    /// 只有取色器开着才有值，关窗就丢掉——原版靠 `resetcolor` 每次复位，效果一样。
+    pub accent_pick: Option<AccentPick>,
     /// 原版 `donate_banner`：捐赠横幅是否显示（跟着欢迎窗走）。
     pub donate_banner: bool,
     pub editing_layer_name: Option<(u32, String)>,
@@ -1175,6 +1217,7 @@ impl EditorState {
             update_success: false,
             changelog: load_changelog(),
             update_scroll: 0.0,
+            accent_pick: None,
             donate_banner: false,
             editing_layer_name: None,
             event_edit: EventEditDraft::default(),

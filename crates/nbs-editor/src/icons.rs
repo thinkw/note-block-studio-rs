@@ -281,6 +281,12 @@ pub struct Bank {
     frame5_dark: Strip,
     frame5_fluent: Strip,
     frame5_fluent_d: Strip,
+    /// 主题色取色器（`draw_window_set_accent`）：色相/饱和方块 `spr_hsv` 187x225、
+    /// 明度条 `spr_value` 240x8（整条按当前色相/饱和调制）、`spr_radiobox` 12x12
+    /// 的两个游标（18 = 方块上的圈，21 = 明度条上的竖标）。
+    hsv: Strip,
+    value: Strip,
+    radiobox: Strip,
 }
 
 /// 三态：0 常态、1 悬停、2 悬停且按住。
@@ -416,6 +422,9 @@ impl Bank {
             frame5_dark: strip("frame5_dark", 320, 16)?,
             frame5_fluent: strip("frame5_fluent", 320, 16)?,
             frame5_fluent_d: strip("frame5_fluent_d", 320, 16)?,
+            hsv: strip("hsv", 187, 225)?,
+            value: strip("value", 240, 8)?,
+            radiobox: strip("radiobox", 12, 12)?,
         })
     }
 
@@ -963,6 +972,24 @@ impl Bank {
         self.donate.draw(p, at, if lang_cn { 3 } else { 2 }, Color32::WHITE);
     }
 
+    /// 取色器的色相/饱和方块：`draw_sprite(spr_hsv, 0, x1 + 20, y1 + 43)`，
+    /// 原点 0、187x225，正好就是原版那两块拖拽判定区的大小。
+    pub fn hsv_square(&self, p: &egui::Painter, at: Pos2) {
+        self.hsv.draw(p, at, 0, Color32::WHITE);
+    }
+
+    /// 明度条：`draw_sprite_ext(spr_value, 0, …, make_color_hsv(h / 360 * 255,
+    /// s * 2.55, 255), alpha)`。
+    /// egui 的 image tint 和 GameMaker 的 modulate 都是「贴图 × 颜色」，同一套算法。
+    pub fn value_bar(&self, p: &egui::Painter, at: Pos2, tint: Color32) {
+        self.value.draw(p, at, 0, tint);
+    }
+
+    /// 取色器游标 `spr_radiobox`（12x12）：18 = 方块上那个圈，21 = 明度条上的竖标。
+    pub fn picker_cursor(&self, p: &egui::Painter, at: Pos2, frame: usize) {
+        self.radiobox.draw(p, at, frame, Color32::WHITE);
+    }
+
     /// 欢迎窗动作按钮的图标：普通主题用 spr_bigicons，Fluent 按深浅用 _f/_d；
     /// 按下时整体右移 1px（原版 `b + (a > 1)`）。
     pub fn big_icon(&self, p: &egui::Painter, at: Pos2, th: &Theme, index: usize, pressed: bool) {
@@ -1141,6 +1168,9 @@ mod tests {
             ("frame5_dark", 3),
             ("frame5_fluent", 3),
             ("frame5_fluent_d", 3),
+            ("hsv", 1),
+            ("value", 1),
+            ("radiobox", 30),
         ] {
             let got = std::fs::read_dir(root.join(dir))
                 .unwrap_or_else(|e| panic!("{dir} 目录读不到：{e}"))
