@@ -1585,7 +1585,7 @@ mod tests {
     #[test]
     fn wheel_scroll_steps_by_the_preference() {
         let _prefs = crate::isolate_prefs();
-        let mut st = EditorState::new();
+        let mut st = EditorState::for_test();
         let from = 20i64;
         st.prefs.mousewheel_scroll_speed = 1;
 
@@ -1620,7 +1620,7 @@ mod tests {
     /// 靶子谱：320×128 的网格 = 可见 10 列，空谱 `enda = 0`，
     /// 于是原版 `:1122` 的夹取上限正好是 `0 + 10 = 10`。
     fn ruler_state() -> EditorState {
-        let mut st = EditorState::new();
+        let mut st = EditorState::for_test();
         st.window = None;
         st.doc.replace_song(nbs_core::model::Song::new());
         st.viewport.origin = Pos2::ZERO;

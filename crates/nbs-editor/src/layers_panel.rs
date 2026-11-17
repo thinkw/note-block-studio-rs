@@ -1173,7 +1173,7 @@ mod tests {
     /// 原版就地速度框那一次提交的规则（`draw_window_set_tempo.gml:29-46`）：
     /// 直接喂字符串进去，看最后写进歌曲的速度。`start` 是提交前的速度。
     fn committed(text: &str, mult: f32, start: f32) -> f32 {
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.doc.song.meta.tempo = start;
         commit_tempo_input(&mut state, text, mult);
         for cmd in std::mem::take(&mut state.pending) {

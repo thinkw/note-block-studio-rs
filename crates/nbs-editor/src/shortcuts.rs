@@ -577,7 +577,7 @@ mod tests {
     /// 出厂开机流程会打开欢迎窗，而窗口开着快捷键全被门槛拦掉；
     /// 快捷键测试的靶子是裸编辑器，这里把欢迎窗关掉。
     fn fresh_state() -> EditorState {
-        let mut s = EditorState::new();
+        let mut s = EditorState::for_test();
         s.window = None;
         s
     }

@@ -84,6 +84,9 @@ mod tests {
     }
 
     /// 装了系统字体之后，egui 才能给出中文字形；没装之前这些字符全是空框。
+    /// 找的是本机字体目录，所以没装中文字体的机器上这条只能跳过（原版在中文机器上
+    /// 同样只能靠 `fnt_src_*` 那套位图字体，代码这边没有兜底资源）。
+    /// 用 `NBS_FONT=<字体文件>` 可以指定要装的字体，跳过时按这个提示补一次覆盖。
     #[test]
     fn installing_the_system_font_makes_cjk_glyphs_available() {
         let id = egui::FontId::proportional(13.0);
@@ -95,7 +98,13 @@ mod tests {
             "默认字体不该有中文字形，否则这个用例证明不了什么"
         );
 
-        let path = install(&ctx).expect("本机应能找到中文字体");
+        let Some(path) = install(&ctx) else {
+            eprintln!(
+                "跳过：本机找不到中文字体（查 %WINDIR%\\Fonts 等目录，或用 NBS_FONT 指定），\
+                 没有字体时无法验证字形兜底"
+            );
+            return;
+        };
         assert!(path.is_file());
         pass(&ctx);
         assert!(

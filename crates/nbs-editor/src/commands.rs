@@ -1933,14 +1933,11 @@ mod tests {
     }
 
     fn state_with(song: Song) -> EditorState {
-        let mut s = EditorState::new();
+        let mut s = EditorState::for_test();
         // 原版第一次走到这里会写 settings.ini；测试预先当作「已经提示过」，不碰用户配置。
         s.prefs.warning_schematic = true;
         // dispatch 按各自 state 的 prefs 同步全局语言；钉成中文让断言不跟本机/并行用例漂。
         s.prefs.language = 1;
-        // 缩放档出厂是 None = 系统倍率，用户把界面调到 150% 时阶梯断言就会从 1.25
-        // 变成 1.75；测试环境里钉回默认，阶梯才只由代码决定。
-        s.prefs.window_scale = None;
         s.doc.replace_song(song);
         // 开机流程会开欢迎窗，命令测试的靶子是「欢迎窗已经关掉」的裸编辑器。
         s.window = None;

@@ -2114,7 +2114,7 @@ mod tests {
             answer,
             seen: std::sync::Mutex::new(Vec::new()),
         });
-        let mut st = EditorState::new();
+        let mut st = EditorState::for_test();
         // dispatch 按各自 state 的 prefs 同步全局语言；钉中文让「保存歌曲」断言稳定。
         st.prefs.language = 1;
         st.picker = Some(picker.clone());
@@ -2206,7 +2206,7 @@ mod tests {
     #[test]
     fn wheel_preview_uses_the_hovered_layer_only_when_the_pref_is_on() {
         use nbs_core::model::Layer;
-        let mut st = EditorState::new();
+        let mut st = EditorState::for_test();
         // 清掉新建模板自带的音符，好让 endb 由本用例说了算。
         st.doc.song.columns.clear();
         st.doc.song.layers = vec![
@@ -2293,7 +2293,7 @@ mod tests {
 
     /// 区间起播/停播的靶子谱：空谱、没有窗口、播放头归零。
     fn section_state() -> EditorState {
-        let mut st = EditorState::new();
+        let mut st = EditorState::for_test();
         st.window = None;
         st.doc.replace_song(nbs_core::model::Song::new());
         st.prepare_audio();

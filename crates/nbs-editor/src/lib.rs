@@ -140,13 +140,39 @@ pub(crate) fn isolate_prefs() -> PrefsLock {
 }
 
 #[cfg(test)]
+impl EditorState {
+    /// 用例用的状态：出厂的界面档位。`EditorState::new()` 会把本机 prefs.json 里
+    /// 的主题、删除效果、琴键标注、界面缩放拷进 `flags` / `theme`，用户在首选项里
+    /// 改过任何一项，「原版默认界面」的断言就只在这台机器上成立。这里按出厂值钉回去
+    /// （出厂档位见 `control_create.gml:225,246-248,314-318`）。
+    /// 语言不在这里钉：用例断言的是哪一种语言的文案，自己设 `prefs.language`
+    /// 并配 `LangGuard`，出厂值取的是系统区域。
+    pub(crate) fn for_test() -> Self {
+        let mut s = Self::new();
+        s.prefs.theme = 3;
+        s.prefs.remove_effect = true;
+        s.prefs.keys_to_show = 30;
+        // 原版绝对像素的断言（键宽 40、步进 39、y = 746）只有在 1:1 界面上成立；
+        // 用户存过 150% 的话整帧等比放大，一根琴键都筛不出来。无头用例里 egui 拿不到
+        // 系统倍率（`native_pixels_per_point` 是每帧从平台层喂进来的，测试没喂 = 1.0），
+        // 所以缩放这一档只剩 prefs.json 里存的这个值要钉。
+        s.prefs.window_scale = Some(1.0);
+        s.theme = Theme::new(ThemeKind::Fluent);
+        s.theme.fdark = false;
+        s.theme.set_accent_base(s.prefs.accent);
+        s.flags = UiFlags::default();
+        s
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn editor_state_defaults() {
         let _prefs = isolate_prefs();
-        let s = EditorState::new();
+        let s = EditorState::for_test();
         assert!(s.doc.song.total_blocks > 0);
         assert!(s.doc.history.can_undo() == false);
     }
@@ -155,7 +181,7 @@ mod tests {
     #[test]
     fn ui_renders_one_frame_offscreen() {
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -186,7 +212,7 @@ mod tests {
         assert!(total > 1000, "测试需要一个足够大的样本曲");
 
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.doc.replace_song(song);
         state.theme.apply(&ctx);
         let input = egui::RawInput {
@@ -212,7 +238,7 @@ mod tests {
 
     #[test]
     fn culling_range_stays_small_for_huge_song() {
-        let mut s = EditorState::new();
+        let mut s = EditorState::for_test();
         for i in 0..2000u32 {
             s.doc
                 .place_note(i * 50, 0, nbs_core::model::Note::new(0, 45));
@@ -228,7 +254,7 @@ mod tests {
     #[test]
     fn enter_startup_factory_defaults_show_greeting_and_banner() {
         let _prefs = isolate_prefs();
-        let s = EditorState::new();
+        let s = EditorState::for_test();
         // donate_banner_time 出厂 0（= 原版 −1），now > 0 → 横幅亮
         assert!(s.donate_banner, "出厂应亮捐赠横幅");
         assert_eq!(
@@ -243,7 +269,7 @@ mod tests {
     #[test]
     fn enter_startup_flags_update_success_on_version_change() {
         let _prefs = isolate_prefs();
-        let mut s = EditorState::new();
+        let mut s = EditorState::for_test();
         s.prefs.last_version = Some("0.0.1".into());
         s.prefs.show_welcome = false;
         // 模拟全新一次开机：原版 create 时 window 还没有任何值。
@@ -302,7 +328,7 @@ mod tests {
     #[test]
     fn bundled_changelog_is_readable() {
         let _prefs = isolate_prefs();
-        let src = EditorState::new()
+        let src = EditorState::for_test()
             .changelog
             .expect("assets/changelog.txt 应当能在资源目录里找到");
         assert!(!src.contains('\r'), "载入时要把 CRLF 归一成 LF");
@@ -342,7 +368,7 @@ mod tests {
     #[test]
     fn bundled_credits_is_readable() {
         let _prefs = isolate_prefs();
-        let src = EditorState::new()
+        let src = EditorState::for_test()
             .credits
             .expect("assets/credits.txt 应当能在资源目录里找到");
         assert!(!src.contains('\r'), "载入时要把 CRLF 归一成 LF");
@@ -364,7 +390,7 @@ mod tests {
     #[test]
     fn poll_update_check_asks_once_per_new_version() {
         let _prefs = isolate_prefs();
-        let mut s = EditorState::new();
+        let mut s = EditorState::for_test();
         s.poll_update_check();
         assert!(s.modals.is_empty(), "检查中不应弹窗");
         s.update_check.lock().unwrap().status = 1;
@@ -409,7 +435,7 @@ mod gui_export_tests {
     #[test]
     fn audio_export_window_dialog_and_wav_output_are_real() {
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.language = 1;
         state.window = Some(WindowKind::AudioExport);
@@ -471,7 +497,7 @@ mod gui_export_tests {
             return;
         }
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.export_format = "MP3".into();
         let out: PathBuf = std::env::temp_dir().join("nbs_gui_export_should_not_exist.mp3");
@@ -531,7 +557,7 @@ mod gui_window_tests {
     fn help_menu_opens_changelist() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.language = 1;
         state.window = None;
@@ -549,7 +575,7 @@ mod gui_window_tests {
     fn changelog_window_draws_the_bundled_lines() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.language = 1;
         state.window = Some(WindowKind::Changelist);
@@ -580,7 +606,7 @@ mod gui_window_tests {
     fn changelog_ok_button_targets_differ_by_kind() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.language = 1;
         state.prefs.last_version = Some("0.0.1".into());
@@ -607,7 +633,7 @@ mod gui_window_tests {
     fn missing_changelog_pops_message_and_closes() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.language = 1;
         state.changelog = None;
@@ -633,7 +659,7 @@ mod gui_window_tests {
     #[test]
     fn ctrl_p_opens_preferences_and_stays_open() {
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         // 开机流程会开欢迎窗（窗口开着快捷键全被门槛拦掉）；Ctrl+P 的靶子是裸编辑器。
         state.window = None;
         let ctrl = egui::Modifiers {
@@ -768,7 +794,7 @@ mod gui_window_tests {
     #[test]
     fn datapack_window_dialog_and_folder_output_are_real() {
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
 
         // ShowWindow 会像原版首帧那样把 dat_name 预填成歌曲名。
@@ -905,7 +931,7 @@ mod gui_window_tests {
     #[test]
     fn datapack_export_refuses_an_empty_name() {
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.language = 1;
         state.datapack_options.name = "  !! ".into();
@@ -937,7 +963,7 @@ mod gui_window_tests {
     #[test]
     fn datapack_export_refuses_too_many_subfolders() {
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.language = 1;
         dispatch(
@@ -986,7 +1012,7 @@ mod gui_window_tests {
     #[test]
     fn clicking_window_controls_drives_the_export() {
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.language = 1;
         dispatch(
@@ -1050,7 +1076,7 @@ mod gui_window_tests {
     fn clicking_through_the_schematic_export_window() {
         let ctx = egui::Context::default();
         let _prefs = isolate_prefs();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         // 原版第一次会写 settings.ini 记住「警告已看过」，测试预置成已看过，不碰用户配置。
         state.prefs.warning_schematic = true;
@@ -1158,7 +1184,7 @@ mod gui_window_tests {
         )
         .expect("导出经典图样");
 
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         // 菜单文案跟着界面语言走，钉成中文，免得跟着本机 locale 变。
         state.prefs.language = 1;
@@ -1205,7 +1231,7 @@ mod gui_window_tests {
         drop(_lock);
 
         // 打开分流：.schematic 走导入，不会被当成 NBS 解析。
-        let mut s2 = EditorState::new();
+        let mut s2 = EditorState::for_test();
         s2.theme.apply(&ctx);
         s2.prefs.language = 1;
         let recents2 = s2.recent_files.len();
@@ -1252,7 +1278,7 @@ mod gui_window_tests {
     #[test]
     fn instruments_window_lists_twenty_and_advertises_only_real_bindings() {
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.prefs.language = 1;
         dispatch(
             &mut state,
@@ -1313,7 +1339,7 @@ mod gui_window_tests {
     fn greeting_window_renders_and_create_button_closes_it() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         // 工厂默认跟系统语言走，测试里显式钉中文（英文分支有单独用例）。
         state.prefs.language = 1;
         let _cn = crate::LangGuard::set(1);
@@ -1397,7 +1423,7 @@ mod gui_window_tests {
     fn greeting_logo_frame_follows_window_icon_and_fdark() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.window = Some(WindowKind::Greeting);
         state.theme.apply(&ctx);
         frame(&mut state, &ctx);
@@ -1476,7 +1502,7 @@ mod gui_window_tests {
     fn about_window_shows_the_original_text() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.prefs.language = 0;
         let _en = crate::LangGuard::set(0);
         state.theme.apply(&ctx);
@@ -1518,7 +1544,7 @@ mod gui_window_tests {
     fn about_credit_rows_follow_the_original_grid() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.prefs.language = 0;
         let _en = crate::LangGuard::set(0);
         state.theme.apply(&ctx);
@@ -1553,7 +1579,7 @@ mod gui_window_tests {
     fn about_credits_links_and_site_buttons_open_the_right_urls() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.prefs.language = 1;
         let _cn = crate::LangGuard::set(1);
         state.theme.apply(&ctx);
@@ -1590,7 +1616,7 @@ mod gui_window_tests {
     fn about_without_credits_file_draws_an_empty_column() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.prefs.language = 0;
         let _en = crate::LangGuard::set(0);
         state.theme.apply(&ctx);
@@ -1612,7 +1638,7 @@ mod gui_window_tests {
     fn about_title_and_logo_follow_the_original() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.prefs.language = 1;
         let _cn = crate::LangGuard::set(1);
         state.theme.apply(&ctx);
@@ -1639,7 +1665,7 @@ mod gui_window_tests {
     fn greeting_renders_english_when_language_zero() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.prefs.language = 0;
         let _en = crate::LangGuard::set(0);
         state.theme.apply(&ctx);
@@ -1703,7 +1729,7 @@ mod gui_window_tests {
     fn greeting_missing_recent_reports_and_clears_entries() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.prefs.language = 1;
         let _cn = crate::LangGuard::set(1);
         state.theme.apply(&ctx);
@@ -1727,7 +1753,7 @@ mod gui_window_tests {
     fn preferences_startup_group_renders_and_warns_on_prerelease() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.language = 1;
         state.window = Some(WindowKind::Preferences);
@@ -1765,7 +1791,7 @@ mod gui_window_tests {
     fn preferences_language_row_switches_interface_language() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.window = Some(WindowKind::Preferences);
         state.prefs_tab = 1;
@@ -1826,7 +1852,7 @@ mod gui_window_tests {
     fn preferences_appearance_rows_render_toggle_and_persist() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.language = 1;
         state.window = Some(WindowKind::Preferences);
@@ -1872,10 +1898,14 @@ mod gui_window_tests {
     fn timeline_context_menu_follows_the_section_and_the_two_checks() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.language = 1;
         state.window = None;
+        // 两行勾的判据是这两个开关，出厂是「开 / 关」；用户在首选项里翻过就得跟着翻，
+        // 断言前先钉回出厂值。
+        state.prefs.marker_start = true;
+        state.prefs.marker_end = false;
         // 「跳到区间开始/结束」的置灰判据是 `section_start > enda`，空谱 enda = 0
         // 会把它们永久钉灰，所以靶子谱要有第 12 列；选区那条要数得出音符，故 3..8 内也放两颗。
         let mut song = nbs_core::model::Song::new();
@@ -1989,11 +2019,15 @@ mod gui_window_tests {
     fn preferences_playback_rows_toggle_the_section_options_and_persist() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.language = 1;
         state.window = Some(WindowKind::Preferences);
         state.prefs_tab = 4;
+        // 两条断言都是「点一下翻到出厂值的另一面」，先把出厂值钉住，
+        // 否则用户存过 开/关 就只剩一次点击的机会。
+        state.prefs.marker_start = true;
+        state.prefs.marker_end = false;
         frame(&mut state, &ctx);
         let texts = drawn_texts(&mut state, &ctx);
         for t in ["在区间时开始播放", "在区间后停止播放"] {
@@ -2021,7 +2055,7 @@ mod gui_window_tests {
     fn preferences_usability_page_shows_wheel_and_layer_groups() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.language = 1;
         state.window = Some(WindowKind::Preferences);
@@ -2090,7 +2124,7 @@ mod gui_window_tests {
 
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.language = 1;
         state.prefs.use_bpm = false;
@@ -2150,7 +2184,7 @@ mod gui_window_tests {
     fn tempo_tapper_measures_taps_and_applies_the_tempo() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.language = 1;
         state.window = Some(WindowKind::TempoTapper);
@@ -2206,7 +2240,7 @@ mod gui_window_tests {
         let _prefs = isolate_prefs();
         let _cn = crate::LangGuard::set(1);
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.language = 1;
         state.window = None;
@@ -2247,7 +2281,7 @@ mod gui_window_tests {
         assert_eq!(state.window, None, "写完关窗");
 
         // 19 个自定义音色：原版 `min_version = 5`，0..4 五行锁住，单选低于 5 的要抬上来。
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.language = 1;
         state.window = None;
@@ -2294,7 +2328,7 @@ mod gui_window_tests {
     /// prefs.json，也不校验首选项取值，没必要占出厂值用例那把串行锁。
     fn state_with_selection() -> EditorState {
         scratch_prefs_dir();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.prefs.language = 1;
         state.window = None;
         // 空谱起步：`EditorState::new()` 自带演示曲，全选会连它一起抬进选区。
@@ -2786,7 +2820,7 @@ mod gui_window_tests {
     fn fluent_preferences_swatch_opens_the_accent_picker() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.language = 1;
         state.theme.accent_base = [200, 20, 60];
@@ -2831,7 +2865,7 @@ mod gui_window_tests {
     fn accent_picker_draws_the_original_pieces() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         open_accent_picker(&mut state, &ctx);
         let out = frame_out(&mut state, &ctx, base_input());
@@ -2909,7 +2943,7 @@ mod gui_window_tests {
     fn accent_picker_square_drag_sets_hue_and_saturation() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         open_accent_picker(&mut state, &ctx);
         let (sq, _bar) = accent_zones(&mut state, &ctx);
@@ -2963,7 +2997,7 @@ mod gui_window_tests {
     fn accent_picker_value_bar_drag_uses_the_240_travel() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         open_accent_picker(&mut state, &ctx);
         let (_sq, bar) = accent_zones(&mut state, &ctx);
@@ -3000,7 +3034,7 @@ mod gui_window_tests {
     fn accent_picker_rgb_boxes_commit_as_a_batch() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         open_accent_picker(&mut state, &ctx);
         let before = picked(&state).hsv;
@@ -3030,7 +3064,7 @@ mod gui_window_tests {
     fn accent_picker_typed_box_rederives_the_hsv() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         open_accent_picker(&mut state, &ctx);
         let out = frame_out(&mut state, &ctx, base_input());
@@ -3063,7 +3097,7 @@ mod gui_window_tests {
     fn accent_picker_close_paths() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         open_accent_picker(&mut state, &ctx);
         state.accent_pick = Some(crate::state::AccentPick::from_rgb([7, 8, 9]));
@@ -3108,7 +3142,7 @@ mod gui_window_tests {
     fn accent_picker_use_default_asks_before_writing() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.theme.accent_base = [200, 20, 60];
         state.theme.accent_init();
@@ -3159,7 +3193,7 @@ mod gui_encoder_tests {
         let ffmpeg = nbs_io::audio_export::find_ffmpeg()
             .expect("未找到 ffmpeg：设置 NBS_FFMPEG 或放进 PATH 后再跑本用例");
         let ctx = egui::Context::default();
-        let mut state = EditorState::new();
+        let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.export_format = "FLAC".into();
         state.prefs.export_sample_rate = 44100;
@@ -3213,17 +3247,10 @@ mod gui_piano_tests {
         ctx.run(inp, |ctx| crate::show(ctx, state))
     }
 
-    /// `EditorState::new()` 会把本机 prefs 拷进 flags，而这几条用例断言的是原版默认视图。
-    /// 用户把钢琴键盘关掉时也必须照样跑，所以在这里把相关开关钉回出厂值。
+    /// 这几条用例断言的是原版默认界面，用 `for_test()` 把界面档位钉回出厂值
+    /// （钢琴、琴键标注、30 根键、1:1 缩放），用户盘里存过什么都不影响。
     fn piano_state() -> EditorState {
-        let mut state = EditorState::new();
-        state.flags.show_piano = true;
-        state.flags.show_keyboard = true;
-        state.prefs.keys_to_show = 30;
-        // 这三条断言量的是原版绝对像素（键宽 40、步进 39、y=746），用户盘里存着
-        // 缩放档（比如 150%）的话整帧都被等比放大，一根键都筛不出来。测试环境里
-        // `Context::default()` 的系统倍率是 1.0，钉成出厂值就恒等于 1.0。
-        state.prefs.window_scale = None;
+        let mut state = EditorState::for_test();
         // 开机流程会开欢迎窗；钢琴测试断言整帧的形状/贴图，欢迎窗和它最近的
         // 歌曲行（frame5 是 320×16 贴图）会混进来，靶子必须是裸编辑器。
         state.window = None;
