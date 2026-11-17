@@ -376,9 +376,8 @@ fn seconds_to_str(secs: i64) -> String {
 }
 
 /// 原版 `draw_window_greeting.gml`。窗口 700×430 无标题栏，内容原点 o = 原版 (x1, y1)。
-/// 语言取中文分支（多语言在 T2e 接线）；is_prerelease 恒为假 → dev_label_offset = 0、
-/// 开发版本行不画；程序图标选项未接线 → window_icon 恒为假；播放器模式按钮没有对应
-/// 功能，不画（原版 :323-329）。
+/// `is_prerelease` 恒为假 → dev_label_offset = 0、开发版本行不画；播放器模式按钮没有
+/// 对应功能，不画（原版 :323-329）。
 fn greeting(state: &mut EditorState, ui: &mut Ui) {
     let th = state.theme.clone();
     let margin = ui.spacing().window_margin;
@@ -398,9 +397,15 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
     let x = |dx: f32| o.x + dx;
     let y = |dy: f32| o.y + dy;
 
-    // :39-41 logo：帧 = window_icon + (window_icon && fdark)，window_icon 恒假。
+    // :39-41 logo：帧 = window_icon + (window_icon && fdark)，也就是「旧图标」开关
+    // 开着时欢迎窗左上角那张也跟着换。
     if let Some(bk) = &bank {
-        bk.greeting_logo(&p, egui::pos2(x(64.0), y(50.0)), false, th.fdark);
+        bk.greeting_logo(
+            &p,
+            egui::pos2(x(64.0), y(50.0)),
+            state.prefs.window_icon,
+            th.fdark,
+        );
     }
     // :43 标题（font_info_med_bold）。
     greet_text_center(

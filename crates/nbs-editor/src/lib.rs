@@ -1320,6 +1320,65 @@ mod gui_window_tests {
         assert_eq!(state.window, None, "创建歌曲应当关掉欢迎窗");
     }
 
+    /// logo 是欢迎窗里唯一一块 165×165 的贴图（`spr_logo` 半尺寸），帧号直接写在
+    /// 网格 uv 的左边界上：3 帧横排 → 0 / ⅓ / ⅔。
+    fn logo_u0(state: &mut EditorState, ctx: &egui::Context) -> f32 {
+        let out = frame_out(state, ctx, base_input());
+        let hits: Vec<f32> = out
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Mesh(m) => Some((
+                    m.calc_bounds(),
+                    m.vertices.iter().map(|v| v.uv.x).fold(f32::MAX, f32::min),
+                )),
+                _ => None,
+            })
+            .filter(|(r, _)| (r.width() - 165.0).abs() < 0.6 && (r.height() - 165.0).abs() < 0.6)
+            .map(|(_, u)| u)
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "欢迎窗里应当只有一张 logo，实际 {} 张",
+            hits.len()
+        );
+        hits[0]
+    }
+
+    /// 原版 `draw_window_greeting.gml:39-41`：logo 帧 = `window_icon + (window_icon && fdark)`，
+    /// 首选项那个「旧图标」开关会连带换掉欢迎窗左上角那张图；`window_icon` 关着时
+    /// `fdark` 不参与（原版括号里的 `&&`）。
+    #[test]
+    fn greeting_logo_frame_follows_window_icon_and_fdark() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.window = Some(WindowKind::Greeting);
+        state.theme.apply(&ctx);
+        frame(&mut state, &ctx);
+        assert!(!state.prefs.window_icon, "出厂是不带旧图标的原版 logo");
+        assert_eq!(logo_u0(&mut state, &ctx), 0.0);
+        state.prefs.window_icon = true;
+        assert!(
+            (logo_u0(&mut state, &ctx) - 1.0 / 3.0).abs() < 1e-4,
+            "开「旧图标」→ 第 1 帧"
+        );
+        state.theme = Theme::new(ThemeKind::Fluent);
+        state.theme.fdark = true;
+        state.theme.apply(&ctx);
+        assert!(
+            (logo_u0(&mut state, &ctx) - 2.0 / 3.0).abs() < 1e-4,
+            "「旧图标」+ 暗色 Fluent → 第 2 帧"
+        );
+        state.prefs.window_icon = false;
+        assert_eq!(
+            logo_u0(&mut state, &ctx),
+            0.0,
+            "「旧图标」关着时 fdark 不算"
+        );
+    }
+
     /// 语言切到英文（原版 language=0 分支）后欢迎窗整套文案与行位切换：
     /// 第二行社区链接只剩 GitHub / Donate（中文还有 QQ 群 / 捐赠），各字符串
     /// 全部照 draw_window_greeting.gml 的 `if (language != 1)` 分支。
