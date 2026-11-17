@@ -714,16 +714,13 @@ fn macro_bar(
     }
 }
 
-/// 宏按钮的动作：原版三个（琶音 / 滑音 / 错开）有各自的对话框，我们没有，
-/// 就打开统一的宏编辑器并预选好对应那一项。
+/// 宏条按钮的动作分发。原版 `control_draw.gml:1640-1658` 每条都是
+/// `{playing = 0 …}`：窗口走 `HotkeyWindow`、直接执行的宏走 `HotkeyMacro`，
+/// 两者都会先停下播放，再开窗 / 跑宏。
 fn emit_macro(state: &mut EditorState, action: &MacroAction) {
     match action {
-        MacroAction::Window(kind) => state.emit(Command::ShowWindow(kind.clone())),
-        MacroAction::Editor(mi) => {
-            state.macro_index = *mi;
-            state.emit(Command::ShowWindow(WindowKind::MacroEditor));
-        }
-        MacroAction::Run(m) => state.emit(Command::RunMacro(m.clone())),
+        MacroAction::Window(kind) => state.emit(Command::HotkeyWindow(kind.clone())),
+        MacroAction::Run(m) => state.emit(Command::HotkeyMacro(m.clone())),
     }
 }
 
@@ -740,7 +737,6 @@ pub(crate) fn time_str(sec: f64) -> String {
 #[derive(Clone)]
 enum MacroAction {
     Window(WindowKind),
-    Editor(usize),
     Run(nbs_core::Macro),
 }
 
@@ -781,7 +777,7 @@ const MACRO_BTNS: [MacroBtn; 15] = [
         tip_zh: "Arpeggio...",
         label_en: "Arpeggio...",
         label_zh: "Arpeggio…",
-        action: MacroAction::Editor(8),
+        action: MacroAction::Window(WindowKind::Arpeggio),
     },
     MacroBtn {
         index: 3,
@@ -789,7 +785,7 @@ const MACRO_BTNS: [MacroBtn; 15] = [
         tip_zh: "Portamento...",
         label_en: "Portamento...",
         label_zh: "Portamento…",
-        action: MacroAction::Editor(9),
+        action: MacroAction::Window(WindowKind::Portamento),
     },
     MacroBtn {
         index: 4,
@@ -805,7 +801,7 @@ const MACRO_BTNS: [MacroBtn; 15] = [
         tip_zh: "Stagger...",
         label_en: "Stagger...",
         label_zh: "Stagger…",
-        action: MacroAction::Editor(10),
+        action: MacroAction::Window(WindowKind::Stagger),
     },
     MacroBtn {
         index: 6,

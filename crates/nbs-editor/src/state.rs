@@ -7,7 +7,7 @@ use std::time::Instant;
 use egui::{Context, Pos2};
 use nbs_audio::{AudioEngine, CpalEngine, SoundBank, DEFAULT_MAX_VOICES, EXTENDED_MAX_VOICES};
 use nbs_core::model::Note;
-use nbs_core::{Document, Macro, TremoloFade};
+use nbs_core::Document;
 use nbs_io::datapack::DatapackOptions;
 use nbs_io::image_export::ImageOptions;
 use nbs_io::midi::MidiImportOptions;
@@ -196,7 +196,13 @@ pub enum WindowKind {
     MidiImport,
     SchematicExport,
     PngExport,
-    MacroEditor,
+    /// 原版 `w_arpeggio`（`draw_window_macro_arpeggio.gml`）：140×130，只有一个规律框。
+    Arpeggio,
+    /// 原版 `w_portamento`（`draw_window_macro_portamento.gml`）：140×130，
+    /// 反转勾选 + cents 拖拽。
+    Portamento,
+    /// 原版 `w_stagger`（`draw_window_macro_stagger.gml`）：150×160，规律框 + 警示文字。
+    Stagger,
     Autosaves,
     /// 原版 `w_minecraft`（`macros.gml:69`）：右上角兼容性图标点开的窗口。
     MinecraftCompat,
@@ -248,7 +254,11 @@ impl WindowKind {
             // 原版 `draw_window_schematic_export.gml:14`：CN "导出结构"。
             Self::SchematicExport => tr("Schematic Export", "导出结构"),
             Self::PngExport => tr("Export PNG chart", "导出 PNG 谱面"),
-            Self::MacroEditor => tr("Macros", "宏"),
+            // 原版三个宏窗口的正文标题都是 `draw_text_dynamic(x1 + 8, y1 + 8, "Arpeggio")`
+            // 这种不分语言的写法，中文界面里也保持英文，照抄。
+            Self::Arpeggio => "Arpeggio",
+            Self::Portamento => "Portamento",
+            Self::Stagger => "Stagger",
             Self::Autosaves => tr("Autosaves / Backups", "自动保存 / 备份"),
             // 原版 `draw_window_minecraft.gml:21` 的标题文字。
             Self::MinecraftCompat => tr("Minecraft Compatibility", "Minecraft 兼容性"),
@@ -871,9 +881,16 @@ pub struct EditorState {
     /// `rel` 是相对当前视口左上格的格坐标（原版存 `xx - starta`，不随滚动移动）。
     pub remove_effects: Vec<RemoveFx>,
     pub macro_amount: f32,
-    pub macro_index: usize,
-    pub macro_pattern: String,
-    pub macro_reverse: bool,
+    /// 原版 `draw_window_macro_arpeggio` 的 57 号文本框（琶音规律）。原版把它存在
+    /// `draw_text_edit` 的会话缓冲里：跨开关窗保留，但不落 settings.ini。
+    pub arpeggio_pattern: String,
+    /// 同上，`draw_window_macro_stagger` 的 58 号文本框（错开规律）。
+    pub stagger_pattern: String,
+    /// 原版会话全局 `porta_reverse` / `port_cent`（`control_create.gml:658-659`），
+    /// 滑音窗口的勾选与偏移量；同样只在会话里活着。
+    /// 原版 `port_cent` 是浮点（拖拽灵敏度 0.1），端口沿用了 `Page::drag` 的整数走查。
+    pub porta_reverse: bool,
+    pub port_cent: i32,
     pub midi_options: MidiImportOptions,
     /// 原版 `midi_*` 那一堆全局：解析好的 MIDI。导入窗口只在这有值时才打开——
     /// 原版 `open_midi()` 是先解析、再 `window = w_midi`，没有「先开空窗口」这条路。
@@ -1096,9 +1113,10 @@ impl EditorState {
             layer_drag: None,
             remove_effects: Vec::new(),
             macro_amount: 1.0,
-            macro_index: 0,
-            macro_pattern: "0|4|7|12".into(),
-            macro_reverse: false,
+            arpeggio_pattern: String::new(),
+            stagger_pattern: String::new(),
+            porta_reverse: false,
+            port_cent: 0,
             midi_options,
             midi_data: None,
             midi_file: String::new(),
@@ -1747,61 +1765,6 @@ impl EditorState {
             self.sync_prefs();
             self.last_prefs_save = Instant::now();
             let _ = self.prefs.save();
-        }
-    }
-
-    /// 按宏窗口当前参数构造一个宏。
-    pub fn current_macro(&self) -> Macro {
-        let a = self.macro_amount;
-        let pattern: Vec<i32> = self
-            .macro_pattern
-            .split('|')
-            .filter_map(|s| s.trim().parse::<i32>().ok())
-            .collect();
-        match self.macro_index {
-            0 => Macro::FadeIn,
-            1 => Macro::FadeOut,
-            2 => Macro::VelocityLfo,
-            3 => Macro::Vibrato,
-            4 => Macro::Reset,
-            5 => Macro::ReplaceKey,
-            6 => Macro::Tremolo {
-                spacing: a.clamp(1.0, 8.0) as u32,
-                fade: if self.macro_reverse {
-                    TremoloFade::Out
-                } else {
-                    TremoloFade::None
-                },
-                amount: a as i32,
-            },
-            7 => Macro::Stereo {
-                width: a.clamp(0.0, 100.0) as u8,
-                reverse: self.macro_reverse,
-            },
-            8 => Macro::Arpeggio { pattern },
-            9 => Macro::Portamento {
-                cents: a as i32,
-                reverse: self.macro_reverse,
-            },
-            10 => Macro::Stagger {
-                pattern: pattern.iter().map(|&x| x.max(0) as u32).collect(),
-            },
-            11 => Macro::Chorus { detune: a as i32 },
-            12 => Macro::SetVelocity {
-                value: a.clamp(0.0, 100.0) as u8,
-                percent: self.macro_reverse,
-            },
-            13 => Macro::SetPanning {
-                value: a.clamp(-100.0, 100.0) as i16,
-            },
-            14 => Macro::SetPitch {
-                value: a as i16,
-                additive: self.macro_reverse,
-            },
-            15 => Macro::SetInstrument {
-                value: a.clamp(0.0, 15.0) as u8,
-            },
-            _ => Macro::Reset,
         }
     }
 

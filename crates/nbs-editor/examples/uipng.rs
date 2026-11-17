@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 
 use egui::epaint::{ImageData, ImageDelta, Primitive, TextureId};
 use egui::{Color32, Rect, Vec2};
+use nbs_core::model::Note;
 use nbs_editor::{EditorState, Theme, ThemeKind, WindowKind};
 
 struct Tex {
@@ -184,7 +185,9 @@ fn main() -> Result<(), String> {
             "tremolo" => WindowKind::Tremolo,
             "stereo" => WindowKind::Stereo,
             "clip-editor" => WindowKind::ClipEditor,
-            "macro-editor" => WindowKind::MacroEditor,
+            "arpeggio" => WindowKind::Arpeggio,
+            "portamento" => WindowKind::Portamento,
+            "stagger" => WindowKind::Stagger,
             "audio-settings" => WindowKind::AudioSettings,
             "audio-export" => WindowKind::AudioExport,
             "midi-import" => WindowKind::MidiImport,
@@ -260,6 +263,19 @@ fn main() -> Result<(), String> {
                 Ok("theme") => state.prefs_theme_menu = true,
                 _ => {}
             }
+        }
+        // 琶音 / 滑音 / 错开三个宏窗口照原版在绘制里自闸门：没有选区一帧就关窗。
+        // 空歌时先落两个音符再全选，截图才有东西可画；载了歌就不动别人的谱面。
+        let macro_window = matches!(
+            k,
+            WindowKind::Arpeggio | WindowKind::Portamento | WindowKind::Stagger
+        );
+        if macro_window && state.doc.selection.is_empty() {
+            if state.doc.song.total_blocks == 0 {
+                state.doc.place_note(0, 0, Note::new(0, 45));
+                state.doc.place_note(1, 2, Note::new(0, 47));
+            }
+            state.doc.select_all();
         }
         state.window = Some(k);
     }

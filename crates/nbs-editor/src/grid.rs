@@ -1374,7 +1374,7 @@ mod tests {
     /// 纵向一个槽 = 1 层。方向（哪个符号算前进）沿用端口既有约定，这里只核每格走多远。
     #[test]
     fn wheel_scroll_steps_by_the_preference() {
-        crate::isolate_prefs();
+        let _prefs = crate::isolate_prefs();
         let mut st = EditorState::new();
         let from = 20i64;
         st.prefs.mousewheel_scroll_speed = 1;

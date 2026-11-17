@@ -1,14 +1,15 @@
 //! 原版 15 个宏（macro_* / draw_window_macro_*）的 Rust 实现。
 //!
-//! 原版把选区导成扁平数组做指针算术，每个音符占 7 个槽位；这里直接在
-//! `Vec<(i64,i64,Note)>` 上按列分组变换，语义等价但不易越界。
-//! 所有宏都通过一次事务提交，撤销只占一条历史。
+//! 原版把选区导成扁平数组做指针算术：每列先是列偏移，然后每个音符 6 个槽
+//! （行偏移、乐器、音高键、力度、声道、微调），列尾一个 -1
+//! （`selection_to_array_ext.gml`）；这里直接在 `Vec<(i64,i64,Note)>` 上按列
+//! 分组变换，语义等价但不易越界。所有宏都通过一次事务提交，撤销只占一条历史。
 
 use std::collections::BTreeMap;
 
 use crate::document::Document;
 use crate::model::{Note, KEY_MAX, PAN_MAX, PIT_MAX, VEL_MAX};
-use crate::selection::{Selection, SelectionNote};
+use crate::selection::Selection;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TremoloFade {
@@ -159,6 +160,21 @@ impl Macro {
     }
 }
 
+/// 原版三个带规律的窗口（琶音 / 错开）解析输入框的写法：
+/// `string_digits_symbol(pattern, "|")` 只留数字和 `|`（负号、小数点、空格、
+/// 字母全被丢掉），补一个尾部 `|` 后交给 `selection_to_array` 切段，而它
+/// 只收非空段（`if (element_size > 0)`）。所以 `"0 | -4 |7"` → `[0, 4, 7]`。
+pub fn parse_pattern(raw: &str) -> Vec<i32> {
+    let kept: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == '|')
+        .collect();
+    kept.split('|')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<f64>().unwrap_or(0.0) as i32)
+        .collect()
+}
+
 /// 按列（tick）分组，返回排序后的列号与各列音符。
 fn group_columns(items: &[(i64, i64, Note)]) -> BTreeMap<i64, Vec<(i64, i64, Note)>> {
     let mut cols: BTreeMap<i64, Vec<(i64, i64, Note)>> = BTreeMap::new();
@@ -254,9 +270,14 @@ pub fn transform(items: Vec<(i64, i64, Note)>, m: &Macro) -> Vec<(i64, i64, Note
             if pattern.is_empty() {
                 return items;
             }
-            for &x in &col_keys {
-                for (k, &(xx, y, mut n)) in cols[&x].iter().enumerate() {
-                    let d = pattern[k % pattern.len()];
+            // 原版那条指针走查是按列推进规律下标的（`for (i = 0; i < arplen; i++)`
+            // 在外层 while 里面，一轮走完一整列），所以同一列的所有音符拿同一个
+            // 偏移，相邻列之间才换规律里的下一个数。
+            for (ci, &x) in col_keys.iter().enumerate() {
+                let d = pattern[ci % pattern.len()];
+                for &(xx, y, mut n) in &cols[&x] {
+                    // 原版的越界判断写成 `> 0 || < 88`，恒为真，等于不夹；这里
+                    // 保留夹取，因为端口浮动选区的 key 是 u8，越界会直接写坏音符。
                     n.key = (n.key as i32 + d).clamp(0, KEY_MAX as i32) as u8;
                     out.push((xx, y, n));
                 }
@@ -265,8 +286,12 @@ pub fn transform(items: Vec<(i64, i64, Note)>, m: &Macro) -> Vec<(i64, i64, Note
         Macro::Portamento { cents, reverse } => {
             let step = *cents as f32 / ncol as f32;
             for (ci, &x) in col_keys.iter().enumerate() {
+                // 原版每列后 `decr += inc`（反转是 `decr -= inc`），`inc` 就是首列
+                // 的 `step`，所以第 ci 列拿到 `step * (ci + 1)`；反转那一支是
+                // `arr_data[val] = port_cent + decr`（直接赋值，不看原音高），
+                // decr 从 step 起步往下减，即 `step * (1 - ci)`。
                 let delta = if *reverse {
-                    *cents as f32 - step * ci as f32
+                    *cents as f32 + step * (1 - ci as i32) as f32
                 } else {
                     step * (ci + 1) as f32
                 };
@@ -285,9 +310,10 @@ pub fn transform(items: Vec<(i64, i64, Note)>, m: &Macro) -> Vec<(i64, i64, Note
             if pattern.is_empty() {
                 return items;
             }
-            for &x in &col_keys {
-                for (k, &(xx, y, n)) in cols[&x].iter().enumerate() {
-                    let dy = pattern[k % pattern.len()] as i64;
+            // 与琶音同一套走查：规律下标按列推进，一列内的音符整体下移同样的行数。
+            for (ci, &x) in col_keys.iter().enumerate() {
+                let dy = pattern[ci % pattern.len()] as i64;
+                for &(xx, y, n) in &cols[&x] {
                     out.push((xx, y + dy, n));
                 }
             }
@@ -402,36 +428,25 @@ impl Document {
         let result = transform(abs, m);
         let mut tx = self.begin(format!("{}: {}", crate::tr("Macro", "宏"), m.label()));
         tx.track_selection();
-        let new_sel = selection_from_absolute(&result);
+        let new_sel = selection_at_origin(sel.x, sel.y, &result);
         *tx.selection() = new_sel;
         tx.commit();
     }
 }
 
-fn selection_from_absolute(items: &[(i64, i64, Note)]) -> Selection {
+/// 宏结果写回浮动选区。原版每个宏收尾都是
+/// `selection_load_from_array(songs[song].selection_x, songs[song].selection_y, arr)`
+/// ——原点沿用选区自己的，不跟着重新取左上角；否则错开把音符整体下移后，
+/// 选区会莫名往上跳。
+fn selection_at_origin(x: i64, y: i64, items: &[(i64, i64, Note)]) -> Selection {
     if items.is_empty() {
         return Selection::new();
     }
-    let minx = items.iter().map(|t| t.0).min().unwrap_or(0);
-    let miny = items.iter().map(|t| t.1).min().unwrap_or(0);
-    let mut notes: Vec<SelectionNote> = items
+    let abs: Vec<(u32, u32, Note)> = items
         .iter()
-        .map(|&(x, y, n)| SelectionNote {
-            dx: (x - minx) as u32,
-            dy: (y - miny) as u32,
-            note: n,
-        })
+        .map(|&(ax, ay, n)| (ax as u32, ay as u32, n))
         .collect();
-    notes.sort_by_key(|n| (n.dx, n.dy));
-    notes.dedup_by_key(|n| (n.dx, n.dy));
-    let mut s = Selection {
-        x: minx,
-        y: miny,
-        notes,
-        ..Default::default()
-    };
-    s.recalc_size();
-    s
+    Selection::from_absolute(x, y, &abs)
 }
 
 #[cfg(test)]
@@ -528,17 +543,79 @@ mod tests {
     }
 
     #[test]
-    fn arpeggio_applies_pattern() {
+    fn arpeggio_applies_pattern_per_column() {
         let mut d = Document::with_song(Song::new());
-        d.place_note(0, 0, Note::new(0, 45));
-        d.place_note(0, 1, Note::new(0, 45));
-        d.place_note(0, 2, Note::new(0, 45));
-        d.select_rect(0, 0, 0, 2, false, false, false);
+        // 原版规律下标按列推进：同一列两个音符拿同一个偏移，下一列才换下一个数。
+        for x in 0..3u32 {
+            d.place_note(x, 0, Note::new(0, 45));
+            d.place_note(x, 1, Note::new(0, 45));
+        }
+        d.select_rect(0, 0, 2, 1, false, false, false);
         d.run_macro(&Macro::Arpeggio {
             pattern: vec![0, 4, 7],
         });
-        assert_eq!(d.selection.at(0, 0).unwrap().key, 45);
-        assert_eq!(d.selection.at(0, 1).unwrap().key, 49);
-        assert_eq!(d.selection.at(0, 2).unwrap().key, 52);
+        for (x, key) in [(0u32, 45u8), (1, 49), (2, 52)] {
+            assert_eq!(d.selection.at(x, 0).unwrap().key, key, "第 {x} 列上行");
+            assert_eq!(d.selection.at(x, 1).unwrap().key, key, "第 {x} 列下行");
+        }
+    }
+
+    #[test]
+    fn stagger_shifts_each_column_by_pattern() {
+        let mut d = Document::with_song(Song::new());
+        for x in 0..3u32 {
+            d.place_note(x, 0, Note::new(0, 45));
+            d.place_note(x, 1, Note::new(0, 45));
+        }
+        d.select_rect(0, 0, 2, 1, false, false, false);
+        d.run_macro(&Macro::Stagger {
+            pattern: vec![0, 1, 2],
+        });
+        // 每列整体下移 pattern[列号]，列内两音符的间距不变。
+        assert!(d.selection.at(0, 0).is_some());
+        assert!(d.selection.at(1, 1).is_some());
+        assert!(d.selection.at(2, 2).is_some());
+        assert!(d.selection.at(2, 3).is_some());
+        // 原点不跟着重新取左上角：第一列没动，选区仍锚在 (0, 0)。
+        assert_eq!((d.selection.x, d.selection.y), (0, 0));
+    }
+
+    /// 原点保持的另一半：选区不在 (0,0) 时，错开也不要把选区往上拽。
+    #[test]
+    fn stagger_keeps_the_selection_origin() {
+        let mut d = Document::with_song(Song::new());
+        d.place_note(5, 7, Note::new(0, 45));
+        d.place_note(6, 7, Note::new(0, 45));
+        d.select_rect(5, 7, 6, 7, false, false, false);
+        d.run_macro(&Macro::Stagger {
+            pattern: vec![2, 3],
+        });
+        assert_eq!((d.selection.x, d.selection.y), (5, 7));
+        assert_eq!(d.selection.at(0, 2).unwrap().key, 45);
+        assert_eq!(d.selection.at(1, 3).unwrap().key, 45);
+    }
+
+    #[test]
+    fn portamento_reverse_is_one_step_higher_than_cent() {
+        // 原版反转那一支：第 0 列是 `port_cent + decr`（decr 初值 = cent/列数），
+        // 之后每列再减一个 step，所以起步比要求的 cent 还高一个 step。
+        let out = transform(
+            vec![(0, 0, Note::new(0, 45)), (1, 0, Note::new(0, 45))],
+            &Macro::Portamento {
+                cents: 400,
+                reverse: true,
+            },
+        );
+        assert_eq!(out[0].2.pitch, 600);
+        assert_eq!(out[1].2.pitch, 400);
+    }
+
+    #[test]
+    fn parse_pattern_keeps_only_digits_and_pipes() {
+        assert_eq!(parse_pattern("0 | -4 |7"), vec![0, 4, 7]);
+        // 空段整段丢掉（原版 `element_size > 0`），小数点被吃掉只留下数字。
+        assert_eq!(parse_pattern("1||2|"), vec![1, 2]);
+        assert_eq!(parse_pattern("0.5|abc|"), vec![5]);
+        assert_eq!(parse_pattern(""), Vec::<i32>::new());
     }
 }

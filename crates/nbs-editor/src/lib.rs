@@ -98,16 +98,40 @@ pub(crate) fn frame_lock() -> std::sync::MutexGuard<'static, ()> {
     TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// 测试用的配置目录是全进程共用的一份：`NBS_RUST_CONFIG_DIR` 是环境变量，
+/// 谁后设谁生效，`prefs.json` 也只有一份。不串行时，一个用例的「落盘 → 回读 → 断言」
+/// 会被另一个用例的删除或落盘插进来，红不红全看调度顺序。
+#[cfg(test)]
+static PREFS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// `isolate_prefs()` 交出来的串行凭据，持到用例结束。
+#[cfg(test)]
+#[must_use = "要持到用例结束：中途放掉，并行用例会把 prefs.json 删掉或改走"]
+pub(crate) struct PrefsLock(std::sync::MutexGuard<'static, ()>);
+
+/// 只把配置目录指到临时目录，不动里面的文件。给不校验首选项取值、
+/// 只是不想读写用户真配置的用例用。
+#[cfg(test)]
+pub(crate) fn scratch_prefs_dir() {
+    let dir = std::env::temp_dir().join("nbs-rust-test-prefs");
+    let _ = std::fs::create_dir_all(&dir);
+    std::env::set_var("NBS_RUST_CONFIG_DIR", &dir);
+}
+
 /// 出厂值断言 / 不该写用户配置的测试都用它：指向一个空的配置目录，
 /// 调试界实时改过缩放 / 音量、或测试期间真的落盘过偏好，单测都会莫名其妙变红。
 /// 目录里旧一轮跑剩的 prefs.json 也要清掉，否则上次测试写下的开关值
 /// 会污染这一轮的「出厂值」断言。
 #[cfg(test)]
-pub(crate) fn isolate_prefs() {
-    let dir = std::env::temp_dir().join("nbs-rust-test-prefs");
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::remove_file(dir.join("prefs.json"));
-    std::env::set_var("NBS_RUST_CONFIG_DIR", &dir);
+pub(crate) fn isolate_prefs() -> PrefsLock {
+    let lock = PREFS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    scratch_prefs_dir();
+    let _ = std::fs::remove_file(
+        std::env::temp_dir()
+            .join("nbs-rust-test-prefs")
+            .join("prefs.json"),
+    );
+    PrefsLock(lock)
 }
 
 #[cfg(test)]
@@ -116,7 +140,7 @@ mod tests {
 
     #[test]
     fn editor_state_defaults() {
-        isolate_prefs();
+        let _prefs = isolate_prefs();
         let s = EditorState::new();
         assert!(s.doc.song.total_blocks > 0);
         assert!(s.doc.history.can_undo() == false);
@@ -198,7 +222,7 @@ mod tests {
     /// 原版 control_create.gml 结尾的开机流程：出厂状态横幅亮 + 欢迎窗开。
     #[test]
     fn enter_startup_factory_defaults_show_greeting_and_banner() {
-        isolate_prefs();
+        let _prefs = isolate_prefs();
         let s = EditorState::new();
         // donate_banner_time 出厂 0（= 原版 −1），now > 0 → 横幅亮
         assert!(s.donate_banner, "出厂应亮捐赠横幅");
@@ -213,7 +237,7 @@ mod tests {
     /// :747-753 的版本变化分支：上次版本与本版不同 → update_success + 强制横幅。
     #[test]
     fn enter_startup_flags_update_success_on_version_change() {
-        isolate_prefs();
+        let _prefs = isolate_prefs();
         let mut s = EditorState::new();
         s.prefs.last_version = Some("0.0.1".into());
         s.prefs.show_welcome = false;
@@ -234,7 +258,7 @@ mod tests {
     /// check_updates.gml 回调的 UI 侧：后台写 1 → 弹一次问句；不重复弹；其他状态不弹。
     #[test]
     fn poll_update_check_asks_once_per_new_version() {
-        isolate_prefs();
+        let _prefs = isolate_prefs();
         let mut s = EditorState::new();
         s.poll_update_check();
         assert!(s.modals.is_empty(), "检查中不应弹窗");
@@ -817,7 +841,7 @@ mod gui_window_tests {
     #[test]
     fn clicking_through_the_schematic_export_window() {
         let ctx = egui::Context::default();
-        isolate_prefs();
+        let _prefs = isolate_prefs();
         let mut state = EditorState::new();
         state.theme.apply(&ctx);
         // 原版第一次会写 settings.ini 记住「警告已看过」，测试预置成已看过，不碰用户配置。
@@ -916,7 +940,7 @@ mod gui_window_tests {
     #[test]
     fn gui_imports_a_schematic_through_the_dialog_and_the_open_route() {
         let ctx = egui::Context::default();
-        isolate_prefs();
+        let _prefs = isolate_prefs();
         let dir = scratch("schematic-import");
         let file = dir.join("demo.schematic");
         nbs_io::schematic::export_schematic(
@@ -1079,7 +1103,7 @@ mod gui_window_tests {
     /// 出厂 show_welcome=true 时欢迎窗就是开机默认窗，这里显式打开避免读到人手 prefs。
     #[test]
     fn greeting_window_renders_and_create_button_closes_it() {
-        isolate_prefs();
+        let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
         let mut state = EditorState::new();
         // 工厂默认跟系统语言走，测试里显式钉中文（英文分支有单独用例）。
@@ -1137,7 +1161,7 @@ mod gui_window_tests {
     /// 全部照 draw_window_greeting.gml 的 `if (language != 1)` 分支。
     #[test]
     fn greeting_renders_english_when_language_zero() {
-        isolate_prefs();
+        let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
         let mut state = EditorState::new();
         state.prefs.language = 0;
@@ -1201,7 +1225,7 @@ mod gui_window_tests {
     /// （draw_window_greeting.gml:219-231）。
     #[test]
     fn greeting_missing_recent_reports_and_clears_entries() {
-        isolate_prefs();
+        let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
         let mut state = EditorState::new();
         state.prefs.language = 1;
@@ -1225,7 +1249,7 @@ mod gui_window_tests {
     /// 首选项「启动」组三行真实渲染 + 开发版本警告问句。
     #[test]
     fn preferences_startup_group_renders_and_warns_on_prerelease() {
-        isolate_prefs();
+        let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
         let mut state = EditorState::new();
         state.theme.apply(&ctx);
@@ -1263,7 +1287,7 @@ mod gui_window_tests {
     /// prefs.language 并收起菜单，下一帧 app::show 把全局开关同步成中文。
     #[test]
     fn preferences_language_row_switches_interface_language() {
-        isolate_prefs();
+        let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
         let mut state = EditorState::new();
         state.theme.apply(&ctx);
@@ -1324,7 +1348,7 @@ mod gui_window_tests {
     /// 效果本身的画法另有专门用例（`gui_piano_tests` 的五线谱、commands 里的淡出边框动画）。
     #[test]
     fn preferences_appearance_rows_render_toggle_and_persist() {
-        isolate_prefs();
+        let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
         let mut state = EditorState::new();
         state.theme.apply(&ctx);
@@ -1371,7 +1395,7 @@ mod gui_window_tests {
     /// 组名此前被写成「琴键」、滚动速度与悬停层预览两行缺失，这条用例把它们钉回原版。
     #[test]
     fn preferences_usability_page_shows_wheel_and_layer_groups() {
-        isolate_prefs();
+        let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
         let mut state = EditorState::new();
         state.theme.apply(&ctx);
@@ -1423,7 +1447,7 @@ mod gui_window_tests {
     /// 「双倍速度」可勾，确认把 `ctempo * 2 / 15` 写进歌曲速度并关窗。
     #[test]
     fn tempo_tapper_measures_taps_and_applies_the_tempo() {
-        isolate_prefs();
+        let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
         let mut state = EditorState::new();
         state.theme.apply(&ctx);
@@ -1478,7 +1502,7 @@ mod gui_window_tests {
     #[test]
     fn save_options_window_locks_rows_by_instrument_count() {
         use commands::Command;
-        isolate_prefs();
+        let _prefs = isolate_prefs();
         let _cn = crate::LangGuard::set(1);
         let ctx = egui::Context::default();
         let mut state = EditorState::new();
@@ -1544,6 +1568,237 @@ mod gui_window_tests {
         // v6 上限那条（乐器数 > 236 时把 6 改回 5）由 nbs-core 的
         // `save_version_options_follows_the_instrument_count` 钉；这里不画：
         // 237 条自定义音色已经把 `instrument_list()` 的 u8 索引撑爆（见报告）。
+    }
+
+    /// 一帧画到屏幕上的全部文字（菜单/子菜单内容只能这样查，控件本身没有 API），
+    /// 连起点一起返回：既看有没有画出来，也看画在哪儿。画两帧，弹层才定下尺寸。
+    fn drawn_at(state: &mut EditorState, ctx: &egui::Context) -> Vec<(String, egui::Pos2)> {
+        frame_out(state, ctx, base_input());
+        let out = frame_out(state, ctx, base_input());
+        out.shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some((t.galley.text().to_string(), t.pos)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn drawn_texts(state: &mut EditorState, ctx: &egui::Context) -> Vec<String> {
+        drawn_at(state, ctx).into_iter().map(|(t, _)| t).collect()
+    }
+
+    /// 三个宏窗口的靶子谱：三列 × 两层，全选后抬出一个 6 音符的浮动选区。
+    /// `scratch_prefs_dir` 放在 `new()` 之前，免得读写到用户真机的配置；这里不删
+    /// prefs.json，也不校验首选项取值，没必要占出厂值用例那把串行锁。
+    fn state_with_selection() -> EditorState {
+        scratch_prefs_dir();
+        let mut state = EditorState::new();
+        state.prefs.language = 1;
+        state.window = None;
+        // 空谱起步：`EditorState::new()` 自带演示曲，全选会连它一起抬进选区。
+        state.doc.replace_song(nbs_core::model::Song::new());
+        for (col, key) in [(0u32, 50u8), (1, 52), (2, 55)] {
+            state
+                .doc
+                .place_note_raw(col, 0, nbs_core::model::Note::new(0, key));
+            state
+                .doc
+                .place_note_raw(col, 1, nbs_core::model::Note::new(0, key + 12));
+        }
+        state.doc.select_all();
+        assert_eq!(state.doc.selection.len(), 6, "测试前提：全选抬出 6 个音符");
+        state
+    }
+
+    /// 原版三个宏窗口开头都是 `if (songs[song].selected = 0) { window = 0 }`：
+    /// 没有选区，窗口画一帧就自己关掉，不会退化成「对整首歌生效」。
+    #[test]
+    fn macro_windows_self_close_without_a_selection() {
+        let ctx = egui::Context::default();
+        for kind in [
+            WindowKind::Arpeggio,
+            WindowKind::Portamento,
+            WindowKind::Stagger,
+        ] {
+            let mut state = state_with_selection();
+            state.theme.apply(&ctx);
+            state.doc.place_selection();
+            assert!(state.doc.selection.is_empty(), "测试前提：先把选区放回歌上");
+            state.window = Some(kind.clone());
+            // emit 的关窗命令要到下一帧开头才落地。
+            frame(&mut state, &ctx);
+            frame(&mut state, &ctx);
+            assert_eq!(state.window, None, "{kind:?} 没有选区应当自己关掉");
+        }
+    }
+
+    /// 琶音窗口：规律里没有 `|` 只弹错误、窗口留着；补上规律后按列循环取值
+    /// （原版 `for (i = 0; i < arplen; i++)` 每一轮吃掉一整列），确定则落回歌曲并关窗。
+    #[test]
+    fn arpeggio_window_validates_then_applies_the_pattern_per_column() {
+        let ctx = egui::Context::default();
+        let mut state = state_with_selection();
+        state.theme.apply(&ctx);
+        // 原版 `string_digits_symbol` 会把空格吃掉，所以「0 12」等于没有分隔符。
+        state.arpeggio_pattern = "0 12".into();
+        state.window = Some(WindowKind::Arpeggio);
+        click_text(&mut state, &ctx, "确定");
+        assert_eq!(state.modals.items.len(), 1, "缺分隔符要弹一次错误");
+        assert_eq!(state.modals.items[0].title, "错误");
+        assert_eq!(state.modals.items[0].text, "请使用“|”分隔值！");
+        assert_eq!(
+            state.window,
+            Some(WindowKind::Arpeggio),
+            "原版报错只 `return 1`，窗口留着"
+        );
+        assert_eq!(
+            state.doc.selection.at(1, 0).map(|n| n.key),
+            Some(52),
+            "被拒的规律不该已经改到音高"
+        );
+
+        dispatch(&mut state, commands::Command::AnswerModal(true), &ctx);
+        state.arpeggio_pattern = "0|12".into();
+        click_text(&mut state, &ctx, "确定");
+        frame(&mut state, &ctx);
+        assert_eq!(state.window, None, "确定后关窗");
+        let key = |st: &EditorState, col: u32, row: u32| st.doc.song.get(col, row).map(|n| n.key);
+        assert_eq!(key(&state, 0, 0), Some(50), "第 1 列吃规律第 1 个值 +0");
+        assert_eq!(key(&state, 1, 0), Some(64), "第 2 列吃 +12");
+        assert_eq!(key(&state, 2, 0), Some(55), "第 3 列回到 +0：规律按列走");
+        assert_eq!(key(&state, 1, 1), Some(76), "同一列的两个音符吃同一个值");
+        assert!(state.doc.selection.is_empty(), "落回后不残留选区");
+    }
+
+    /// 错开窗口比琶音多一条原版校验：规律里出现 `-` 直接拒
+    /// （`string_count("-", pattern) != 0`，因为 `string_digits_symbol` 会把负号吃掉）。
+    #[test]
+    fn stagger_window_rejects_a_negative_pattern() {
+        let ctx = egui::Context::default();
+        let mut state = state_with_selection();
+        state.theme.apply(&ctx);
+        state.stagger_pattern = "0|-3".into();
+        state.window = Some(WindowKind::Stagger);
+        click_text(&mut state, &ctx, "确定");
+        assert_eq!(state.modals.items.len(), 1, "负号要弹一次错误");
+        assert_eq!(state.modals.items[0].title, "错误");
+        assert_eq!(state.modals.items[0].text, "Stagger 只能向下延伸！");
+        assert_eq!(state.window, Some(WindowKind::Stagger), "报错后窗口留着");
+        assert_eq!(
+            state.doc.selection.at(0, 1).map(|n| n.key),
+            Some(62),
+            "被拒的规律不该已经改到音高"
+        );
+    }
+
+    /// 滑音窗口的复选框和数值就是原版那两个会话全局（`porta_reverse` / `port_cent`）：
+    /// 勾上「反转」要改到状态，确定的偏移按原版 `decr = port_cent / 列数` 逐列累加。
+    #[test]
+    fn portamento_window_checkbox_and_cent_shift_reach_the_song() {
+        let ctx = egui::Context::default();
+        let mut state = state_with_selection();
+        state.theme.apply(&ctx);
+        state.port_cent = 600;
+        state.window = Some(WindowKind::Portamento);
+        click_text(&mut state, &ctx, "反转");
+        assert!(state.porta_reverse, "复选框没接上原版 porta_reverse");
+        state.porta_reverse = false;
+        click_text(&mut state, &ctx, "确定");
+        frame(&mut state, &ctx);
+        assert_eq!(state.window, None, "确定后关窗");
+        let pitch = |st: &EditorState, col: u32| st.doc.song.get(col, 0).map(|n| n.pitch);
+        assert_eq!(pitch(&state, 0), Some(200), "3 列 → 一个步长");
+        assert_eq!(pitch(&state, 1), Some(400));
+        assert_eq!(pitch(&state, 2), Some(600), "末列正好是要求的 cent");
+    }
+
+    /// 原版错开那句警示带真换行（`draw_text_dynamic` 的 `\n`），而 `Page::text`
+    /// 走的是不分行的排版，所以端口按 `\n` 拆开逐行画。这里验两行都画到了屏幕上。
+    #[test]
+    fn stagger_warning_splits_at_the_original_newline() {
+        let ctx = egui::Context::default();
+        let mut state = state_with_selection();
+        state.prefs.language = 0;
+        state.theme.apply(&ctx);
+        state.window = Some(WindowKind::Stagger);
+        let texts = drawn_texts(&mut state, &ctx);
+        assert!(
+            texts.iter().any(|t| t == "This may replace "),
+            "警示第一行没画出来：{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t == "lower note blocks!"),
+            "警示第二行没画出来：{texts:?}"
+        );
+    }
+
+    /// 原版 Edit 菜单的 `Macros...`（中文界面父项原文「快捷键......」）是一条 15 项
+    /// 子菜单，顺序、文案、尾部的 `get_hotkey` 显示串逐条照抄。这里真点两下鼠标
+    /// 把子菜单打开，再看屏幕上画出来的到底是哪 15 条、按什么顺序排。
+    ///
+    /// 叶子条目本身不点：egui 0.31 的弹层在进程内第一次打开时，前几帧还带着上一帧
+    /// 的宽度（差 60px），照着文本中心按下会点空——这是离屏测试的时序问题，不是
+    /// 界面接不上。条目 → 命令的接线由 `toolbar::macros_menu_items` 的用例钉住。
+    #[test]
+    fn edit_menu_macros_submenu_lists_the_original_fifteen_items() {
+        let ctx = egui::Context::default();
+        let mut state = state_with_selection();
+        state.theme.apply(&ctx);
+        click_text(&mut state, &ctx, "编辑");
+        click_text(&mut state, &ctx, "快捷键......");
+        let rows = drawn_at(&mut state, &ctx);
+        let mut prev_y = f32::MIN;
+        for label in [
+            "Tremolo...  Ctrl+Shift+A",
+            "Stereo...  Ctrl+Shift+S",
+            "Arpeggio...  Ctrl+Shift+D",
+            "Portamento...  Ctrl+Shift+F",
+            "Vibrato  Ctrl+Shift+G",
+            "Stagger...  Ctrl+Shift+H",
+            "Chorus  Ctrl+Shift+J",
+            "Volume LFO  Ctrl+Shift+K",
+            "淡入  Ctrl+Shift+Q",
+            "淡出  Ctrl+Shift+W",
+            "替换音  Ctrl+Shift+E",
+            "设定音量......  Ctrl+Shift+R",
+            "设定声道......  Ctrl+Shift+T",
+            "设定音高......  Ctrl+Shift+Y",
+            "重置所有属性  Ctrl+Shift+U",
+        ] {
+            let y = rows
+                .iter()
+                .find(|(t, _)| t == label)
+                .map(|(_, pos)| pos.y)
+                .unwrap_or_else(|| panic!("子菜单里没画出「{label}」，实得：{rows:?}"));
+            assert!(y > prev_y, "「{label}」画在第 {y} 行，顺序不对");
+            prev_y = y;
+        }
+    }
+
+    /// 原版子菜单父项带 `inactive(selected = 0 || selection_l = 0)`：没有选区整条置灰，
+    /// 点不开子菜单，也就开不了宏窗口。
+    #[test]
+    fn macros_submenu_is_locked_without_a_selection() {
+        let ctx = egui::Context::default();
+        let mut state = state_with_selection();
+        state.theme.apply(&ctx);
+        state.doc.place_selection();
+        assert!(state.doc.selection.is_empty(), "测试前提：选区已落回歌曲");
+        click_text(&mut state, &ctx, "编辑");
+        let texts = drawn_texts(&mut state, &ctx);
+        assert!(
+            texts.iter().any(|t| t == "快捷键......"),
+            "父项要照常画出来（置灰），实得：{texts:?}"
+        );
+        click_text(&mut state, &ctx, "快捷键......");
+        let texts = drawn_texts(&mut state, &ctx);
+        assert!(
+            !texts.iter().any(|t| t.starts_with("Arpeggio")),
+            "锁住的父项不该展开子菜单：{texts:?}"
+        );
+        frame(&mut state, &ctx);
+        assert_eq!(state.window, None, "无选区时开不了宏窗口");
     }
 }
 

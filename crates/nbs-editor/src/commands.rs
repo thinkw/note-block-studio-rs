@@ -18,7 +18,7 @@ use crate::state::{
 use crate::theme::{Theme, ThemeKind};
 use crate::tr;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     New,
     ConfirmNew,
@@ -208,6 +208,13 @@ pub enum Command {
     /// 文件对话框确定。
     DialogConfirm(PathBuf),
     RunMacro(Macro),
+    /// 琶音 / 滑音 / 错开三个原版宏窗口的「确定」。宏只改浮动选区，收尾原版是
+    /// `changed = 1` + `if(!keyboard_check(vk_alt)) selection_place(false)` ——
+    /// 没按 Alt 时把选区落回歌曲（那在原版里也是第二条历史）。
+    MacroWindowOk {
+        m: Macro,
+        place: bool,
+    },
     SetMasterVolume(f32),
     SetPlaySpeed(f32),
     ToggleMetronome,
@@ -1572,6 +1579,13 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 format!("Macro applied: {label}")
             });
         }
+        Command::MacroWindowOk { m, place } => {
+            dispatch(state, Command::RunMacro(m), ctx);
+            if place {
+                state.doc.place_selection();
+            }
+            dispatch(state, Command::CloseWindow, ctx);
+        }
         Command::SetMasterVolume(v) => {
             state.prefs.master_volume = v.clamp(0.0, 2.0);
             state.apply_audio_prefs();
@@ -2792,6 +2806,46 @@ mod tests {
             "淡入要把首列压到最轻，实得 {:?}",
             velocities(&state)
         );
+    }
+
+    /// 原版宏窗口确定的收尾：`if(!keyboard_check(vk_alt)) selection_place(false)`。
+    /// 没按 Alt 把改完的浮动选区落回歌曲；按着 Alt 只改选区，歌上一个字都不动。
+    #[test]
+    fn macro_window_ok_places_the_selection_unless_alt() {
+        let ctx = Context::default();
+        let key_at = |state: &EditorState, col: u32, layer: u32| {
+            state.doc.song.get(col, layer).map(|n| n.key)
+        };
+        for place in [true, false] {
+            let mut state = state_with(four_case_song(10.0));
+            // four_case_song：列 0 两层（40 / 30）、列 1 一层 45、列 2 一层 50。
+            // 全选把音符抬进浮动选区，歌上那三格此时是空的。
+            state.doc.select_all();
+            dispatch(
+                &mut state,
+                Command::MacroWindowOk {
+                    m: Macro::Arpeggio {
+                        pattern: vec![0, 12],
+                    },
+                    place,
+                },
+                &ctx,
+            );
+            assert_eq!(state.window, None, "确定后窗口要关掉");
+            if place {
+                assert_eq!(key_at(&state, 0, 0), Some(40), "第 1 列吃规律第 1 个值 +0");
+                assert_eq!(key_at(&state, 1, 0), Some(57), "第 2 列吃 +12");
+                assert_eq!(key_at(&state, 2, 0), Some(50), "第 3 列循环回 +0");
+                assert!(state.doc.selection.is_empty(), "落回后没有残余选区");
+            } else {
+                assert_eq!(key_at(&state, 1, 0), None, "按 Alt 不落回，歌上还是空的");
+                assert_eq!(
+                    state.doc.selection.at(1, 0).map(|n| n.key),
+                    Some(57),
+                    "改的是浮动选区那一份"
+                );
+            }
+        }
     }
 
     /// 原版 `toggle_playing` 起播第一行：播完停在歌尾（歌长 + 16 刻）再按

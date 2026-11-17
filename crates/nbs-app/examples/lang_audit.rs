@@ -205,6 +205,10 @@ fn state_with(lang: u8, window: Option<WindowKind>) -> EditorState {
     state.flags.show_piano = true;
     state.prefs.show_layers = true;
     state.prefs.show_piano = true;
+    // 原版带「无选区不开」闸门的那一族窗口（批量设置、颤音/立体声、琶音/滑音/错开）
+    // 在空歌里 select_all 直接早退，窗口一画就自关，扫不到文案。先落两个音符。
+    state.doc.place_note(0, 0, Note::new(0, 45));
+    state.doc.place_note(1, 2, Note::new(0, 47));
     state.doc.select_all();
     state.window = window;
     state
@@ -300,7 +304,7 @@ fn main() {
     let en_ok = kept_english(zh_mode);
     // (标签, 窗口, 首选项页签)
     let mut units: Vec<(String, Option<WindowKind>, u8)> = vec![("主界面".into(), None, 0)];
-    let named: [(&str, WindowKind); 30] = [
+    let named: [(&str, WindowKind); 32] = [
         ("歌曲信息", WindowKind::SongInfo),
         ("歌曲属性", WindowKind::Properties),
         ("歌曲数据", WindowKind::Statistics),
@@ -326,7 +330,9 @@ fn main() {
         ("导入 MIDI", WindowKind::MidiImport),
         ("导出原理图", WindowKind::SchematicExport),
         ("导出 PNG", WindowKind::PngExport),
-        ("宏编辑器", WindowKind::MacroEditor),
+        ("琶音", WindowKind::Arpeggio),
+        ("滑音", WindowKind::Portamento),
+        ("错开", WindowKind::Stagger),
         ("自动存档", WindowKind::Autosaves),
         ("兼容性", WindowKind::MinecraftCompat),
         ("变速器编辑", WindowKind::EditTempoChanger(0, 0)),

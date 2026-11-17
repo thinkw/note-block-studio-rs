@@ -84,7 +84,7 @@ impl Bar {
 pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
     egui::menu::bar(ui, |ui| {
         // 标签和条目名照原版 control_draw.gml 的 `if (language != 1)` 英文分支；
-        // 移植版自己加的条目（PNG 谱面 / 自动备份 / 清空所有音符 / 快捷宏）没有
+        // 移植版自己加的条目（PNG 谱面 / 自动备份 / 清空所有音符）没有
         // 原版文案，英文按字面直译。
         ui.menu_button(tr("File", "文件"), |ui| {
             if ui.button(tr("New song  Ctrl+N", "新建  Ctrl+N")).clicked() {
@@ -302,31 +302,23 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
             ui.separator();
             instrument_menus(state, ui);
             ui.separator();
-            // 原版没有给 Macros... 绑键盘快捷键（get_hotkey 里没有这一项），
-            // 菜单文案不标 Ctrl+M。
-            if ui
-                .add_enabled(
-                    has_sel,
-                    egui::Button::new(tr("Macros... (15 macros)", "宏编辑器（15 种宏）…")),
-                )
-                .clicked()
-            {
-                state.emit(Command::ShowWindow(WindowKind::MacroEditor));
-                ui.close_menu();
-            }
-            ui.menu_button(tr("Macros", "快捷宏"), |ui| {
-                for m in [
-                    nbs_core::Macro::FadeIn,
-                    nbs_core::Macro::FadeOut,
-                    nbs_core::Macro::Vibrato,
-                    nbs_core::Macro::VelocityLfo,
-                    nbs_core::Macro::Reset,
-                    nbs_core::Macro::ReplaceKey,
-                ] {
-                    if ui.button(m.label()).clicked() {
-                        state.emit(Command::RunMacro(m));
+            // 原版 Edit 菜单的 `Macros...`（中文界面父项原文就写作「快捷键......」）
+            // 是一条子菜单，条目见 `macros_menu_items`。父项在原版里带
+            // `inactive(selected = 0 || selection_l = 0)`，也就是没有选区整条置灰；
+            // 子项本身不再判空（宏窗口/宏本体各自早退）。
+            // 点击走 menu_click.gml:115-129：这一族只开窗 / 只跑宏，
+            // 不像图标条和 Ctrl+Shift 热键那样先停下播放。
+            ui.add_enabled_ui(has_sel, |ui| {
+                ui.menu_button(tr("Macros...", "快捷键......"), |ui| {
+                    for (text, zh, key, cmd) in macros_menu_items() {
+                        // 原版把热键右对齐单独画在行尾（`get_hotkey` 的返回串），
+                        // egui 的菜单项没有第二列，这里按「文案 + 两个空格 + 显示串」拼成一条。
+                        let label = format!("{}  Ctrl+Shift+{key}", tr(text, zh.unwrap_or(text)));
+                        if ui.button(label).clicked() {
+                            state.emit(cmd);
+                        }
                     }
-                }
+                });
             });
         });
 
@@ -399,6 +391,44 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
             }
         });
     });
+}
+
+/// 原版 Edit → `Macros...` 子菜单的 15 条，顺序与文案逐条照抄
+/// `control_draw.gml:562-577`（中文分支 :600-615：前 8 条宏名连中文界面都保持英文，
+/// 所以中文文案留 `None`，后 7 条才给中文）。第三个字段是原版 `get_hotkey.gml:73-146`
+/// 里这个宏的按键字母，画在行尾。
+///
+/// 前 8 条里 Vibrato/Chorus/Volume LFO 在原版里直接执行宏、其余开宏窗口；
+/// 后 7 条按原版：淡入/淡出/替换音/重置所有属性直接执行，三个「设定…」开批量窗口。
+/// 单独抽成表是为了能在没有鼠标的用例里核对「这条文案派发的是哪个命令」。
+pub(crate) fn macros_menu_items() -> [(&'static str, Option<&'static str>, char, Command); 15] {
+    use nbs_core::Macro as Mac;
+    let open = Command::ShowWindow;
+    let run = Command::RunMacro;
+    // 这四条的命令先绑成局部值：整条写进表格那一格，这一行就超出 rustfmt 肯留在
+    // 一行里的宽度，15 行的表会被拆成竖排，看不出顺序。
+    let velocity = open(WindowKind::SetVelocity);
+    let panning = open(WindowKind::SetPanning);
+    let pitch = open(WindowKind::SetPitch);
+    let reset = run(Mac::Reset);
+    // (菜单文案, 中文界面改用这条, get_hotkey 的字母, 派发的命令)
+    [
+        ("Tremolo...", None, 'A', open(WindowKind::Tremolo)),
+        ("Stereo...", None, 'S', open(WindowKind::Stereo)),
+        ("Arpeggio...", None, 'D', open(WindowKind::Arpeggio)),
+        ("Portamento...", None, 'F', open(WindowKind::Portamento)),
+        ("Vibrato", None, 'G', run(Mac::Vibrato)),
+        ("Stagger...", None, 'H', open(WindowKind::Stagger)),
+        ("Chorus", None, 'J', run(Mac::Chorus { detune: 5 })),
+        ("Volume LFO", None, 'K', run(Mac::VelocityLfo)),
+        ("Fade in", Some("淡入"), 'Q', run(Mac::FadeIn)),
+        ("Fade out", Some("淡出"), 'W', run(Mac::FadeOut)),
+        ("Replace key", Some("替换音"), 'E', run(Mac::ReplaceKey)),
+        ("Set velocity...", Some("设定音量......"), 'R', velocity),
+        ("Set panning...", Some("设定声道......"), 'T', panning),
+        ("Set pitch...", Some("设定音高......"), 'Y', pitch),
+        ("Reset all properties", Some("重置所有属性"), 'U', reset),
+    ]
 }
 
 /// 原版在 Edit 菜单和网格右键菜单里都出现的三段乐器列表：
@@ -1178,4 +1208,82 @@ fn show_toolbar_text(state: &mut EditorState, ui: &mut Ui) {
             state.emit(Command::SetMasterVolume(vol));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 子菜单的顺序、文案和「这条文案派发哪个命令」都是原版的硬规格，抄在
+    /// `macros_menu_items` 里；这里逐条钉住，防止后面接线时错位或漏改。
+    /// 第三个字段 `Ctrl+Shift+字母` 的顺序（A S D F G H J K Q W E R T Y U）来自
+    /// `get_hotkey.gml:73-146`，`shortcuts.rs` 里另有对应用例验按键真的生效。
+    /// 拼到屏幕上之后的整串文案，由 `lib.rs` 的
+    /// `edit_menu_macros_submenu_lists_the_original_fifteen_items` 对着真实绘制结果验。
+    #[test]
+    fn macros_menu_table_follows_the_original_order_and_targets() {
+        use nbs_core::Macro as Mac;
+        // 英文文案：原版 control_draw.gml:562-577 的 15 行。
+        let want_text = [
+            "Tremolo...",
+            "Stereo...",
+            "Arpeggio...",
+            "Portamento...",
+            "Vibrato",
+            "Stagger...",
+            "Chorus",
+            "Volume LFO",
+            "Fade in",
+            "Fade out",
+            "Replace key",
+            "Set velocity...",
+            "Set panning...",
+            "Set pitch...",
+            "Reset all properties",
+        ];
+        // 中文文案：原版 :600-615 的分支，前 8 条连中文界面都照抄英文，故为 None。
+        let want_zh: [Option<&str>; 15] = [
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("淡入"),
+            Some("淡出"),
+            Some("替换音"),
+            Some("设定音量......"),
+            Some("设定声道......"),
+            Some("设定音高......"),
+            Some("重置所有属性"),
+        ];
+        let want_key = [
+            'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U',
+        ];
+        let want_cmd = [
+            Command::ShowWindow(WindowKind::Tremolo),
+            Command::ShowWindow(WindowKind::Stereo),
+            Command::ShowWindow(WindowKind::Arpeggio),
+            Command::ShowWindow(WindowKind::Portamento),
+            Command::RunMacro(Mac::Vibrato),
+            Command::ShowWindow(WindowKind::Stagger),
+            Command::RunMacro(Mac::Chorus { detune: 5 }),
+            Command::RunMacro(Mac::VelocityLfo),
+            Command::RunMacro(Mac::FadeIn),
+            Command::RunMacro(Mac::FadeOut),
+            Command::RunMacro(Mac::ReplaceKey),
+            Command::ShowWindow(WindowKind::SetVelocity),
+            Command::ShowWindow(WindowKind::SetPanning),
+            Command::ShowWindow(WindowKind::SetPitch),
+            Command::RunMacro(Mac::Reset),
+        ];
+        for (i, (text, zh, key, cmd)) in macros_menu_items().iter().enumerate() {
+            assert_eq!(*text, want_text[i], "第 {} 条英文文案", i + 1);
+            assert_eq!(*zh, want_zh[i], "第 {} 条中文文案", i + 1);
+            assert_eq!(*key, want_key[i], "第 {} 条热键字母", i + 1);
+            assert_eq!(cmd, &want_cmd[i], "第 {} 条派发的命令", i + 1);
+        }
+    }
 }

@@ -84,7 +84,7 @@ pub fn tr_at<'a>(lang: u8, en: &'a str, zh: &'a str) -> &'a str {
 
 pub use document::Document;
 pub use history::{Edit, History};
-pub use macros::{transform as transform_notes, Macro, TremoloFade};
+pub use macros::{parse_pattern, transform as transform_notes, Macro, TremoloFade};
 pub use model::{
     key_name, key_offset, panning_velocity_to_short, short_to_panning_velocity, Column,
     CustomInstrument, Layer, LockMode, Note, Song, SongMeta, FIRST_CUSTOM_INDEX, KEY_MAX, KEY_MIN,

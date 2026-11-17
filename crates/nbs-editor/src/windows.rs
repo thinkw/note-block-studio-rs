@@ -64,8 +64,12 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         // 原版 `draw_window(x1, y1, x1 + 140, y1 + 130/162/180)`。
         WindowKind::TempoTapper
         | WindowKind::SaveOptions
+        | WindowKind::Arpeggio
+        | WindowKind::Portamento
         | WindowKind::EditTempoChanger(..)
         | WindowKind::EditSoundStopper(..) => 140.0,
+        // 原版 `draw_window_macro_stagger`：`draw_window(x1, y1, x1 + 150, y1 + 160)`。
+        WindowKind::Stagger => 150.0,
         _ => 360.0,
     };
     egui::Window::new(title)
@@ -76,6 +80,9 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             kind,
             WindowKind::TempoTapper
                 | WindowKind::SaveOptions
+                | WindowKind::Arpeggio
+                | WindowKind::Portamento
+                | WindowKind::Stagger
                 | WindowKind::EditTempoChanger(..)
                 | WindowKind::EditSoundStopper(..)
         ))
@@ -91,6 +98,9 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::SetTempo => numeric_window(state, ui, Numeric::Tempo),
             WindowKind::TempoTapper => tempo_tapper_window(state, ui),
             WindowKind::SaveOptions => save_options_window(state, ui),
+            WindowKind::Arpeggio => arpeggio_window(state, ui),
+            WindowKind::Portamento => portamento_window(state, ui),
+            WindowKind::Stagger => stagger_window(state, ui),
             WindowKind::SetVelocity => numeric_window(state, ui, Numeric::Velocity),
             WindowKind::SetPanning => numeric_window(state, ui, Numeric::Panning),
             WindowKind::SetPitch => numeric_window(state, ui, Numeric::Pitch),
@@ -109,7 +119,6 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::SchematicExport => schematic_export_window(state, ui),
             WindowKind::DatapackExport => datapack_export_window(state, ui),
             WindowKind::PngExport => png_export_window(state, ui),
-            WindowKind::MacroEditor => macro_editor_window(state, ui),
             WindowKind::Autosaves => autosaves_window(state, ui),
             WindowKind::MinecraftCompat => minecraft_compat_window(state, ui),
             WindowKind::EditTempoChanger(tick, layer) => {
@@ -3253,6 +3262,284 @@ fn save_options_window(state: &mut EditorState, ui: &mut Ui) {
     }
 }
 
+/// 原版三个带参数宏窗口开头都有 `if (songs[song].selected == 0) { window = 0; return 0 }`：
+/// 没有选区就不给用，选区在窗口开着的时候没了窗口自己关掉，绝不退化成「对全曲生效」。
+/// 返回 `false` 表示已经安排上关窗，调用方直接 return。
+fn macro_gate(state: &mut EditorState) -> bool {
+    if state.doc.selection.is_empty() {
+        state.emit(Command::CloseWindow);
+        return false;
+    }
+    true
+}
+
+/// 原版 `draw_window_macro_arpeggio`：140×130，一个规律框 + 确定/取消。
+/// 规律只认数字和 `|`，所以原版确定时只校验「有没有 `|`」，没有就弹错误并留着窗口。
+fn arpeggio_window(state: &mut EditorState, ui: &mut Ui) {
+    if !macro_gate(state) {
+        return;
+    }
+    let th = state.theme.clone();
+    let fluent = th.kind == ThemeKind::Fluent;
+    let margin = ui.spacing().window_margin;
+    let (ml, mr) = (margin.left as f32, margin.right as f32);
+    let body = ui.allocate_exact_size(
+        egui::vec2(140.0 - ml - mr, if fluent { 106.0 } else { 104.0 }),
+        egui::Sense::hover(),
+    );
+    let o = body.0.min - egui::vec2(ml, 0.0);
+    let ry = if fluent { -8.0 } else { -26.0 };
+    // 原版 OK 收尾 `if(!keyboard_check(vk_alt)) selection_place(false)`：
+    // 按着 Alt 确定就只改浮动选区，不落回歌曲。
+    let place = !ui.input(|i| i.modifiers.alt);
+    let mut cmd = None;
+    {
+        let mut pg = Page {
+            ui,
+            o,
+            ry,
+            th: &th,
+            fluent,
+        };
+        if th.kind == ThemeKind::Aqua {
+            let p = pg.ui.painter().clone();
+            let rect = pg.row_rect(6.0, 26.0, 134.0, 92.0);
+            p.rect_filled(rect, 0.0, Color32::WHITE);
+            p.rect_stroke(
+                rect,
+                0.0,
+                Stroke::new(1.0_f32, Color32::from_rgb(137, 140, 149)),
+                StrokeKind::Inside,
+            );
+        }
+        pg.header(10.0, 43.0, 120.0, 35.0, tr("Pattern", "规律"));
+        pg.textarea(
+            15.0,
+            50.0,
+            113.0,
+            25.0,
+            &mut state.arpeggio_pattern,
+            tr(
+                "Must separate relative keys with pipes.",
+                "必须用“|”分隔相联系的音。",
+            ),
+            "macro-arpeggio",
+        );
+        if pg.button2(10.0, 98.0, 60.0, tr("OK", "确定"), false, false) {
+            if state.arpeggio_pattern.contains('|') {
+                cmd = Some(Command::MacroWindowOk {
+                    m: Macro::Arpeggio {
+                        pattern: nbs_core::parse_pattern(&state.arpeggio_pattern),
+                    },
+                    place,
+                });
+            } else {
+                state.modals = ModalQueue::message(
+                    tr("Error", "错误"),
+                    tr(
+                        "Please add pipes ( | ) to separate values!",
+                        "请使用“|”分隔值！",
+                    ),
+                );
+            }
+        }
+        if pg.button2(70.0, 98.0, 60.0, tr("Cancel", "取消"), false, true) {
+            cmd = Some(Command::CloseWindow);
+        }
+    }
+    if let Some(c) = cmd {
+        state.emit(c);
+    }
+}
+
+/// 原版 `draw_window_macro_portamento`：140×130，反转勾选 + cents 拖拽。
+/// 两个参数都是原版会话全局（`porta_reverse` / `port_cent`），不落 settings.ini。
+fn portamento_window(state: &mut EditorState, ui: &mut Ui) {
+    if !macro_gate(state) {
+        return;
+    }
+    let th = state.theme.clone();
+    let fluent = th.kind == ThemeKind::Fluent;
+    let margin = ui.spacing().window_margin;
+    let (ml, mr) = (margin.left as f32, margin.right as f32);
+    let body = ui.allocate_exact_size(
+        egui::vec2(140.0 - ml - mr, if fluent { 106.0 } else { 104.0 }),
+        egui::Sense::hover(),
+    );
+    let o = body.0.min - egui::vec2(ml, 0.0);
+    let ry = if fluent { -8.0 } else { -26.0 };
+    let place = !ui.input(|i| i.modifiers.alt);
+    let mut cmd = None;
+    {
+        let mut pg = Page {
+            ui,
+            o,
+            ry,
+            th: &th,
+            fluent,
+        };
+        if th.kind == ThemeKind::Aqua {
+            let p = pg.ui.painter().clone();
+            let rect = pg.row_rect(6.0, 26.0, 134.0, 92.0);
+            p.rect_filled(rect, 0.0, Color32::WHITE);
+            p.rect_stroke(
+                rect,
+                0.0,
+                Stroke::new(1.0_f32, Color32::from_rgb(137, 140, 149)),
+                StrokeKind::Inside,
+            );
+        }
+        if pg.check(
+            10.0,
+            30.0,
+            state.porta_reverse,
+            tr("Reversed", "反转"),
+            tr(
+                "Portamento is done in the inverse direction.",
+                "反方向应用 Portamento。",
+            ),
+            false,
+            false,
+        ) {
+            state.porta_reverse = !state.porta_reverse;
+        }
+        pg.header(10.0, 53.0, 120.0, 35.0, tr("Cent shift", "偏移"));
+        // 原版 `median(-1200, draw_dragvalue(11, x1 + 55, y1 + 65, port_cent, 0.1), 1200)`。
+        if let Some(v) = pg.drag(
+            55.0,
+            65.0,
+            state.port_cent,
+            0.1,
+            -1200,
+            1200,
+            false,
+            "",
+            &mut state.prefs_drag,
+        ) {
+            state.port_cent = v;
+        }
+        if pg.button2(10.0, 98.0, 60.0, tr("OK", "确定"), false, false) {
+            cmd = Some(Command::MacroWindowOk {
+                m: Macro::Portamento {
+                    cents: state.port_cent,
+                    reverse: state.porta_reverse,
+                },
+                place,
+            });
+        }
+        if pg.button2(70.0, 98.0, 60.0, tr("Cancel", "取消"), false, true) {
+            cmd = Some(Command::CloseWindow);
+        }
+    }
+    if let Some(c) = cmd {
+        state.emit(c);
+    }
+}
+
+/// 原版 `draw_window_macro_stagger`：150×160，规律框加一句警示。
+/// 确定时原版校验两条：没有 `|` 报错；出现 `-` 报「只能向下延伸」
+/// （就算放行，`string_digits_symbol` 也会把负号吃掉变成正数，所以那条检查是唯一的拦法）。
+fn stagger_window(state: &mut EditorState, ui: &mut Ui) {
+    if !macro_gate(state) {
+        return;
+    }
+    let th = state.theme.clone();
+    let fluent = th.kind == ThemeKind::Fluent;
+    let margin = ui.spacing().window_margin;
+    let (ml, mr) = (margin.left as f32, margin.right as f32);
+    let body = ui.allocate_exact_size(
+        egui::vec2(150.0 - ml - mr, if fluent { 136.0 } else { 134.0 }),
+        egui::Sense::hover(),
+    );
+    let o = body.0.min - egui::vec2(ml, 0.0);
+    let ry = if fluent { -8.0 } else { -26.0 };
+    let place = !ui.input(|i| i.modifiers.alt);
+    let mut cmd = None;
+    {
+        let mut pg = Page {
+            ui,
+            o,
+            ry,
+            th: &th,
+            fluent,
+        };
+        if th.kind == ThemeKind::Aqua {
+            let p = pg.ui.painter().clone();
+            let rect = pg.row_rect(11.0, 26.0, 154.0, 102.0);
+            p.rect_filled(rect, 0.0, Color32::WHITE);
+            p.rect_stroke(
+                rect,
+                0.0,
+                Stroke::new(1.0_f32, Color32::from_rgb(137, 140, 149)),
+                StrokeKind::Inside,
+            );
+        }
+        pg.header(15.0, 53.0, 120.0, 35.0, tr("Pattern", "规律"));
+        pg.textarea(
+            20.0,
+            60.0,
+            113.0,
+            25.0,
+            &mut state.stagger_pattern,
+            tr(
+                "Must separate relative keys with pipes.",
+                "必须用“|”分割值。",
+            ),
+            "macro-stagger",
+        );
+        // 原版 `draw_text_dynamic` 的 `\n` 是真断行；`Page::text` 走不分行的排版，
+        // 所以按行各画一次，行距取第一行排版出来的人字高。
+        let warn = tr(
+            "This may replace \nlower note blocks!",
+            "这可能会替换低的音符！",
+        );
+        let ink = pg.ink();
+        let p = pg.ui.painter().clone();
+        let mut line_n = 92.0;
+        for part in warn.split('\n') {
+            let g = p.layout_no_wrap(part.to_string(), FontId::proportional(PREFS_FONT), ink);
+            let h = g.size().y;
+            pg.text(pg.row(25.0, line_n), part, PREFS_FONT, ink);
+            line_n += h;
+        }
+        if pg.button2(15.0, 128.0, 60.0, tr("OK", "确定"), false, false) {
+            if !state.stagger_pattern.contains('|') {
+                state.modals = ModalQueue::message(
+                    tr("Error", "错误"),
+                    tr(
+                        "Please add pipes ( | ) to separate values!",
+                        "请使用“|”分隔值！",
+                    ),
+                );
+            } else if state.stagger_pattern.contains('-') {
+                state.modals = ModalQueue::message(
+                    tr("Error", "错误"),
+                    tr(
+                        "Stagger can only extend downwards!",
+                        "Stagger 只能向下延伸！",
+                    ),
+                );
+            } else {
+                cmd = Some(Command::MacroWindowOk {
+                    m: Macro::Stagger {
+                        pattern: nbs_core::parse_pattern(&state.stagger_pattern)
+                            .into_iter()
+                            .map(|d| d as u32)
+                            .collect(),
+                    },
+                    place,
+                });
+            }
+        }
+        if pg.button2(75.0, 128.0, 60.0, tr("Cancel", "取消"), false, true) {
+            cmd = Some(Command::CloseWindow);
+        }
+    }
+    if let Some(c) = cmd {
+        state.emit(c);
+    }
+}
+
 /// 原版 `draw_window_tempo_tapper`：140×130，只有一颗「按 T 打点」和结果数字。
 /// 按 T 采间隔 → `taptempo` 取全部间隔的滑动平均；数字只有在打过点且测出值时才画
 /// （`if (tapping && taptempo != 0)`），显示单位跟首选项的速度单位走
@@ -6118,83 +6405,6 @@ fn png_export_window(state: &mut EditorState, ui: &mut Ui) {
         state.emit(Command::OpenDialog(crate::state::DialogAction::ExportPng));
     }
     footer(state, ui);
-}
-
-fn macro_editor_window(state: &mut EditorState, ui: &mut Ui) {
-    let macros = Macro::all();
-    // 原版菜单里 Macros... 的锁定条件是 `selected = 0 || selection_l = 0`，
-    // 宏本体也全部空选区早退 —— 这里如实显示作用对象。
-    ui.label(
-        RichText::new(if state.doc.selection.is_empty() {
-            tr(
-                "Target: no selection (apply is a no-op)",
-                "作用对象：无选区（应用无效）",
-            )
-            .to_string()
-        } else {
-            tr(
-                &format!(
-                    "Target: floating selection of {} notes",
-                    state.doc.selection.len()
-                ),
-                &format!("作用对象：浮动选区 {} 音符", state.doc.selection.len()),
-            )
-            .to_string()
-        })
-        .small()
-        .weak(),
-    );
-    ui.separator();
-    egui::ScrollArea::vertical()
-        .max_height(180.0)
-        .show(ui, |ui| {
-            for (i, m) in macros.iter().enumerate() {
-                if ui
-                    .selectable_label(state.macro_index == i, m.label())
-                    .clicked()
-                {
-                    state.macro_index = i;
-                    state.macro_amount = match i {
-                        6 => 2.0,   // Tremolo spacing
-                        7 => 60.0,  // Stereo width
-                        8 => 0.0,   // Arpeggio 用 pattern
-                        9 => 300.0, // Portamento cents
-                        12 => 100.0,
-                        15 => 0.0,
-                        _ => 20.0,
-                    };
-                }
-            }
-        });
-    ui.separator();
-    ui.add(
-        egui::Slider::new(&mut state.macro_amount, -1200.0..=1200.0).text(tr("Amount", "参数值")),
-    );
-    ui.horizontal(|ui| {
-        ui.label(tr("Pattern (| separated)", "序列 (| 分隔)"));
-        ui.add(egui::TextEdit::singleline(&mut state.macro_pattern).desired_width(160.0));
-    });
-    ui.checkbox(
-        &mut state.macro_reverse,
-        tr("Reverse / overlay mode", "反转 / 叠加模式"),
-    );
-    ui.label(
-        RichText::new(tr(
-            &format!("Current: {}", state.current_macro().name()),
-            &format!("当前：{}", state.current_macro().name_zh()),
-        ))
-        .small()
-        .weak(),
-    );
-    ui.separator();
-    ui.horizontal(|ui| {
-        if ui.button(tr("Apply macro", "应用宏")).clicked() {
-            state.emit(Command::RunMacro(state.current_macro()));
-        }
-        if ui.button(tr("Close", "关闭")).clicked() {
-            state.emit(Command::CloseWindow);
-        }
-    });
 }
 
 fn autosaves_window(state: &mut EditorState, ui: &mut Ui) {

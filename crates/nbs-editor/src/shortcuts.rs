@@ -273,7 +273,6 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
             // Ctrl+Shift+I（770-773）在闸门外。
             // 每条第一句都是 `playing = 0`，所以走 HotkeyWindow / HotkeyMacro，
             // 不是 ShowWindow / RunMacro。
-            // 琶音 D / 滑音 F / 交错 H 这三个窗口本端口还没实现，不占用按键。
             // 每一行原版都写死 `keyboard_check(vk_shift)`：这一族必须带 Shift，
             // 否则 Ctrl+P/S/A/R/Y 会和上面 `ctrl && !shift` 那批功能撞车。
             if shift {
@@ -290,11 +289,18 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
                     if p(Key::S) {
                         out.push(Command::HotkeyWindow(WindowKind::Stereo));
                     }
-                    // 原版直接执行的 7 个宏（control_draw.gml:792-834）。同一段里
-                    // 的 D 琶音 / F 滑音 / H 交错是带参数的窗口，本端口没有这两个
-                    // 窗口，不占用按键。
+                    if p(Key::D) {
+                        out.push(Command::HotkeyWindow(WindowKind::Arpeggio));
+                    }
+                    if p(Key::F) {
+                        out.push(Command::HotkeyWindow(WindowKind::Portamento));
+                    }
+                    // 原版直接执行的 7 个宏（control_draw.gml:792-834）。
                     if p(Key::G) {
                         out.push(Command::HotkeyMacro(Macro::Vibrato));
+                    }
+                    if p(Key::H) {
+                        out.push(Command::HotkeyWindow(WindowKind::Stagger));
                     }
                     if p(Key::J) {
                         // 原版 macro_chorus() 里写死 +5 / -5。
@@ -478,10 +484,11 @@ pub fn shortcut_help() -> Vec<(&'static str, &'static str)> {
             "批量设置力度 / 声像 / 微调（需选区，无选区按键无效）",
         ),
         (
-            "Ctrl+Shift+A / S",
-            "Ctrl+Shift+A / S",
-            "Tremolo / stereo macro windows (needs a selection, no-op without one)",
-            "颤音 / 立体声宏窗口（需选区，无选区按键无效）",
+            "Ctrl+Shift+A / S / D / F / H",
+            "Ctrl+Shift+A / S / D / F / H",
+            "Tremolo / stereo / arpeggio / portamento / stagger macro windows (needs a \
+             selection, no-op without one)",
+            "Tremolo / Stereo / Arpeggio / Portamento / Stagger 宏窗口（需选区，无选区按键无效）",
         ),
         (
             "Ctrl+Shift+G / J / K / Q / W / E / U",
@@ -711,7 +718,7 @@ mod tests {
     }
 
     /// 原版 `control_draw.gml` 的 Macro Hotkeys 区整段包在
-    /// `if current_song.selected != 0` 里：Ctrl+Shift+R/T/Y/A/S 没有选区时必须
+    /// `if current_song.selected != 0` 里：Ctrl+Shift+R/T/Y/A/S/D/F/H 没有选区时必须
     /// 无效果，而 Ctrl+Shift+P（片段编辑器）在闸门外，空选区照样打开。
     #[test]
     fn ctrl_shift_macro_keys_require_a_selection() {
@@ -728,6 +735,9 @@ mod tests {
                 key(Key::Y, true, both),
                 key(Key::A, true, both),
                 key(Key::S, true, both),
+                key(Key::D, true, both),
+                key(Key::F, true, both),
+                key(Key::H, true, both),
             ],
             &empty,
         );
@@ -740,6 +750,9 @@ mod tests {
                         | WindowKind::SetPitch
                         | WindowKind::Tremolo
                         | WindowKind::Stereo
+                        | WindowKind::Arpeggio
+                        | WindowKind::Portamento
+                        | WindowKind::Stagger
                 )
             )),
             "无选区时宏族按键必须全部无效: {got:?}"
@@ -765,6 +778,9 @@ mod tests {
                 key(Key::Y, true, both),
                 key(Key::A, true, both),
                 key(Key::S, true, both),
+                key(Key::D, true, both),
+                key(Key::F, true, both),
+                key(Key::H, true, both),
             ],
             &sel,
         );
@@ -774,11 +790,44 @@ mod tests {
             WindowKind::SetPitch,
             WindowKind::Tremolo,
             WindowKind::Stereo,
+            WindowKind::Arpeggio,
+            WindowKind::Portamento,
+            WindowKind::Stagger,
         ] {
             assert!(
                 got.iter()
                     .any(|c| matches!(c, Command::HotkeyWindow(k) if *k == want)),
                 "有选区时应打开 {want:?}: {got:?}"
+            );
+        }
+    }
+
+    /// 快捷键表里带窗口的宏一族逐键对位（`get_hotkey` 的 A/S/D/F/H）：
+    /// 琶音 D、滑音 F、错开 H 三个窗口端口此前没接，键位一直空着。
+    #[test]
+    fn ctrl_shift_macro_window_hotkeys() {
+        let both = egui::Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Default::default()
+        };
+        let want: [(Key, WindowKind); 5] = [
+            (Key::A, WindowKind::Tremolo),
+            (Key::S, WindowKind::Stereo),
+            (Key::D, WindowKind::Arpeggio),
+            (Key::F, WindowKind::Portamento),
+            (Key::H, WindowKind::Stagger),
+        ];
+        let mut sel = fresh_state();
+        sel.doc.place_note(0, 0, nbs_core::model::Note::new(0, 45));
+        sel.doc.place_note(1, 0, nbs_core::model::Note::new(0, 47));
+        sel.doc.select_rect(0, 0, 1, 0, false, false, false);
+        for (k, kind) in &want {
+            let got = cmds_with(vec![key(*k, true, both)], &sel);
+            assert!(
+                got.iter()
+                    .any(|c| matches!(c, Command::HotkeyWindow(w) if w == kind)),
+                "Ctrl+Shift+{k:?} 应打开 {kind:?}，实得 {got:?}"
             );
         }
     }
