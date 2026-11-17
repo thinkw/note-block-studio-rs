@@ -209,6 +209,12 @@ pub enum WindowKind {
     EditTempoChanger(u32, u32),
     /// 原版 `w_edit_sound_stopper`：落消音器时弹出，参数同上。
     EditSoundStopper(u32, u32),
+    /// 原版 `w_changelist`（`macros.gml:86`）：帮助菜单「更新历史……」打开的那扇，
+    /// 和 `w_update` 共用 `draw_window_update.gml`，只有标题、「谢词」和「确认」的去处不同。
+    Changelist,
+    /// 原版 `w_update`（`macros.gml:87`）：开机发现上次记录的版本和本版不同时，
+    /// 顶掉欢迎窗打开的那一版（`control_create.gml:750`）。
+    Update,
     /// 原版 `w_greeting`（`macros.gml:105`）：开机欢迎窗（`show_welcome` 时打开）。
     /// 原版 `draw_window` 没有标题文字，这里也画成无标题栏的 700x430 窗。
     Greeting,
@@ -224,6 +230,10 @@ impl WindowKind {
             Self::Preferences => tr("Preferences", "首选项"),
             Self::Instruments => tr("Instruments", "音色设置"),
             Self::About => tr("About nbs-rust", "关于 nbs-rust"),
+            // 原版 `draw_window_update.gml:23-37` 的粗体标题：`window = w_update` 才是
+            // 「更新」，从帮助菜单进的「更新历史」走 else 那支。
+            Self::Changelist => tr("Changelist", "更新历史"),
+            Self::Update => tr("Update", "更新"),
             // 原版 `draw_window_tempo_tapper` 的标题（`condstr(language != 1, "Tempo tapper", "速度测量器")`）。
             Self::TempoTapper => tr("Tempo tapper", "速度测量器"),
             // 原版 `draw_window_save_options:13-14` 的正文粗体标题。
@@ -866,6 +876,12 @@ pub struct EditorState {
     /// 原版 `update_success`（`control_create.gml:747-753`）：上次运行版本和当前不同时
     /// 置 1，欢迎窗显示「更新成功！」并重新亮出捐赠横幅。
     pub update_success: bool,
+    /// 原版全局 `changelogstr`（`control_create.gml:754`：
+    /// `load_text(bundled_data_directory + "changelog.txt")`）。读不到是 `None`，
+    /// 对应原版的 `changelogstr = 0`——打开更新历史时弹「找不到更新历史！」并把窗收掉。
+    pub changelog: Option<String>,
+    /// 原版 `sb_val[update_scrollbar]`：更新历史那根竖滚动条的读数，单位是行。
+    pub update_scroll: f32,
     /// 原版 `donate_banner`：捐赠横幅是否显示（跟着欢迎窗走）。
     pub donate_banner: bool,
     pub editing_layer_name: Option<(u32, String)>,
@@ -1030,6 +1046,33 @@ pub fn tempo_datapack_good(tempo: f32) -> bool {
         .any(|v| (tempo - v).abs() < 1e-3)
 }
 
+/// 原版 `bundled_data_directory + "changelog.txt"`（`control_create.gml:754`）。
+/// 搜索顺序跟 `icons::asset_root` 一致：先可执行文件旁逐级往上，再工作目录，
+/// 不把编译期的绝对路径写进二进制。找到后只把 CRLF 归一成 LF——原版逐行
+/// `draw_text` 时那个 CR 是不显示的，egui 却会把它当成一个字形画出来。
+fn load_changelog() -> Option<String> {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for up in ["", "..", "../..", "../../.."] {
+                dirs.push(dir.join(up).join("assets"));
+            }
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        for up in ["", "..", "../.."] {
+            dirs.push(cwd.join(up).join("assets"));
+        }
+    }
+    let path = dirs
+        .into_iter()
+        .map(|d| d.join("changelog.txt"))
+        .find(|p| p.is_file())?;
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.replace("\r\n", "\n"))
+}
+
 impl EditorState {
     pub fn new() -> Self {
         let prefs = Preferences::load();
@@ -1130,6 +1173,8 @@ impl EditorState {
             update_check: std::sync::Arc::new(std::sync::Mutex::new(UpdateCheck::default())),
             update_question: false,
             update_success: false,
+            changelog: load_changelog(),
+            update_scroll: 0.0,
             donate_banner: false,
             editing_layer_name: None,
             event_edit: EventEditDraft::default(),
@@ -1213,18 +1258,32 @@ impl EditorState {
         // `date_compare_date(date_current_datetime(), donate_banner_time) > 0`（:728-733）：
         // 当前日期晚于静音到期日才显示。donate_banner_time = 0 等价原版出厂的 −1（没静音过）。
         self.donate_banner = nbs_io::prefs::unix_now() > self.prefs.donate_banner_time;
-        // :747-753 的 `vers_tmp != version` 分支：置 update_success 并强制亮横幅。
-        // 原版还会切回 Fluent 主题并打开 w_update 窗口——我们没有更新历史文本，
-        // 状态行放进欢迎窗（已记录的偏差）。
+        // :747-753 的 `vers_tmp != version` 分支：置 update_success、强制亮横幅、
+        // 把运行时主题切成 Fluent，并打开 w_update。
         let last = self.prefs.last_version.clone();
-        if last.is_some() && last.as_deref() != Some(crate::VERSION) {
+        let updated = last.is_some() && last.as_deref() != Some(crate::VERSION);
+        if updated {
             self.update_success = true;
             self.donate_banner = true;
+            // :748 `if (theme = 2) fdark = 1`：原来存的是深色主题，切过去要带 fdark，
+            // 得到的是「深色 Fluent」。prefs.theme 不动——原版要等「确认」里的
+            // save_settings 才写回设置文件。
+            if self.theme.kind == ThemeKind::Dark {
+                self.theme.fdark = true;
+            }
+            let fdark = self.theme.fdark;
+            let base = self.theme.accent_base;
+            self.theme = Theme::new(ThemeKind::Fluent);
+            self.theme.fdark = fdark;
+            self.theme.set_accent_base(base);
         }
         // :707 的 `if (show_welcome) window = w_greeting`。
-        // 原版在版本变化时会用 w_update 顶掉欢迎窗；这里没有 w_update，欢迎窗保留。
         if self.prefs.show_welcome {
             self.window = Some(WindowKind::Greeting);
+        }
+        // :750 的 `window = w_update` 排在 :707 之后，欢迎窗会被顶掉。
+        if updated {
+            self.window = Some(WindowKind::Update);
         }
     }
 

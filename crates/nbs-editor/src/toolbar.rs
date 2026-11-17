@@ -369,6 +369,12 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                 state.emit(Command::ShowWindow(WindowKind::Shortcuts));
                 ui.close_menu();
             }
+            // 原版帮助菜单倒数第二条（`control_draw.gml:1783/1878` 的
+            // `Changelist...` / 「更新历史......」），点的就是 `window = w_changelist`。
+            if ui.button(tr("Changelist...", "更新历史…")).clicked() {
+                state.emit(Command::ShowWindow(WindowKind::Changelist));
+                ui.close_menu();
+            }
             if ui.button(tr("About nbs-rust", "关于 nbs-rust")).clicked() {
                 state.emit(Command::ShowWindow(WindowKind::About));
                 ui.close_menu();

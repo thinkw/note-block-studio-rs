@@ -50,6 +50,15 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
     let default_width = match kind {
         // 原版 `draw_window(x1, y1, x1 + 500, y1 + 510)`。
         WindowKind::Preferences => 500.0,
+        // 原版 `draw_window(x1, y1, x1 + 500 + theme_offset, y1 + 400)`：
+        // `theme_offset` 只有非 Fluent 才 +20（那三套字体更宽）。
+        WindowKind::Changelist | WindowKind::Update => {
+            if state.theme.kind == ThemeKind::Fluent {
+                500.0
+            } else {
+                520.0
+            }
+        }
         WindowKind::Shortcuts => 460.0,
         WindowKind::FileOpen | WindowKind::FileSave => 520.0,
         WindowKind::ClipEditor => 500.0,
@@ -105,6 +114,9 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::Preferences => preferences(state, ui),
             WindowKind::Instruments => instruments_window(state, ui),
             WindowKind::About => about(ui),
+            // 原版 `draw_windows.gml:56-57`：`w_update` 和 `w_changelist` 都进
+            // `draw_window_update()`，函数里再看 `window` 是哪个。
+            WindowKind::Changelist | WindowKind::Update => changelog_window(state, ui),
             WindowKind::TempoTapper => tempo_tapper_window(state, ui),
             WindowKind::SaveOptions => save_options_window(state, ui),
             WindowKind::Arpeggio => arpeggio_window(state, ui),
@@ -2913,6 +2925,245 @@ fn instruments_window(state: &mut EditorState, ui: &mut Ui) {
     .small()
     .weak());
     footer(state, ui);
+}
+
+/// 原版 `draw_window_update.gml`，`w_changelist` 与 `w_update` 共用一份绘制：
+/// 正文是随程序的 `changelog.txt` 逐行列出，`w_update` 多一句谢词，「确认」的
+/// 去处也不同（前者回欢迎窗并 `save_settings()`，后者直接关窗）。
+fn changelog_window(state: &mut EditorState, ui: &mut Ui) {
+    let is_update = state.window == Some(WindowKind::Update);
+    let th = state.theme.clone();
+    let fluent = th.kind == ThemeKind::Fluent;
+    // 原版 `theme_offset = (theme == 3 ? 0 : 20)`，右缘的框线、滚动条、确认按钮跟着右移。
+    let off = if fluent { 0.0 } else { 20.0 };
+    let margin = ui.spacing().window_margin;
+    let (ml, mr) = (margin.left as f32, margin.right as f32);
+    let body = ui.allocate_exact_size(
+        egui::vec2(500.0 + off - ml - mr, if fluent { 392.0 } else { 374.0 }),
+        egui::Sense::hover(),
+    );
+    let o = body.0.min - egui::vec2(ml, 0.0);
+    let ry = if fluent { -8.0 } else { -26.0 };
+    // :7-16：`changelogstr = 0` 就 `message()` 一句然后收窗，`w_update` 退回欢迎窗。
+    let Some(src) = state.changelog.clone() else {
+        state.modals = ModalQueue::message(
+            "Note Block Studio",
+            tr("Changelist not found!", "找不到更新历史！"),
+        );
+        state.window = if is_update {
+            Some(WindowKind::Greeting)
+        } else {
+            None
+        };
+        return;
+    };
+    let lines = changelog_lines(&src);
+    let total = lines.len();
+    let mut pg = Page {
+        ui,
+        o,
+        ry,
+        th: &th,
+        fluent,
+    };
+    // :52-59：只有 `w_update` 有这句，坐标就是源文的 (x1 + 32, y1 + 32)。
+    if is_update {
+        let thanks = if crate::lang() == 1 {
+            format!("感谢你更新到 {}版本！", crate::VERSION)
+        } else {
+            format!("Thank you for upgrading to version {}!", crate::VERSION)
+        };
+        pg.text(pg.row(32.0, 32.0), &thanks, PREFS_FONT, pg.ink());
+    }
+    // 「观看更新视频」原版画在 `y1 + 8` 那一横带里，也就是 GameMaker 自绘的标题带上；
+    // 端口这扇用的是 egui 标题栏，这一条只能落在内容区顶上，横坐标照抄。
+    if pg.button2(
+        500.0 - 120.0 - 8.0,
+        8.0,
+        120.0,
+        tr("Watch release video", "观看更新视频"),
+        false,
+        true,
+    ) {
+        // :60-64：两种语言连站点都不一样。
+        state.emit(Command::OpenUrl(if crate::lang() == 1 {
+            "https://www.bilibili.com/video/BV1qWq9Y2ESX/".to_string()
+        } else {
+            "https://youtu.be/gya4NAQunEc".to_string()
+        }));
+    }
+    // :68 的正文框 `draw_area(x1 + 16, y1 + 58, x1 + 487 + theme_offset, y1 + 357)`。
+    pg.frame_box(16.0, 58.0, 487.0 + off, 357.0);
+    // 一页 18 行（:76 `a < sb_val[update_scrollbar] + 18`），可滚动条是按 22 槽给的
+    // （:84 第 5 个参数是 22）——这个不一致是原版自己的，照抄。
+    let start = state.update_scroll.floor().max(0.0) as usize;
+    let p = pg.ui.painter().clone();
+    let ink = pg.ink();
+    for a in start..(start + 18).min(total) {
+        let (line, bold) = &lines[a];
+        greet_text_left(
+            &p,
+            pg.row(32.0, 64.0 + 16.0 * (a - start) as f32),
+            line,
+            PREFS_FONT,
+            ink,
+            *bold,
+        );
+    }
+    update_scrollbar(&mut pg, 470.0 + off, 60.0, total, &mut state.update_scroll);
+    // :85-87「查看更旧版本……」开 `link_changelog`。
+    if pg.button2(
+        16.0,
+        365.0,
+        96.0,
+        tr("Older versions...", "查看更旧版本…"),
+        false,
+        true,
+    ) {
+        state.emit(Command::OpenUrl(crate::LINK_CHANGELOG.to_string()));
+    }
+    // :88-95：`w_update` 的确认是「回欢迎窗 + 把新版本号写回设置」，
+    // 帮助菜单进来的那版只是关窗。原版那句 `&& (windowopen = 1 || theme != 3)`
+    // 是赋值不是比较，恒真，这里不跟着复刻。
+    if pg.button2(
+        487.0 - 72.0 + off,
+        365.0,
+        72.0,
+        tr("OK", "确认"),
+        false,
+        false,
+    ) {
+        if is_update {
+            state.prefs.last_version = Some(crate::VERSION.to_string());
+            state.save_prefs();
+            state.window = Some(WindowKind::Greeting);
+        } else {
+            state.emit(Command::CloseWindow);
+        }
+    }
+}
+
+/// 原版 :69-75 的分行：一次取到下一个 `\n` 之前，行首字符是 `C` 的那行走粗体
+/// （`if (string_char_at(str[a], 1) = "C") strb[a] = 1`）。末尾没有换行符的那段
+/// 原版按 `string_count("\n")` 计数，压根不会进表，这里同样丢掉。
+pub(crate) fn changelog_lines(src: &str) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    let mut rest = src;
+    while let Some(i) = rest.find('\n') {
+        let line = &rest[..i];
+        out.push((line.to_string(), line.starts_with('C')));
+        rest = &rest[i + 1..];
+    }
+    out
+}
+
+/// 原版 `draw_scrollbar(update_scrollbar, x1 + 470 + theme_offset, y1 + 60, 12, 22, 行数, 0, 1)`：
+/// 槽高 12、22 槽（轨道 `s * swh` = 264 像素），滑块 `max(10, 22 / 总行数 * 264)`，
+/// 出界一律 `median(0, 值, 行数 - 22)`。
+///
+/// 算式跟 `midi_scrollbar` 是同一条，但没去复用：那条把 MIDI 窗自己的 17/9 两个常数和
+/// 17 像素的画宽写死在函数里，改它要把已经逐项核对过的 MIDI 窗口再动一遍。
+fn update_scrollbar(pg: &mut Page, x: f32, n: f32, total: usize, scroll: &mut f32) {
+    const SLOTS: f32 = 22.0;
+    const TRACK: f32 = 12.0 * SLOTS;
+    let max_scroll = (total as f32 - SLOTS).max(0.0);
+    *scroll = scroll.clamp(0.0, max_scroll);
+    let locked = total as f32 <= SLOTS;
+    let bwh = if locked {
+        0.0
+    } else {
+        (SLOTS / total as f32 * TRACK).max(10.0)
+    };
+    let bpos = if locked {
+        0.0
+    } else {
+        (*scroll / total as f32 * TRACK).floor()
+    };
+    let p = pg.ui.painter().clone();
+    p.rect_filled(
+        Rect::from_min_size(pg.row(x, n), Vec2::new(16.0, TRACK + 32.0)),
+        3.0,
+        pg.th.panel,
+    );
+    if !locked {
+        let thumb = Rect::from_min_size(
+            pg.row(x, n + 20.0 + bpos),
+            Vec2::new(16.0, bwh.floor() - 6.0),
+        );
+        p.rect_filled(thumb, 3.0, pg.th.accent_soft);
+        p.rect_stroke(
+            thumb,
+            3.0,
+            Stroke::new(1.0_f32, pg.th.accent),
+            StrokeKind::Inside,
+        );
+    }
+    // 上下箭头：原版是 `spr_scrollbar_v_button_up/down`，精灵图没导出，画同位置的三角形。
+    let ink = pg.ink();
+    for (down, dy) in [(false, 0.0), (true, TRACK + 16.0)] {
+        let rect = Rect::from_min_size(pg.row(x, n + dy), Vec2::new(16.0, 16.0));
+        let (resp, _) = pg.hit(rect, Id::new(("upd-sb-btn", dy as i32)), locked);
+        let c = rect.center();
+        let pts = if down {
+            vec![
+                c + Vec2::new(-3.5, -1.5),
+                c + Vec2::new(3.5, -1.5),
+                c + Vec2::new(0.0, 3.0),
+            ]
+        } else {
+            vec![
+                c + Vec2::new(-3.5, 1.5),
+                c + Vec2::new(3.5, 1.5),
+                c + Vec2::new(0.0, -3.0),
+            ]
+        };
+        p.add(egui::Shape::convex_polygon(pts, ink, Stroke::NONE));
+        if resp.clicked() {
+            *scroll = (*scroll + if down { 1.0 } else { -1.0 }).clamp(0.0, max_scroll);
+        }
+    }
+    // 槽底（滑块上/下那两段）按整页翻，一页是 22 槽。
+    for above in [true, false] {
+        if locked {
+            break;
+        }
+        let y = if above {
+            n + 16.0
+        } else {
+            n + 16.0 + bpos + bwh
+        };
+        let h = if above { bpos } else { TRACK - (bpos + bwh) };
+        if h <= 0.0 {
+            continue;
+        }
+        let rect = Rect::from_min_size(pg.row(x, y), Vec2::new(16.0, h));
+        let (resp, _) = pg.hit(rect, Id::new(("upd-sb-track", above)), false);
+        if resp.clicked() {
+            *scroll = (*scroll + if above { -SLOTS } else { SLOTS }).clamp(0.0, max_scroll);
+        }
+    }
+    // 拖滑块：原版 `sb_val += dy / (mwh / ms)`，松手取整。
+    if !locked {
+        let grip = Rect::from_min_size(pg.row(x, n + 16.0 + bpos), Vec2::new(16.0, bwh));
+        let resp = pg.ui.interact(grip, Id::new("upd-sb-thumb"), Sense::drag());
+        if resp.dragged() {
+            *scroll =
+                (*scroll + resp.drag_delta().y / (TRACK / total as f32)).clamp(0.0, max_scroll);
+        } else if resp.drag_stopped() {
+            *scroll = scroll.round().clamp(0.0, max_scroll);
+        }
+    }
+    // 滚轮：原版要 `sb_sel = i`（点过这条）才吃滚轮，这里跟 MIDI 窗一样按悬停就算。
+    let zone = Rect::from_min_size(pg.row(x, n), Vec2::new(16.0, TRACK + 32.0));
+    let hover = pg
+        .ui
+        .interact(zone, Id::new("upd-sb-wheel"), Sense::hover());
+    if hover.hovered() {
+        let d = pg.ui.input(|i| i.raw_scroll_delta.y);
+        if d != 0.0 {
+            *scroll = (*scroll - d).clamp(0.0, max_scroll);
+        }
+    }
 }
 
 fn clip_editor(state: &mut EditorState, ui: &mut Ui) {

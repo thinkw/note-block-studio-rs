@@ -50,6 +50,8 @@ pub const RELEASES_PAGE: &str = "https://github.com/thinkw/note-block-studio-rs/
 /// 欢迎窗的链接组（macros.gml:9-20）。这些是 OpenNBS 社区的入口，重写版照原样
 /// 指向官方页面；只有更新检查指向本仓库（见 RELEASES_PAGE 的偏差说明）。
 pub const LINK_WEBSITE: &str = "https://opennbs.org/";
+/// 原版 `link_changelog`（`macros.gml:14`）：更新历史窗「查看更旧版本……」打开的页。
+pub const LINK_CHANGELOG: &str = "https://opennbs.org/changelog";
 pub const LINK_DONATE: &str = "https://opencollective.com/OpenNBS/donate";
 pub const LINK_DISCORD: &str = "https://discord.gg/sKPGjyVcyy";
 pub const LINK_TWITTER: &str = "https://twitter.com/OpenNBS";
@@ -237,7 +239,7 @@ mod tests {
         assert!(!s.update_success, "首次运行不算「更新成功」");
     }
 
-    /// :747-753 的版本变化分支：上次版本与本版不同 → update_success + 强制横幅。
+    /// :747-753 的版本变化分支：亮「更新成功」+ 强制横幅 + 切 Fluent 主题 + 开 w_update。
     #[test]
     fn enter_startup_flags_update_success_on_version_change() {
         let _prefs = isolate_prefs();
@@ -246,16 +248,72 @@ mod tests {
         s.prefs.show_welcome = false;
         // 模拟全新一次开机：原版 create 时 window 还没有任何值。
         s.window = None;
+        s.theme = Theme::new(ThemeKind::Dark);
+        let saved_theme = s.prefs.theme;
         s.enter_startup();
         assert!(s.update_success, "版本变了要亮「更新成功！」");
         assert!(s.donate_banner, "版本变化强制亮横幅");
-        assert_eq!(s.window, None, "show_welcome 关着就不开欢迎窗");
+        assert_eq!(
+            s.window,
+            Some(WindowKind::Update),
+            ":750 的 window = w_update 排在 :707 之后，欢迎窗会被顶掉"
+        );
+        assert_eq!(
+            s.theme.kind,
+            ThemeKind::Fluent,
+            ":749 把运行时主题切成 Fluent"
+        );
+        assert!(
+            s.theme.fdark,
+            ":748 `if (theme = 2) fdark = 1` → 深色 Fluent"
+        );
+        assert_eq!(
+            s.prefs.theme, saved_theme,
+            "prefs.theme 要等「确认」里的 save_settings 才写回，这里不该动"
+        );
         // 同版本再启动（退出时 save_prefs 已把 last_version 写成本版）→ 不算更新成功
         s.prefs.last_version = Some(crate::VERSION.to_string());
         s.update_success = false;
         s.window = None;
         s.enter_startup();
         assert!(!s.update_success);
+        assert_eq!(s.window, None, "show_welcome 关着就不开欢迎窗");
+    }
+
+    /// 原版 :69-75 的分行规则：只按换行切，行首字母是 `C` 才走粗体，
+    /// 末尾不带换行符的那段按 `string_count("\n")` 计数，压根进不了表。
+    #[test]
+    fn changelog_lines_follow_the_original_split() {
+        let lines =
+            crate::windows::changelog_lines("Changes in v1:\n\n* alpha\nbeta\n未结尾的一段");
+        assert_eq!(
+            lines,
+            vec![
+                ("Changes in v1:".to_string(), true),
+                (String::new(), false),
+                ("* alpha".to_string(), false),
+                ("beta".to_string(), false),
+            ]
+        );
+    }
+
+    /// 随程序那份 `Data/changelog.txt` 必须真的读得到，否则更新历史窗只会走
+    /// 原版 :7-16 那句「找不到更新历史！」。
+    #[test]
+    fn bundled_changelog_is_readable() {
+        let _prefs = isolate_prefs();
+        let src = EditorState::new()
+            .changelog
+            .expect("assets/changelog.txt 应当能在资源目录里找到");
+        assert!(!src.contains('\r'), "载入时要把 CRLF 归一成 LF");
+        let lines = crate::windows::changelog_lines(&src);
+        assert!(lines.len() > 100, "装机版那份是 {} 行", lines.len());
+        assert!(
+            lines[0].0.starts_with("Changes in v3.12.0-rc.1"),
+            "首行：{}",
+            lines[0].0
+        );
+        assert!(lines[0].1, "首行以 C 开头 → 原版画粗体");
     }
 
     /// check_updates.gml 回调的 UI 侧：后台写 1 → 弹一次问句；不重复弹；其他状态不弹。
@@ -421,6 +479,109 @@ mod gui_window_tests {
     ) -> egui::FullOutput {
         let _lock = frame_lock();
         ctx.run(input, |ctx| crate::show(ctx, state))
+    }
+
+    /// 帮助菜单倒数第二条（原版 `control_draw.gml:1783/1878` 的 `Changelist...` /
+    /// 「更新历史......」）＝ `menu_click.gml:224/229` 的 `window = w_changelist`。
+    #[test]
+    fn help_menu_opens_changelist() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        click_text(&mut state, &ctx, "帮助");
+        click_text(&mut state, &ctx, "更新历史…");
+        assert_eq!(
+            state.window,
+            Some(WindowKind::Changelist),
+            "帮助 → 更新历史… 要开 w_changelist"
+        );
+    }
+
+    /// 正文画的是随程序那份 changelog 的头 18 行；谢词只有 `w_update` 有（:52-59）。
+    #[test]
+    fn changelog_window_draws_the_bundled_lines() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = Some(WindowKind::Changelist);
+        let shown = drawn_texts(&mut state, &ctx);
+        assert!(
+            shown
+                .iter()
+                .any(|t| t.starts_with("Changes in v3.12.0-rc.1")),
+            "正文应当是 assets/changelog.txt 的行：{shown:?}"
+        );
+        assert!(
+            !shown.iter().any(|t| t.contains("感谢你更新到")),
+            "帮助菜单进来的那版不该有谢词"
+        );
+        state.window = Some(WindowKind::Update);
+        let shown = drawn_texts(&mut state, &ctx);
+        assert!(
+            shown
+                .iter()
+                .any(|t| t == &format!("感谢你更新到 {}版本！", crate::VERSION)),
+            "原版 :57 的中文谢词：{shown:?}"
+        );
+    }
+
+    /// 「确认」的去处按窗口种类分岔（:88-95）：帮助菜单进来的关窗，
+    /// `w_update` 进来的回欢迎窗并把新版本号写回设置。
+    #[test]
+    fn changelog_ok_button_targets_differ_by_kind() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.prefs.last_version = Some("0.0.1".into());
+        state.window = Some(WindowKind::Changelist);
+        click_text(&mut state, &ctx, "确认");
+        assert_eq!(state.window, None, "w_changelist 的确认只是关窗（:94）");
+        state.window = Some(WindowKind::Update);
+        click_text(&mut state, &ctx, "确认");
+        assert_eq!(state.window, Some(WindowKind::Greeting), ":90 回欢迎窗");
+        assert_eq!(
+            state.prefs.last_version.as_deref(),
+            Some(crate::VERSION),
+            ":91 那句 save_settings 要先把版本号记进 prefs"
+        );
+        assert_eq!(
+            nbs_io::prefs::Preferences::load().last_version.as_deref(),
+            Some(crate::VERSION),
+            "而且真的落盘"
+        );
+    }
+
+    /// 读不到更新历史时原版 :7-16 弹一句 message 就收窗：`w_update` 退回欢迎窗。
+    #[test]
+    fn missing_changelog_pops_message_and_closes() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.changelog = None;
+        state.window = Some(WindowKind::Changelist);
+        frame(&mut state, &ctx);
+        assert_eq!(state.window, None, "w_changelist 直接关");
+        state.window = Some(WindowKind::Update);
+        frame(&mut state, &ctx);
+        assert_eq!(
+            state.window,
+            Some(WindowKind::Greeting),
+            "w_update 退回欢迎窗"
+        );
+        assert_eq!(
+            state.modals.items.len(),
+            1,
+            "两次各弹一句「找不到更新历史！」"
+        );
     }
 
     /// Ctrl+P 开窗：原版 596 行用 `prevwindow == window` 挡住同一帧的「开 → 关」，
