@@ -218,7 +218,10 @@ impl SharedState {
             events: Vec::new(),
             cursor: 0,
             position: 0.0,
-            mixer: Mixer::new(sample_rate),
+            // 实时状态自带原版后端的不精确起点对齐；导出路径不走 Mixer，
+            // 保持 nbswave 的精确时间轴。
+            mixer: Mixer::new(sample_rate)
+                .with_tick_jitter(crate::mixer::REALTIME_TICK_JITTER_MS),
             bank,
             sample_rate,
             audio_active: false,
@@ -324,6 +327,7 @@ impl SharedState {
                     ev.layer_stereo,
                     &self.bank,
                     ev.layer + 1,
+                    ev.tick as i64,
                 );
             }
         }
@@ -372,7 +376,7 @@ impl SharedState {
             let mut click = Note::new(4, 45);
             click.velocity = 60;
             self.mixer.master = self.params.master;
-            self.mixer.spawn(&click, 100, 100, &self.bank, 0);
+            self.mixer.spawn(&click, 100, 100, &self.bank, 0, -1);
             self.metronome_played = pos + 1;
         }
     }

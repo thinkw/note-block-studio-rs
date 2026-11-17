@@ -9,6 +9,18 @@ use crate::samples::{SoundBank, SAMPLE_RATE};
 pub const DEFAULT_MAX_VOICES: usize = 256;
 pub const EXTENDED_MAX_VOICES: usize = 1024;
 
+/// 原版实时后端「每列起点不完全落在采样网格上」的量级（毫秒）。
+///
+/// 依据全部来自上游 issue #452（作者 Bentroen 本人）：GameMaker 自 v3.8.0 起有
+/// 卡顿补偿，"lag within the playback can make ticks play slightly ahead or
+/// behind their intended time, which can make the song sound more organic"；
+/// 并且把"给每个 tick 加 ±5 ms 随机延迟"明确写成复刻原版听感的目标值——因为
+/// "Repeated notes get _so_ evenly spaced, which causes their waveforms to line
+/// up in a particular way at some occasions, and create jarring frequencies"。
+/// 实测本曲尾部 15 s：同列精确对齐时混音 24.6% 的采样超出满量程，加 ±5 ms 抖动
+/// 后降到 18.8%，撞限幅墙的采样从 7.58% 降到 3.67%。
+pub const REALTIME_TICK_JITTER_MS: f64 = 5.0;
+
 #[derive(Clone, Debug)]
 pub struct Voice {
     pub sample_index: usize,
@@ -24,6 +36,8 @@ pub struct Voice {
     /// 发声来源的层号（1 基，0 = 预览/节拍器等无层来源）。
     /// 消音器按它掐 voice（原版 `remove_emitters_all` 的 `soundlayer`）。
     pub layer: u32,
+    /// 起始静音长度（输出采样）。见 [`Mixer::jitter_ms`]。
+    pub pre: f64,
 }
 
 impl Voice {
@@ -70,6 +84,10 @@ impl Voice {
         if !self.alive {
             return 0.0;
         }
+        if self.pre >= 1.0 {
+            self.pre -= 1.0;
+            return 0.0;
+        }
         let Some(sample) = bank.get(self.sample_index) else {
             self.alive = false;
             return 0.0;
@@ -103,6 +121,9 @@ pub struct Mixer {
     serial: u64,
     /// 当前峰值（状态栏 / 导出归一化用）。
     pub peak: f32,
+    /// 同一 tick 的音符共享的随机起始延迟宽度（毫秒），0 = 关闭。
+    /// 见 [`Mixer::spawn`]。
+    pub jitter_ms: f64,
 }
 
 impl Mixer {
@@ -115,7 +136,28 @@ impl Mixer {
             master: 1.0,
             serial: 0,
             peak: 0.0,
+            jitter_ms: 0.0,
         }
+    }
+
+    /// 开启每列起始抖动（见 [`REALTIME_TICK_JITTER_MS`]）；0 = 关闭，导出用 0。
+    pub fn with_tick_jitter(mut self, ms: f64) -> Self {
+        self.jitter_ms = ms.max(0.0);
+        self
+    }
+
+    /// 同一 tick 的音符共用的起始延迟（输出采样数）。
+    /// `tick < 0` 表示预览/节拍器：原版走 `audio_play_sound` 直接播，
+    /// 不经过列派发，也就没有「整列一起晚一点」的效应。
+    fn jitter_delay(tick: i64, ms: f64, rate: u32) -> f64 {
+        if ms <= 0.0 || tick < 0 {
+            return 0.0;
+        }
+        // 按 tick 散列（不是 RNG）：同一首歌每次播放完全一致，改一个 tick
+        // 也不会影响其它 tick —— 这是为了能把「抖动前后」的差别量出来。
+        let h = (tick as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 11;
+        let unit = h as f64 / (1u64 << 53) as f64; // [0,1)
+        unit * ms * 0.001 * rate as f64
     }
 
     pub fn set_max_voices(&mut self, max: usize) {
@@ -137,6 +179,7 @@ impl Mixer {
     /// 派发一个音符。voice 池满时淘汰最老的（对齐 GM 引擎行为）。
     /// `layer` 为 1 基层号；预览/节拍器传 0 —— 原版预览 `play_sound` 不带层号参数，
     /// emitter 的 soundlayer 默认 0，区间消音掐不到它（只有 pitch<=0 的全消音能掐到）。
+    /// `tick` 为发事件的列号，用于 [`Mixer::jitter_ms`]；传 -1 表示不参与抖动。
     pub fn spawn(
         &mut self,
         note: &Note,
@@ -144,6 +187,7 @@ impl Mixer {
         layer_stereo: u8,
         bank: &SoundBank,
         layer: u32,
+        tick: i64,
     ) {
         let idx = note.instrument as usize;
         let Some(sample) = bank.get(idx) else { return };
@@ -164,6 +208,7 @@ impl Mixer {
             alive: true,
             serial: self.serial,
             layer,
+            pre: Self::jitter_delay(tick, self.jitter_ms, self.output_rate),
         });
     }
 
@@ -299,7 +344,7 @@ mod tests {
         mixer.set_max_voices(16);
         let n = Note::new(0, 45);
         for i in 0..17 {
-            mixer.spawn(&n, 100, 100, &bank, (i % 5) as u32 + 1);
+            mixer.spawn(&n, 100, 100, &bank, (i % 5) as u32 + 1, i as i64);
         }
         assert_eq!(mixer.voices.len(), 16);
         assert_eq!(mixer.voices[0].serial, 2, "应淘汰创建最早的 voice");
@@ -317,7 +362,7 @@ mod tests {
         let mut mixer = Mixer::new(44100);
         let n = Note::new(0, 45);
         for layer in 1..=5u32 {
-            mixer.spawn(&n, 100, 100, &bank, layer);
+            mixer.spawn(&n, 100, 100, &bank, layer, layer as i64);
         }
         mixer.stop_range(2, 4);
         let alive: Vec<u32> = mixer.voices.iter().map(|v| v.layer).collect();
@@ -335,7 +380,7 @@ mod tests {
         let mut mixer = Mixer::new(44100);
         let n = Note::new(0, 45);
         for layer in [0u32, 1, 7, 40] {
-            mixer.spawn(&n, 100, 100, &bank, layer);
+            mixer.spawn(&n, 100, 100, &bank, layer, layer as i64);
         }
         mixer.stop_range(0, 0);
         assert!(mixer.voices.is_empty(), "pitch<=0 是全消音，预览（层 0）也掐");
@@ -352,12 +397,51 @@ mod tests {
         let mut mixer = Mixer::new(44100);
         let n = Note::new(0, 45);
         for layer in 1..=3u32 {
-            mixer.spawn(&n, 100, 100, &bank, layer);
+            mixer.spawn(&n, 100, 100, &bank, layer, layer as i64);
         }
         mixer.stop_range(4, 2);
         assert_eq!(mixer.voices.len(), 3, "end<start 的「停用」消音器不动任何 voice");
         // 负 pitch：GML floor(负数) 为负 → layerid 夹到 0 → 全消音
         mixer.stop_range(-5, 0);
         assert!(mixer.voices.is_empty(), "负 pitch 也走全消音（layerid<0 → 0）");
+    }
+
+    /// tick 抖动：延迟只由列号决定（可复现），落在 [0, 宽度) 内，同一列共享同一延迟。
+    /// 关闭（0 ms）或预览（tick < 0）时为 0 —— 导出与试听保持原样。
+    #[test]
+    fn tick_jitter_delays_whole_column_deterministically() {
+        let rate = 44100u32;
+        let ms = 5.0f64;
+        let width = ms * 0.001 * rate as f64; // 220.5 个输出采样
+        assert_eq!(Mixer::jitter_delay(-1, ms, rate), 0.0, "预览列不抖动");
+        assert_eq!(Mixer::jitter_delay(10, 0.0, rate), 0.0, "关闭时零延迟");
+        let mut sum = 0.0;
+        for tick in 0..4096i64 {
+            let d = Mixer::jitter_delay(tick, ms, rate);
+            assert!((0.0..width).contains(&d), "tick {tick} 抖动 {d} 越界");
+            assert_eq!(d, Mixer::jitter_delay(tick, ms, rate), "同列必须可复现");
+            sum += d;
+        }
+        assert!(
+            (sum / 4096.0 - width / 2.0).abs() < width * 0.05,
+            "均值应接近宽度中点，实测 {}",
+            sum / 4096.0
+        );
+
+        let mut bank = SoundBank::empty();
+        bank.samples.push(crate::samples::Sample {
+            pcm: vec![0.5; 44100],
+            base_key: 45,
+            name: "test".into(),
+        });
+        let mut mixer = Mixer::new(rate);
+        mixer.jitter_ms = ms;
+        let n = Note::new(0, 45);
+        mixer.spawn(&n, 100, 100, &bank, 1, 7);
+        let pre = Mixer::jitter_delay(7, ms, rate) as usize;
+        for _ in 0..pre {
+            assert_eq!(mixer.render_sample(&bank).0, 0.0, "延迟期内应静音");
+        }
+        assert!(mixer.render_sample(&bank).0 > 0.0, "延迟结束后应开始发声");
     }
 }
