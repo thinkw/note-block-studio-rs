@@ -5,3 +5,5 @@
 __pycache__/
 # export_sprites.py 用 git archive 解出来的参照精灵，只用于比对/导出，不入库
 assets/target/
+# 排查用的临时工程、原始数据和试听文件，不入库
+.work/
