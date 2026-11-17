@@ -67,6 +67,8 @@ pub struct PlayParams {
     pub mono: bool,
     pub time_signature: u8,
     pub include_locked: bool,
+    /// 原版 `marker_end` + 区间末端：播放头自然越过这一刻就停在那里，负数 = 关。
+    pub stop_at: f64,
 }
 
 impl Default for PlayParams {
@@ -87,6 +89,7 @@ impl Default for PlayParams {
             mono: false,
             time_signature: 4,
             include_locked: false,
+            stop_at: -1.0,
         }
     }
 }
@@ -417,9 +420,26 @@ impl SharedState {
 
             let from = prev.floor() as i64 + 1;
             let to = self.position.floor() as i64;
+            // 原版 `control_draw.gml:1033-1036` 把播放头钉在区间末端并停下，
+            // `control_step.gml:243` 那一大串或条件里唯一为假的情形就是「自然播放刚越过
+            // 区间末端这一列」——那一列不发声。手动定位/拖播放头（原版 `forward <> 0`、
+            // `window = w_dragmarker`）不在闸门里，照常响。
+            let stop_at = self.params.stop_at;
+            let hitting = stop_at >= 0.0 && prev < stop_at && self.position >= stop_at;
+            let to_notes = if hitting {
+                to.min(stop_at.floor() as i64 - 1)
+            } else {
+                to
+            };
+            if to_notes >= from {
+                self.trigger(from, to_notes);
+            }
             if to >= from {
-                self.trigger(from, to);
                 self.trigger_metronome(self.position);
+            }
+            if hitting {
+                self.position = stop_at;
+                self.params.playing = false;
             }
 
             if self.params.loop_enabled && self.params.loop_end > self.params.loop_start {
@@ -478,6 +498,7 @@ pub struct TransportClock {
     loop_enabled: bool,
     loop_start: f64,
     loop_end: f64,
+    stop_at: f64,
 }
 
 impl Default for TransportClock {
@@ -492,6 +513,7 @@ impl Default for TransportClock {
             loop_enabled: false,
             loop_start: 0.0,
             loop_end: 0.0,
+            stop_at: -1.0,
         }
     }
 }
@@ -582,6 +604,13 @@ impl TransportClock {
             st.params.loop_count = max as i32;
         }
     }
+    /// 原版 `marker_end` 的那道闸：负数 = 关，非负 = 播放头自然越过这一刻就停。
+    pub fn set_stop_at(&mut self, tick: f64) {
+        self.stop_at = tick;
+        if let Some(s) = &self.shared {
+            s.lock().params.stop_at = tick;
+        }
+    }
     pub fn seek(&mut self, tick: f64) {
         self.position = tick.max(0.0);
         self.last = Instant::now();
@@ -641,9 +670,15 @@ impl TransportClock {
             return false;
         }
         let prev = self.position.floor() as i64;
+        let before = self.position;
         self.position += dt * self.tempo as f64 / self.speed as f64;
         if self.loop_enabled && self.loop_end > self.loop_start && self.position > self.loop_end {
             self.position = self.loop_start;
+        }
+        // 无音频设备时也要有原版 `marker_end` 的停点（这条路径不出声，只管播放头）。
+        if self.stop_at >= 0.0 && before < self.stop_at && self.position >= self.stop_at {
+            self.position = self.stop_at;
+            self.playing = false;
         }
         if let Some(shared) = &self.shared {
             shared.lock().position = self.position;
@@ -733,6 +768,58 @@ mod tests {
         assert_eq!(st.params.loop_end, 9.0);
         assert_eq!(st.params.loop_max, 3);
         assert_eq!(st.params.loop_count, 3);
+    }
+
+    /// 原版 `marker_end` 那一档：播放头自然越过区间末端就钉在那里停下，
+    /// 并且末端那一列不发声（`control_draw.gml:1033-1036` 定停点、
+    /// `control_step.gml:243` 掐发声列）。
+    #[test]
+    fn stop_at_pins_the_playhead_and_mutes_that_column() {
+        let mut bank = SoundBank::empty();
+        bank.samples.push(crate::samples::Sample {
+            pcm: vec![0.5; 44100],
+            base_key: 45,
+            name: "test".into(),
+        });
+        let mut song = Song::new();
+        for t in [2u32, 4, 6] {
+            song.set(t, 0, Note::new(0, 45));
+        }
+        song.recalculate();
+        let mut st = SharedState::new(Arc::new(bank.clone()), 44100);
+        st.prepare(&song, Arc::new(bank));
+        st.params.playing = true;
+        st.params.song_length = 100_000.0;
+        // 每采样 1 tick：2、4 两列先响，跨过 6 时命中停点。
+        st.params.tempo = 44100.0;
+        st.params.stop_at = 6.0;
+        drive(&mut st, 20);
+        assert_eq!(st.position, 6.0, "停点要钉在区间末端，实测 {}", st.position);
+        assert!(!st.params.playing, "越过区间末端必须停止播放");
+        assert_eq!(
+            st.mixer.active(),
+            2,
+            "2、4 两列发声、末端那列不响，实测 {} 个 voice",
+            st.mixer.active()
+        );
+    }
+
+    /// 停点只挡「从下面越上来」：播放头已经停在区间末端再按播放，要从那里继续往下走，
+    /// 否则一按播放就立刻自杀。
+    #[test]
+    fn stop_at_does_not_retrigger_from_the_stop_position() {
+        let mut st = SharedState::new(Arc::new(SoundBank::default()), 44100);
+        let song = song_ticks(4);
+        st.prepare(&song, Arc::new(SoundBank::default()));
+        st.params.playing = true;
+        st.params.song_length = 100_000.0;
+        st.params.tempo = 44100.0;
+        st.params.stop_at = 6.0;
+        st.seek(6.0);
+        st.params.playing = true;
+        drive(&mut st, 4);
+        assert!(st.params.playing, "从停点原地起播不该立刻停");
+        assert!(st.position > 6.0, "要能走过停点，实测 {}", st.position);
     }
 
     /// 带一个「Tempo Changer」自定义乐器的歌：内置那 20 个音符绝不能被当成它。

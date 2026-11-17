@@ -292,6 +292,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.viewport.start_tick = 0;
             state.viewport.start_layer = 0;
             state.set_marker(0.0);
+            state.clear_section();
             state.window = None;
             state.set_message(tr("New song created", "已新建歌曲"));
         }
@@ -329,6 +330,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 state.viewport.start_tick = 0;
                 state.viewport.start_layer = 0;
                 state.set_marker(0.0);
+                state.clear_section();
                 state.add_recent(path.clone());
                 state.window = None;
                 if old {
@@ -918,6 +920,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.viewport.start_tick = 0;
             state.viewport.start_layer = 0;
             state.set_marker(0.0);
+            state.clear_section();
             state.save_prefs();
             state.set_message(if crate::lang() == 1 {
                 format!("MIDI 导入完成：{n} 个音符")
@@ -1691,6 +1694,7 @@ fn import_schematic(state: &mut EditorState, path: &std::path::Path) {
             state.viewport.start_tick = 0;
             state.viewport.start_layer = 0;
             state.set_marker(0.0);
+            state.clear_section();
             state.set_message(if crate::lang() == 1 {
                 format!("Schematic 导入完成：{n} 个音符，{inputs} 个输入")
             } else {
@@ -2537,6 +2541,38 @@ mod tests {
         }
         let _ = std::fs::remove_file(&old);
         let _ = std::fs::remove_file(&current);
+    }
+
+    /// 原版 `obj_song/Create_0.gml:22-24`：区间属于「这一首歌」，每首开出来都是
+    /// 无区间、两端归零。端口把它放在 `EditorState` 上，所以四条整首换歌的路线
+    /// 都得清掉，否则上一首的区间会留在标尺上，还会继续当 `marker_end` 的停点。
+    /// （MIDI 导入和图样导入两条走的是同样的三件套，这里不重复铺样本。）
+    #[test]
+    fn song_replacement_clears_the_section() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        let arm = |state: &mut EditorState| {
+            state.section_exists = true;
+            state.section_start = 3;
+            state.section_end = 8;
+        };
+
+        arm(&mut state);
+        dispatch(&mut state, Command::ConfirmNew, &ctx);
+        assert!(!state.section_exists, "新建歌曲要清掉区间");
+        assert_eq!((state.section_start, state.section_end), (0, 0));
+
+        let file = std::env::temp_dir().join("nbs_rust_section_reset.nbs");
+        let mut song = Song::new();
+        song.set(4, 0, Note::new(0, 48));
+        nbs_core::nbs::save(&file, &song, nbs_core::nbs::NBS_VERSION).unwrap();
+        arm(&mut state);
+        dispatch(&mut state, Command::OpenPath(file.clone()), &ctx);
+        assert!(!state.section_exists, "打开歌曲要清掉区间");
+        assert_eq!((state.section_start, state.section_end), (0, 0));
+        assert_eq!(state.marker(), 0.0, "原版换歌连播放头一起归零");
+        let _ = std::fs::remove_file(&file);
     }
 
     /// `predicted_dt = 0` 是关键：egui 会把「 predicted 帧长」从延时里减掉防止超调

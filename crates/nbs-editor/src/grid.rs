@@ -22,7 +22,7 @@ use crate::layers_panel::time_str;
 use crate::state::{ContextKind, ContextMenu, EditMode, EditorState};
 use crate::theme::{Theme, ThemeKind};
 use crate::tr;
-use crate::viewport::{SCROLLBAR_SIZE, TIMELINE_HEIGHT};
+use crate::viewport::{Viewport, SCROLLBAR_SIZE, TIMELINE_HEIGHT};
 
 /// 原版标尺用的 `font_small`（fnt_small / fnt_wslui_small 的 size 都是 8）。
 const RULER_FONT: FontId = FontId::proportional(8.0);
@@ -99,35 +99,154 @@ pub fn show_grid(state: &mut EditorState, ui: &mut Ui, area: Rect) {
 
 // ---------------------------------------------------------------- 输入处理
 
-fn handle_timeline_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect) {
-    let Some(pos) = input.pointer else { return };
-    if !rect.contains(pos) || state.window.is_some() {
+/// 原版标尺/播放头共用的取列式：`starta + (mouse_x - (x1 + 2)) / 32`
+/// （`control_draw.gml:171/175/177/1103/1113`）。不带 `note_offset` —— 那一项只在
+/// 播放跟随到「按帧」时才非零，而这一整段命中判定要求停播（`:124`）。
+fn ruler_tick(vp: &Viewport, x: f32) -> f64 {
+    vp.start_tick as f64 + (x - vp.origin.x) as f64 / vp.cell() as f64
+}
+
+/// 原版 `x1 + 2 + floor(marker_pos * 32 - starta * 32)`：播放头那条线所在的像素 x，
+/// 也是 `spr_marker` 传给 `draw_sprite` 的横坐标（贴图原点就在线上）。
+fn marker_x(state: &EditorState) -> f32 {
+    let vp = &state.viewport;
+    let m = state.marker().max(0.0);
+    vp.tick_x(m.floor() as i64) + (m.fract() as f32) * vp.cell()
+}
+
+/// 原版 `control_draw.gml:1122-1127`：区间两端每帧夹进 `[0, enda + totalcols]`，
+/// 夹完重合（且当前不在拖边界）就当作没有区间。
+fn clamp_section(state: &mut EditorState) {
+    if !state.section_exists {
         return;
     }
+    let totalcols = (state.viewport.size.x / state.viewport.cell()).floor() as i64;
+    let bound = state.doc.song.enda as i64 + totalcols;
+    state.section_start = state.section_start.clamp(0, bound);
+    state.section_end = state.section_end.clamp(0, bound);
+    let dragging = matches!(
+        state.interaction.mode,
+        DragMode::DragSectionStart | DragMode::DragSectionEnd
+    );
+    if state.section_end == state.section_start && !dragging {
+        state.section_exists = false;
+    }
+}
+
+fn handle_timeline_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect) {
+    // 每帧先夹取，和鼠标在哪、开没开窗都无关（原版这一段在 `if (!isplayer)` 里、
+    // 命中判定之外，`control_draw.gml:1122`）。
+    clamp_section(state);
+
+    // ---- 进行中的拖拽：原版 `:1056-1120` 只认「左键还按着没」，鼠标出格也继续跟。
+    let mode = state.interaction.mode.clone();
+    if let Some(pos) = input.pointer.filter(|_| mode != DragMode::None) {
+        let tick = ruler_tick(&state.viewport, pos.x);
+        match mode {
+            DragMode::DragMarker => {
+                if input.primary_down {
+                    state.set_marker(tick);
+                    state.interaction.cursor = CursorIcon::ResizeHorizontal;
+                } else {
+                    state.interaction.reset();
+                }
+            }
+            DragMode::PressTimeline { pressa } => {
+                if !input.primary_down {
+                    if input.primary_released {
+                        // 原版 `:173-175`：没横向拖开就在原地松手 → 播放头跳到这一点（带小数）。
+                        state.set_marker(tick);
+                    }
+                    state.interaction.reset();
+                } else if tick.floor() as i64 != pressa {
+                    // 原版 `:177-183`：一拖开就地建一段，右端接着跟鼠标，之后交给
+                    // `w_dragsection_end`。
+                    state.section_exists = true;
+                    state.section_start = pressa;
+                    state.section_end = tick.floor() as i64;
+                    state.interaction.mode = DragMode::DragSectionEnd;
+                }
+            }
+            DragMode::DragSectionStart | DragMode::DragSectionEnd => {
+                if input.primary_down {
+                    // 原版 `:1103/1113`：拖边界用 `round`，比新建区间时的 `floor` 进一步。
+                    let t = tick.round() as i64;
+                    if matches!(mode, DragMode::DragSectionStart) {
+                        state.section_start = t;
+                    } else {
+                        state.section_end = t;
+                    }
+                } else {
+                    // 原版 `:1105-1118`：松手时两端重合就删掉，否则把两端排好序。
+                    if state.section_end == state.section_start {
+                        state.section_exists = false;
+                    }
+                    let (a, b) = (state.section_start, state.section_end);
+                    state.section_start = a.min(b);
+                    state.section_end = a.max(b);
+                    state.interaction.reset();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ---- 起手判定：原版 `:124` 的总闸 —— 播放中、有窗口、已有别的拖拽状态都不响应。
+    // `window = 0` 在原版里同时管着「没开窗」和「没在拖别的」（`window` 一个变量两用）。
+    let Some(pos) = input.pointer.filter(|p| rect.contains(*p)) else {
+        return;
+    };
+    if state.window.is_some() || state.is_playing() || state.interaction.mode != DragMode::None {
+        return;
+    }
+    // 原版 `:132/141/148`：三个 16px 命中框，播放头优先、区间两端让位（`cursmarker`）。
+    // 原版的高度是整列（`totalrows * 32 + 32`），端口只做标尺带那 32px，
+    // 网格里的音符编辑因此不会被播放头/区间手柄抢走。
+    let handles = [
+        (marker_x(state), DragMode::DragMarker),
+        (
+            state.viewport.tick_x(state.section_start),
+            DragMode::DragSectionStart,
+        ),
+        (
+            state.viewport.tick_x(state.section_end),
+            DragMode::DragSectionEnd,
+        ),
+    ];
+    let mut on_handle = false;
+    for (i, (x, mode)) in handles.iter().enumerate() {
+        if i > 0 && !state.section_exists {
+            continue;
+        }
+        if (pos.x - x).abs() < 8.0 {
+            state.interaction.cursor = CursorIcon::ResizeHorizontal;
+            // 原版 `:132/141/148` 的命中框只吃左键（按下即 `window = w_drag*`）；
+            // 右键照样落到下面的区间菜单（`:156` 那道 `window = 0` 仍然成立）。
+            if input.primary_pressed {
+                state.interaction.mode = mode.clone();
+                return;
+            }
+            on_handle = true;
+            break;
+        }
+    }
     if input.secondary_pressed {
-        let tick = state.viewport.x_tick(pos.x).max(0) as u32;
         state.context_menu = Some(ContextMenu {
             pos,
-            cell: (tick, 0),
+            cell: (state.viewport.x_tick(pos.x).max(0) as u32, 0),
             kind: ContextKind::Timeline,
         });
         return;
     }
-    if input.primary_pressed {
-        state.interaction.mode = DragMode::DragMarker;
-    }
-    if matches!(state.interaction.mode, DragMode::DragMarker) && input.primary_down {
-        let tick = state.viewport.x_tick(pos.x).max(0) as f64;
-        state.set_marker(tick);
-        state.interaction.cursor = CursorIcon::ResizeHorizontal;
-    }
-    if input.primary_released && matches!(state.interaction.mode, DragMode::DragMarker) {
-        state.interaction.reset();
+    if input.primary_pressed && !on_handle {
+        // 原版 `:171`：按下只记下那一列（`timeline_pressa`），松手或拖开才有下文。
+        state.interaction.mode = DragMode::PressTimeline {
+            pressa: ruler_tick(&state.viewport, pos.x).floor() as i64,
+        };
     }
 }
 
 fn handle_grid_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect) {
-    state.interaction.cursor = CursorIcon::Default;
     state.interaction.click_in_grid = false;
 
     let pointer_cell = input
@@ -139,6 +258,12 @@ fn handle_grid_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect)
 
     let interactive = hover.is_some() && state.window.is_none() && state.context_menu.is_none();
     let pointer_in_grid = input.pointer.is_some_and(|p| rect.contains(p));
+    // 光标只在指针真的进了网格时才收回默认：标尺上那三个 16px 手柄的
+    // `cr_size_we` 是 `handle_timeline_input` 先设的（原版 `control_draw.gml:134/144/151`），
+    // 无条件重置会让手柄永远画不出拉伸光标。
+    if pointer_in_grid {
+        state.interaction.cursor = CursorIcon::Default;
+    }
 
     // 滚轮：悬停音符调属性 / 按 `mousewheel` 档位决定是平移、换音色还是换键。
     // Ctrl+滚轮不在这里处理——原版把它归在键盘快捷键段（`control_draw.gml:736-751`），
@@ -745,9 +870,35 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
         }
     }
 
-    // 播放头：原版在时间轴顶端画 spr_marker 的箭头帧，细身帧一路拉满整个网格；
-    // 精灵 xorigin = 8，贴图横坐标就是线所在的 x。网格那半截见 draw_grid。
-    let mx = vp.tick_x(state.marker().floor() as i64) + (state.marker().fract() as f32) * cell;
+    // 时间轴区间：原版 `control_draw.gml:1128-1140`。0.25 不透明的纯蓝底加两端帽，
+    // 帽和边界线共用 `spr_marker` 的 2..5 帧（区间反着拖时换成另一头的图形），
+    // 线一路拉满网格的那半截在 `draw_grid` 里补，和播放头一样的拆法。
+    if state.section_exists {
+        let rev = (state.section_end < state.section_start) as usize;
+        let x0 = vp.tick_x(state.section_start);
+        let x1 = vp.tick_x(state.section_end);
+        p.rect_filled(
+            Rect::from_min_max(pos2(x0.min(x1), top), pos2(x0.max(x1), top + 31.0)),
+            0.0,
+            alpha(C_BLUE, 64),
+        );
+        if let Some(bank) = state.icons.bank() {
+            for (x, cap) in [(x0, 2 + 2 * rev), (x1, 4 - 2 * rev)] {
+                bank.marker(&p, pos2(x, top), cap, Vec2::new(16.0, 15.0), Color32::WHITE);
+                bank.marker(
+                    &p,
+                    pos2(x, top),
+                    cap + 1,
+                    Vec2::new(16.0, rect.max.y - top),
+                    Color32::WHITE,
+                );
+            }
+        }
+    }
+
+    // 播放头：原版在时间轴顶端画 spr_marker 的箭头帧，细身帧一路拉满整个网格
+    // （贴图原点在线上，见 `IconBank::marker`）。网格那半截见 draw_grid。
+    let mx = marker_x(state);
     if let Some(bank) = state.icons.bank() {
         if mx >= rect.min.x - 8.0 && mx <= rect.max.x + 8.0 {
             let tint = if th.kind == ThemeKind::Fluent {
@@ -950,10 +1101,30 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
         }
     }
 
+    // 区间两条边界线在网格里的半截（原版 `control_draw.gml:1136/1139` 拉满
+    // `(totalrows + 1) * 32 / 15` 高的那两笔）：音符之上、播放头之下，和原版同序。
+    if state.section_exists {
+        let rev = (state.section_end < state.section_start) as usize;
+        if let Some(bank) = state.icons.bank() {
+            for (x, cap) in [
+                (vp.tick_x(state.section_start), 2 + 2 * rev),
+                (vp.tick_x(state.section_end), 4 - 2 * rev),
+            ] {
+                bank.marker(
+                    &p,
+                    pos2(x, rect.min.y),
+                    cap + 1,
+                    Vec2::new(16.0, rect.height()),
+                    Color32::WHITE,
+                );
+            }
+        }
+    }
+
     // 播放头：原版 spr_marker 第 0 帧是箭头、第 1 帧是纵向拉满的细身（箭头画在时间轴那一格，
-    // 见 draw_timeline），精灵 xorigin = 8，所以贴图横坐标就是播放头所在的 x。
+    // 见 draw_timeline），贴图原点在线上（`IconBank::marker`）。
     if let Some(bank) = state.icons.bank() {
-        let mx = vp.tick_x(state.marker().floor() as i64) + (state.marker().fract() as f32) * cell;
+        let mx = marker_x(state);
         if mx >= rect.min.x && mx <= rect.max.x {
             let tint = if th.kind == ThemeKind::Fluent {
                 th.accent(3)
@@ -1240,33 +1411,72 @@ fn draw_context_menu(state: &mut EditorState, ui: &Ui) {
                     crate::toolbar::instrument_menus(state, ui);
                 }
                 ContextKind::Timeline => {
-                    if item(ui, tr("Jump to playhead", "跳到播放头")) {
-                        state.viewport.start_tick = state.marker().floor().max(0.0) as u32;
+                    // 原版 `control_draw.gml:156-168` + `menu_click.gml:235-251`：
+                    // 标尺右键菜单只有这六条，前四条没有区间就整条置灰。
+                    let enda = state.doc.song.enda as i64;
+                    let exists = state.section_exists;
+                    let item_on = |ui: &mut Ui, label: &str, on: bool| -> bool {
+                        ui.add_enabled(on, egui::Button::new(label)).clicked()
+                    };
+                    let tick = |t: i64| t.max(0) as u32;
+                    if item_on(ui, tr("Remove section", "移除区间"), exists) {
+                        state.clear_section();
                         close = true;
                     }
-                    if item(ui, tr("Set as loop start", "设为循环起点")) {
-                        state
-                            .doc
-                            .edit_meta(tr("Set loop start", "设置循环起点"), |m| {
-                                m.loop_start = menu.cell.0.min(u16::MAX as u32) as u16;
-                                m.loop_enabled = true;
-                            });
+                    if item_on(
+                        ui,
+                        tr("Jump to beginning of section", "跳到区间开始"),
+                        exists && state.section_start <= enda,
+                    ) {
+                        // 原版 `starta = section_start`（菜单项本身不管上下页，只管夹进 [0, enda]）。
+                        state.viewport.start_tick = tick(state.section_start).min(enda as u32);
                         close = true;
                     }
-                    if item(ui, tr("Seek here", "定位到此处")) {
-                        state.set_marker(menu.cell.0 as f64);
+                    if item_on(
+                        ui,
+                        tr("Jump to ending of section", "跳到区间结束"),
+                        exists && state.section_end <= enda,
+                    ) {
+                        state.viewport.start_tick = tick(state.section_end - 1).min(enda as u32);
                         close = true;
                     }
-                    if item(ui, tr("Select all up to here", "全选到此处")) {
+                    ui.separator();
+                    if item_on(
+                        ui,
+                        tr("Select all blocks in section", "选中区间内方块"),
+                        exists,
+                    ) {
+                        // 原版 `selection_add(section_start, 0, section_end - 1, endb, 0, 0)`。
                         state.doc.select_rect(
+                            tick(state.section_start),
                             0,
-                            0,
-                            menu.cell.0,
+                            tick(state.section_end - 1),
                             state.doc.song.endb,
                             false,
                             false,
-                            true,
+                            false,
                         );
+                        close = true;
+                    }
+                    ui.separator();
+                    // 原版 `show_menu_ext` 的 `check()` 前缀勾，等价于首选项「播放」页那两格。
+                    let checked = |label: &str, on: bool| -> String {
+                        if on {
+                            format!("✓ {label}")
+                        } else {
+                            label.to_string()
+                        }
+                    };
+                    let start_play = tr("Start playing in section", "从区间开始播放");
+                    let stop_after = tr("Stop playing after section", "区间后结束播放");
+                    if item(ui, &checked(start_play, state.prefs.marker_start)) {
+                        state.prefs.marker_start = !state.prefs.marker_start;
+                        state.emit(Command::SavePreferences);
+                        close = true;
+                    }
+                    if item(ui, &checked(stop_after, state.prefs.marker_end)) {
+                        state.prefs.marker_end = !state.prefs.marker_end;
+                        state.emit(Command::SavePreferences);
                         close = true;
                     }
                 }
@@ -1403,5 +1613,184 @@ mod tests {
         st.viewport.start_layer = 3;
         scroll_viewport(&mut st, back, false);
         assert_eq!(st.viewport.start_layer, 0, "越界夹到 0，脏值夹到上限 10");
+    }
+
+    // ---- 标尺状态机（区间 / 播放头手柄）------------------------------------
+
+    /// 靶子谱：320×128 的网格 = 可见 10 列，空谱 `enda = 0`，
+    /// 于是原版 `:1122` 的夹取上限正好是 `0 + 10 = 10`。
+    fn ruler_state() -> EditorState {
+        let mut st = EditorState::new();
+        st.window = None;
+        st.doc.replace_song(nbs_core::model::Song::new());
+        st.viewport.origin = Pos2::ZERO;
+        st.viewport.size = Vec2::new(320.0, 128.0);
+        st.set_marker(0.0);
+        st
+    }
+
+    fn ruler_rect() -> Rect {
+        Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, TIMELINE_HEIGHT))
+    }
+
+    /// 一帧鼠标，`y = 16` 恒在标尺带内；按键位由参数给（`pressed` 与 `down`
+    /// 在同一帧是两件事，原版 `mouse_check_button(_pressed/_released)` 也是三个独立查询）。
+    fn mouse(x: f32, pressed: bool, down: bool, released: bool) -> InputSnapshot {
+        let p = pos2(x, 16.0);
+        InputSnapshot {
+            hover: Some(p),
+            pointer: Some(p),
+            primary_pressed: pressed,
+            primary_down: down,
+            primary_released: released,
+            ..Default::default()
+        }
+    }
+
+    /// 原版 `:171-175`：按下只记下那一列，原地松手才把播放头放到那「一点」上 ——
+    /// 用不取整的 `starta + (mx - (x1 + 2)) / 32`，所以落在半刻就是半刻。
+    #[test]
+    fn a_still_press_on_the_ruler_jumps_the_playhead_to_that_point() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = ruler_state();
+        let r = ruler_rect();
+        handle_timeline_input(&mut st, &mouse(100.0, true, true, false), r);
+        assert!(
+            matches!(st.interaction.mode, DragMode::PressTimeline { pressa: 3 }),
+            "按下只记列：{:?}",
+            st.interaction.mode
+        );
+        assert_eq!(st.marker(), 0.0, "按下本身不该动播放头");
+        handle_timeline_input(&mut st, &mouse(100.0, false, false, true), r);
+        assert_eq!(st.marker(), 3.125, "100px ÷ 32 = 3.125 刻，取整就错了");
+        assert_eq!(st.interaction.mode, DragMode::None);
+        assert!(!st.section_exists, "没横向拖开就不该有区间");
+    }
+
+    /// 原版 `:177-183`：一拖开就地建段，右端用 `floor` 跟鼠标，随后转成
+    /// 「拖右边界」，松手后区间留着。
+    #[test]
+    fn dragging_sideways_on_the_ruler_opens_a_section_and_keeps_it() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = ruler_state();
+        let r = ruler_rect();
+        handle_timeline_input(&mut st, &mouse(100.0, true, true, false), r);
+        handle_timeline_input(&mut st, &mouse(260.0, false, true, false), r);
+        assert!(st.section_exists);
+        assert_eq!((st.section_start, st.section_end), (3, 8), "新建用 floor");
+        assert_eq!(st.interaction.mode, DragMode::DragSectionEnd);
+        handle_timeline_input(&mut st, &mouse(260.0, false, false, true), r);
+        assert_eq!(st.interaction.mode, DragMode::None, "松手要收掉拖拽状态");
+        assert!(st.section_exists, "两端不重合，区间留下");
+        assert_eq!((st.section_start, st.section_end), (3, 8));
+    }
+
+    /// 原版 `:1103/1113` 用 `round`（比新建时的 `floor` 又进一步），且拖的过程中
+    /// 不排序 —— `:1105-1118` 只在松手时排。
+    #[test]
+    fn dragging_a_boundary_rounds_and_sorts_only_on_release() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = ruler_state();
+        let r = ruler_rect();
+        st.section_exists = true;
+        st.section_start = 3;
+        st.section_end = 8;
+        // 右端手柄在 tick_x(8) = 256，命中框 ±8px。
+        handle_timeline_input(&mut st, &mouse(253.0, true, true, false), r);
+        assert_eq!(st.interaction.mode, DragMode::DragSectionEnd);
+        handle_timeline_input(&mut st, &mouse(74.0, false, true, false), r);
+        assert_eq!(
+            (st.section_start, st.section_end),
+            (3, 2),
+            "2.3125 刻 round 成 2，且此时还不排序"
+        );
+        handle_timeline_input(&mut st, &mouse(74.0, false, false, true), r);
+        assert_eq!((st.section_start, st.section_end), (2, 3), "松手排序");
+        assert!(st.section_exists);
+    }
+
+    /// 原版 `:1105-1110`：松手时两端重合 = 直接把这段区间删掉。
+    #[test]
+    fn releasing_with_both_ends_on_the_same_tick_drops_the_section() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = ruler_state();
+        let r = ruler_rect();
+        st.section_exists = true;
+        st.section_start = 3;
+        st.section_end = 8;
+        handle_timeline_input(&mut st, &mouse(253.0, true, true, false), r);
+        handle_timeline_input(&mut st, &mouse(96.0, false, true, false), r);
+        assert_eq!(st.section_end, 3);
+        handle_timeline_input(&mut st, &mouse(96.0, false, false, true), r);
+        assert!(!st.section_exists, "两端重合就不该留一段零宽区间");
+        assert_eq!(st.interaction.mode, DragMode::None);
+    }
+
+    /// 原版 `:1122-1127`：夹取在每帧开头跑，拖的时候鼠标说了算、夹完还会被覆写，
+    /// 松手那一帧才留下夹好的值。空谱 `enda = 0` + 可见 10 列 → 上限 10。
+    #[test]
+    fn a_section_dragged_off_the_song_clamps_to_the_visible_page() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = ruler_state();
+        let r = ruler_rect();
+        handle_timeline_input(&mut st, &mouse(36.0, true, true, false), r);
+        handle_timeline_input(&mut st, &mouse(964.0, false, true, false), r);
+        assert_eq!(st.section_start, 1);
+        assert_eq!(st.section_end, 30, "拖拽中按鼠标原值");
+        handle_timeline_input(&mut st, &mouse(964.0, false, false, true), r);
+        assert_eq!(st.section_end, 10, "夹进 enda + totalcols");
+        assert!(st.section_exists);
+    }
+
+    /// 原版 `:132-151`：播放头手柄的 16px 命中框优先，按在上面不会落到「按下记列」；
+    /// `:1056` 的拖拽只认左键还按着没，鼠标跑出标尺带也继续跟。
+    #[test]
+    fn the_playhead_handle_grabs_the_press_and_tracks_outside_the_ruler() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = ruler_state();
+        let r = ruler_rect();
+        st.set_marker(5.0);
+        handle_timeline_input(&mut st, &mouse(164.0, true, true, false), r);
+        assert_eq!(st.interaction.mode, DragMode::DragMarker);
+        assert_eq!(st.marker(), 5.0, "按下本身不动播放头");
+        handle_timeline_input(&mut st, &mouse(430.0, false, true, false), r);
+        assert_eq!(st.marker(), 13.4375, "出格也要跟手");
+        assert_eq!(st.interaction.cursor, CursorIcon::ResizeHorizontal);
+        assert!(!st.section_exists, "抢到手柄就不该变成拖区间");
+        handle_timeline_input(&mut st, &mouse(430.0, false, false, true), r);
+        assert_eq!(st.interaction.mode, DragMode::None);
+        assert_eq!(st.marker(), 13.4375);
+    }
+
+    /// 原版 `:156`：命中框只吃左键，右键落在手柄上照样开区间菜单。
+    #[test]
+    fn a_right_click_on_a_handle_still_opens_the_timeline_menu() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = ruler_state();
+        let r = ruler_rect();
+        st.set_marker(5.0);
+        let mut snap = mouse(164.0, false, false, false);
+        snap.secondary_pressed = true;
+        handle_timeline_input(&mut st, &snap, r);
+        let menu = st.context_menu.expect("手柄上的右键仍要开菜单");
+        assert_eq!(menu.kind, ContextKind::Timeline);
+        assert_eq!(st.interaction.mode, DragMode::None, "右键不进拖拽状态");
+    }
+
+    /// 原版 `:124` 的总闸：`playing` 非 0 时整段标尺命中都不跑 —— 播放中点标尺
+    /// 既不跳播放头也不建区间。
+    #[test]
+    fn the_ruler_is_inert_while_playing() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = ruler_state();
+        let r = ruler_rect();
+        st.audio.clock_mut().play();
+        handle_timeline_input(&mut st, &mouse(100.0, true, true, false), r);
+        handle_timeline_input(&mut st, &mouse(260.0, false, true, false), r);
+        handle_timeline_input(&mut st, &mouse(260.0, false, false, true), r);
+        st.audio.clock_mut().pause();
+        assert_eq!(st.marker(), 0.0);
+        assert!(!st.section_exists);
+        assert_eq!(st.interaction.mode, DragMode::None);
     }
 }

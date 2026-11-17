@@ -31,6 +31,16 @@ pub enum DragMode {
     DragScrollbarH { grab: f32 },
     DragScrollbarV { grab: f32 },
     DragMarker,
+    /// 原版 `timeline_pressa >= 0`：在标尺空白处按下、还没横向拖开。
+    /// 拖开 → 画一段区间（[`DragMode::DragSectionEnd`]）；原地松开 → 播放头跳过去。
+    PressTimeline {
+        pressa: i64,
+    },
+    /// 原版 `w_dragsection_start`：拖区间左边界（`control_draw.gml:1102-1110`）。
+    DragSectionStart,
+    /// 原版 `w_dragsection_end`：拖区间右边界（`control_draw.gml:1112-1120`），
+    /// 在标尺上横向拖出新段时也用它。
+    DragSectionEnd,
 }
 
 #[derive(Clone, Debug)]
@@ -73,8 +83,18 @@ impl Default for Interaction {
 }
 
 impl Interaction {
+    /// 网格式拖拽（框选 / 移选区 / 平移）是否在进行中。标尺那三种状态
+    /// （按下待判定、拖区间两端）由 `grid::handle_timeline_input` 自己收尾，
+    /// 不归这里 —— 原版 `w_dragsection_*` 也只在松开左键时才结束，
+    /// 和鼠标跑没跑出编辑区无关。
     pub fn is_dragging(&self) -> bool {
-        self.mode != DragMode::None
+        !matches!(
+            self.mode,
+            DragMode::None
+                | DragMode::PressTimeline { .. }
+                | DragMode::DragSectionStart
+                | DragMode::DragSectionEnd
+        )
     }
     pub fn reset(&mut self) {
         self.mode = DragMode::None;

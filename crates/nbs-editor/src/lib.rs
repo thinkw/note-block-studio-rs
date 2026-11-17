@@ -1865,6 +1865,154 @@ mod gui_window_tests {
         assert!(back.show_notechart, "五线谱开关要落盘");
     }
 
+    /// 标尺右键菜单只有原版那六条（`control_draw.gml:156-168` + `menu_click.gml:235-251`）：
+    /// 没有区间时前四条整条置灰（`inactive(...)` 前缀），后两条是 `check(marker_start)` /
+    /// `check(marker_end)` 的前缀勾，和首选项「播放」页共用同一对全局量。
+    #[test]
+    fn timeline_context_menu_follows_the_section_and_the_two_checks() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        // 「跳到区间开始/结束」的置灰判据是 `section_start > enda`，空谱 enda = 0
+        // 会把它们永久钉灰，所以靶子谱要有第 12 列；选区那条要数得出音符，故 3..8 内也放两颗。
+        let mut song = nbs_core::model::Song::new();
+        song.set(4, 0, nbs_core::model::Note::new(0, 48));
+        song.set(7, 0, nbs_core::model::Note::new(0, 50));
+        song.set(12, 0, nbs_core::model::Note::new(0, 52));
+        state.doc.replace_song(song);
+        state.section_exists = true;
+        state.section_start = 3;
+        state.section_end = 8;
+        let open_menu = |state: &mut EditorState| {
+            state.context_menu = Some(crate::state::ContextMenu {
+                pos: egui::pos2(300.0, 300.0),
+                cell: (4, 0),
+                kind: crate::state::ContextKind::Timeline,
+            });
+        };
+
+        open_menu(&mut state);
+        let texts = drawn_texts(&mut state, &ctx);
+        for t in ["移除区间", "跳到区间开始", "跳到区间结束", "选中区间内方块"]
+        {
+            assert!(
+                texts.iter().any(|s| s == t),
+                "标尺菜单缺「{t}」：{}",
+                texts.join(" | ")
+            );
+        }
+        // 后两条带 `check()` 前缀，勾在不在取决于 prefs，这里只认标签本体。
+        for t in ["从区间开始播放", "区间后结束播放"] {
+            assert!(
+                texts.iter().any(|s| s.ends_with(t)),
+                "标尺菜单缺「{t}」：{}",
+                texts.join(" | ")
+            );
+        }
+        assert!(
+            !texts.iter().any(|s| s.starts_with("全选")),
+            "标尺菜单不该串进网格那套：{}",
+            texts.join(" | ")
+        );
+        let marked: Vec<String> = texts
+            .iter()
+            .filter(|s| s.starts_with('✓'))
+            .cloned()
+            .collect();
+        assert_eq!(
+            marked,
+            vec!["✓ 从区间开始播放".to_string()],
+            "出厂 marker_start 开、marker_end 关，勾只能落在第一条上"
+        );
+
+        // 点带勾的那条：翻 `marker_start`、勾下一帧消失，并且落盘（原版两条都写 settings.ini）。
+        click_text(&mut state, &ctx, "✓ 从区间开始播放");
+        assert!(!state.prefs.marker_start);
+        frame_out(&mut state, &ctx, base_input());
+        assert!(
+            !nbs_io::prefs::Preferences::load().marker_start,
+            "菜单这条和首选项是同一个全局量，要一起落盘"
+        );
+
+        // 没有区间时前四条整条点不动：点了既不收菜单也不改状态。
+        state.section_exists = false;
+        open_menu(&mut state);
+        click_text(&mut state, &ctx, "移除区间");
+        assert!(state.context_menu.is_some(), "置灰条目点不动，菜单不该收");
+        assert_eq!(state.section_start, 3, "点不动就不该有任何副作用");
+
+        // 解禁后四条各有去处（`menu_click.gml:235-244`）。
+        state.section_exists = true;
+        open_menu(&mut state);
+        click_text(&mut state, &ctx, "跳到区间开始");
+        assert_eq!(state.viewport.start_tick, 3, "starta = section_start");
+        assert!(state.context_menu.is_none(), "点中要收菜单");
+
+        open_menu(&mut state);
+        click_text(&mut state, &ctx, "跳到区间结束");
+        assert_eq!(state.viewport.start_tick, 7, "starta = section_end - 1");
+
+        open_menu(&mut state);
+        click_text(&mut state, &ctx, "选中区间内方块");
+        assert!(
+            state.doc.selection.contains(4, 0) && state.doc.selection.contains(7, 0),
+            "区间两端内的方块都要进选区"
+        );
+        assert!(
+            !state.doc.selection.contains(12, 0),
+            "原版取的是 section_end - 1，右端那一列之后的方块不该进选区"
+        );
+
+        open_menu(&mut state);
+        click_text(&mut state, &ctx, "区间后结束播放");
+        assert!(state.prefs.marker_end, "点未勾的那条要打上勾");
+        open_menu(&mut state);
+        let texts = drawn_texts(&mut state, &ctx);
+        assert!(
+            texts.iter().any(|s| s == "✓ 区间后结束播放"),
+            "勾要跟着 prefs 画出来：{}",
+            texts.join(" | ")
+        );
+
+        open_menu(&mut state);
+        click_text(&mut state, &ctx, "移除区间");
+        assert!(!state.section_exists, "有区间时「移除区间」要真的删掉");
+    }
+
+    /// 首选项「播放」页的两格（原版 `draw_window_preferences.gml:600-601`，
+    /// 中文 `:652-653`，都在 `y1 + 170 / 190` 的「进度条」框里）：标签用的是
+    /// 「在区间时开始播放 / 在区间后停止播放」，和标尺菜单那两条措辞不同但同值。
+    #[test]
+    fn preferences_playback_rows_toggle_the_section_options_and_persist() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = Some(WindowKind::Preferences);
+        state.prefs_tab = 4;
+        frame(&mut state, &ctx);
+        let texts = drawn_texts(&mut state, &ctx);
+        for t in ["在区间时开始播放", "在区间后停止播放"] {
+            assert!(
+                texts.iter().any(|s| s == t),
+                "播放页缺少「{t}」：{}",
+                texts.join(" | ")
+            );
+        }
+        click_text(&mut state, &ctx, "在区间时开始播放");
+        assert!(!state.prefs.marker_start, "出厂开着，点标签要关掉");
+        click_text(&mut state, &ctx, "在区间后停止播放");
+        assert!(state.prefs.marker_end, "出厂关着，点标签要打开");
+        frame_out(&mut state, &ctx, base_input());
+        let back = nbs_io::prefs::Preferences::load();
+        assert!(!back.marker_start, "两格都要落盘（原版写 settings.ini）");
+        assert!(back.marker_end);
+    }
+
     /// 原版页 3「访问」的两组：`draw_areaheader(22, 74, 456, 140, "鼠标滚轮")` 里的
     /// 三个档位 + 「滚动速度」拖拽行（`y1 + 150`，出厂 1）+ 「悬停层预览」
     /// （`y1 + 198`），和 `draw_areaheader(22, 240, 456, 105, "琴键与层")` 组名本身。

@@ -32,6 +32,10 @@ pub struct Preferences {
     pub follow_marker: bool,
     /// 原版 `marker_pagebypage`：1 = 按页，0 = 按刻（居中），2 = 按帧（居中 + 亚刻位移）。
     pub follow_mode: u8,
+    /// 原版 `marker_start`（`control_create.gml:381` 出厂开）：有区间时按播放从区间起点起播。
+    pub marker_start: bool,
+    /// 原版 `marker_end`（`control_create.gml:382` 出厂关）：播放头自然越过区间末端就停。
+    pub marker_end: bool,
     /// 原版 `autosave`：自动保存总开关，出厂是关的。间隔只在开启后才生效。
     pub autosave_enabled: bool,
     /// 原版 `mousewheel`：0 = 移动视口，1 = 换音色，2 = 换音调。
@@ -230,6 +234,8 @@ impl Default for Preferences {
             include_locked_in_export: false,
             follow_marker: true,
             follow_mode: 1,
+            marker_start: true,
+            marker_end: false,
             autosave_enabled: false,
             mousewheel: 0,
             mousewheel_scroll_speed: 1,
@@ -695,6 +701,8 @@ mod tests {
         assert!(p.changepitch);
         assert!(p.select_lastpressed);
         assert_eq!(p.follow_mode, 1, "原版默认按页跟随");
+        assert!(p.marker_start, "原版 marker_start 出厂 1（control_create.gml:381）");
+        assert!(!p.marker_end, "原版 marker_end 出厂 0（control_create.gml:382）");
         let on = Preferences { autosave_enabled: true, ..Default::default() };
         assert_eq!(on.autosave_interval(), 10);
     }

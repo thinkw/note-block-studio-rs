@@ -1881,9 +1881,8 @@ fn prefs_usability(state: &mut EditorState, pg: &mut Page) {
     }
 }
 
-/// 原版页 4「播放」：进度条跟随、播放开关、速度单位。
-/// 「在区间时开始播放」/「在区间后停止播放」/「启用任务栏进度」三行
-/// 我们没有区间起播和任务栏进度，整行不画。
+/// 原版页 4「播放」：进度条跟随、区间起播/停播、播放开关、速度单位。
+/// 原版 `taskbar`（任务栏进度）那一行在上游自己就被注释掉了（`:612`），两边一致。
 fn prefs_playback(state: &mut EditorState, pg: &mut Page) {
     pg.header(22.0, 74.0, 456.0, 145.0, tr("Marker", "进度条"));
     if pg.check(
@@ -1940,6 +1939,39 @@ fn prefs_playback(state: &mut EditorState, pg: &mut Page) {
             state.follow_mode = value;
             state.emit(Command::SavePreferences);
         }
+    }
+
+    // 原版 `:600-601`（中文 `:652-653`）：区间起播/停播两格，挂在「进度条」这个框里，
+    // 和标尺右键菜单后两条是同一对全局量。
+    if pg.check(
+        40.0,
+        170.0,
+        state.prefs.marker_start,
+        tr("Start playing in section", "在区间时开始播放"),
+        tr(
+            "Whether to always start playing\nat the start of the active section.",
+            "有区间存在时是否在区间起始处开始播放。",
+        ),
+        false,
+        false,
+    ) {
+        state.prefs.marker_start = !state.prefs.marker_start;
+        state.emit(Command::SavePreferences);
+    }
+    if pg.check(
+        40.0,
+        190.0,
+        state.prefs.marker_end,
+        tr("Stop playing after section", "在区间后停止播放"),
+        tr(
+            "Whether to stop playing when the\nmarker passes the active section.",
+            "有区间存在时是否在区间结束处停止播放。",
+        ),
+        false,
+        false,
+    ) {
+        state.prefs.marker_end = !state.prefs.marker_end;
+        state.emit(Command::SavePreferences);
     }
 
     pg.header(22.0, 244.0, 218.0, 120.0, tr("Playing", "播放"));

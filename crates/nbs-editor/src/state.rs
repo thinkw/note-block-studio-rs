@@ -894,6 +894,16 @@ pub struct EditorState {
     pub marker_follow: bool,
     /// 原版 `marker_pagebypage`：1 = 按页，0 = 按刻，2 = 按帧。
     pub follow_mode: u8,
+    /// 原版 `section_exists` / `section_start` / `section_end`
+    /// （`obj_song/Create_0.gml:22-24`）：时间轴上的一段区间。原版挂在歌曲对象上、
+    /// **不写进 .nbs**（`save_song.gml:119` 只写 `loopstart`），所以端口把它当会话状态，
+    /// 换歌、新建即清空。拖拽途中允许 `section_end < section_start`，松手才排序
+    /// （`control_draw.gml:1108-1118`）。
+    pub section_exists: bool,
+    pub section_start: i64,
+    pub section_end: i64,
+    /// 上一帧推给播放时钟的 `marker_end` 停点，只在它变化时才推。
+    stop_at_pushed: f64,
     pub hover_cell: Option<(u32, u32)>,
     /// 原版 `w_tempotapper`（速度测量器）的会话状态。
     pub tapper: TempoTapper,
@@ -1211,6 +1221,10 @@ impl EditorState {
             prefs,
             marker_follow: follow_marker,
             follow_mode,
+            section_exists: false,
+            section_start: 0,
+            section_end: 0,
+            stop_at_pushed: -1.0,
             hover_cell: None,
             tapper: TempoTapper::default(),
             // 原版这个全局没有初值（只有 menu_click.gml:47 在开窗前播种）。
@@ -1608,6 +1622,9 @@ impl EditorState {
                 }
             }
         }
+        // 原版 `marker_end` 的停点每帧从区间现算（`control_draw.gml:1033` 当场读
+        // `section_*`），推给时钟要在推进时钟之前。
+        self.sync_section_stop();
         let _crossed = self.audio.clock_mut().update();
         let playing = self.audio.clock().is_playing();
         // 原版 `if (playing = 0) record = 0`：播放一停，录音自动退出。
@@ -1749,6 +1766,30 @@ impl EditorState {
         self.audio.clock_mut().seek(tick);
     }
 
+    /// 原版 `marker_end` 认的那道闸（`control_draw.gml:1033`）：开关开着、区间存在、
+    /// 终点确实在起点之后，才有停点。
+    pub fn section_stop_tick(&self) -> Option<i64> {
+        (self.prefs.marker_end && self.section_exists && self.section_end > self.section_start)
+            .then_some(self.section_end)
+    }
+
+    /// 把 `marker_end` 的停点推给播放时钟。原版每帧现算，这里只在值变了时才推。
+    pub fn sync_section_stop(&mut self) {
+        let stop = self.section_stop_tick().map_or(-1.0, |t| t as f64);
+        if stop != self.stop_at_pushed {
+            self.stop_at_pushed = stop;
+            self.audio.clock_mut().set_stop_at(stop);
+        }
+    }
+
+    /// 换歌 / 新建歌曲：原版每首歌自带一组 `section_exists = 0`、
+    /// `section_start = section_end = 0`（`obj_song/Create_0.gml:22-24`）。
+    pub fn clear_section(&mut self) {
+        self.section_exists = false;
+        self.section_start = 0;
+        self.section_end = 0;
+    }
+
     pub fn is_playing(&self) -> bool {
         self.audio.clock().is_playing()
     }
@@ -1760,7 +1801,8 @@ impl EditorState {
 
     /// 原版 `toggle_playing` 的起播语义：上一轮播完停在歌尾（非循环的停点 =
     /// 歌长 + [`nbs_audio::scheduler::END_STOP_MARGIN_TICKS`]）时先回到 0，
-    /// 再按落点列起播（取落点速度并整列派发，见 [`AudioEngine::start`]）。
+    /// 再按 `marker_start` 跳到区间起点（`:9`，只认「区间存在且终点在起点之后」），
+    /// 最后按落点列起播（取落点速度并整列派发，见 [`AudioEngine::start`]）。
     /// 「播放 / 暂停」与录音待命首键两条起播路径都必须走这里。
     pub fn begin_playback(&mut self) {
         let end_stop =
@@ -1768,6 +1810,12 @@ impl EditorState {
         if self.audio.clock().position() >= end_stop {
             self.audio.clock_mut().seek(0.0);
         }
+        if self.prefs.marker_start && self.section_exists && self.section_end > self.section_start {
+            self.audio
+                .clock_mut()
+                .seek(self.section_start.max(0) as f64);
+        }
+        self.sync_section_stop();
         let pos = self.audio.clock().position();
         self.audio.start(pos);
     }
@@ -2241,5 +2289,101 @@ mod tests {
         assert_eq!(t.bpm, 0.0, "新一轮第一下没有间隔可测");
         t.register_tap(7000);
         assert_eq!(t.measured(), 120.0, "上一轮残留的计数不得把新一轮平均带偏");
+    }
+
+    /// 区间起播/停播的靶子谱：空谱、没有窗口、播放头归零。
+    fn section_state() -> EditorState {
+        let mut st = EditorState::new();
+        st.window = None;
+        st.doc.replace_song(nbs_core::model::Song::new());
+        st.prepare_audio();
+        st.set_marker(0.0);
+        st
+    }
+
+    /// 原版 `control_draw.gml:1033` 的停点判据是三个条件与：`marker_end` 开关、
+    /// 区间存在、终点在起点之后。零宽和反向区间都不算。
+    #[test]
+    fn section_stop_needs_the_switch_a_section_and_a_real_end() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = section_state();
+        st.section_exists = true;
+        st.section_start = 4;
+        st.section_end = 9;
+        assert_eq!(st.section_stop_tick(), None, "出厂 marker_end = 关");
+        st.prefs.marker_end = true;
+        assert_eq!(st.section_stop_tick(), Some(9));
+        st.section_exists = false;
+        assert_eq!(st.section_stop_tick(), None, "没有区间就没有停点");
+        st.section_exists = true;
+        st.section_end = 4;
+        assert_eq!(st.section_stop_tick(), None, "零宽区间不算停点");
+    }
+
+    /// 原版每帧现算停点，端口把它推给播放时钟（`TransportClock::set_stop_at`），
+    /// 关掉开关或删掉区间要推回「没有停点」的哨兵值 -1。
+    #[test]
+    fn sync_section_stop_pushes_the_stop_tick_into_the_clock() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = section_state();
+        assert_eq!(st.stop_at_pushed, -1.0, "空状态没有停点");
+        st.section_exists = true;
+        st.section_start = 4;
+        st.section_end = 9;
+        st.prefs.marker_end = true;
+        st.sync_section_stop();
+        assert_eq!(st.stop_at_pushed, 9.0);
+        st.prefs.marker_end = false;
+        st.sync_section_stop();
+        assert_eq!(st.stop_at_pushed, -1.0, "关开关要把哨兵值推回去");
+        st.prefs.marker_end = true;
+        st.sync_section_stop();
+        st.clear_section();
+        st.sync_section_stop();
+        assert_eq!(st.stop_at_pushed, -1.0, "删区间同样要撤掉停点");
+    }
+
+    /// 原版 `toggle_playing:9`：按播放键时 `marker_start` 开着就从区间起点起播，
+    /// 判据和停点那条一样只看 `end > start`；开关关掉则仍按播放头。
+    #[test]
+    fn begin_playback_honors_marker_start() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = section_state();
+        st.section_exists = true;
+        st.section_start = 4;
+        st.section_end = 9;
+        st.prefs.marker_start = true;
+        st.begin_playback();
+        assert!(st.is_playing());
+        assert_eq!(st.marker(), 4.0, "开关开着要落在区间起点");
+        st.audio.stop();
+        st.set_marker(0.0);
+        st.prefs.marker_start = false;
+        st.begin_playback();
+        assert_eq!(st.marker(), 0.0, "关掉开关就该按播放头起播");
+        st.audio.stop();
+        st.prefs.marker_start = true;
+        st.section_start = 9;
+        st.begin_playback();
+        assert_eq!(st.marker(), 0.0, "零宽区间不跳（原版 end > start 那道闸）");
+        st.audio.stop();
+    }
+
+    /// 原版区间是「每首歌自带一组」的运行时状态（`obj_song/Create_0.gml:22-24`），
+    /// 既不存盘也不跨歌；端口把它挂在 `EditorState` 上，换歌处调用的就是这里
+    /// （见 commands.rs 的 `song_replacement_clears_the_section`），三件一起归零。
+    #[test]
+    fn clear_section_resets_all_three_fields() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = section_state();
+        st.section_exists = true;
+        st.section_start = 7;
+        st.section_end = 12;
+        st.prefs.marker_end = true;
+        st.sync_section_stop();
+        st.clear_section();
+        assert!(!st.section_exists);
+        assert_eq!((st.section_start, st.section_end), (0, 0));
+        assert_eq!(st.section_stop_tick(), None);
     }
 }

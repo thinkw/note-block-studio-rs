@@ -872,9 +872,14 @@ impl Bank {
     }
 
     /// 原版 `draw_sprite_ext(spr_marker, 0/1, x, y, 1, (totalrows + 1) * 32 / 15, …)`：
-    /// 播放头是「箭头 + 一条纵向拉伸的细身」，`index` 传 0（头）或 1（身）。
+    /// 播放头是「箭头 + 一条纵向拉伸的细身」，`index` 是原帧号（0/1 浅色、6/7 深色、
+    /// 8/9 Fluent；区间两端用 2..5）。
+    /// `at` 就是原版传给 `draw_sprite` 的那个坐标：`spr_marker.yy` 的 `"origin": 1`
+    /// 是顶边中点（`xorig = 8`），贴图左上角要往左让这 8px，否则箭头和竖线整体
+    /// 右移半格（16px 帧里的线在第 7-8 像素）。
     pub fn marker(&self, p: &egui::Painter, at: Pos2, index: usize, size: Vec2, tint: Color32) {
-        self.marker.blit(p, at, index, size, tint);
+        self.marker
+            .blit(p, at - Vec2::new(8.0, 0.0), index, size, tint);
     }
 
     /// 原版 `draw_sprite(spr_notechart, 0 + 3*theme, xx, yy-320+1)`：
