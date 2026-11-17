@@ -173,6 +173,8 @@ pub enum WindowKind {
     Instruments,
     About,
     SetTempo,
+    /// 原版 `w_tempotapper`（`draw_window_tempo_tapper.gml`）：按 T 打点测速。
+    TempoTapper,
     SetVelocity,
     SetPanning,
     SetPitch,
@@ -218,6 +220,8 @@ impl WindowKind {
             // 以下批量/数值窗口是 port 自绘（原版对应入口是别的交互形式），
             // 标题没有原版文字可抄，EN 自拟。
             Self::SetTempo => tr("Set Tempo", "设置速度"),
+            // 原版 `draw_window_tempo_tapper` 的标题（`condstr(language != 1, "Tempo tapper", "速度测量器")`）。
+            Self::TempoTapper => tr("Tempo tapper", "速度测量器"),
             Self::SetVelocity => tr("Set Velocity", "批量设置力度"),
             Self::SetPanning => tr("Set Panning", "批量设置声像"),
             Self::SetPitch => tr("Set Pitch", "批量设置微调"),
@@ -730,6 +734,78 @@ pub struct EventEditDraft {
     pub until: String,
 }
 
+/// 原版 `w_tempotapper`（速度测量器）的会话状态：`taptempo` / `tapping` / `ltime` /
+/// `taps`（`control_create.gml:561-564`）。这四个是纯会话变量，不进 settings.ini，
+/// 窗口一关就清零（OK / Cancel 在 `draw_window_tempo_tapper.gml:56-58` 与 `68-70`，
+/// Esc 在 `draw_windows.gml:94-99`）。
+/// 勾选项 `tapdouble` 不在这个结构里：原版把它当偏好存盘（`save_settings.gml:71` /
+/// `load_settings.gml:78`），所以它住 `prefs.tapdouble`，关窗不清零。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TempoTapper {
+    /// `taptempo`：目前测到的 BPM。
+    pub bpm: f64,
+    /// `tapping`：已经打过至少一下。
+    pub tapping: bool,
+    /// `ltime`：上一次打点的毫秒时刻。
+    pub last_ms: i64,
+    /// `taps`：已计入平均的间隔数。
+    pub taps: u32,
+}
+
+impl TempoTapper {
+    /// 原版 `draw_window_tempo_tapper` 里按「T」那一段：
+    /// `taptempo = (60 / dt秒 + taptempo * taps) / (taps + 1)`，
+    /// 间隔短到「新一拍比现有测量值快一倍」时视为重新起打，清零重来。
+    /// 返回是否要发一声打点音（原版 `if (ins.loaded) play_sound(ins, 45, 100, 100, 0)`）。
+    /// 原版同一毫秒连按会得到 `60 / 0 = inf` 直接写进 `taptempo`，端口不照抄：
+    /// 那样界面要显示 inf、确认时还会把 inf 送进速度，这里只更新时间与打点数。
+    pub fn register_tap(&mut self, now_ms: i64) -> bool {
+        let dt_ms = now_ms - self.last_ms;
+        if dt_ms > 0 {
+            let instant = 60.0 / (dt_ms as f64 / 1000.0);
+            let ltempo = self.bpm;
+            if self.tapping {
+                let denom = if ltempo != 0.0 {
+                    self.taps as f64 + 1.0
+                } else {
+                    1.0
+                };
+                self.bpm = (instant + ltempo * self.taps as f64) / denom;
+            }
+            if (instant + 0.5).floor() <= ltempo / 2.0 && ltempo != 0.0 {
+                self.bpm = 0.0;
+                self.taps = 0;
+            }
+        }
+        self.tapping = true;
+        self.last_ms = now_ms;
+        self.taps += 1;
+        true
+    }
+
+    /// 原版 `ctempo = floor(taptempo + 0.5)`：界面显示和确认都用它。
+    pub fn measured(&self) -> f64 {
+        (self.bpm + 0.5).floor()
+    }
+
+    /// 原版关窗时的三条复位（OK / Cancel 在 `draw_window_tempo_tapper.gml:56-58`
+    /// 和 `68-70`，Esc 在 `draw_windows.gml:94-99`）。`taps` 照原版不清：那一项只在
+    /// `(taps + 1) * (ltempo != 0) + (!ltempo)` 里参与，而 `taptempo` 已经归零，
+    /// 分母塌成 1，上一轮残留的计数值传不到新一轮来。
+    pub fn reset_for_close(&mut self) {
+        self.bpm = 0.0;
+        self.tapping = false;
+        self.last_ms = 0;
+    }
+}
+
+/// 打点用的毫秒时钟：原版用 `current_time`（进程启动以来的毫秒），端口拿
+/// 首次调用作原点，够单调且不受系统时间调整影响。
+pub fn tap_clock_ms() -> i64 {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    EPOCH.get_or_init(std::time::Instant::now).elapsed().as_millis() as i64
+}
+
 pub struct EditorState {
     pub doc: Document,
     pub viewport: Viewport,
@@ -758,6 +834,8 @@ pub struct EditorState {
     /// 原版 `marker_pagebypage`：1 = 按页，0 = 按刻，2 = 按帧。
     pub follow_mode: u8,
     pub hover_cell: Option<(u32, u32)>,
+    /// 原版 `w_tempotapper`（速度测量器）的会话状态。
+    pub tapper: TempoTapper,
     pub pending: Vec<Command>,
     pub file_dialog: Option<FileDialog>,
     /// 宿主装进来的原生选择器（Windows 上是 `IFileOpenDialog` / `IFileSaveDialog`）。
@@ -992,6 +1070,7 @@ impl EditorState {
             marker_follow: follow_marker,
             follow_mode,
             hover_cell: None,
+            tapper: TempoTapper::default(),
             pending: Vec::new(),
             file_dialog: None,
             picker: None,
@@ -1971,6 +2050,9 @@ mod tests {
         st.doc.song.recalculate();
         assert_eq!(st.doc.song.endb, 1, "用例前提：最后一条有音符的层是 1");
         st.hover_cell = Some((0, 1));
+        // 出厂值不靠磁盘：临时配置目录里可能正好留着别的用例写下的 true。
+        // 「缺键退回出厂关闭」由 nbs-io/prefs.rs 的持久化用例钉，这里只管两种取值的行为。
+        st.prefs.layerhov_vppreview = false;
         assert_eq!(
             st.wheel_preview_vp(),
             (100, 100),
@@ -1995,5 +2077,46 @@ mod tests {
             (100, 100),
             "鼠标不在格子上时按 100/100"
         );
+    }
+
+    /// 原版 `draw_window_tempo_tapper` 的打点算法：滑动平均 + 「间隔突然拉长一倍
+    /// 就当重新起打」。这里钉的是三条：第一下不出值、等间隔值稳定、慢一半的清零。
+    #[test]
+    fn tempo_tapper_averages_taps_and_restarts_on_a_double_interval() {
+        let mut t = TempoTapper::default();
+        // 原版 `if (tapping)`：第一下只记时刻，不进平均。
+        assert!(t.register_tap(1000), "每一下都要发打点音");
+        assert_eq!(t.bpm, 0.0, "第一下没有间隔可测");
+        assert_eq!(t.taps, 1);
+        // 之后每 500 ms 一下 = 120 BPM，再多点也不变。
+        t.register_tap(1500);
+        assert_eq!(t.measured(), 120.0, "60 / 0.5 秒");
+        t.register_tap(2000);
+        t.register_tap(2500);
+        assert_eq!(t.measured(), 120.0, "等间隔打点平均不漂移");
+        assert_eq!(t.taps, 4);
+        // 间隔拉长到 2.5 秒（24 BPM）：floor(24 + 0.5) <= 120 / 2 成立 → 清零重新起打。
+        t.register_tap(5000);
+        assert_eq!(t.bpm, 0.0, "间隔翻倍要当作重新起打");
+        assert_eq!(t.taps, 1, "清零后这一下算第一个点");
+        t.register_tap(6000);
+        assert_eq!(t.measured(), 60.0, "重新起打后按新的间隔测");
+        // 同一毫秒连两下：原版 `60 / 0` 会得到 inf 并写进 taptempo，端口不照抄。
+        let before = t.bpm;
+        t.register_tap(6000);
+        assert_eq!(t.bpm, before, "同一毫秒不得把 inf 写进测量值");
+        assert!(t.bpm.is_finite());
+        // 关窗复位：原版清三条，`taps` 不动。
+        let taps_before = t.taps;
+        t.reset_for_close();
+        assert_eq!(t.bpm, 0.0);
+        assert!(!t.tapping);
+        assert_eq!(t.last_ms, 0);
+        assert_eq!(t.taps, taps_before, "原版没有清 taps");
+        // 残留的 taps 不会污染新一轮：第一下只记时刻，第二下照样按新间隔测。
+        t.register_tap(6500);
+        assert_eq!(t.bpm, 0.0, "新一轮第一下没有间隔可测");
+        t.register_tap(7000);
+        assert_eq!(t.measured(), 120.0, "上一轮残留的计数不得把新一轮平均带偏");
     }
 }

@@ -70,9 +70,9 @@ pub fn set_language(l: u8) {
     nbs_core::set_language(l);
 }
 
-/// 跑帧的测试互相串行。语言已经改成按线程钉（见 `nbs_core::lang`），不再需要这把锁
-/// 防串台；现在它只起「一次只跑一个 GUI 用例」的作用，红了好复现。
-/// 等 #7 死代码清理时再决定要不要撤掉。
+/// 跑帧的测试互相串行。语言已经改成按线程钉（见 `nbs_core::lang`），这把锁不再防串台，
+/// 只起「一次只跑一个 GUI 用例」的作用：GUI 用例要走完整帧循环，并行时 egui 的
+/// Context 全局状态会让红了的用例没法复现。
 #[cfg(test)]
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -1348,9 +1348,11 @@ mod gui_window_tests {
                 texts.join(" | ")
             );
         }
-        // 出厂值：删除效果开（control_create.gml:225）、五线谱关（:461）。
-        assert!(state.flags.remove_effect);
-        assert!(!state.flags.show_notechart);
+        // 出厂值不在这里验：临时配置目录可能被并行用例写过，出厂值由
+        // nbs-io/prefs.rs 的 `remove_effect` / `show_notechart` 用例钉。
+        // 本用例只管界面点击和落盘。
+        state.flags.remove_effect = true;
+        state.flags.show_notechart = false;
 
         click_text(&mut state, &ctx, "显示删除效果");
         assert!(!state.flags.remove_effect, "点标签要真的关掉删除效果");
@@ -1415,6 +1417,58 @@ mod gui_window_tests {
         state.save_prefs();
         let back = nbs_io::prefs::Preferences::load();
         assert!(back.layerhov_vppreview, "悬停层预览开关要落盘");
+    }
+
+    /// 原版 `w_tempotapper`（速度测量器）：按 T 打点 → 界面按速度单位显示测到的值，
+    /// 「双倍速度」可勾，确认把 `ctempo * 2 / 15` 写进歌曲速度并关窗。
+    #[test]
+    fn tempo_tapper_measures_taps_and_applies_the_tempo() {
+        isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = Some(WindowKind::TempoTapper);
+        // 每 500 ms 一下 = 120 BPM；速度单位出厂 t/s，界面画 120 / 15 = 8。
+        state.tapper.register_tap(0);
+        state.tapper.register_tap(500);
+        state.tapper.register_tap(1000);
+        frame(&mut state, &ctx);
+        let out = frame_out(&mut state, &ctx, base_input());
+        let texts: Vec<String> = out
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        for t in ["t/s (按 T 打速度)", "双倍速度", "确认", "取消", "8"] {
+            assert!(
+                texts.iter().any(|s| s == t),
+                "速度测量器缺少「{t}」，当前文本：{}",
+                texts.join(" | ")
+            );
+        }
+        click_text(&mut state, &ctx, "双倍速度");
+        frame(&mut state, &ctx);
+        assert!(state.prefs.tapdouble, "点标签要真的勾上双倍速度");
+        click_text(&mut state, &ctx, "确认");
+        frame(&mut state, &ctx);
+        assert_eq!(
+            state.doc.song.meta.tempo,
+            16.0,
+            "120 BPM 双倍 = 240 / 15 = 16 t/s"
+        );
+        assert_eq!(state.window, None, "确认即关窗（原版 windowclose = 1）");
+        // 原版 OK 里清的那三条（draw_window_tempo_tapper.gml:56-58）；
+        // 但双倍速度是 settings.ini 里的偏好（save_settings.gml:71），不跟着清。
+        assert_eq!(state.tapper.bpm, 0.0, "确认后打点测量值清零");
+        assert!(!state.tapper.tapping, "确认后 tapping 清零");
+        assert_eq!(state.tapper.last_ms, 0, "确认后 ltime 清零");
+        state.save_prefs();
+        let back = nbs_io::prefs::Preferences::load();
+        assert!(back.tapdouble, "双倍速度勾选要落盘（save_settings.gml:71）");
     }
 }
 

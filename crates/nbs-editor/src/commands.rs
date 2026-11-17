@@ -132,6 +132,10 @@ pub enum Command {
     SetTimeSignature(u8),
     SetSaveVersion(u8),
     ClearSong,
+    /// 原版 Ctrl+Shift+I（`control_draw.gml:771-774`）：先 `playing = 0` 再开速度测量器。
+    /// 标尺右键菜单那条入口不一样（`menu_click.gml:390` 只写 `window`），
+    /// 走普通的 `ShowWindow(TempoTapper)`，播放继续。
+    TempoTapperHotkey,
     /// 原版右上角兼容性徽章被点（`control_draw.gml:2029-2038`）：停播放、关录制、
     /// 落回浮动选区，再打开 `w_minecraft`。
     ShowCompat,
@@ -785,6 +789,11 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 state.midi_data = None;
                 state.midi_file.clear();
             }
+            if state.window == Some(WindowKind::TempoTapper) {
+                // 原版关窗清三条打点变量（OK / Cancel 写在窗口脚本里，Esc 写在
+                // `draw_windows.gml:94-99`）；双倍速度的勾选是偏好，不跟着清。
+                state.tapper.reset_for_close();
+            }
             state.window = None;
             // 原版的 `obj_menu` 跟着窗口一起销毁。这里不清的话，下拉菜单开着时用
             // Escape / Ctrl+P 关窗，下次打开首选项会凭空冒出一个悬浮菜单。
@@ -1034,6 +1043,12 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         Command::ClearSong => {
             state.doc.clear_all_notes();
             state.prepare_audio();
+        }
+        Command::TempoTapperHotkey => {
+            // 原版这一段就两行：`playing = 0` 和 `window = w_tempotapper`。
+            // 播放中不重新起播，所以和 ShowCompat 一样直接 pause，而不是走 PlayPause。
+            state.audio.clock_mut().pause();
+            dispatch(state, Command::ShowWindow(WindowKind::TempoTapper), ctx);
         }
         Command::ShowCompat => {
             // 原版这一段（`control_draw.gml:2032-2036`）：playing = 0、record = 0、
@@ -2636,6 +2651,40 @@ mod tests {
         );
         assert_eq!(state.doc.song.total_blocks, 4);
         assert_eq!(state.mc_tab, 0, "原版开窗就从 Schematic 页开始");
+    }
+
+    /// 速度测量器的两条入口在原版里并不一样：Ctrl+Shift+I 前面有 `playing = 0`
+    /// （`control_draw.gml:771-774`），标尺右键菜单只写 `window`
+    /// （`menu_click.gml:390`）。关窗则清三条打点变量
+    /// （`draw_window_tempo_tapper.gml:56-58` / `draw_windows.gml:94-99`）。
+    #[test]
+    fn tempo_tapper_hotkey_stops_playback_but_the_menu_entry_does_not() {
+        let ctx = Context::default();
+        let mut state = state_with(four_case_song(10.0));
+        state.tapper.register_tap(0);
+        state.tapper.register_tap(500);
+        assert_eq!(state.tapper.measured(), 120.0);
+        state.audio.clock_mut().seek(2.0);
+        state.begin_playback();
+
+        dispatch(&mut state, Command::ShowWindow(WindowKind::TempoTapper), &ctx);
+        assert_eq!(state.window, Some(WindowKind::TempoTapper));
+        assert!(
+            state.is_playing(),
+            "菜单入口不该停播放（menu_click.gml:390 只赋值 window）"
+        );
+
+        dispatch(&mut state, Command::CloseWindow, &ctx);
+        assert_eq!(state.window, None);
+        assert_eq!(state.tapper.bpm, 0.0, "关窗清 taptempo");
+        assert!(
+            !state.tapper.tapping && state.tapper.last_ms == 0,
+            "关窗清 tapping / ltime"
+        );
+
+        dispatch(&mut state, Command::TempoTapperHotkey, &ctx);
+        assert_eq!(state.window, Some(WindowKind::TempoTapper));
+        assert!(!state.is_playing(), "原版 playing = 0");
     }
 
     /// 原版 `toggle_playing` 起播第一行：播完停在歌尾（歌长 + 16 刻）再按

@@ -21,6 +21,10 @@ pub struct Preferences {
     pub show_layer_volumes: bool,
     /// 原版 `use_bpm`：速度框用 BPM 还是红石刻/秒。
     pub use_bpm: bool,
+    /// 原版 `tapdouble`（`control_create.gml:565` 出厂 0）：速度测量器里「双倍速度」
+    /// 的勾选态。它和另外四条打点变量不一样，是写进 settings.ini 的
+    /// （`save_settings.gml:71` / `load_settings.gml:78`），所以关窗、重开程序都还在。
+    pub tapdouble: bool,
     pub extended_voices: bool,
     /// 原版 `show_soundcount`：状态栏要不要显示「声音数」。
     pub show_sound_count: bool,
@@ -219,6 +223,7 @@ impl Default for Preferences {
             mono: false,
             show_layer_volumes: true,
             use_bpm: false,
+            tapdouble: false,
             // 原版 `control_create.gml:163-165`：channelstoggle=1 → audio_channel_num(1024)。
             extended_voices: true,
             show_sound_count: false,
@@ -633,6 +638,22 @@ mod tests {
         p.layerhov_vppreview = true;
         let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert!(back.layerhov_vppreview, "悬停层预览开关要落盘（save_settings.gml:51）");
+    }
+
+    /// 原版 `tapdouble`（速度测量器「双倍速度」）是写进 settings.ini 的
+    /// （`save_settings.gml:71` / `load_settings.gml:78`），出厂 0（`control_create.gml:565`）。
+    #[test]
+    fn tapdouble_defaults_off_and_persists() {
+        assert!(
+            !Preferences::default().tapdouble,
+            "双倍速度出厂关闭（control_create.gml:565）"
+        );
+        let old: Preferences = serde_json::from_str(r#"{"version":1,"theme":3}"#).unwrap();
+        assert!(!old.tapdouble, "旧配置缺键时退回出厂关闭");
+        let mut p = Preferences::default();
+        p.tapdouble = true;
+        let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert!(back.tapdouble, "双倍速度勾选要落盘（save_settings.gml:71）");
     }
 
     /// `[schematic_export]` 段：整份选项 + 「警告已看过」都要能落盘，

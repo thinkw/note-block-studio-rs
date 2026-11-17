@@ -266,14 +266,17 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
             }
             // 原版的 Ctrl+Shift+ 字母：宏窗口和批量设置窗口。这一族（A/S/D/F/G/H/
             // J/K/Q/W/E/R/T/Y/U）整段包在 `if current_song.selected != 0` 里，
-            // 没有选区时按键无效果；片段编辑器 Ctrl+Shift+P 和节拍器 Ctrl+Shift+I
-            // 在闸门外。Tempo Tapper / 琶音 / 滑音 / 交错这几个窗口本端口还没实现，
-            // 不占用按键。
+            // 没有选区时按键无效果；片段编辑器 Ctrl+Shift+P（control_draw.gml:766-770）
+            // 和速度测量器 Ctrl+Shift+I（同文件 771-773）在闸门外。
+            // 琶音 / 滑音 / 交错这几个窗口本端口还没实现，不占用按键。
             // 每一行原版都写死 `keyboard_check(vk_shift)`：这一族必须带 Shift，
             // 否则 Ctrl+P/S/A/R/Y 会和上面 `ctrl && !shift` 那批功能撞车。
             if shift {
                 if p(Key::P) {
                     out.push(Command::ShowWindow(WindowKind::ClipEditor));
+                }
+                if p(Key::I) {
+                    out.push(Command::TempoTapperHotkey);
                 }
                 if !state.doc.selection.is_empty() {
                     if p(Key::R) {
@@ -433,6 +436,12 @@ pub fn shortcut_help() -> Vec<(&'static str, &'static str)> {
         ),
         ("Ctrl+Shift+P", "Ctrl+Shift+P", "Clip editor", "片段编辑器"),
         (
+            "Ctrl+Shift+I",
+            "Ctrl+Shift+I",
+            "Tempo tapper (tap T to measure the tempo)",
+            "速度测量器（按 T 打点测速）",
+        ),
+        (
             "Ctrl+Shift+R / T / Y",
             "Ctrl+Shift+R / T / Y",
             "Batch-set velocity / panning / pitch (needs a selection, no-op without one)",
@@ -566,6 +575,33 @@ mod tests {
     fn bare_key_does_not_match_a_ctrl_chord() {
         let got = cmds(vec![key(Key::P, true, egui::Modifiers::NONE)]);
         assert!(!got.iter().any(prefs_open_cmd), "裸 P 不该开首选项");
+    }
+
+    /// 原版 `control_draw.gml:771-774`：Ctrl+Shift+I 先 `playing = 0` 再开速度测量器，
+    /// 和片段编辑器一样在选区闸门外；不带 Shift 的 Ctrl+I 不算这档。
+    #[test]
+    fn ctrl_shift_i_opens_the_tempo_tapper_without_a_selection() {
+        let both = egui::Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Default::default()
+        };
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        let got = cmds(vec![key(Key::I, true, both)]);
+        assert!(
+            got.iter().any(|c| matches!(c, Command::TempoTapperHotkey)),
+            "Ctrl+Shift+I 应开速度测量器: {got:?}"
+        );
+        let got = cmds(vec![key(Key::I, true, ctrl)]);
+        assert!(
+            !got
+                .iter()
+                .any(|c| matches!(c, Command::TempoTapperHotkey)),
+            "Ctrl+I 不该开速度测量器: {got:?}"
+        );
     }
 
     /// 原版 `control_draw.gml:849-924` 每一行都带 `keyboard_check(vk_shift)`：

@@ -1321,7 +1321,6 @@ fn draw_context_menu(state: &mut EditorState, ui: &Ui) {
                         close = true;
                     }
                     ui.separator();
-                    // 原版末尾还有一项「速度测量器」，我们没有打点测速功能，就不画它。
                     for t in [10.0_f32, 12.0, 14.0, 16.0, 18.0, 20.0, 30.0, 60.0] {
                         let label = if bpm_on {
                             format!("{:.0} BPM", t * 15.0)
@@ -1332,6 +1331,14 @@ fn draw_context_menu(state: &mut EditorState, ui: &Ui) {
                             cmds.push(Command::SetTempo(t));
                             close = true;
                         }
+                    }
+                    // 原版菜单最后一项，前面还有一条 `|-|` 分隔线
+                    // （`control_draw.gml:2510` / `2521`，`menu_click` 的 `sel = 10`）：
+                    // 打开速度测量器。这条入口不停播放。
+                    ui.separator();
+                    if item(ui, tr("Tempo tapper...", "速度测量器......")) {
+                        cmds.push(Command::ShowWindow(crate::state::WindowKind::TempoTapper));
+                        close = true;
                     }
                 }
             }

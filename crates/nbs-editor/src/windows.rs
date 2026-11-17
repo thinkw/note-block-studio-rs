@@ -62,7 +62,9 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         // 原版 `draw_window(x1, y1, x1 + 600, y1 + 400 + navigation_space)`。
         WindowKind::MidiImport => 600.0,
         // 原版 `draw_window(x1, y1, x1 + 140, y1 + 130)` / `(x1 + 140, y1 + 180)`。
-        WindowKind::EditTempoChanger(..) | WindowKind::EditSoundStopper(..) => 140.0,
+        WindowKind::TempoTapper
+        | WindowKind::EditTempoChanger(..)
+        | WindowKind::EditSoundStopper(..) => 140.0,
         _ => 360.0,
     };
     egui::Window::new(title)
@@ -71,7 +73,9 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         .collapsible(false)
         .resizable(!matches!(
             kind,
-            WindowKind::EditTempoChanger(..) | WindowKind::EditSoundStopper(..)
+            WindowKind::TempoTapper
+                | WindowKind::EditTempoChanger(..)
+                | WindowKind::EditSoundStopper(..)
         ))
         .default_width(default_width)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -83,6 +87,7 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::Instruments => instruments_window(state, ui),
             WindowKind::About => about(ui),
             WindowKind::SetTempo => numeric_window(state, ui, Numeric::Tempo),
+            WindowKind::TempoTapper => tempo_tapper_window(state, ui),
             WindowKind::SetVelocity => numeric_window(state, ui, Numeric::Velocity),
             WindowKind::SetPanning => numeric_window(state, ui, Numeric::Panning),
             WindowKind::SetPitch => numeric_window(state, ui, Numeric::Pitch),
@@ -3156,6 +3161,114 @@ fn layer_rename(state: &mut EditorState, ui: &mut Ui, layer: u32) {
         state.editing_layer_name = None;
         state.emit(c);
         state.emit(Command::CloseWindow);
+    }
+}
+
+/// 原版 `draw_window_tempo_tapper`：140×130 的打点测速窗。
+/// 按 T 采间隔 → `taptempo` 取全部间隔的滑动平均；数字只有在打过点且测出值时才画
+/// （`if (tapping && taptempo != 0)`），显示单位跟首选项的速度单位走
+/// （BPM 直接画 `floor(taptempo + 0.5)`，t/s 画它除以 15）。
+/// 确认：`real_tempo = (ctempo * (1 + tapdouble)) / 15`，然后关窗。
+/// 原版即使一次没打也照算（`0 / 15 = 0`），端口沿用了 `SetTempo` 的 0.25..=60 夹取。
+fn tempo_tapper_window(state: &mut EditorState, ui: &mut Ui) {
+    let th = state.theme.clone();
+    let fluent = th.kind == ThemeKind::Fluent;
+    let margin = ui.spacing().window_margin;
+    let (ml, mr) = (margin.left as f32, margin.right as f32);
+    let body = ui.allocate_exact_size(
+        egui::vec2(140.0 - ml - mr, if fluent { 106.0 } else { 104.0 }),
+        egui::Sense::hover(),
+    );
+    let o = body.0.min - egui::vec2(ml, 0.0);
+    let ry = if fluent { -8.0 } else { -26.0 };
+    // 原版 `keyboard_check_pressed(ord("T"))`：只在这个窗开着时收点，每点发一声打点音。
+    let tapped = ui.input(|i| i.key_pressed(egui::Key::T))
+        && state.tapper.register_tap(crate::state::tap_clock_ms());
+    if tapped {
+        // 原版 `play_sound(soundmetronome, 45, 100, 100, 0)` 用的是 ui/metronome.ogg；
+        // 端口的节拍器采样落在采样库 4 号（click）上，和播放时的节拍器同一个音，
+        // 力度按原版取 100。
+        let mut click = nbs_core::model::Note::new(4, 45);
+        click.velocity = 100;
+        state.audio.preview_note(&click);
+    }
+    let mut apply: Option<Command> = None;
+    let mut close = false;
+    {
+        let mut pg = Page {
+            ui,
+            o,
+            ry,
+            th: &th,
+            fluent,
+        };
+        if th.kind == ThemeKind::Aqua {
+            let p = pg.ui.painter().clone();
+            let rect = pg.row_rect(6.0, 26.0, 134.0, 92.0);
+            p.rect_filled(rect, 0.0, Color32::WHITE);
+            p.rect_stroke(
+                rect,
+                0.0,
+                Stroke::new(1.0_f32, Color32::from_rgb(137, 140, 149)),
+                StrokeKind::Inside,
+            );
+        }
+        // 原版组名跟着速度单位走：`if (use_bpm) "BPM (T to tap)" else "t/s (T to tap)"`。
+        let header = if state.prefs.use_bpm {
+            tr("BPM (T to tap)", "BPM (按 T 打速度)").to_string()
+        } else {
+            tr("t/s (T to tap)", "t/s (按 T 打速度)").to_string()
+        };
+        pg.header(10.0, 43.0, 120.0, 35.0, &header);
+        if state.tapper.tapping && state.tapper.bpm != 0.0 {
+            let ctempo = state.tapper.measured();
+            let shown = if state.prefs.use_bpm {
+                ctempo
+            } else {
+                ctempo / 15.0
+            };
+            let text = gml_number(shown);
+            pg.text(pg.row(60.0, 55.0), &text, PREFS_FONT, pg.ink());
+        }
+        // 双倍速度：原版把它存进 settings.ini（`save_settings.gml:71`），
+        // 关窗不会跟着清零，所以直接读写 prefs。
+        if pg.check(
+            15.0,
+            80.0,
+            state.prefs.tapdouble,
+            tr("Double tempo", "双倍速度"),
+            tr("Double the tempo to apply.", "应用时使速度 x2。"),
+            true,
+            false,
+        ) {
+            state.prefs.tapdouble = !state.prefs.tapdouble;
+        }
+        if pg.button2(10.0, 98.0, 60.0, tr("OK", "确认"), false, false) {
+            let doubled = state.tapper.measured() * (1.0 + state.prefs.tapdouble as i32 as f64);
+            apply = Some(Command::SetTempo((doubled / 15.0) as f32));
+            close = true;
+        }
+        if pg.button2(70.0, 98.0, 60.0, tr("Cancel", "取消"), false, true) {
+            close = true;
+        }
+    }
+    if let Some(c) = apply {
+        state.emit(c);
+    }
+    if close {
+        state.emit(Command::CloseWindow);
+    }
+}
+
+/// 原版 `string()`：整数值不带小数点，其余最多 6 位有效数字并去掉尾零。
+fn gml_number(v: f64) -> String {
+    if (v - v.round()).abs() < 1e-9 {
+        format!("{}", v.round() as i64)
+    } else {
+        format!("{v:.5}")
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
     }
 }
 

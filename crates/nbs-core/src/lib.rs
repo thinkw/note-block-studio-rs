@@ -82,10 +82,6 @@ pub fn tr_at<'a>(lang: u8, en: &'a str, zh: &'a str) -> &'a str {
     }
 }
 
-/// 会翻转全局语言的测试要串行，别互相踩到别人的断言。
-#[cfg(test)]
-pub(crate) static TEST_LANG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 pub use document::Document;
 pub use history::{Edit, History};
 pub use macros::{transform as transform_notes, Macro, TremoloFade};
