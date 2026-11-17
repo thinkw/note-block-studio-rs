@@ -303,6 +303,45 @@ fn trim_trailing_padding_layers(song: &mut Song) {
     }
 }
 
+/// 原版 `nbs_custom_instrument_limit`（`new_instrument.gml:44-55`）：乐器 ID 只有一字节。
+/// v0..v4 固定给 18 格，v5 从 16 起算所以给到 240 格，v6 因为内置乐器涨到 20 个
+/// 而只剩 `256 - FIRST_CUSTOM_INDEX`。
+/// 原版还有个 `includes_v6_instruments` 参数（旧格式要把 v6 新增的 4 个铜块
+/// 当自定义乐器存，各减 4），只有音色表和加载路径传得到，保存选项按单参调用。
+pub fn custom_instrument_limit(format_version: u8) -> usize {
+    let limit: i32 = if format_version < 5 {
+        18
+    } else if format_version < 6 {
+        240
+    } else {
+        256 - FIRST_CUSTOM_INDEX as i32
+    };
+    limit.max(0) as usize
+}
+
+/// 「保存选项」窗口一轮换算的结果（原版 `draw_window_save_options:24-30`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SaveVersionOptions {
+    /// 原版 `min_version`：`< 地板` 的那些版本整行禁用。
+    pub floor: u8,
+    /// 原版 `v6_instrument_limit`：v6 那一行还要单独问一次乐器数。
+    pub v6_limit: usize,
+    /// 原版夹过之后的 `save_options_version`。
+    pub selected: u8,
+}
+
+/// 按曲子里的自定义乐器数夹一遍：超过 18 个就锁死 v0..v4；
+/// 选中 v6 又超过 v6 上限则退回 v5。
+pub fn save_version_options(requested: u8, user_instruments: usize) -> SaveVersionOptions {
+    let floor = if user_instruments > custom_instrument_limit(4) { 5 } else { 0 };
+    let v6_limit = custom_instrument_limit(6);
+    let mut selected = requested.max(floor);
+    if selected >= 6 && user_instruments > v6_limit {
+        selected = 5;
+    }
+    SaveVersionOptions { floor, v6_limit, selected }
+}
+
 /// 序列化为 NBS 字节流。
 pub fn save_bytes(song: &Song, version: u8) -> Result<Vec<u8>, NbsError> {
     let version = version.min(MAX_NBS_VERSION);
@@ -598,5 +637,28 @@ mod tests {
         let bytes = save_bytes(&song, 5).unwrap();
         let back = load_bytes(&bytes).unwrap();
         assert_eq!(back.get(140_000, 0), Some(Note::new(1, 50)));
+    }
+
+    /// 保存选项窗口那三段换算（原版 `draw_window_save_options:24-30`）。
+    /// 自定义乐器上限来自 `nbs_custom_instrument_limit`，地板只可能取 0 或 5。
+    #[test]
+    fn save_version_options_follows_the_instrument_count() {
+        assert_eq!(custom_instrument_limit(0), 18);
+        assert_eq!(custom_instrument_limit(4), 18);
+        assert_eq!(custom_instrument_limit(5), 240);
+        assert_eq!(custom_instrument_limit(6), 236);
+
+        // 18 个以内：随便选，地板 0。
+        let o = save_version_options(0, 18);
+        assert_eq!((o.floor, o.selected), (0, 0));
+        // 19 个：v0..v4 锁死，且请求 v0 被抬到 v5。
+        let o = save_version_options(0, 19);
+        assert_eq!((o.floor, o.selected), (5, 5), "19 个自定义乐器要抬到 v5");
+        // 237 个：超了 v6 上限，选 v6 退回 v5。
+        let o = save_version_options(6, 237);
+        assert_eq!(o.selected, 5);
+        // 236 个：正好卡在上限，v6 留着。
+        let o = save_version_options(6, 236);
+        assert_eq!(o.selected, 6);
     }
 }

@@ -61,8 +61,9 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         WindowKind::MinecraftCompat => 490.0,
         // 原版 `draw_window(x1, y1, x1 + 600, y1 + 400 + navigation_space)`。
         WindowKind::MidiImport => 600.0,
-        // 原版 `draw_window(x1, y1, x1 + 140, y1 + 130)` / `(x1 + 140, y1 + 180)`。
+        // 原版 `draw_window(x1, y1, x1 + 140, y1 + 130/162/180)`。
         WindowKind::TempoTapper
+        | WindowKind::SaveOptions
         | WindowKind::EditTempoChanger(..)
         | WindowKind::EditSoundStopper(..) => 140.0,
         _ => 360.0,
@@ -74,6 +75,7 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         .resizable(!matches!(
             kind,
             WindowKind::TempoTapper
+                | WindowKind::SaveOptions
                 | WindowKind::EditTempoChanger(..)
                 | WindowKind::EditSoundStopper(..)
         ))
@@ -88,6 +90,7 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::About => about(ui),
             WindowKind::SetTempo => numeric_window(state, ui, Numeric::Tempo),
             WindowKind::TempoTapper => tempo_tapper_window(state, ui),
+            WindowKind::SaveOptions => save_options_window(state, ui),
             WindowKind::SetVelocity => numeric_window(state, ui, Numeric::Velocity),
             WindowKind::SetPanning => numeric_window(state, ui, Numeric::Panning),
             WindowKind::SetPitch => numeric_window(state, ui, Numeric::Pitch),
@@ -1013,33 +1016,8 @@ fn properties(state: &mut EditorState, ui: &mut Ui) {
             }
         });
     });
-    ui.horizontal(|ui| {
-        ui.label(tr("Save format version", "保存格式版本"));
-        let mut v = state.doc.song.meta.save_version;
-        egui::ComboBox::from_id_salt("save_version")
-            .selected_text(format!("NBS v{v}"))
-            .show_ui(ui, |ui| {
-                for n in 0..=nbs_core::nbs::MAX_NBS_VERSION {
-                    ui.selectable_value(&mut v, n, format!("NBS v{n}"));
-                }
-            });
-        if v != state.doc.song.meta.save_version {
-            state.emit(Command::SetSaveVersion(v));
-        }
-    });
-    ui.separator();
-    ui.label(RichText::new(tr(
-        &format!(
-            "v0..v{} are all readable and writable; velocity / panning / pitch and layer locks are only saved in v4/v5, and v6 just extends the built-in instrument list from 16 to 20 (same format as v5)",
-            nbs_core::nbs::MAX_NBS_VERSION
-        ),
-        &format!(
-            "v0..v{} 全部可读可写；v4/v5 才会保存力度/声像/微调与图层锁定，v6 只是把内置乐器从 16 种扩到 20 种（格式与 v5 相同）",
-            nbs_core::nbs::MAX_NBS_VERSION
-        ),
-    ))
-    .small()
-    .weak());
+    // 原版属性窗到「循环次数」就结束了；保存版本另有文件菜单的「保存选项」窗口，
+    // 不再在这里塞一个下拉框和一段格式说明。
     footer(state, ui);
 }
 
@@ -3164,7 +3142,118 @@ fn layer_rename(state: &mut EditorState, ui: &mut Ui, layer: u32) {
     }
 }
 
-/// 原版 `draw_window_tempo_tapper`：140×130 的打点测速窗。
+/// 原版 `draw_window_save_options`：140×162，七行版本单选 + 一个确定。
+/// 每行的悬停词就是该版本相对上一版新增了什么；锁住的行表示曲子里的自定义
+/// 乐器数超过那个版本的上限（原版 `min_version` / `v6_instrument_limit`）。
+fn save_options_window(state: &mut EditorState, ui: &mut Ui) {
+    let th = state.theme.clone();
+    let fluent = th.kind == ThemeKind::Fluent;
+    let margin = ui.spacing().window_margin;
+    let (ml, mr) = (margin.left as f32, margin.right as f32);
+    let body = ui.allocate_exact_size(
+        egui::vec2(140.0 - ml - mr, if fluent { 138.0 } else { 136.0 }),
+        egui::Sense::hover(),
+    );
+    let o = body.0.min - egui::vec2(ml, 0.0);
+    let ry = if fluent { -8.0 } else { -26.0 };
+    let user_instruments = state.doc.song.custom_instruments.len();
+    let opt = nbs_core::nbs::save_version_options(state.save_options_version, user_instruments);
+    state.save_options_version = opt.selected;
+    let mut cmd = None;
+    {
+        let mut pg = Page {
+            ui,
+            o,
+            ry,
+            th: &th,
+            fluent,
+        };
+        if th.kind == ThemeKind::Aqua {
+            let p = pg.ui.painter().clone();
+            let rect = pg.row_rect(6.0, 26.0, 134.0, 132.0);
+            p.rect_filled(rect, 0.0, Color32::WHITE);
+            p.rect_stroke(
+                rect,
+                0.0,
+                Stroke::new(1.0_f32, Color32::from_rgb(137, 140, 149)),
+                StrokeKind::Inside,
+            );
+        }
+        // (版本, 标签, 悬停词, 原版 `y1 +` 后面的行号)，中英逐字照抄。
+        let rows: [(u8, &str, &str, f32); 7] = [
+            (
+                6,
+                "v6",
+                tr(
+                    "Added the new instruments introduced in Minecraft 26",
+                    "增加在 Minecraft 26 中推出的新音色",
+                ),
+                23.0,
+            ),
+            (
+                5,
+                "v5",
+                tr(
+                    "Increases custom instrument limit\nAllows custom sounds in subfolders",
+                    "增加自定义音色限制、允许自定义文件在子目录",
+                ),
+                38.0,
+            ),
+            (
+                4,
+                "v4",
+                tr(
+                    "Includes note velocity/pan/pitch and looping",
+                    "包含音符音量、声道、音高和循环",
+                ),
+                53.0,
+            ),
+            (3, "v3", tr("Includes song length", "包含歌曲长度"), 68.0),
+            (
+                2,
+                "v2",
+                tr("Includes layer panning", "包含层声道数据"),
+                83.0,
+            ),
+            (
+                1,
+                "v1",
+                tr("Includes custom instrument index", "包含自定义乐器序号"),
+                98.0,
+            ),
+            (
+                0,
+                tr("Classic", "经典"),
+                tr(
+                    "Doesn't have any of the above, but works on all versions.",
+                    "上面的都没有，但所有版本都兼容。",
+                ),
+                113.0,
+            ),
+        ];
+        for (v, label, tip, n) in rows {
+            // 原版 v6 的条件是 `min_version > 6 || 乐器数超上限`，而 min_version
+            // 只可能取 0 / 5，前半永远不成立，所以这里只问上限。
+            let lock = match v {
+                6 => user_instruments > opt.v6_limit,
+                _ => opt.floor > v,
+            };
+            if pg.radio(15.0, n, opt.selected == v, label, tip, lock) {
+                state.save_options_version = v;
+            }
+        }
+        if pg.button2(40.0, 135.0, 60.0, tr("OK", "确定"), false, false) {
+            cmd = Some(Command::ApplySaveOptions {
+                version: state.save_options_version,
+            });
+        }
+    }
+    if let Some(c) = cmd {
+        state.emit(c);
+    }
+}
+
+/// 原版 `draw_window_tempo_tapper`：140×130，只有一颗「按 T 打点」和结果数字。
 /// 按 T 采间隔 → `taptempo` 取全部间隔的滑动平均；数字只有在打过点且测出值时才画
 /// （`if (tapping && taptempo != 0)`），显示单位跟首选项的速度单位走
 /// （BPM 直接画 `floor(taptempo + 0.5)`，t/s 画它除以 15）。

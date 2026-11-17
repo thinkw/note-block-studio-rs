@@ -175,6 +175,9 @@ pub enum WindowKind {
     SetTempo,
     /// 原版 `w_tempotapper`（`draw_window_tempo_tapper.gml`）：按 T 打点测速。
     TempoTapper,
+    /// 原版 `w_saveoptions`（`draw_window_save_options.gml`）：文件菜单里的「保存选项」，
+    /// 用单选框选存盘用的 NBS 版本。打开时把 `save_options_version` 播种成歌曲当前版本。
+    SaveOptions,
     SetVelocity,
     SetPanning,
     SetPitch,
@@ -222,6 +225,8 @@ impl WindowKind {
             Self::SetTempo => tr("Set Tempo", "设置速度"),
             // 原版 `draw_window_tempo_tapper` 的标题（`condstr(language != 1, "Tempo tapper", "速度测量器")`）。
             Self::TempoTapper => tr("Tempo tapper", "速度测量器"),
+            // 原版 `draw_window_save_options:13-14` 的正文粗体标题。
+            Self::SaveOptions => tr("Save options", "保存选项"),
             Self::SetVelocity => tr("Set Velocity", "批量设置力度"),
             Self::SetPanning => tr("Set Panning", "批量设置声像"),
             Self::SetPitch => tr("Set Pitch", "批量设置微调"),
@@ -836,6 +841,9 @@ pub struct EditorState {
     pub hover_cell: Option<(u32, u32)>,
     /// 原版 `w_tempotapper`（速度测量器）的会话状态。
     pub tapper: TempoTapper,
+    /// 原版全局 `save_options_version`：保存选项窗口里的单选草稿，
+    /// 打开时播种成歌曲的 `save_version`，点确定才写回歌曲。不落盘。
+    pub save_options_version: u8,
     pub pending: Vec<Command>,
     pub file_dialog: Option<FileDialog>,
     /// 宿主装进来的原生选择器（Windows 上是 `IFileOpenDialog` / `IFileSaveDialog`）。
@@ -1071,6 +1079,9 @@ impl EditorState {
             follow_mode,
             hover_cell: None,
             tapper: TempoTapper::default(),
+            // 原版这个全局没有初值（只有 menu_click.gml:47 在开窗前播种）。
+            // 端口需要一个 Default，取程序自身的版本；从菜单进来必然被覆盖，看不到。
+            save_options_version: nbs_core::nbs::NBS_VERSION,
             pending: Vec::new(),
             file_dialog: None,
             picker: None,

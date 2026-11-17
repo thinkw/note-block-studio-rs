@@ -130,7 +130,19 @@ pub enum Command {
     Stereo(i16),
     SetTempo(f32),
     SetTimeSignature(u8),
-    SetSaveVersion(u8),
+    /// 原版文件菜单「保存选项......」（`menu_click.gml:46-49`）：先把全局
+    /// `save_options_version` 播种成歌曲版本，再开窗。
+    OpenSaveOptions,
+    /// 保存选项窗口的确定：`version` 是夹过之后的单选值。
+    /// 和程序自身版本不同就先问一句（原版 `question(...)`），答否只把单选
+    /// 退回歌曲版本、窗口不关；答是（或本来就相同）才写回歌曲并关窗。
+    ApplySaveOptions {
+        version: u8,
+    },
+    /// 上面那问的「是」分支（版本相同则直接走这条）：写回歌曲并关窗。
+    SaveOptionsConfirm {
+        version: u8,
+    },
     ClearSong,
     /// 原版 Ctrl+Shift+ 字母开窗口那一族（`control_draw.gml:765-831`）：
     /// 片段编辑器 P、速度测量器 I、宏窗口 A/S/D/F/H、批量设置 R/T/Y——
@@ -1038,11 +1050,37 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     m.time_signature = ts.clamp(2, 8)
                 });
         }
-        Command::SetSaveVersion(v) => {
+        Command::OpenSaveOptions => {
+            state.save_options_version = state.doc.song.meta.save_version;
+            dispatch(state, Command::ShowWindow(WindowKind::SaveOptions), ctx);
+        }
+        Command::ApplySaveOptions { version } => {
+            if version != nbs_core::nbs::NBS_VERSION {
+                // 原版 `question(...)` 的否分支：`save_options_version =
+                // cursong.save_version` 然后 return，窗口留着。这里提前把单选退回
+                // 歌曲版本，答「是」的分支再用手上的 version 覆盖回来。
+                state.save_options_version = state.doc.song.meta.save_version;
+                state.modals = ModalQueue::question(
+                    tr("Confirm", "确定"),
+                    tr(
+                        "Some of the song's data will be lost if you save in a previous version! Are you sure?",
+                        "如果你保存在旧版本的话一些歌曲信息将会丢失！你确定吗？",
+                    ),
+                    Command::SaveOptionsConfirm { version },
+                );
+            } else {
+                dispatch(state, Command::SaveOptionsConfirm { version }, ctx);
+            }
+        }
+        Command::SaveOptionsConfirm { version } => {
+            state.save_options_version = version;
             state.doc.edit_meta(
                 tr("Change save version", "修改保存版本"),
-                |m: &mut SongMeta| m.save_version = v.min(nbs_core::nbs::MAX_NBS_VERSION),
+                |m: &mut SongMeta| {
+                    m.save_version = version;
+                },
             );
+            dispatch(state, Command::CloseWindow, ctx);
         }
         Command::ClearSong => {
             state.doc.clear_all_notes();
@@ -3029,5 +3067,82 @@ mod tests {
         dispatch(&mut state, Command::RemoveNote { tick: 0, layer: 0 }, &ctx);
         assert!(state.remove_effects.is_empty(), "锁定层拦截时不生成效果");
         assert!(state.doc.song.get(0, 0).is_some(), "音符还在");
+    }
+
+    /// 原版 `menu_click.gml:46-49`：文件菜单那一项先 `save_options_version =
+    /// songs[song].save_version` 再开窗，单选草稿从歌曲版本起步。
+    #[test]
+    fn open_save_options_seeds_the_scratch_from_the_song() {
+        let ctx = Context::default();
+        let mut song = Song::new();
+        song.meta.save_version = 4;
+        let mut state = state_with(song);
+        state.save_options_version = 0;
+        dispatch(&mut state, Command::OpenSaveOptions, &ctx);
+        assert_eq!(state.window, Some(WindowKind::SaveOptions));
+        assert_eq!(
+            state.save_options_version, 4,
+            "开窗要把歌曲的保存版本播种给单选草稿"
+        );
+        assert!(state.modals.is_empty(), "开窗本身不问话");
+    }
+
+    /// 版本和当前写盘版本一致时原版不问直接改（`save_options_version !=
+    /// nbs_version` 才 `question`），改完关窗；不一致先问，窗口留着。
+    #[test]
+    fn save_options_ok_asks_only_when_leaving_the_current_version() {
+        let _lock = crate::frame_lock();
+        let _cn = crate::LangGuard::set(1);
+        let ctx = Context::default();
+        let current = nbs_core::nbs::NBS_VERSION;
+        let mut state = state_with(Song::new());
+        dispatch(&mut state, Command::ShowWindow(WindowKind::SaveOptions), &ctx);
+        dispatch(
+            &mut state,
+            Command::ApplySaveOptions { version: current },
+            &ctx,
+        );
+        assert!(state.modals.is_empty(), "就是当前版本，不用问");
+        assert_eq!(state.doc.song.meta.save_version, current);
+        assert_eq!(state.window, None, "原版 windowclose = 1");
+        assert!(state.doc.history.can_undo(), "原版 cursong.changed = 1");
+
+        let mut state = state_with(Song::new());
+        dispatch(&mut state, Command::ShowWindow(WindowKind::SaveOptions), &ctx);
+        dispatch(&mut state, Command::ApplySaveOptions { version: 0 }, &ctx);
+        assert_eq!(titles(&state), vec!["确定"]);
+        assert_eq!(
+            texts(&state),
+            vec!["如果你保存在旧版本的话一些歌曲信息将会丢失！你确定吗？"]
+        );
+        assert!(state.modals.then.is_some());
+        assert_eq!(state.doc.song.meta.save_version, 6, "问完还没改");
+        assert_eq!(
+            state.save_options_version, 6,
+            "原版否分支要 `save_options_version = cursong.save_version`，提前做掉"
+        );
+        assert_eq!(state.window, Some(WindowKind::SaveOptions), "问话时窗口还留着");
+    }
+
+    /// 上面那问的答否：不改歌曲、窗口留着（原版是 `return`）。答是：走
+    /// `SaveOptionsConfirm`，把手上的版本写回并关窗。
+    #[test]
+    fn save_options_question_branches_apply_or_keep_the_song_version() {
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        dispatch(&mut state, Command::ShowWindow(WindowKind::SaveOptions), &ctx);
+        dispatch(&mut state, Command::ApplySaveOptions { version: 3 }, &ctx);
+        dispatch(&mut state, Command::AnswerModal(false), &ctx);
+        assert!(state.modals.is_empty());
+        assert_eq!(state.doc.song.meta.save_version, 6, "答否不改保存版本");
+        assert_eq!(state.window, Some(WindowKind::SaveOptions));
+
+        let mut state = state_with(Song::new());
+        dispatch(&mut state, Command::ShowWindow(WindowKind::SaveOptions), &ctx);
+        dispatch(&mut state, Command::ApplySaveOptions { version: 3 }, &ctx);
+        dispatch(&mut state, Command::AnswerModal(true), &ctx);
+        assert_eq!(state.doc.song.meta.save_version, 3, "答是才写回");
+        assert_eq!(state.save_options_version, 3);
+        assert_eq!(state.window, None);
     }
 }

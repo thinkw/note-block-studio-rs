@@ -1470,6 +1470,81 @@ mod gui_window_tests {
         let back = nbs_io::prefs::Preferences::load();
         assert!(back.tapdouble, "双倍速度勾选要落盘（save_settings.gml:71）");
     }
+
+    /// 原版 `w_saveoptions`（文件菜单「保存选项......」，`draw_window_save_options.gml`）：
+    /// 140×162，七行版本单选 + 一颗确定。行按原版坐标画，锁行条件是自定义乐器数
+    /// （`min_version` 与 v6 的 `nbs_custom_instrument_limit(6)`），点确定走
+    /// `ApplySaveOptions`，非当前版本先问一句。
+    #[test]
+    fn save_options_window_locks_rows_by_instrument_count() {
+        use commands::Command;
+        isolate_prefs();
+        let _cn = crate::LangGuard::set(1);
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        dispatch(&mut state, Command::OpenSaveOptions, &ctx);
+        assert_eq!(state.window, Some(WindowKind::SaveOptions));
+        assert_eq!(state.save_options_version, 6, "新歌的保存版本播种给单选");
+        frame(&mut state, &ctx);
+        let out = frame_out(&mut state, &ctx, base_input());
+        let texts: Vec<String> = out
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        for t in ["v6", "v5", "v4", "v3", "v2", "v1", "经典", "确定"] {
+            assert!(
+                texts.iter().any(|s| s == t),
+                "保存选项窗缺少「{t}」，当前文本：{}",
+                texts.join(" | ")
+            );
+        }
+        // 自定义音色 0 个：`min_version = 0`，最旧那行也能点。
+        click_text(&mut state, &ctx, "经典");
+        frame(&mut state, &ctx);
+        assert_eq!(state.save_options_version, 0, "点「经典」要选中 v0");
+        click_text(&mut state, &ctx, "确定");
+        frame(&mut state, &ctx);
+        assert_eq!(state.modals.items.len(), 1, "退到旧版本要先问一句");
+        assert_eq!(state.doc.song.meta.save_version, 6, "没答应不改歌曲");
+        assert_eq!(
+            state.save_options_version, 6,
+            "原版否分支把单选退回歌曲版本，提前做掉"
+        );
+        dispatch(&mut state, Command::AnswerModal(true), &ctx);
+        assert_eq!(state.doc.song.meta.save_version, 0, "答是才写回");
+        assert_eq!(state.window, None, "写完关窗");
+
+        // 19 个自定义音色：原版 `min_version = 5`，0..4 五行锁住，单选低于 5 的要抬上来。
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        state.doc.song.meta.save_version = 4;
+        let custom = |i: usize| nbs_core::model::CustomInstrument {
+            name: i.to_string(),
+            filename: String::new(),
+            key: 45,
+            press: true,
+        };
+        state.doc.song.custom_instruments = (0..19).map(custom).collect();
+        dispatch(&mut state, Command::OpenSaveOptions, &ctx);
+        frame(&mut state, &ctx);
+        frame_out(&mut state, &ctx, base_input());
+        assert_eq!(state.save_options_version, 5, "低于 min_version 的单选要抬上来");
+        click_text(&mut state, &ctx, "经典");
+        frame(&mut state, &ctx);
+        assert_eq!(state.save_options_version, 5, "v0 那行是锁的，点不动");
+        // v6 上限那条（乐器数 > 236 时把 6 改回 5）由 nbs-core 的
+        // `save_version_options_follows_the_instrument_count` 钉；这里不画：
+        // 237 条自定义音色已经把 `instrument_list()` 的 u8 索引撑爆（见报告）。
+    }
 }
 
 #[cfg(test)]

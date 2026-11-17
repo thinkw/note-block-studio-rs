@@ -173,6 +173,10 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                     ui.close_menu();
                 }
             });
+            if ui.button(tr("Save options...", "保存选项…")).clicked() {
+                state.emit(Command::OpenSaveOptions);
+                ui.close_menu();
+            }
             if ui
                 .button(tr("Restore unsaved files...", "自动保存 / 备份…"))
                 .clicked()
