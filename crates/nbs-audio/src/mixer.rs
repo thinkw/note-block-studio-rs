@@ -41,7 +41,7 @@ impl Voice {
     /// 原版 `control_draw.gml:470-480` + `play_sound.gml:24`：
     /// `vol = (layer.volume/100) * note.velocity`
     /// `pan = layer.stereo == 100 ? note.panning : (layer.stereo + note.panning)/2`
-    /// `gain = vol/100 * mastervol`；pan 0..200，100 为中性（不衰减）。
+    /// `gain = vol/100 * mastervol`；pan 0..200 走线性声像律，居中左右各半。
     pub fn gains(
         note: &Note,
         layer_volume: u8,
@@ -59,10 +59,11 @@ impl Voice {
         } else {
             ((layer_stereo as u16 + note.panning as u16) / 2) as u8
         };
-        let p = pan_eff as f32 / 100.0;
-        let left = (2.0 - p).min(1.0).max(0.0);
-        let right = p.min(1.0).max(0.0);
-        (g * left, g * right)
+        // 线性（单声道兼容）声像律：左右增益之和恒为 1，居中各 0.5。
+        // 原版把 0..200 的 pan 直接交给发射器位置，引擎侧就是这条律——
+        // 上游 issue #452 实测「编辑器播放比归一化导出恒定低 50%」即由此而来。
+        let p = pan_eff as f32 / 200.0;
+        (g * (1.0 - p), g * p)
     }
 
     pub fn next_sample(&mut self, bank: &SoundBank, output_rate: u32) -> f32 {
@@ -195,8 +196,9 @@ impl Mixer {
         }
         self.voices.retain(|v| v.alive);
         self.peak = self.peak.max(l.abs()).max(r.abs());
-        // 原版引擎（GameMaker 底层 SoLoud）主输出走 CLIP_ROUNDOFF 软饱和，
-        // 不是 ±1 硬削波——密集混音时平面硬顶产生刺耳爆音，曲线饱和则平滑。
+        // 密集段的求和远超满量程，原版靠引擎后端压下来（GM 2022.0.3 LTS 用的是
+        // modified OpenAL，见上游 issue #452），那条曲线闭源。这里保留软饱和而非
+        // ±1 硬削波：同一首歌的尾部硬削把 24.6% 采样钉成平顶，软饱和只 7.6%。
         (clip_roundoff(l), clip_roundoff(r))
     }
 }
@@ -257,9 +259,10 @@ mod tests {
 
     #[test]
     fn gains_and_pan() {
+        // 线性声像律：左右增益之和恒为 1（单声道兼容），居中各 0.5
         let n = Note::new(0, 45);
         let (l, r) = Voice::gains(&n, 100, 100, 1.0, false);
-        assert!((l - 1.0).abs() < 1e-6 && (r - 1.0).abs() < 1e-6);
+        assert!((l - 0.5).abs() < 1e-6 && (r - 0.5).abs() < 1e-6);
         let mut n = Note::new(0, 45);
         n.panning = 0;
         let (l, r) = Voice::gains(&n, 100, 100, 1.0, false);
@@ -267,15 +270,21 @@ mod tests {
         n.panning = 200;
         let (l, r) = Voice::gains(&n, 100, 100, 1.0, false);
         assert!(l.abs() < 1e-6 && (r - 1.0).abs() < 1e-6);
-        // 层音量 50 → 一半
+        n.panning = 50;
+        let (l, r) = Voice::gains(&n, 100, 100, 1.0, false);
+        assert!((l - 0.75).abs() < 1e-6 && (r - 0.25).abs() < 1e-6);
+        // 层音量 50 → 整体一半
         let n = Note::new(0, 45);
-        let (l, _) = Voice::gains(&n, 50, 100, 1.0, false);
-        assert!((l - 0.5).abs() < 1e-6);
-        // 层声像非中性时取平均：(0 + 100)/2 = 50 → 左满、右半
+        let (l, r) = Voice::gains(&n, 50, 100, 1.0, false);
+        assert!((l - 0.25).abs() < 1e-6 && (r - 0.25).abs() < 1e-6);
+        // 层声像非中性时取平均：(0 + 100)/2 = 50 → p = 0.25
         let mut n = Note::new(0, 45);
         n.panning = 100;
         let (l, r) = Voice::gains(&n, 100, 0, 1.0, false);
-        assert!((l - 1.0).abs() < 1e-6 && (r - 0.5).abs() < 1e-6);
+        assert!((l - 0.75).abs() < 1e-6 && (r - 0.25).abs() < 1e-6);
+        // 单声道输出不衰减声像
+        let (l, r) = Voice::gains(&n, 100, 0, 1.0, true);
+        assert!((l - 1.0).abs() < 1e-6 && (r - 1.0).abs() < 1e-6);
     }
 
     #[test]
