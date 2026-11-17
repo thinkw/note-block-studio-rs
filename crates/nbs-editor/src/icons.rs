@@ -956,9 +956,10 @@ impl Bank {
         }
     }
 
-    /// 原版 `draw_sprite_ext(spr_logo, icon_index, x1+64, y1+50, 0.5, 0.5, …)`：
-    /// 原点 (28,32) 缩半后对齐锚点。`icon_index = window_icon + (window_icon && fdark)`。
-    pub fn greeting_logo(&self, p: &egui::Painter, anchor: Pos2, custom_icon: bool, fdark: bool) {
+    /// 原版 `draw_sprite_ext(spr_logo, icon_index, x1+N, y1+50, 0.5, 0.5, …)`：
+    /// 原点 (28,32) 缩半后对齐锚点，欢迎窗给 (x1+64, y1+50)、关于窗给 (x1+80, y1+50)。
+    /// `icon_index = window_icon + (window_icon && fdark)`（两处同一个算式）。
+    pub fn window_logo(&self, p: &egui::Painter, anchor: Pos2, custom_icon: bool, fdark: bool) {
         let frame = usize::from(custom_icon) + usize::from(custom_icon && fdark);
         let size = Vec2::new(self.logo.fw * 0.5, self.logo.fh * 0.5);
         self.logo

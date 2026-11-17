@@ -316,6 +316,50 @@ mod tests {
         assert!(lines[0].1, "首行以 C 开头 → 原版画粗体");
     }
 
+    /// 原版 `draw_window_about.gml:44-58` 的分行：行首 `*` 是标题（`*` 本身吃掉），
+    /// 含 `|` 的那行在竖线处切成「文字 + 链接」，竖线后的整段是 url。
+    /// 末尾不带换行符的那段跟 `changelog_lines` 一样进不了表。
+    #[test]
+    fn credits_lines_follow_the_original_split() {
+        let src = "*Lead developer\nBentroen|https://example.test/\n\n未结尾的一段";
+        let lines = crate::windows::credits_lines(src);
+        assert_eq!(
+            lines,
+            vec![
+                ("Lead developer".to_string(), true, None),
+                (
+                    "Bentroen".to_string(),
+                    false,
+                    Some("https://example.test/".to_string())
+                ),
+                (String::new(), false, None),
+            ]
+        );
+    }
+
+    /// `assets/credits.txt` 是原版 `datafiles/Data/credits.txt` 的逐字节副本，
+    /// 关于窗右栏直接吃它；载入时同样只归一 CRLF。
+    #[test]
+    fn bundled_credits_is_readable() {
+        let _prefs = isolate_prefs();
+        let src = EditorState::new()
+            .credits
+            .expect("assets/credits.txt 应当能在资源目录里找到");
+        assert!(!src.contains('\r'), "载入时要把 CRLF 归一成 LF");
+        let lines = crate::windows::credits_lines(&src);
+        assert_eq!(
+            lines[0],
+            ("CREDITS".to_string(), true, None),
+            "首行是 `*CREDITS` → 标题行"
+        );
+        assert!(lines.len() > 100, "装机版那份是 {} 行", lines.len());
+        assert!(
+            lines.iter().any(|(t, _, u)| t == "Boost.Filesystem"
+                && u.as_deref() == Some("http://www.boost.org/libs/filesystem")),
+            "栏里应当有 `名字|网址` 这种链接行"
+        );
+    }
+
     /// check_updates.gml 回调的 UI 侧：后台写 1 → 弹一次问句；不重复弹；其他状态不弹。
     #[test]
     fn poll_update_check_asks_once_per_new_version() {
@@ -1320,8 +1364,8 @@ mod gui_window_tests {
         assert_eq!(state.window, None, "创建歌曲应当关掉欢迎窗");
     }
 
-    /// logo 是欢迎窗里唯一一块 165×165 的贴图（`spr_logo` 半尺寸），帧号直接写在
-    /// 网格 uv 的左边界上：3 帧横排 → 0 / ⅓ / ⅔。
+    /// logo 是欢迎窗／关于窗里唯一一块 165×165 的贴图（`spr_logo` 半尺寸），帧号直接
+    /// 写在网格 uv 的左边界上：3 帧横排 → 0 / ⅓ / ⅔。
     fn logo_u0(state: &mut EditorState, ctx: &egui::Context) -> f32 {
         let out = frame_out(state, ctx, base_input());
         let hits: Vec<f32> = out
@@ -1340,7 +1384,7 @@ mod gui_window_tests {
         assert_eq!(
             hits.len(),
             1,
-            "欢迎窗里应当只有一张 logo，实际 {} 张",
+            "这一屏里应当只有一张 logo，实际 {} 张",
             hits.len()
         );
         hits[0]
@@ -1376,6 +1420,215 @@ mod gui_window_tests {
             logo_u0(&mut state, &ctx),
             0.0,
             "「旧图标」关着时 fdark 不算"
+        );
+    }
+
+    /// 关于窗谢词栏那一列，返回 `（行顶 y，文本，是否粗体）` 再加程序名那行的行顶。
+    /// 栏心是原版 `xx + w/2` = `x1 + 425`，而程序名在 `x1 + 150`，所以拿程序名的中心
+    /// 往右 275 定基准，测试就不依赖窗口落在屏幕哪儿。粗体在端口是同一行叠两层
+    /// （`greet_text_center` 的 0.5px 近似），同 y 出现两层即原版那句 `font_main_bold`。
+    fn credit_column(
+        state: &mut EditorState,
+        ctx: &egui::Context,
+    ) -> (Vec<(f32, String, bool)>, f32) {
+        frame_out(state, ctx, base_input());
+        let out = frame_out(state, ctx, base_input());
+        // `Shape::Text` 的绝对位置在 `t.pos`，`galley.rect` 只是相对自身的大小。
+        let text_rect =
+            |t: &egui::epaint::TextShape| egui::Rect::from_min_size(t.pos, t.galley.rect.size());
+        let title = out
+            .shapes
+            .iter()
+            .find_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) if t.galley.text() == "Note Block Studio" => {
+                    Some(text_rect(t))
+                }
+                _ => None,
+            })
+            .expect("关于窗应当画出程序名");
+        let cx = title.center().x + 275.0;
+        let mut all: Vec<(f32, String)> = out
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => {
+                    let r = text_rect(t);
+                    ((r.center().x - cx).abs() < 0.6)
+                        .then(|| (r.min.y, t.galley.text().to_string()))
+                }
+                _ => None,
+            })
+            .collect();
+        all.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let mut rows: Vec<(f32, String, bool)> = Vec::new();
+        for (y, text) in all {
+            match rows.last_mut() {
+                Some(last) if (last.0 - y).abs() < 0.6 => last.2 = true,
+                _ => rows.push((y, text, false)),
+            }
+        }
+        (rows, title.min.y)
+    }
+
+    /// 原版 `draw_window_about.gml:19-28` 的正文：程序名 + 版本 + 延续声明。
+    /// 端口原先那份自加的功能清单（「A 数据层 / egui 0.31 …」）不属于原版。
+    #[test]
+    fn about_window_shows_the_original_text() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.prefs.language = 0;
+        let _en = crate::LangGuard::set(0);
+        state.theme.apply(&ctx);
+        state.window = Some(WindowKind::About);
+        let texts = drawn_texts(&mut state, &ctx);
+        let head = format!(
+            "Version {} - Released {}",
+            crate::VERSION,
+            crate::VERSION_DATE
+        );
+        for t in [
+            "Note Block Studio",
+            head.as_str(),
+            "This program is a continuation of",
+            // 源文这两行行首、行尾都带空格，逐字符照抄。
+            " Minecraft Note Block Studio, ",
+            "created by David Andrei. ",
+            "or the game Minecraft.",
+            "Website",
+            "GitHub",
+            "Donate",
+            "OK",
+        ] {
+            assert!(texts.iter().any(|s| s == t), "关于窗缺「{t}」：{texts:?}");
+        }
+        for t in [
+            "A Data layer",
+            "egui 0.31 · glow (switchable to wgpu) · cpal · Rust 2021",
+            "A 数据层",
+        ] {
+            assert!(!texts.iter().any(|s| s == t), "原版关于窗没有「{t}」");
+        }
+    }
+
+    /// 谢词栏的网格：一屏 19 行（:60 `a < sb_val + 19`）、行距 16（:63）、
+    /// 第一行行顶 `yy + 9` = `y1 + 44`、`*` 行走粗体（:64-67）。
+    /// 滚一格窗口整体下移一行。
+    #[test]
+    fn about_credit_rows_follow_the_original_grid() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.prefs.language = 0;
+        let _en = crate::LangGuard::set(0);
+        state.theme.apply(&ctx);
+        state.window = Some(WindowKind::About);
+        let want = crate::windows::credits_lines(state.credits.as_ref().unwrap());
+        let (rows, title_y) = credit_column(&mut state, &ctx);
+        assert_eq!(rows.len(), 19, "原版一屏 19 行，实际 {} 行", rows.len());
+        assert!(
+            (rows[0].0 - title_y + 156.0).abs() < 0.6,
+            "首行行顶在 y1+44，程序名在 y1+200（差 -156），实际 {:+.1}",
+            rows[0].0 - title_y
+        );
+        for i in 1..rows.len() {
+            assert!(
+                (rows[i].0 - rows[i - 1].0 - 16.0).abs() < 0.6,
+                "第 {i} 行行距是 {}",
+                rows[i].0 - rows[i - 1].0
+            );
+        }
+        for (i, (_, text, bold)) in rows.iter().enumerate() {
+            assert_eq!(text, &want[i].0, "第 {i} 行不是 credits.txt 的第 {i} 行");
+            assert_eq!(*bold, want[i].1, "第 {i} 行「{text}」的粗体档位");
+        }
+        state.credits_scroll = 1.0;
+        let (rows, _) = credit_column(&mut state, &ctx);
+        assert_eq!(rows[0].1, want[1].0, "滚一格，首行是第二行");
+        assert_eq!(rows[18].1, want[19].0, "最后一行也跟着下移");
+    }
+
+    /// :44-58 的 `|` 行交给 `draw_text_url`（:70），:82-107 六个站点按钮加「确定」。
+    #[test]
+    fn about_credits_links_and_site_buttons_open_the_right_urls() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.prefs.language = 1;
+        let _cn = crate::LangGuard::set(1);
+        state.theme.apply(&ctx);
+        state.window = Some(WindowKind::About);
+        state.credits = Some("*Section\nLink text|https://example.test/a\nPlain\n".to_string());
+        click_text(&mut state, &ctx, "Link text");
+        assert_eq!(
+            commands::take_open_url().as_deref(),
+            Some("https://example.test/a"),
+            "竖线后面那半截才是 url，文字本身不带竖线"
+        );
+        for (label, url) in [
+            ("官方网站", crate::LINK_WEBSITE),
+            ("GitHub", crate::LINK_GITHUB),
+            ("Discord", crate::LINK_DISCORD),
+            ("Twitter", crate::LINK_TWITTER),
+            ("YouTube", crate::LINK_YOUTUBE),
+            ("捐赠", crate::LINK_DONATE),
+        ] {
+            click_text(&mut state, &ctx, label);
+            assert_eq!(
+                commands::take_open_url().as_deref(),
+                Some(url),
+                "「{label}」要开 {url}"
+            );
+        }
+        click_text(&mut state, &ctx, "确定");
+        assert_eq!(state.window, None, ":106-107 的「确定」是 windowclose = 1");
+    }
+
+    /// 读不到 `credits.txt` 时原版 `string_count` 当场报错，端口按「一栏都不画」处理，
+    /// 窗口其余部分照常。
+    #[test]
+    fn about_without_credits_file_draws_an_empty_column() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.prefs.language = 0;
+        let _en = crate::LangGuard::set(0);
+        state.theme.apply(&ctx);
+        state.window = Some(WindowKind::About);
+        state.credits = None;
+        let (rows, _) = credit_column(&mut state, &ctx);
+        assert!(rows.is_empty(), "没有谢词就一栏都不画：{rows:?}");
+        let texts = drawn_texts(&mut state, &ctx);
+        assert!(
+            texts.iter().any(|t| t == "Note Block Studio"),
+            "左半和按钮照旧：{texts:?}"
+        );
+    }
+
+    /// :10-11 的标题就是一个「About」/「关于」；:15-17 的 logo 帧号和欢迎窗共用
+    /// 同一条 `window_icon + (window_icon && fdark)` 算式；中文那两行「版本」
+    /// 「发布于」后面不带空格（英文的空格来自语言表）。
+    #[test]
+    fn about_title_and_logo_follow_the_original() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.prefs.language = 1;
+        let _cn = crate::LangGuard::set(1);
+        state.theme.apply(&ctx);
+        state.window = Some(WindowKind::About);
+        let texts = drawn_texts(&mut state, &ctx);
+        assert!(
+            texts.iter().any(|t| t == "关于"),
+            "中文标题是「关于」：{texts:?}"
+        );
+        let head = format!("版本{} - 发布于{}", crate::VERSION, crate::VERSION_DATE);
+        assert!(texts.iter().any(|t| t == &head), "中文版本行：{texts:?}");
+        assert_eq!(logo_u0(&mut state, &ctx), 0.0, "不带旧图标是第 0 帧");
+        state.prefs.window_icon = true;
+        assert!(
+            (logo_u0(&mut state, &ctx) - 1.0 / 3.0).abs() < 1e-4,
+            "开「旧图标」→ 第 1 帧"
         );
     }
 

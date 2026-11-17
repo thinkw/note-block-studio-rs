@@ -232,7 +232,8 @@ impl WindowKind {
             Self::Statistics => tr("Song Stats", "歌曲数据"),
             Self::Preferences => tr("Preferences", "首选项"),
             Self::Instruments => tr("Instruments", "音色设置"),
-            Self::About => tr("About nbs-rust", "关于 nbs-rust"),
+            // 原版 `draw_window_about.gml:10-11`：框内标题就一个「About」/「关于」。
+            Self::About => tr("About", "关于"),
             // 原版 `draw_window_update.gml:23-37` 的粗体标题：`window = w_update` 才是
             // 「更新」，从帮助菜单进的「更新历史」走 else 那支。
             Self::Changelist => tr("Changelist", "更新历史"),
@@ -921,6 +922,13 @@ pub struct EditorState {
     pub changelog: Option<String>,
     /// 原版 `sb_val[update_scrollbar]`：更新历史那根竖滚动条的读数，单位是行。
     pub update_scroll: f32,
+    /// 原版全局 `creditsstr`（`control_create.gml:755`：
+    /// `load_text(bundled_data_directory + "credits.txt")`）：关于窗右侧那栏谢词。
+    /// 读不到是 `None`。原版没有兜底分支（`string_count("\n", 0)` 直接报错），
+    /// 端口按「一栏都不画」处理，文件本身随程序一起发。
+    pub credits: Option<String>,
+    /// 原版 `sb_val[credits_scrollbar]`：谢词栏那根竖滚动条的读数，单位是行。
+    pub credits_scroll: f32,
     /// 原版 `w_setaccent` 的编辑态（`hsv` / `rr,gg,bb` / `text_str[60..62]`）。
     /// 只有取色器开着才有值，关窗就丢掉——原版靠 `resetcolor` 每次复位，效果一样。
     pub accent_pick: Option<AccentPick>,
@@ -1088,11 +1096,12 @@ pub fn tempo_datapack_good(tempo: f32) -> bool {
         .any(|v| (tempo - v).abs() < 1e-3)
 }
 
-/// 原版 `bundled_data_directory + "changelog.txt"`（`control_create.gml:754`）。
-/// 搜索顺序跟 `icons::asset_root` 一致：先可执行文件旁逐级往上，再工作目录，
-/// 不把编译期的绝对路径写进二进制。找到后只把 CRLF 归一成 LF——原版逐行
-/// `draw_text` 时那个 CR 是不显示的，egui 却会把它当成一个字形画出来。
-fn load_changelog() -> Option<String> {
+/// 原版 `bundled_data_directory + <name>`（`control_create.gml:754-755`：
+/// `changelog.txt` 与 `credits.txt`）。搜索顺序跟 `icons::asset_root` 一致：
+/// 先可执行文件旁逐级往上，再工作目录，不把编译期的绝对路径写进二进制。
+/// 找到后只把 CRLF 归一成 LF——原版逐行 `draw_text` 时那个 CR 是不显示的，
+/// egui 却会把它当成一个字形画出来。
+fn load_bundled_text(name: &str) -> Option<String> {
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -1108,7 +1117,7 @@ fn load_changelog() -> Option<String> {
     }
     let path = dirs
         .into_iter()
-        .map(|d| d.join("changelog.txt"))
+        .map(|d| d.join(name))
         .find(|p| p.is_file())?;
     std::fs::read_to_string(path)
         .ok()
@@ -1215,8 +1224,10 @@ impl EditorState {
             update_check: std::sync::Arc::new(std::sync::Mutex::new(UpdateCheck::default())),
             update_question: false,
             update_success: false,
-            changelog: load_changelog(),
+            changelog: load_bundled_text("changelog.txt"),
             update_scroll: 0.0,
+            credits: load_bundled_text("credits.txt"),
+            credits_scroll: 0.0,
             accent_pick: None,
             donate_banner: false,
             editing_layer_name: None,

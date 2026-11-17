@@ -375,7 +375,7 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                 state.emit(Command::ShowWindow(WindowKind::Changelist));
                 ui.close_menu();
             }
-            if ui.button(tr("About nbs-rust", "关于 nbs-rust")).clicked() {
+            if ui.button(tr("About...", "关于…")).clicked() {
                 state.emit(Command::ShowWindow(WindowKind::About));
                 ui.close_menu();
             }

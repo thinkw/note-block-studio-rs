@@ -61,6 +61,8 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
                 520.0
             }
         }
+        // 原版 `draw_window(x1, y1, x1 + 580, y1 + 410)`，两个主题组都是这个尺寸。
+        WindowKind::About => 580.0,
         WindowKind::Shortcuts => 460.0,
         // 原版 `draw_window(x1, y1, x1 + 280, y1 + 440)`（draw_window_set_accent.gml:10）。
         WindowKind::SetAccent => 280.0,
@@ -98,6 +100,7 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             kind,
             WindowKind::TempoTapper
                 | WindowKind::SaveOptions
+                | WindowKind::About
                 | WindowKind::Arpeggio
                 | WindowKind::Portamento
                 | WindowKind::Stagger
@@ -118,7 +121,7 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::Statistics => statistics(state, ui),
             WindowKind::Preferences => preferences(state, ui),
             WindowKind::Instruments => instruments_window(state, ui),
-            WindowKind::About => about(ui),
+            WindowKind::About => about(state, ui),
             // 原版 `draw_windows.gml:56-57`：`w_update` 和 `w_changelist` 都进
             // `draw_window_update()`，函数里再看 `window` 是哪个。
             WindowKind::Changelist | WindowKind::Update => changelog_window(state, ui),
@@ -247,6 +250,22 @@ fn greet_text_left(p: &egui::Painter, at: Pos2, s: &str, font: f32, color: Color
     p.galley(at, g.clone(), Color32::BLACK);
     if bold {
         p.galley(at + Vec2::new(0.5, 0.0), g, Color32::BLACK);
+    }
+}
+
+/// 原版 `draw_text_dynamic` 的居中多行形态（关于窗那一大块声明）。英文分支直接丢给
+/// 引擎的 `draw_text`，中文分支逐字排版、每遇到换行 `line_y += 16`
+/// （`draw_text_dynamic.gml`）——两套字体的行距都是 16 像素，这里统一按 16 走一行。
+fn greet_text_center_lines(
+    p: &egui::Painter,
+    center_x: f32,
+    y: f32,
+    s: &str,
+    font: f32,
+    color: Color32,
+) {
+    for (i, line) in s.split('\n').enumerate() {
+        greet_text_center(p, center_x, y + 16.0 * i as f32, line, font, color, false);
     }
 }
 
@@ -400,7 +419,7 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
     // :39-41 logo：帧 = window_icon + (window_icon && fdark)，也就是「旧图标」开关
     // 开着时欢迎窗左上角那张也跟着换。
     if let Some(bk) = &bank {
-        bk.greeting_logo(
+        bk.window_logo(
             &p,
             egui::pos2(x(64.0), y(50.0)),
             state.prefs.window_icon,
@@ -3284,7 +3303,16 @@ fn changelog_window(state: &mut EditorState, ui: &mut Ui) {
             *bold,
         );
     }
-    update_scrollbar(&mut pg, 470.0 + off, 60.0, total, &mut state.update_scroll);
+    list_scrollbar(
+        &mut pg,
+        "upd",
+        470.0 + off,
+        60.0,
+        12.0,
+        22.0,
+        total,
+        &mut state.update_scroll,
+    );
     // :85-87「查看更旧版本……」开 `link_changelog`。
     if pg.button2(
         16.0,
@@ -3332,38 +3360,50 @@ pub(crate) fn changelog_lines(src: &str) -> Vec<(String, bool)> {
     out
 }
 
-/// 原版 `draw_scrollbar(update_scrollbar, x1 + 470 + theme_offset, y1 + 60, 12, 22, 行数, 0, 1)`：
-/// 槽高 12、22 槽（轨道 `s * swh` = 264 像素），滑块 `max(10, 22 / 总行数 * 264)`，
-/// 出界一律 `median(0, 值, 行数 - 22)`。
+/// 原版 `draw_scrollbar(id, x, y, slotwh, slots, 行数, 0, 1)` 的竖直分支：
+/// 轨道高 `slots * slotwh`，滑块 `max(10, slots / 行数 * 轨道)`，
+/// 出界一律 `median(0, 值, 行数 - slots)`。
+/// `update_scrollbar` 给的是槽高 12、22 槽（`draw_window_update.gml:84`），
+/// 关于窗谢词栏是 16、18（`draw_window_about.gml:78`）——一屏可见几行是各窗口
+/// 自己的循环上限，跟这里的槽数不一定相等（两处都是原版自己的不一致）。
 ///
 /// 算式跟 `midi_scrollbar` 是同一条，但没去复用：那条把 MIDI 窗自己的 17/9 两个常数和
 /// 17 像素的画宽写死在函数里，改它要把已经逐项核对过的 MIDI 窗口再动一遍。
-fn update_scrollbar(pg: &mut Page, x: f32, n: f32, total: usize, scroll: &mut f32) {
-    const SLOTS: f32 = 22.0;
-    const TRACK: f32 = 12.0 * SLOTS;
-    let max_scroll = (total as f32 - SLOTS).max(0.0);
+fn list_scrollbar(
+    pg: &mut Page,
+    id: &str,
+    x: f32,
+    n: f32,
+    slotwh: f32,
+    slots: f32,
+    total: usize,
+    scroll: &mut f32,
+) {
+    const DRAW_W: f32 = 16.0;
+    let track = slotwh * slots;
+    let max_scroll = (total as f32 - slots).max(0.0);
     *scroll = scroll.clamp(0.0, max_scroll);
-    let locked = total as f32 <= SLOTS;
+    let locked = total as f32 <= slots;
     let bwh = if locked {
         0.0
     } else {
-        (SLOTS / total as f32 * TRACK).max(10.0)
+        (slots / total as f32 * track).max(10.0)
     };
     let bpos = if locked {
         0.0
     } else {
-        (*scroll / total as f32 * TRACK).floor()
+        (*scroll / total as f32 * track).floor()
     };
     let p = pg.ui.painter().clone();
     p.rect_filled(
-        Rect::from_min_size(pg.row(x, n), Vec2::new(16.0, TRACK + 32.0)),
+        Rect::from_min_size(pg.row(x, n), Vec2::new(DRAW_W, track + 32.0)),
         3.0,
         pg.th.panel,
     );
     if !locked {
         let thumb = Rect::from_min_size(
             pg.row(x, n + 20.0 + bpos),
-            Vec2::new(16.0, bwh.floor() - 6.0),
+            Vec2::new(DRAW_W, bwh.floor() - 6.0),
         );
         p.rect_filled(thumb, 3.0, pg.th.accent_soft);
         p.rect_stroke(
@@ -3375,9 +3415,9 @@ fn update_scrollbar(pg: &mut Page, x: f32, n: f32, total: usize, scroll: &mut f3
     }
     // 上下箭头：原版是 `spr_scrollbar_v_button_up/down`，精灵图没导出，画同位置的三角形。
     let ink = pg.ink();
-    for (down, dy) in [(false, 0.0), (true, TRACK + 16.0)] {
-        let rect = Rect::from_min_size(pg.row(x, n + dy), Vec2::new(16.0, 16.0));
-        let (resp, _) = pg.hit(rect, Id::new(("upd-sb-btn", dy as i32)), locked);
+    for (down, dy) in [(false, 0.0), (true, track + 16.0)] {
+        let rect = Rect::from_min_size(pg.row(x, n + dy), Vec2::new(DRAW_W, 16.0));
+        let (resp, _) = pg.hit(rect, Id::new((id, "sb-btn", dy as i32)), locked);
         let c = rect.center();
         let pts = if down {
             vec![
@@ -3397,7 +3437,7 @@ fn update_scrollbar(pg: &mut Page, x: f32, n: f32, total: usize, scroll: &mut f3
             *scroll = (*scroll + if down { 1.0 } else { -1.0 }).clamp(0.0, max_scroll);
         }
     }
-    // 槽底（滑块上/下那两段）按整页翻，一页是 22 槽。
+    // 槽底（滑块上/下那两段）按整页翻，一页是 `slots` 槽。
     for above in [true, false] {
         if locked {
             break;
@@ -3407,32 +3447,34 @@ fn update_scrollbar(pg: &mut Page, x: f32, n: f32, total: usize, scroll: &mut f3
         } else {
             n + 16.0 + bpos + bwh
         };
-        let h = if above { bpos } else { TRACK - (bpos + bwh) };
+        let h = if above { bpos } else { track - (bpos + bwh) };
         if h <= 0.0 {
             continue;
         }
-        let rect = Rect::from_min_size(pg.row(x, y), Vec2::new(16.0, h));
-        let (resp, _) = pg.hit(rect, Id::new(("upd-sb-track", above)), false);
+        let rect = Rect::from_min_size(pg.row(x, y), Vec2::new(DRAW_W, h));
+        let (resp, _) = pg.hit(rect, Id::new((id, "sb-track", above)), false);
         if resp.clicked() {
-            *scroll = (*scroll + if above { -SLOTS } else { SLOTS }).clamp(0.0, max_scroll);
+            *scroll = (*scroll + if above { -slots } else { slots }).clamp(0.0, max_scroll);
         }
     }
     // 拖滑块：原版 `sb_val += dy / (mwh / ms)`，松手取整。
     if !locked {
-        let grip = Rect::from_min_size(pg.row(x, n + 16.0 + bpos), Vec2::new(16.0, bwh));
-        let resp = pg.ui.interact(grip, Id::new("upd-sb-thumb"), Sense::drag());
+        let grip = Rect::from_min_size(pg.row(x, n + 16.0 + bpos), Vec2::new(DRAW_W, bwh));
+        let resp = pg
+            .ui
+            .interact(grip, Id::new((id, "sb-thumb")), Sense::drag());
         if resp.dragged() {
             *scroll =
-                (*scroll + resp.drag_delta().y / (TRACK / total as f32)).clamp(0.0, max_scroll);
+                (*scroll + resp.drag_delta().y / (track / total as f32)).clamp(0.0, max_scroll);
         } else if resp.drag_stopped() {
             *scroll = scroll.round().clamp(0.0, max_scroll);
         }
     }
     // 滚轮：原版要 `sb_sel = i`（点过这条）才吃滚轮，这里跟 MIDI 窗一样按悬停就算。
-    let zone = Rect::from_min_size(pg.row(x, n), Vec2::new(16.0, TRACK + 32.0));
+    let zone = Rect::from_min_size(pg.row(x, n), Vec2::new(DRAW_W, track + 32.0));
     let hover = pg
         .ui
-        .interact(zone, Id::new("upd-sb-wheel"), Sense::hover());
+        .interact(zone, Id::new((id, "sb-wheel")), Sense::hover());
     if hover.hovered() {
         let d = pg.ui.input(|i| i.raw_scroll_delta.y);
         if d != 0.0 {
@@ -4736,86 +4778,149 @@ fn confirm_new(state: &mut EditorState, ui: &mut Ui) {
     });
 }
 
-fn about(ui: &mut Ui) {
-    ui.heading("nbs-rust");
-    ui.label(tr(
-        "A complete Rust rewrite of Open Note Block Studio 3.11.0 (GameMaker)",
-        "Open Note Block Studio 3.11.0 (GameMaker) 的 Rust 完整重写版",
-    ));
-    ui.separator();
-    ui.label(RichText::new(tr("A Data layer", "A 数据层")).strong());
-    for line in [
-        tr(
-            "Sparse BTreeMap grid, full NBS v0–v5 read/write, custom instruments",
-            "稀疏 BTreeMap 网格、NBS v0–v5 完整读写、自定义乐器",
-        ),
-        tr(
-            "Compact diff transactions (undo records only changed cells)",
-            "紧凑 diff 事务（撤销只记录变化的格子）",
-        ),
-    ] {
-        ui.label(RichText::new(line).small());
-    }
-    ui.label(RichText::new(tr("B Audio / C Scheduler", "B 音频 / C 调度")).strong());
-    for line in [
-        tr(
-            "The original 16 OGG samples, resampled to 44100/48000",
-            "原版 16 个 OGG 采样，44100/48000 统一重采样",
-        ),
-        tr(
-            "pitch = 0.5·2^((key−33+pitch/100)/12), byte-identical to the original",
-            "pitch = 0.5·2^((key−33+pitch/100)/12)，与原版逐字节对齐",
-        ),
-        tr(
-            "Voice pools of 256/1024, gain/pan, cpal realtime output, independent sample clock",
-            "voice 池 256/1024、gain/pan、cpal 实时输出、独立采样时钟",
-        ),
-        tr(
-            "Offline multithreaded mixing exports WAV; MP3/AIFF/FLAC transcode via ffmpeg",
-            "离线多线程混音导出 WAV，MP3/AIFF/FLAC 经 ffmpeg 转码",
-        ),
-    ] {
-        ui.label(RichText::new(line).small());
-    }
-    ui.label(RichText::new(tr("D Grid editor", "D 网格编辑器")).strong());
-    for line in [
-        tr(
-            "Viewport culling, batched shape drawing, zoom/pan/edge auto-scroll",
-            "视口剔除、批量形状绘制、缩放/平移/边缘自动滚动",
-        ),
-        tr(
-            "Box select/deselect, floating selection drag, eyedropper, full modifier keys",
-            "框选/减选/浮动选区拖拽/吸管/全量修饰键",
-        ),
-        tr(
-            "Layer bar, instruments, timeline, piano, menus, dialogs, 4 themes, 15 macros",
-            "图层栏、乐器、时间轴、钢琴、菜单、弹窗、4 套主题、15 个宏",
-        ),
-    ] {
-        ui.label(RichText::new(line).small());
-    }
-    ui.label(RichText::new(tr("E Import/export", "E 导入导出")).strong());
-    for line in [
-        tr(
-            "MIDI SMF import/export, .nbp patterns, .schematic / structure NBT, PNG sheets",
-            "MIDI SMF 导入/导出、.nbp 片段、.schematic / 结构 NBT、PNG 谱面",
-        ),
-        tr(
-            "JSON preferences, recent files, atomic saves, auto backups",
-            "JSON 偏好、最近文件、原子保存、自动备份",
-        ),
-    ] {
-        ui.label(RichText::new(line).small());
-    }
-    ui.separator();
-    ui.label(
-        RichText::new(tr(
-            "egui 0.31 · glow (switchable to wgpu) · cpal · Rust 2021",
-            "egui 0.31 · glow（可切 wgpu）· cpal · Rust 2021",
-        ))
-        .small()
-        .weak(),
+/// 原版 `draw_window_about.gml`：580×410。左半是 logo + 「Note Block Studio」+ 版本
+/// 与延续声明，右半是随程序发的 `credits.txt` 那一栏（行首 `*` 是标题，`|` 后面是链接），
+/// 底下一排六个站点按钮加一个「确定」。
+fn about(state: &mut EditorState, ui: &mut Ui) {
+    let th = state.theme.clone();
+    let fluent = th.kind == ThemeKind::Fluent;
+    let margin = ui.spacing().window_margin;
+    let (ml, mr) = (margin.left as f32, margin.right as f32);
+    // 原版 `draw_window(x1, y1, x1 + 580, y1 + 410)`，这扇不带 `theme_offset`；
+    // 高度照 `changelog_window` 那一套减掉标题带。
+    let body = ui.allocate_exact_size(
+        egui::vec2(580.0 - ml - mr, if fluent { 402.0 } else { 384.0 }),
+        egui::Sense::hover(),
     );
+    let o = body.0.min - egui::vec2(ml, 0.0);
+    let ry = if fluent { -8.0 } else { -26.0 };
+    let bank = state.icons.bank();
+    let mut pg = Page {
+        ui,
+        o,
+        ry,
+        th: &th,
+        fluent,
+    };
+    // :15-17 logo：帧号跟欢迎窗是同一条算式（`window_icon + (window_icon && fdark)`），
+    // 只是画在 `x1 + 80` 而不是欢迎窗的 `x1 + 64`。
+    if let Some(bk) = &bank {
+        let p = pg.ui.painter().clone();
+        bk.window_logo(&p, pg.row(80.0, 50.0), state.prefs.window_icon, th.fdark);
+    }
+    let p = pg.ui.painter().clone();
+    // :19-20 程序名（font_info_med_bold），居中于 `x1 + 150`。
+    greet_text_center(
+        &p,
+        pg.row(150.0, 0.0).x,
+        pg.row(0.0, 200.0).y,
+        "Note Block Studio",
+        PREFS_FONT_MED,
+        th.text,
+        true,
+    );
+    // :22-28 版本 + 延续声明（font_main）。英文三段正是语言表的
+    // `text_window_about_version` / `_released` / `_description`（`lang_en_us.gml:480-482`，
+    // 「Version 」的尾空格和声明里两处行尾空格都留着）；中文照源码字面，
+    // 「版本」「发布于」后面不带空格。原版 `NOT_RUN_FROM_IDE` 那一支（「Version Local
+    // Release」/「本地版本」）只有在 GameMaker IDE 里直接跑才走得到，端口没有这一支。
+    let head = format!(
+        "{}{}{}{}",
+        tr("Version ", "版本"),
+        crate::VERSION,
+        tr(" - Released ", " - 发布于"),
+        crate::VERSION_DATE
+    );
+    let desc = if crate::lang() == 1 {
+        "\n\n本程序是 Minecraft Note Block Studio 的延续版本\n原作者 David Andrei\n\n本产品与 Mojang Studios、\nMicrosoft Studios 以及\n游戏 Minecraft 无任何关联。"
+    } else {
+        "\n\nThis program is a continuation of\n Minecraft Note Block Studio, \ncreated by David Andrei. \n\nThis product is not affiliated with\nMojang Studios, Microsoft Studios\nor the game Minecraft."
+    };
+    greet_text_center_lines(
+        &p,
+        pg.row(150.0, 0.0).x,
+        pg.row(0.0, 217.0).y,
+        &(head + desc),
+        PREFS_FONT,
+        th.text,
+    );
+    // :35-79 谢词栏。原版读不到 `credits.txt` 时 `string_count` 当场报错，端口按
+    // 「一栏都不画」处理：框照旧、滚动条因为不满 18 槽锁死。
+    let lines = state
+        .credits
+        .as_deref()
+        .map(credits_lines)
+        .unwrap_or_default();
+    let total = lines.len();
+    pg.frame_box(295.0, 35.0, 555.0, 357.0);
+    // 一屏 19 行（:60 `a < sb_val + 19`），滚动条按 18 槽给（:78）——原版自己的不一致。
+    let start = state.credits_scroll.floor().max(0.0) as usize;
+    let ink = pg.ink();
+    let cx = pg.row(425.0, 0.0).x;
+    for a in start..(start + 19).min(total) {
+        let (text, bold, url) = &lines[a];
+        let row = pg.row(0.0, 44.0 + 16.0 * (a - start) as f32);
+        if let Some(u) = url {
+            greet_link(state, &mut pg.ui, &p, &th, cx, row.y, text, u);
+        } else {
+            greet_text_center(&p, cx, row.y, text, PREFS_FONT, ink, *bold);
+        }
+    }
+    list_scrollbar(
+        &mut pg,
+        "credits",
+        538.0,
+        36.0,
+        16.0,
+        18.0,
+        total,
+        &mut state.credits_scroll,
+    );
+    // :82-104 六个站点按钮；GitHub / Discord / Twitter / YouTube 四个
+    // `condstr(language != 1, X, X)` 两边同词，直接写英文。
+    for (x, label, url) in [
+        (8.0, tr("Website", "官方网站"), crate::LINK_WEBSITE),
+        (84.0, "GitHub", crate::LINK_GITHUB),
+        (160.0, "Discord", crate::LINK_DISCORD),
+        (236.0, "Twitter", crate::LINK_TWITTER),
+        (312.0, "YouTube", crate::LINK_YOUTUBE),
+        (388.0, tr("Donate", "捐赠"), crate::LINK_DONATE),
+    ] {
+        if pg.button2(x, 380.0, 72.0, label, false, true) {
+            state.emit(Command::OpenUrl(url.to_string()));
+        }
+    }
+    // :106-107「确定」= `windowclose = 1`，位置 `x2 - 72 - 8`。原版那句 `&& (windowopen = 1 || theme != 3)`
+    // 是等开窗动画放完才认点击，端口没有开窗动画，恒真，不跟着复刻。
+    if pg.button2(492.0, 380.0, 72.0, tr("OK", "确定"), false, false) {
+        state.emit(Command::CloseWindow);
+    }
+}
+
+/// 原版 :44-58 的谢词分行：行首 `*` 是标题（吃掉 `*`、走 `font_main_bold`），
+/// 含 `|` 的那行在竖线处切开、后半当链接交给 `draw_text_url`。跟 `changelog_lines`
+/// 一样，末尾换行之后的那段原版按 `string_count("\n")` 计数进不了表，这里同样丢掉。
+pub(crate) fn credits_lines(src: &str) -> Vec<(String, bool, Option<String>)> {
+    let mut out = Vec::new();
+    let mut rest = src;
+    while let Some(i) = rest.find('\n') {
+        let mut line = &rest[..i];
+        let bold = line.starts_with('*');
+        if bold {
+            line = &line[1..];
+        }
+        let url = match line.find('|') {
+            Some(k) => {
+                let u = line[k + 1..].to_string();
+                line = &line[..k];
+                Some(u)
+            }
+            None => None,
+        };
+        out.push((line.to_string(), bold, url));
+        rest = &rest[i + 1..];
+    }
+    out
 }
 
 // ---------------------------------------------------------------- B/C/E 弹窗

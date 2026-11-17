@@ -1626,8 +1626,14 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.set_message(crate::tr("Preferences saved", "偏好设置已保存"));
         }
         Command::RestoreAutosave(path) => dispatch(state, Command::OpenPath(path), ctx),
-        // 原版 `open_url(url)`：欢迎窗 / 更新弹窗里所有跳浏览器的链接都走这里。
-        Command::OpenUrl(url) => open_url(&url),
+        // 原版 `open_url(url)`：欢迎窗 / 关于窗 / 更新弹窗里所有跳浏览器的链接都走这里。
+        // 单测里不真开浏览器，把 url 记进下面的线程局部槽，由用例 `take_open_url()` 取。
+        Command::OpenUrl(url) => {
+            #[cfg(test)]
+            OPEN_URL.with(|slot| *slot.borrow_mut() = Some(url.clone()));
+            #[cfg(not(test))]
+            open_url(&url);
+        }
         // 原版开发版确认框答「是」后的 `check_prerelease = !check_prerelease` +
         // 隐式落盘（原版在退出时统一 save_settings）。
         Command::SetCheckPrerelease(on) => {
@@ -1637,8 +1643,21 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
     }
 }
 
+// `Command::OpenUrl` 的落地槽：单测里线程局部记一条，用例各跑各的、不会串台。
+#[cfg(test)]
+thread_local! {
+    static OPEN_URL: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 取走上一条被拦下的 `OpenUrl`（没有则 `None`），同时清空。
+#[cfg(test)]
+pub(crate) fn take_open_url() -> Option<String> {
+    OPEN_URL.with(|slot| slot.borrow_mut().take())
+}
+
 /// 原版 `open_url(url)`（macros.gml:1-3）：用系统默认方式打开链接。
 /// Windows 的 `start` 第一个带引号参数是窗口标题，所以要垫一个空串。
+#[cfg(not(test))]
 fn open_url(url: &str) {
     #[cfg(windows)]
     {
