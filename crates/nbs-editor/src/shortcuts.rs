@@ -13,6 +13,8 @@
 
 use egui::{Context, Event, Key};
 
+use nbs_core::Macro;
+
 use crate::commands::Command;
 use crate::state::EditorState;
 use crate::state::{EditMode, Flag, WindowKind};
@@ -264,35 +266,63 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
                     }
                 }
             }
-            // 原版的 Ctrl+Shift+ 字母：宏窗口和批量设置窗口。这一族（A/S/D/F/G/H/
-            // J/K/Q/W/E/R/T/Y/U）整段包在 `if current_song.selected != 0` 里，
-            // 没有选区时按键无效果；片段编辑器 Ctrl+Shift+P（control_draw.gml:766-770）
-            // 和速度测量器 Ctrl+Shift+I（同文件 771-773）在闸门外。
-            // 琶音 / 滑音 / 交错这几个窗口本端口还没实现，不占用按键。
+            // 原版的 Ctrl+Shift+ 字母：宏窗口、批量设置窗口和 7 个直接执行的宏。
+            // 这一族（A/S/D/F/G/H/J/K/Q/W/E/R/T/Y/U）整段包在
+            // `if current_song.selected != 0`（control_draw.gml:775）里，没有选区时
+            // 按键无效果；片段编辑器 Ctrl+Shift+P（同文件 765-769）和速度测量器
+            // Ctrl+Shift+I（770-773）在闸门外。
+            // 每条第一句都是 `playing = 0`，所以走 HotkeyWindow / HotkeyMacro，
+            // 不是 ShowWindow / RunMacro。
+            // 琶音 D / 滑音 F / 交错 H 这三个窗口本端口还没实现，不占用按键。
             // 每一行原版都写死 `keyboard_check(vk_shift)`：这一族必须带 Shift，
             // 否则 Ctrl+P/S/A/R/Y 会和上面 `ctrl && !shift` 那批功能撞车。
             if shift {
                 if p(Key::P) {
-                    out.push(Command::ShowWindow(WindowKind::ClipEditor));
+                    out.push(Command::HotkeyWindow(WindowKind::ClipEditor));
                 }
                 if p(Key::I) {
-                    out.push(Command::TempoTapperHotkey);
+                    out.push(Command::HotkeyWindow(WindowKind::TempoTapper));
                 }
                 if !state.doc.selection.is_empty() {
-                    if p(Key::R) {
-                        out.push(Command::ShowWindow(WindowKind::SetVelocity));
-                    }
-                    if p(Key::T) {
-                        out.push(Command::ShowWindow(WindowKind::SetPanning));
-                    }
-                    if p(Key::Y) {
-                        out.push(Command::ShowWindow(WindowKind::SetPitch));
-                    }
                     if p(Key::A) {
-                        out.push(Command::ShowWindow(WindowKind::Tremolo));
+                        out.push(Command::HotkeyWindow(WindowKind::Tremolo));
                     }
                     if p(Key::S) {
-                        out.push(Command::ShowWindow(WindowKind::Stereo));
+                        out.push(Command::HotkeyWindow(WindowKind::Stereo));
+                    }
+                    // 原版直接执行的 7 个宏（control_draw.gml:792-834）。同一段里
+                    // 的 D 琶音 / F 滑音 / H 交错是带参数的窗口，本端口没有这两个
+                    // 窗口，不占用按键。
+                    if p(Key::G) {
+                        out.push(Command::HotkeyMacro(Macro::Vibrato));
+                    }
+                    if p(Key::J) {
+                        // 原版 macro_chorus() 里写死 +5 / -5。
+                        out.push(Command::HotkeyMacro(Macro::Chorus { detune: 5 }));
+                    }
+                    if p(Key::K) {
+                        out.push(Command::HotkeyMacro(Macro::VelocityLfo));
+                    }
+                    if p(Key::Q) {
+                        out.push(Command::HotkeyMacro(Macro::FadeIn));
+                    }
+                    if p(Key::W) {
+                        out.push(Command::HotkeyMacro(Macro::FadeOut));
+                    }
+                    if p(Key::E) {
+                        out.push(Command::HotkeyMacro(Macro::ReplaceKey));
+                    }
+                    if p(Key::R) {
+                        out.push(Command::HotkeyWindow(WindowKind::SetVelocity));
+                    }
+                    if p(Key::T) {
+                        out.push(Command::HotkeyWindow(WindowKind::SetPanning));
+                    }
+                    if p(Key::Y) {
+                        out.push(Command::HotkeyWindow(WindowKind::SetPitch));
+                    }
+                    if p(Key::U) {
+                        out.push(Command::HotkeyMacro(Macro::Reset));
                     }
                 }
             }
@@ -454,6 +484,14 @@ pub fn shortcut_help() -> Vec<(&'static str, &'static str)> {
             "颤音 / 立体声宏窗口（需选区，无选区按键无效）",
         ),
         (
+            "Ctrl+Shift+G / J / K / Q / W / E / U",
+            "Ctrl+Shift+G / J / K / Q / W / E / U",
+            "Run vibrato / chorus / volume LFO / fade in / fade out / replace key / reset \
+             properties (needs a selection)",
+            // 原版中文菜单前 8 个宏名也写英文（draw_macrobutton 的 language 分支），照抄。
+            "Vibrato / Chorus / Volume LFO / 淡入 / 淡出 / 替换音 / 重置所有属性（需选区）",
+        ),
+        (
             "Ctrl+0 / Ctrl+±",
             "Ctrl+0 / Ctrl+±",
             "Reset / adjust whole-window zoom",
@@ -577,7 +615,7 @@ mod tests {
         assert!(!got.iter().any(prefs_open_cmd), "裸 P 不该开首选项");
     }
 
-    /// 原版 `control_draw.gml:771-774`：Ctrl+Shift+I 先 `playing = 0` 再开速度测量器，
+    /// 原版 `control_draw.gml:770-773`：Ctrl+Shift+I 先 `playing = 0` 再开速度测量器，
     /// 和片段编辑器一样在选区闸门外；不带 Shift 的 Ctrl+I 不算这档。
     #[test]
     fn ctrl_shift_i_opens_the_tempo_tapper_without_a_selection() {
@@ -590,21 +628,16 @@ mod tests {
             ctrl: true,
             ..Default::default()
         };
+        let tapper = |c: &Command| {
+            matches!(c, Command::HotkeyWindow(WindowKind::TempoTapper))
+        };
         let got = cmds(vec![key(Key::I, true, both)]);
-        assert!(
-            got.iter().any(|c| matches!(c, Command::TempoTapperHotkey)),
-            "Ctrl+Shift+I 应开速度测量器: {got:?}"
-        );
+        assert!(got.iter().any(tapper), "Ctrl+Shift+I 应开速度测量器: {got:?}");
         let got = cmds(vec![key(Key::I, true, ctrl)]);
-        assert!(
-            !got
-                .iter()
-                .any(|c| matches!(c, Command::TempoTapperHotkey)),
-            "Ctrl+I 不该开速度测量器: {got:?}"
-        );
+        assert!(!got.iter().any(tapper), "Ctrl+I 不该开速度测量器: {got:?}");
     }
 
-    /// 原版 `control_draw.gml:849-924` 每一行都带 `keyboard_check(vk_shift)`：
+    /// 原版 `control_draw.gml:765-831` 每一行都带 `keyboard_check(vk_shift)`：
     /// Ctrl+P 只开首选项，片段编辑器必须是 Ctrl+Shift+P。
     #[test]
     fn ctrl_window_keys_do_not_collide_with_plain_ctrl() {
@@ -617,34 +650,64 @@ mod tests {
             shift: true,
             ..Default::default()
         };
+        let clip = |c: &Command| matches!(c, Command::HotkeyWindow(WindowKind::ClipEditor));
+        let stereo = |c: &Command| matches!(c, Command::HotkeyWindow(WindowKind::Stereo));
         let got = cmds(vec![key(Key::P, true, ctrl)]);
         assert!(got.iter().any(prefs_open_cmd), "Ctrl+P 应开首选项: {got:?}");
-        assert!(
-            !got.iter()
-                .any(|c| matches!(c, Command::ShowWindow(WindowKind::ClipEditor))),
-            "Ctrl+P 不该同时开片段编辑器: {got:?}"
-        );
+        assert!(!got.iter().any(clip), "Ctrl+P 不该同时开片段编辑器: {got:?}");
         // Ctrl+S 是保存，不能被立体声宏窗口抢走。
         let got = cmds(vec![key(Key::S, true, ctrl)]);
-        assert!(
-            got.iter().any(|c| matches!(c, Command::Save)),
-            "Ctrl+S 应保存: {got:?}"
-        );
-        assert!(
-            !got.iter()
-                .any(|c| matches!(c, Command::ShowWindow(WindowKind::Stereo))),
-            "Ctrl+S 不该开立体声窗口: {got:?}"
-        );
+        assert!(got.iter().any(|c| matches!(c, Command::Save)), "Ctrl+S 应保存: {got:?}");
+        assert!(!got.iter().any(stereo), "Ctrl+S 不该开立体声窗口: {got:?}");
         let got = cmds(vec![key(Key::P, true, both)]);
-        assert!(
-            got.iter()
-                .any(|c| matches!(c, Command::ShowWindow(WindowKind::ClipEditor))),
-            "Ctrl+Shift+P 应开片段编辑器: {got:?}"
-        );
+        assert!(got.iter().any(clip), "Ctrl+Shift+P 应开片段编辑器: {got:?}");
         assert!(
             !got.iter().any(prefs_open_cmd),
             "Ctrl+Shift+P 不该开首选项: {got:?}"
         );
+    }
+
+    /// 原版 `control_draw.gml:792-834`：同一段里的 7 个直接执行的宏各占一键
+    /// （G 颤音 / J 合唱 / K 音量 LFO / Q 淡入 / W 淡出 / E 替换音 / U 重置属性），
+    /// 同样在 `if current_song.selected != 0` 闸门里。端口此前一键都没接。
+    #[test]
+    fn ctrl_shift_direct_macro_hotkeys() {
+        let both = egui::Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Default::default()
+        };
+        let want: [(Key, Macro); 7] = [
+            (Key::G, Macro::Vibrato),
+            (Key::J, Macro::Chorus { detune: 5 }),
+            (Key::K, Macro::VelocityLfo),
+            (Key::Q, Macro::FadeIn),
+            (Key::W, Macro::FadeOut),
+            (Key::E, Macro::ReplaceKey),
+            (Key::U, Macro::Reset),
+        ];
+        let mut sel = fresh_state();
+        sel.doc.place_note(0, 0, nbs_core::model::Note::new(0, 45));
+        sel.doc.place_note(1, 0, nbs_core::model::Note::new(0, 47));
+        sel.doc.select_rect(0, 0, 1, 0, false, false, false);
+        assert!(!sel.doc.selection.is_empty(), "测试前提：框选要摘出音符");
+        for (k, m) in &want {
+            let got = cmds_with(vec![key(*k, true, both)], &sel);
+            assert!(
+                got.iter()
+                    .any(|c| matches!(c, Command::HotkeyMacro(g) if *g == *m)),
+                "Ctrl+Shift+{k:?} 应派发 {m:?}，实得 {got:?}"
+            );
+        }
+        // 闸门另一侧：没有选区时这 7 个键一个都不该动。
+        let empty = fresh_state();
+        for (k, _) in &want {
+            let got = cmds_with(vec![key(*k, true, both)], &empty);
+            assert!(
+                !got.iter().any(|c| matches!(c, Command::HotkeyMacro(_))),
+                "无选区时 Ctrl+Shift+{k:?} 不该跑宏: {got:?}"
+            );
+        }
     }
 
     /// 原版 `control_draw.gml` 的 Macro Hotkeys 区整段包在
@@ -671,7 +734,7 @@ mod tests {
         assert!(
             !got.iter().any(|c| matches!(
                 c,
-                Command::ShowWindow(
+                Command::HotkeyWindow(
                     WindowKind::SetVelocity
                         | WindowKind::SetPanning
                         | WindowKind::SetPitch
@@ -685,7 +748,7 @@ mod tests {
         let got = cmds_with(vec![key(Key::P, true, both)], &empty);
         assert!(
             got.iter()
-                .any(|c| matches!(c, Command::ShowWindow(WindowKind::ClipEditor))),
+                .any(|c| matches!(c, Command::HotkeyWindow(WindowKind::ClipEditor))),
             "Ctrl+Shift+P 不该受选区闸门限制: {got:?}"
         );
 
@@ -714,7 +777,7 @@ mod tests {
         ] {
             assert!(
                 got.iter()
-                    .any(|c| matches!(c, Command::ShowWindow(k) if *k == want)),
+                    .any(|c| matches!(c, Command::HotkeyWindow(k) if *k == want)),
                 "有选区时应打开 {want:?}: {got:?}"
             );
         }

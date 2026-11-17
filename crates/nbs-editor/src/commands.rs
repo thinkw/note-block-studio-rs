@@ -132,10 +132,14 @@ pub enum Command {
     SetTimeSignature(u8),
     SetSaveVersion(u8),
     ClearSong,
-    /// 原版 Ctrl+Shift+I（`control_draw.gml:771-774`）：先 `playing = 0` 再开速度测量器。
-    /// 标尺右键菜单那条入口不一样（`menu_click.gml:390` 只写 `window`），
-    /// 走普通的 `ShowWindow(TempoTapper)`，播放继续。
-    TempoTapperHotkey,
+    /// 原版 Ctrl+Shift+ 字母开窗口那一族（`control_draw.gml:765-831`）：
+    /// 片段编辑器 P、速度测量器 I、宏窗口 A/S/D/F/H、批量设置 R/T/Y——
+    /// 每一行第一句都是 `playing = 0`。菜单和工具栏入口不一样
+    /// （`menu_click.gml` 只写 `window`），播放继续，所以不能并进 `ShowWindow`。
+    HotkeyWindow(WindowKind),
+    /// 同上，但对应原版直接执行的那几个宏：Ctrl+Shift+G/J/K/Q/W/E/U
+    /// （`control_draw.gml:792-831`），每条也都是先 `playing = 0`。
+    HotkeyMacro(Macro),
     /// 原版右上角兼容性徽章被点（`control_draw.gml:2029-2038`）：停播放、关录制、
     /// 落回浮动选区，再打开 `w_minecraft`。
     ShowCompat,
@@ -1044,11 +1048,15 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.doc.clear_all_notes();
             state.prepare_audio();
         }
-        Command::TempoTapperHotkey => {
-            // 原版这一段就两行：`playing = 0` 和 `window = w_tempotapper`。
+        Command::HotkeyWindow(kind) => {
+            // 原版这一族每一条都是 `playing = 0` 加一句 `window = ...`。
             // 播放中不重新起播，所以和 ShowCompat 一样直接 pause，而不是走 PlayPause。
             state.audio.clock_mut().pause();
-            dispatch(state, Command::ShowWindow(WindowKind::TempoTapper), ctx);
+            dispatch(state, Command::ShowWindow(kind), ctx);
+        }
+        Command::HotkeyMacro(m) => {
+            state.audio.clock_mut().pause();
+            dispatch(state, Command::RunMacro(m), ctx);
         }
         Command::ShowCompat => {
             // 原版这一段（`control_draw.gml:2032-2036`）：playing = 0、record = 0、
@@ -2682,9 +2690,70 @@ mod tests {
             "关窗清 tapping / ltime"
         );
 
-        dispatch(&mut state, Command::TempoTapperHotkey, &ctx);
+        dispatch(&mut state, Command::HotkeyWindow(WindowKind::TempoTapper), &ctx);
         assert_eq!(state.window, Some(WindowKind::TempoTapper));
         assert!(!state.is_playing(), "原版 playing = 0");
+    }
+
+    /// 原版 `control_draw.gml:765-831` 的 Ctrl+Shift+ 字母，每一条第一句都是
+    /// `playing = 0`；同一批窗口从菜单/工具栏进来（`ShowWindow`）则不停。
+    /// 端口此前只在速度测量器上补了这句，其余六个按键漏了。
+    #[test]
+    fn every_ctrl_shift_window_hotkey_stops_playback() {
+        let ctx = Context::default();
+        for kind in [
+            WindowKind::ClipEditor,
+            WindowKind::TempoTapper,
+            WindowKind::Tremolo,
+            WindowKind::Stereo,
+            WindowKind::SetVelocity,
+            WindowKind::SetPanning,
+            WindowKind::SetPitch,
+        ] {
+            let mut state = state_with(four_case_song(10.0));
+            state.begin_playback();
+            assert!(state.is_playing());
+            dispatch(&mut state, Command::HotkeyWindow(kind.clone()), &ctx);
+            assert_eq!(state.window, Some(kind.clone()), "{kind:?} 要真的开起来");
+            assert!(!state.is_playing(), "{kind:?} 走快捷键必须停播放（playing = 0）");
+
+            let mut state = state_with(four_case_song(10.0));
+            state.begin_playback();
+            dispatch(&mut state, Command::ShowWindow(kind), &ctx);
+            assert!(state.is_playing(), "同一窗口的菜单入口原版不停播放");
+        }
+    }
+
+    /// 快捷键族里「直接执行」的那 7 个宏也一样：原版每条都是先 `playing = 0`
+    /// 再调宏函数（`control_draw.gml:792-834`）。端口此前一个都没接。
+    #[test]
+    fn hotkey_macro_stops_playback_and_runs() {
+        let ctx = Context::default();
+        // 选中的音符已经从 song.columns 抬进浮动选区（select_rect 的 copy=false），
+        // 宏改的就是那一份，所以取速度要问 selection。
+        let velocities = |state: &EditorState| -> Vec<u8> {
+            state
+                .doc
+                .selection
+                .notes
+                .iter()
+                .map(|n| n.note.velocity)
+                .collect()
+        };
+        let mut state = state_with(four_case_song(10.0));
+        state.doc.select_all();
+        let before = velocities(&state);
+        state.begin_playback();
+
+        dispatch(&mut state, Command::HotkeyMacro(Macro::FadeIn), &ctx);
+        assert!(!state.is_playing(), "原版 playing = 0");
+        assert!(state.message.is_some(), "要真的走到 RunMacro");
+        assert_eq!(before.len(), 4, "测试前提：全选要抬出 4 个音符");
+        assert!(
+            velocities(&state).iter().min() == Some(&1),
+            "淡入要把首列压到最轻，实得 {:?}",
+            velocities(&state)
+        );
     }
 
     /// 原版 `toggle_playing` 起播第一行：播完停在歌尾（歌长 + 16 刻）再按
