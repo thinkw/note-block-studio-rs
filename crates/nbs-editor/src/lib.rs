@@ -1317,6 +1317,51 @@ mod gui_window_tests {
         state.prefs.language = 0;
         frame_out(&mut state, &ctx, base_input());
     }
+
+    /// 首选项「外观」页的删除效果与琴键五线谱两行（原版 `draw_window_preferences.gml:455/466`
+    /// 的 `remove_effect`、`show_notechart`）：要按原版坐标真渲染、点标签真翻运行时开关、
+    /// 并且写进 prefs（原版两条都在 settings.ini 里）。
+    /// 效果本身的画法另有专门用例（`gui_piano_tests` 的五线谱、commands 里的淡出边框动画）。
+    #[test]
+    fn preferences_appearance_rows_render_toggle_and_persist() {
+        isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = Some(WindowKind::Preferences);
+        state.prefs_tab = 2;
+        frame(&mut state, &ctx);
+        let out = frame_out(&mut state, &ctx, base_input());
+        let texts: Vec<String> = out
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        for t in ["显示删除效果", "在琴键上时显示五线谱对应音符"] {
+            assert!(
+                texts.iter().any(|s| s == t),
+                "外观页缺少「{t}」，当前文本：{}",
+                texts.join(" | ")
+            );
+        }
+        // 出厂值：删除效果开（control_create.gml:225）、五线谱关（:461）。
+        assert!(state.flags.remove_effect);
+        assert!(!state.flags.show_notechart);
+
+        click_text(&mut state, &ctx, "显示删除效果");
+        assert!(!state.flags.remove_effect, "点标签要真的关掉删除效果");
+        click_text(&mut state, &ctx, "在琴键上时显示五线谱对应音符");
+        assert!(state.flags.show_notechart, "点标签要真的打开五线谱");
+
+        state.save_prefs();
+        let back = nbs_io::prefs::Preferences::load();
+        assert!(!back.remove_effect, "删除效果开关要落盘");
+        assert!(back.show_notechart, "五线谱开关要落盘");
+    }
 }
 
 #[cfg(test)]
