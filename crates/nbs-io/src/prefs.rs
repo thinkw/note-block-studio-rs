@@ -32,6 +32,9 @@ pub struct Preferences {
     pub autosave_enabled: bool,
     /// 原版 `mousewheel`：0 = 移动视口，1 = 换音色，2 = 换音调。
     pub mousewheel: u8,
+    /// 原版 `mousewheel_scroll_speed`（`control_create.gml:408` 出厂 = 1）：滚轮一格
+    /// 走几层（纵向）/ 几刻（横向按住 Shift），1..=10，只在 `mousewheel = 0` 时可改。
+    pub mousewheel_scroll_speed: u8,
     /// 原版 `changepitch`：滚轮停在音符上时改音符属性，而不是移动视口。
     pub changepitch: bool,
     /// 原版 `select_lastpressed`：键盘按下琴键后，选中的音跟到那个键。
@@ -221,6 +224,7 @@ impl Default for Preferences {
             follow_mode: 1,
             autosave_enabled: false,
             mousewheel: 0,
+            mousewheel_scroll_speed: 1,
             changepitch: true,
             select_lastpressed: true,
             show_layers: true,
@@ -573,6 +577,10 @@ mod tests {
         assert!(!back.window_icon, "出厂用程序自带的图标");
         assert_eq!(back.accent, [0, 120, 212], "强调色基色出厂 0,120,212");
         assert!(back.remove_effect, "旧配置缺键时退回出厂打开");
+        assert_eq!(
+            back.mousewheel_scroll_speed, 1,
+            "旧配置缺键时滚轮步长退回出厂 1（原版 median(1, ini_read_real(…)))"
+        );
         assert!(!back.show_notechart, "旧配置缺键时五线谱退回关闭");
         assert!(
             (back.selection_alpha - 0.8).abs() < 1e-6,
@@ -595,10 +603,12 @@ mod tests {
         p.remove_effect = false;
         p.selection_alpha = 0.35;
         p.show_notechart = true;
+        p.mousewheel_scroll_speed = 7;
         let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert!(!back.remove_effect, "删除效果开关要落盘");
         assert!((back.selection_alpha - 0.35).abs() < 1e-6, "选区强度要落盘");
         assert!(back.show_notechart, "五线谱开关要落盘");
+        assert_eq!(back.mousewheel_scroll_speed, 7, "滚轮步长要落盘（save_settings.gml:49）");
         let mut p = Preferences::default();
         p.accent = [10, 20, 30];
         let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
@@ -640,6 +650,7 @@ mod tests {
         assert_eq!(p.auto_save_minutes, 10);
         assert_eq!(p.autosave_interval(), 0, "开关关掉就不该有间隔");
         assert_eq!(p.mousewheel, 0);
+        assert_eq!(p.mousewheel_scroll_speed, 1, "滚轮步长出厂 1（control_create.gml:408）");
         assert!(p.changepitch);
         assert!(p.select_lastpressed);
         assert_eq!(p.follow_mode, 1, "原版默认按页跟随");

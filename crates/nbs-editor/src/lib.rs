@@ -1362,6 +1362,46 @@ mod gui_window_tests {
         assert!(!back.remove_effect, "删除效果开关要落盘");
         assert!(back.show_notechart, "五线谱开关要落盘");
     }
+
+    /// 原版页 3「访问」的两组：`draw_areaheader(22, 74, 456, 140, "鼠标滚轮")` 里的
+    /// 三个档位 + 「滚动速度」拖拽行（`y1 + 150`，出厂 1），和
+    /// `draw_areaheader(22, 240, 456, 105, "琴键与层")` 组名本身。
+    /// 组名此前被写成「琴键」、滚动速度整行缺失，这条用例把它们钉回原版。
+    #[test]
+    fn preferences_usability_page_shows_wheel_and_layer_groups() {
+        isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = Some(WindowKind::Preferences);
+        state.prefs_tab = 3;
+        frame(&mut state, &ctx);
+        let out = frame_out(&mut state, &ctx, base_input());
+        let texts: Vec<String> = out
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        for t in [
+            "鼠标滚轮",
+            "滚动速度：",
+            "当在音符上使用鼠标滚轮改变音符属性",
+            "琴键与层",
+            "选择按下的键",
+            // 出厂步长 1 直接画在拖拽位上（原版 mousewheel = 0 时也是数字本体）。
+            "1",
+        ] {
+            assert!(
+                texts.iter().any(|s| s == t),
+                "访问页缺少「{t}」，当前文本：{}",
+                texts.join(" | ")
+            );
+        }
+    }
 }
 
 #[cfg(test)]

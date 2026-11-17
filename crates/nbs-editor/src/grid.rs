@@ -283,13 +283,18 @@ fn handle_grid_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect)
     finish_drag(state, input, Some((t, l)));
 }
 
+/// 原版 `draw_scrollbar(…, mousewheel_scroll_speed)`：滚轮一格走 `speed` 个槽位，
+/// 横向一个槽 = 1 刻、纵向一个槽 = 1 层（`sb_val += 滚轮格数 * wheel_speed`）。
+/// Shift 走横向（原版把它当作「另一根滚动条」），此前这里硬编码 4 刻一格，
+/// 与原版 speed=1 时的一刻一格不符，改成走设置值。
 fn scroll_viewport(state: &mut EditorState, delta: f32, shift: bool) {
     let step = if delta > 0.0 { 1 } else { -1 };
+    let speed = state.prefs.mousewheel_scroll_speed.clamp(1, 10) as i64;
     if shift {
-        let s = state.viewport.start_tick as i64 + step * 4;
+        let s = state.viewport.start_tick as i64 + step * speed;
         state.viewport.start_tick = s.max(0) as u32;
     } else {
-        let s = state.viewport.start_layer as i64 + step;
+        let s = state.viewport.start_layer as i64 + step * speed;
         state.viewport.start_layer = s.max(0) as u32;
     }
 }
@@ -1351,5 +1356,45 @@ fn draw_context_menu(state: &mut EditorState, ui: &Ui) {
     let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
     if close || clicked_outside || escape {
         state.context_menu = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 原版 `draw_scrollbar`：两根条每格都走 `wheel_speed` 个槽位，横向一个槽 = 1 刻、
+    /// 纵向一个槽 = 1 层。方向（哪个符号算前进）沿用端口既有约定，这里只核每格走多远。
+    #[test]
+    fn wheel_scroll_steps_by_the_preference() {
+        crate::isolate_prefs();
+        let mut st = EditorState::new();
+        let from = 20i64;
+        st.prefs.mousewheel_scroll_speed = 1;
+
+        st.viewport.start_layer = from as u32;
+        scroll_viewport(&mut st, 1.0, false);
+        let layers = st.viewport.start_layer as i64 - from;
+        st.viewport.start_tick = from as u32;
+        scroll_viewport(&mut st, 1.0, true);
+        let ticks = st.viewport.start_tick as i64 - from;
+        assert_eq!(layers.abs(), 1, "出厂纵向一格一层");
+        assert_eq!(ticks.abs(), 1, "出厂横向一格一刻（原版槽位），不再是硬编码的 4");
+
+        st.prefs.mousewheel_scroll_speed = 7;
+        st.viewport.start_layer = from as u32;
+        scroll_viewport(&mut st, 1.0, false);
+        assert_eq!(
+            (st.viewport.start_layer as i64 - from).abs(),
+            7,
+            "步长要按设置放大"
+        );
+
+        // 配置里的脏值按原版 median(1, …, 10) 夹住，回退方向也不能退到负列。
+        let back = if layers > 0 { -1.0 } else { 1.0 };
+        st.prefs.mousewheel_scroll_speed = 40;
+        st.viewport.start_layer = 3;
+        scroll_viewport(&mut st, back, false);
+        assert_eq!(st.viewport.start_layer, 0, "越界夹到 0，脏值夹到上限 10");
     }
 }

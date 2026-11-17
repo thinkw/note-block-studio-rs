@@ -1661,11 +1661,13 @@ fn prefs_appearance(state: &mut EditorState, pg: &mut Page) {
     }
 }
 
-/// 原版页 3「访问」：滚轮行为与琴键选中行为。
+/// 原版页 3「访问」：滚轮行为（三个档位 + 滚动速度 + 两个开关）与琴键选中行为。
 /// 源码末尾的「对琴键右键可更改键位。」和「重置键位」按钮依赖键位编辑功能，
 /// 我们只有固定键位，所以这两行也不出现。
 fn prefs_usability(state: &mut EditorState, pg: &mut Page) {
-    pg.header(22.0, 74.0, 456.0, 120.0, tr("Mouse wheel", "鼠标滚轮"));
+    // 原版 `draw_areaheader(x1 + 22, y1 + 74, 456, 140, "鼠标滚轮")`：组里除了三个档位
+    // 还有「滚动速度」这一行，只有档位 = 移动视口时可拖，其余情况数字照画但变灰。
+    pg.header(22.0, 74.0, 456.0, 140.0, tr("Mouse wheel", "鼠标滚轮"));
     let wheel_rows = [
         (
             90.0,
@@ -1705,9 +1707,39 @@ fn prefs_usability(state: &mut EditorState, pg: &mut Page) {
             state.emit(Command::SavePreferences);
         }
     }
+    // 原版 `draw_text_dynamic(x1 + 70, y1 + 150, "滚动速度：")` +
+    // `draw_dragvalue(22, x1 + 150, y1 + 150, mousewheel_scroll_speed, 1)`（夹 1..=10），
+    // 档位不是「移动视口」时数字变灰且拖不动。提示挂在整块 180×16 上（popup_set_window）。
+    let speed_on = state.prefs.mousewheel == 0;
+    let speed_tip = tr(
+        "The number of ticks or layers scrolled with each mouse wheel step.\nThis setting does not affect macOS trackpads.",
+        "每滚动一次鼠标滚轮所移动的刻或层数。\n此设置不影响 macOS 触控板。",
+    );
+    pg.text(
+        pg.row(70.0, 150.0),
+        tr("Scroll speed:", "滚动速度："),
+        PREFS_FONT,
+        if speed_on { pg.ink() } else { ggray(128) },
+    );
+    pg.tip_area(70.0, 150.0, 180.0, 16.0, speed_tip);
+    let speed = state.prefs.mousewheel_scroll_speed as i32;
+    if let Some(v) = pg.drag(
+        150.0,
+        150.0,
+        speed,
+        2.0,
+        1,
+        10,
+        !speed_on,
+        "",
+        &mut state.prefs_drag,
+    ) {
+        state.prefs.mousewheel_scroll_speed = v.clamp(1, 10) as u8;
+        state.emit(Command::SavePreferences);
+    }
     if pg.check(
         40.0,
-        158.0,
+        178.0,
         state.prefs.changepitch,
         tr("Change note properties when scrolling over notes", "当在音符上使用鼠标滚轮改变音符属性"),
         tr(
@@ -1721,11 +1753,12 @@ fn prefs_usability(state: &mut EditorState, pg: &mut Page) {
         state.emit(Command::SavePreferences);
     }
 
-    // 原版这组的 CN 标题是「琴键与层」，重写版砍掉了悬停层预览那一行，标题跟着缩成「琴键」。
-    pg.header(22.0, 220.0, 456.0, 105.0, tr("Piano", "琴键"));
+    // 原版 `draw_areaheader(x1 + 22, y1 + 240, 456, 105, "琴键与层")`；
+    // 组里剩下的「对琴键右键可更改键位。」+「重置键位」按钮依赖键位编辑，端口没有，整行不画。
+    pg.header(22.0, 240.0, 456.0, 105.0, tr("Piano and layers", "琴键与层"));
     if pg.check(
         40.0,
-        236.0,
+        256.0,
         state.prefs.select_lastpressed,
         tr("Set selected key to pressed one", "选择按下的键"),
         tr(
