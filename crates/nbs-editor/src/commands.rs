@@ -786,10 +786,6 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     .unwrap_or_default();
                 state.datapack_options.name = if meta.is_empty() { from_file } else { meta };
             }
-            if matches!(kind, WindowKind::SetTempo) {
-                // 原版就地速度输入框的初值就是当前速度，草稿字段同样每次开窗回填。
-                state.tempo_draft = state.doc.song.meta.tempo;
-            }
             // 文件选择不是自绘窗口：走和工具栏同一套对话框请求，起始目录和默认名
             // 都按原版 `load_song.gml` / `save_song.gml` 的写法来。
             match kind {
@@ -1028,8 +1024,10 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 .batch_change(tr("Set pitch", "批量设置微调"), |n| n.pitch = v);
         }
         Command::SetTempo(t) => {
+            // 原版两条写速度的路径都夹在 `median(0.25, 值, 180)`
+            // （`draw_window_set_tempo.gml:42`、`control_draw.gml:2532`），端口统一放在这里。
             state.doc.edit_meta(tr("Change tempo", "修改速度"), |m| {
-                m.tempo = t.clamp(0.25, 60.0)
+                m.tempo = t.clamp(0.25, 180.0)
             });
             state.audio.clock_mut().set_tempo(state.doc.song.meta.tempo);
         }

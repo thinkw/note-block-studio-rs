@@ -105,7 +105,6 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::Preferences => preferences(state, ui),
             WindowKind::Instruments => instruments_window(state, ui),
             WindowKind::About => about(ui),
-            WindowKind::SetTempo => set_tempo_window(state, ui),
             WindowKind::TempoTapper => tempo_tapper_window(state, ui),
             WindowKind::SaveOptions => save_options_window(state, ui),
             WindowKind::Arpeggio => arpeggio_window(state, ui),
@@ -2914,29 +2913,6 @@ fn instruments_window(state: &mut EditorState, ui: &mut Ui) {
     .small()
     .weak());
     footer(state, ui);
-}
-
-/// 速度窗口。原版 `draw_window_set_tempo` 不是独立窗口，而是标尺速度格上就地弹出的
-/// 输入框（红石刻/秒一格、BPM 一格，点框外提交、Esc 取消，`>= 1000` 先除以 100，
-/// 再夹进 `median(0.25, 值, 180)`）。这一步只把原先那扇通吃多个宏的假窗口拆掉、
-/// 换成只服务速度的草稿框；就地输入框留给后面的任务按原版还原。
-fn set_tempo_window(state: &mut EditorState, ui: &mut Ui) {
-    ui.label(tr("Tempo (tick/s)", "速度 (tick/s)"));
-    ui.label(RichText::new("10 t/s = 150 BPM").small().weak());
-    ui.horizontal(|ui| {
-        ui.add(egui::DragValue::new(&mut state.tempo_draft).speed(1.0));
-        ui.label(tr("Value", "数值"));
-    });
-    let tempo = state.tempo_draft;
-    ui.separator();
-    ui.horizontal(|ui| {
-        if ui.button(tr("Apply", "应用")).clicked() {
-            state.emit(Command::SetTempo(tempo));
-        }
-        if ui.button(tr("Close", "关闭")).clicked() {
-            state.emit(Command::CloseWindow);
-        }
-    });
 }
 
 fn clip_editor(state: &mut EditorState, ui: &mut Ui) {

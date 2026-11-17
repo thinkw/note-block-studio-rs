@@ -172,7 +172,6 @@ pub enum WindowKind {
     Preferences,
     Instruments,
     About,
-    SetTempo,
     /// 原版 `w_tempotapper`（`draw_window_tempo_tapper.gml`）：按 T 打点测速。
     TempoTapper,
     /// 原版 `w_saveoptions`（`draw_window_save_options.gml`）：文件菜单里的「保存选项」，
@@ -225,9 +224,6 @@ impl WindowKind {
             Self::Preferences => tr("Preferences", "首选项"),
             Self::Instruments => tr("Instruments", "音色设置"),
             Self::About => tr("About nbs-rust", "关于 nbs-rust"),
-            // 速度窗口是 port 自绘：原版 `draw_window_set_tempo` 是标尺上就地
-            // 弹出的输入框，不是带标题的一扇窗，标题没有原版文字可抄。
-            Self::SetTempo => tr("Set Tempo", "设置速度"),
             // 原版 `draw_window_tempo_tapper` 的标题（`condstr(language != 1, "Tempo tapper", "速度测量器")`）。
             Self::TempoTapper => tr("Tempo tapper", "速度测量器"),
             // 原版 `draw_window_save_options:13-14` 的正文粗体标题。
@@ -900,9 +896,6 @@ pub struct EditorState {
     pub leg_dec: i32,
     pub leg_sus: i32,
     pub trem_spacing: i32,
-    /// 速度窗口的草稿（见 `windows::set_tempo_window`），开窗时由 `Command::ShowWindow`
-    /// 用当前速度播种，对应原版就地输入框里的 `tempo_input`。
-    pub tempo_draft: f32,
     /// 原版会话全局 `setvel` / `percentvel` / `setpan` / `setpit` / `addpitch` /
     /// `stereo_width` / `stereo_reverse`（`control_create.gml:566-663`，出厂
     /// 100 / 0 / 0 / 0 / 0 / 50 / 0），四个批量窗口的草稿值，同样不落 settings.ini。
@@ -992,6 +985,12 @@ pub struct EditorState {
     pub keys_held: crate::piano::KeysHeld,
     /// 原版 `tempodrag`：拖速度框时的未量化累加值。
     pub tempo_drag: Option<f32>,
+    /// 原版 `window = w_settempo` + `text_value[64]`：标尺速度格上就地弹出的输入框，
+    /// `Some` 表示正开着，内容就是框里那份还没提交的文字。
+    pub tempo_input: Option<String>,
+    /// 原版会话全局 `settempo`：最近一次左键按下是否落在这格输入框里。
+    /// 原版只有「按下不在框里、抬手也在框外」才提交（`draw_window_set_tempo.gml:26-31`）。
+    pub tempo_press_in: bool,
     /// 兼容性指示（原版 `compatible`），随 `song.rev` 重算。
     pub compat_rev: u64,
     pub compat: u8,
@@ -1136,7 +1135,6 @@ impl EditorState {
             event_edit: EventEditDraft::default(),
             layer_drag: None,
             remove_effects: Vec::new(),
-            tempo_draft: 10.0,
             arpeggio_pattern: String::new(),
             stagger_pattern: String::new(),
             tremolotype: 0,
@@ -1195,6 +1193,8 @@ impl EditorState {
             record_armed: false,
             keys_held: [false; nbs_core::model::KEY_MAX as usize + 1],
             tempo_drag: None,
+            tempo_input: None,
+            tempo_press_in: false,
             compat_rev: u64::MAX,
             compat: 1,
             compat_outside: 0,

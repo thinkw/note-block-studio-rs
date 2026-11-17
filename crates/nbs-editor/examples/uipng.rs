@@ -178,7 +178,6 @@ fn main() -> Result<(), String> {
             "statistics" => WindowKind::Statistics,
             "shortcuts" => WindowKind::Shortcuts,
             "about" => WindowKind::About,
-            "set-tempo" => WindowKind::SetTempo,
             "set-velocity" => WindowKind::SetVelocity,
             "set-panning" => WindowKind::SetPanning,
             "set-pitch" => WindowKind::SetPitch,

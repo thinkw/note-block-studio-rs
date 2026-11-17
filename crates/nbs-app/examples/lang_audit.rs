@@ -304,14 +304,13 @@ fn main() {
     let en_ok = kept_english(zh_mode);
     // (标签, 窗口, 首选项页签)
     let mut units: Vec<(String, Option<WindowKind>, u8)> = vec![("主界面".into(), None, 0)];
-    let named: [(&str, WindowKind); 31] = [
+    let named: [(&str, WindowKind); 30] = [
         ("歌曲信息", WindowKind::SongInfo),
         ("歌曲属性", WindowKind::Properties),
         ("歌曲数据", WindowKind::Statistics),
         ("首选项", WindowKind::Preferences),
         ("乐器", WindowKind::Instruments),
         ("关于", WindowKind::About),
-        ("设定速度", WindowKind::SetTempo),
         ("设定音量", WindowKind::SetVelocity),
         ("设定声道", WindowKind::SetPanning),
         ("设定微调", WindowKind::SetPitch),

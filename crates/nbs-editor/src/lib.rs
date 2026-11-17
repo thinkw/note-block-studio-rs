@@ -1446,6 +1446,83 @@ mod gui_window_tests {
         assert!(back.layerhov_vppreview, "悬停层预览开关要落盘");
     }
 
+    /// 标尺速度格的原版就地输入框（`w_settempo`）：开框时按
+    /// `string_format(real_tempo * 倍数, 0, 2)` 播种，Esc 只关窗不提交，
+    /// 离开输入框才提交。这里走的是精灵图缺位时图层栏的退路版那颗「速度…」按钮，
+    /// 两条路径共用同一套草稿字段和同一个提交函数。
+    #[test]
+    fn inline_tempo_box_opens_in_place_and_commits_when_left() {
+        // 定点按下 + 抬手，各占一帧（`click_at` 那套是从文字反查坐标，这里要裸坐标）。
+        fn tap_at(state: &mut EditorState, ctx: &egui::Context, p: egui::Pos2) {
+            for pressed in [true, false] {
+                let mut raw = base_input();
+                raw.events.push(egui::Event::PointerMoved(p));
+                raw.events.push(egui::Event::PointerButton {
+                    pos: p,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                });
+                frame_out(state, ctx, raw);
+            }
+        }
+
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.prefs.use_bpm = false;
+        state.window = None;
+        state.doc.replace_song(nbs_core::model::Song::new());
+        state.doc.song.meta.tempo = 10.0;
+
+        // 原版点的是标尺上 (108, 57, 64, 22) 那一格；数值文字居中在 136，所以它的
+        // 中心必落在那条判定框里。框外取右边 90px 的「小节·拍·十六分」，
+        // 那一格只有悬停说明，抬手落在上面不会改动谱面。
+        frame_out(&mut state, &ctx, base_input());
+        let out = frame_out(&mut state, &ctx, base_input());
+        let on_box = text_center_if(&out.shapes, |t| t == "10.00 t / s");
+        let off_box = on_box + egui::vec2(90.0, 0.0);
+
+        tap_at(&mut state, &ctx, on_box);
+        assert_eq!(
+            state.tempo_input.as_deref(),
+            Some("10.00"),
+            "点速度格要就地弹出输入框，初值是 `string_format(速度 * 倍数, 0, 2)`"
+        );
+        assert!(state.window.is_none(), "原版这一格不是带标题的窗口");
+        let shown = drawn_texts(&mut state, &ctx);
+        assert!(
+            !shown.iter().any(|t| t == "10.00 t / s"),
+            "原版要 `window != w_settempo` 才画数值，开框后界面上不该再有它：{shown:?}"
+        );
+
+        // 框里改成别的值再按 Esc：`draw_window_set_tempo.gml:47-51` 只关窗、不改速度。
+        state.tempo_input = Some("1200".into());
+        let mut raw = base_input();
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        });
+        frame_out(&mut state, &ctx, raw);
+        assert_eq!(state.tempo_input, None, "Esc 要把输入框收掉");
+        assert_eq!(state.doc.song.meta.tempo, 10.0, "Esc 是丢弃，速度不该动");
+
+        // 提交只在「这次按下不在框里、这次抬手也在框外」时发生（`:26-46`）。
+        tap_at(&mut state, &ctx, on_box);
+        state.tempo_input = Some("1200".into());
+        tap_at(&mut state, &ctx, off_box);
+        assert_eq!(state.tempo_input, None, "抬手在框外要把输入框收掉");
+        assert_eq!(
+            state.doc.song.meta.tempo, 12.0,
+            "1200 要先除以 100 再夹进 median(0.25, 值, 180)"
+        );
+    }
+
     /// 原版 `w_tempotapper`（速度测量器）：按 T 打点 → 界面按速度单位显示测到的值，
     /// 「双倍速度」可勾，确认把 `ctempo * 2 / 15` 写进歌曲速度并关窗。
     #[test]

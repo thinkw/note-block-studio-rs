@@ -10,8 +10,8 @@
 //! 横向偏移和图标尺寸保持原版像素，纵向按 `(cell - 32) / 2` 居中。
 
 use egui::{
-    pos2, vec2, Align, Align2, Color32, CursorIcon, FontId, Id, Key, Layout, Pos2, Rect, Sense,
-    TextEdit, Ui, UiBuilder,
+    pos2, vec2, Align, Align2, Color32, CursorIcon, FontId, Id, Key, Layout, PointerButton, Pos2,
+    Rect, Sense, TextEdit, Ui, UiBuilder,
 };
 use nbs_core::model::{Layer, LockMode, PAN_CENTER};
 
@@ -198,20 +198,27 @@ fn header(
     }
 
     // 速度框：精灵宽 74，原版判定和文字定位都用左边 108（BPM 时往左挪 7px 画框）。
-    let box_x = if bpm_on { 101.0 } else { 108.0 };
+    // 就地输入框按单位换几何：t/s 用 (108, 57, 64)，BPM 用 (101, 57, 74)
+    // （`draw_window_set_tempo.gml:14-21`）；点击 / 拖拽的判定框固定 (108, 57, 64, 22)。
+    let (box_x, box_w) = if bpm_on { (101.0, 74.0) } else { (108.0, 64.0) };
+    let mult = if bpm_on { 15.0 } else { 1.0 };
     bank.tempo_box(p, pos2(start.x + box_x, band + 3.0), bpm_on, th);
-    let value = if bpm_on {
-        format!("{:.2} BPM", shown * 15.0)
-    } else {
-        format!("{:.2} t / s", shown)
-    };
-    p.text(
-        pos2(start.x + 136.0, band + 6.0),
-        Align2::CENTER_TOP,
-        value,
-        digits,
-        th.text,
-    );
+    if state.tempo_input.is_none() {
+        // 原版把数值文字整段包在 `if (window != w_settempo)` 里（`control_draw.gml:2453`）：
+        // 就地框开着时不画数值，输入框直接盖在同一格上。
+        let value = if bpm_on {
+            format!("{:.2} BPM", shown * 15.0)
+        } else {
+            format!("{:.2} t / s", shown)
+        };
+        p.text(
+            pos2(start.x + 136.0, band + 6.0),
+            Align2::CENTER_TOP,
+            value,
+            digits.clone(),
+            th.text,
+        );
+    }
 
     let idle = state.window.is_none() && state.context_menu.is_none();
     let bars_rect = Rect::from_min_size(pos2(start.x + 184.0, band + 3.0), vec2(64.0, 22.0));
@@ -221,6 +228,88 @@ fn header(
             "歌曲的进度（全音、四分、十六分）",
         ));
 
+    let inline = state.tempo_input.take();
+    if let Some(mut text) = inline {
+        // 原版 `draw_inputbox(64, xx, 57 + song_tab_offset, w, …)`：框体高 21，
+        // 而「上一次按下 / 这次抬手在不在框里」用的是同一条高 22 的矩形。
+        let at = pos2(start.x + box_x, band + 3.0);
+        let gate = Rect::from_min_size(at, vec2(box_w, 22.0));
+        let (pressed, released, esc, hover) = ui.input(|i| {
+            (
+                i.pointer.button_pressed(PointerButton::Primary),
+                i.pointer.button_released(PointerButton::Primary),
+                i.key_pressed(Key::Escape),
+                i.pointer.hover_pos(),
+            )
+        });
+        let inside = hover.is_some_and(|h| gate.contains(h));
+        if pressed {
+            // 原版 `settempo = mouse_rectangle(xx, 57 + song_tab_offset, w, 22)`。
+            state.tempo_press_in = inside;
+        }
+        let focus_id = Id::new("tempo_input_focus");
+        let had_focus = ui
+            .ctx()
+            .data(|d| d.get_temp::<bool>(focus_id))
+            .unwrap_or(false);
+        let nested = ui.allocate_new_ui(
+            UiBuilder::new()
+                .id_salt("tempo_input")
+                .max_rect(Rect::from_min_size(at, vec2(box_w, 21.0)))
+                .layout(Layout::left_to_right(Align::Min)),
+            |ui| {
+                let re = ui.add(
+                    TextEdit::singleline(&mut text)
+                        .desired_width(box_w - 6.0)
+                        .font(digits),
+                );
+                if !had_focus {
+                    re.request_focus();
+                }
+                re
+            },
+        );
+        let re = nested.inner;
+        // 提示走原版 `draw_inputbox` 里的 `popup_set_window(xx, yy, w, 21, str)`，
+        // 两种语言的括号和斜杠两侧空格都不一样。
+        let tip = if crate::lang() == 1 {
+            format!(
+                "输入新速度（{}）",
+                if bpm_on {
+                    "拍数 / 分钟"
+                } else {
+                    "红石刻 / 秒"
+                }
+            )
+        } else {
+            format!(
+                "Enter the new tempo (in {})",
+                if bpm_on {
+                    "beats per minute"
+                } else {
+                    "ticks per second"
+                }
+            )
+        };
+        let re = re.on_hover_text(tip);
+        // 原版的收口条件只有一条：这次按下不在框里、这次抬手也在框外
+        // （`draw_window_set_tempo.gml:31`）。Enter 原样留给文本框、不算提交，
+        // Esc 只丢弃不改速度（`:47-51`），两条都顺带把 `settempo` 清回 0。
+        let finish_commit = released && !state.tempo_press_in && !inside;
+        let focused = re.has_focus();
+        // 关框时顺手清掉「已经抢过焦点」的暂存，下次开框才会重新去抢。
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(focus_id, !finish_commit && !esc && focused));
+        if finish_commit {
+            state.tempo_press_in = false;
+            commit_tempo_input(state, &text, mult);
+        } else if esc {
+            state.tempo_press_in = false;
+        } else {
+            state.tempo_input = Some(text);
+        }
+        return;
+    }
     let hit = Rect::from_min_size(pos2(start.x + 108.0, band + 3.0), vec2(64.0, 22.0));
     let resp = ui.interact(hit, Id::new("tempo_box"), Sense::click_and_drag());
     let clicked = idle && resp.clicked();
@@ -233,7 +322,7 @@ fn header(
         resp.hover_pos(),
     );
     if clicked {
-        state.emit(Command::ShowWindow(WindowKind::SetTempo));
+        open_tempo_input(state, bpm_on);
     }
     if started {
         state.tempo_drag = Some(tempo);
@@ -247,8 +336,9 @@ fn header(
     }
     if dragged {
         if let Some(raw) = state.tempo_drag {
-            // 原版 `tempodrag += 0.25 * (mouse_yprev - mouse_y) / 3`，夹在 0.25..60。
-            state.tempo_drag = Some((raw - dy * 0.25 / 3.0).clamp(0.25, 60.0));
+            // 原版 `tempodrag += 0.25 * (mouse_yprev - mouse_y) / 3`，夹在 0.25..180
+            // （`control_draw.gml:2531-2532`）。
+            state.tempo_drag = Some((raw - dy * 0.25 / 3.0).clamp(0.25, 180.0));
         }
     }
     if stopped {
@@ -278,6 +368,38 @@ fn header(
         } else {
             CursorIcon::PointingHand
         });
+}
+
+/// 打开原版 `w_settempo` 的那一格就地输入框：初值就是
+/// `string_format(real_tempo * 倍数, 0, 2)`（`draw_window_set_tempo.gml:4`）。
+/// 原版每次开窗重算一遍 `var input`，靠 `text_exists[64] = 0` 才把新值灌进
+/// `text_value[64]`，所以这里同样在开窗时重新播种。`settempo` 保持 0：它是全局量，
+/// 开窗那一刻还没被更新过，挡住同帧提交的是「抬手落在框内」那条判定。
+fn open_tempo_input(state: &mut EditorState, bpm_on: bool) {
+    let mult = if bpm_on { 15.0 } else { 1.0 };
+    state.tempo_input = Some(format!("{:.2}", state.doc.song.meta.tempo * mult));
+    state.tempo_press_in = false;
+}
+
+/// 原版 `draw_window_set_tempo.gml:29-46` 的提交：逗号当小数点、其余只留数字和小数点，
+/// 除回红石刻/秒，`>= 1000` 先除以 100，再夹进 `median(0.25, 值, 180)`。
+/// 一个数字都不剩时原版的 `real()` 抛错走 catch 回滚，这里同样按原速度不动；
+/// 原版只在值真的变了才置 `changed`，所以相等时连命令都不发。
+fn commit_tempo_input(state: &mut EditorState, text: &str, mult: f32) {
+    let old = state.doc.song.meta.tempo;
+    let digits: String = text
+        .replace(',', ".")
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let mut next = digits.parse::<f32>().map(|v| v / mult).unwrap_or(old);
+    if next >= 1000.0 {
+        next /= 100.0;
+    }
+    next = next.clamp(0.25, 180.0);
+    if (next - old).abs() > f32::EPSILON {
+        state.emit(Command::SetTempo(next));
+    }
 }
 
 /// 一行图层。`at` 是原版行底左上角（已含 `ROW_LIFT`），`yo` 是行高变化后的纵向居中量。
@@ -889,7 +1011,36 @@ fn show_layers_text(state: &mut EditorState, ui: &mut Ui) {
             time_str(song_len / tempo)
         ));
         if ui.button(tr("Tempo...", "速度…")).clicked() {
-            state.emit(Command::ShowWindow(WindowKind::SetTempo));
+            let bpm_on = state.prefs.use_bpm;
+            open_tempo_input(state, bpm_on);
+        }
+        // 退路没有标尺那条 32px 带，就地输入框只好画在按钮右边，提交条件也从
+        // 原版的「抬手在框外」换成「失去焦点」；Esc 仍然是直接丢弃。
+        let inline = state.tempo_input.take();
+        if let Some(mut text) = inline {
+            let re = ui.add(TextEdit::singleline(&mut text).desired_width(64.0));
+            // 只在刚开框的那一帧抢焦点，否则「失焦即提交」根本不会被触发。
+            let focus_id = Id::new("tempo_input_focus");
+            let had_focus = ui
+                .ctx()
+                .data(|d| d.get_temp::<bool>(focus_id))
+                .unwrap_or(false);
+            if !had_focus {
+                re.request_focus();
+            }
+            let focused = re.has_focus();
+            ui.ctx().data_mut(|d| d.insert_temp(focus_id, focused));
+            let bpm_on = state.prefs.use_bpm;
+            let mult = if bpm_on { 15.0 } else { 1.0 };
+            let esc = ui.input(|i| i.key_pressed(Key::Escape));
+            if esc {
+                state.tempo_press_in = false;
+            } else if re.lost_focus() {
+                state.tempo_press_in = false;
+                commit_tempo_input(state, &text, mult);
+            } else {
+                state.tempo_input = Some(text);
+            }
         }
     });
     ui.separator();
@@ -1013,3 +1164,40 @@ fn text_drag_value(
 }
 
 pub const PANEL_WIDTH: f32 = LAYER_PANEL_WIDTH;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::dispatch;
+
+    /// 原版就地速度框那一次提交的规则（`draw_window_set_tempo.gml:29-46`）：
+    /// 直接喂字符串进去，看最后写进歌曲的速度。`start` 是提交前的速度。
+    fn committed(text: &str, mult: f32, start: f32) -> f32 {
+        let mut state = EditorState::new();
+        state.doc.song.meta.tempo = start;
+        commit_tempo_input(&mut state, text, mult);
+        for cmd in std::mem::take(&mut state.pending) {
+            dispatch(&mut state, cmd, &egui::Context::default());
+        }
+        state.doc.song.meta.tempo
+    }
+
+    #[test]
+    fn inline_tempo_commit_follows_the_original_parse_rules() {
+        assert_eq!(committed("12.5", 1.0, 10.0), 12.5);
+        // 逗号当小数点（`string_replace(input, ",", ".")`）。
+        assert_eq!(committed("1,25", 1.0, 10.0), 1.25);
+        // 先除回红石刻/秒：BPM 单位下输 150 就是 10 t/s。
+        assert_eq!(committed("150", 15.0, 3.0), 10.0);
+        // 一个数字都不剩：原版 `real()` 抛错走 catch，速度回到改之前。
+        assert_eq!(committed("abc", 1.0, 10.0), 10.0);
+        // 单位混在数字里也照旧取值（`string_digits_symbol(…, ".")`）。
+        assert_eq!(committed("t8.5/s", 1.0, 10.0), 8.5);
+        // 除完之后 >= 1000 先除以 100，再夹进 median(0.25, 值, 180)。
+        assert_eq!(committed("1200", 1.0, 10.0), 12.0);
+        assert_eq!(committed("800", 1.0, 10.0), 180.0);
+        assert_eq!(committed("0", 1.0, 10.0), 0.25);
+        // 和原值相等时原版不置 changed，端口连命令都不发。
+        assert_eq!(committed("10", 1.0, 10.0), 10.0);
+    }
+}
