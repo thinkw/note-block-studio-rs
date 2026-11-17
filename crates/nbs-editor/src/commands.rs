@@ -669,7 +669,8 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.current.velocity = 100;
             state.current.panning = 100;
             state.current.pitch = 0;
-            state.audio.preview_note(&state.current);
+            let (vol, stereo) = state.wheel_preview_vp();
+            state.audio.preview_note_vp(&state.current, vol, stereo);
         }
         Command::WheelKey(dir) => {
             let cur = state.current.key as i32;
@@ -681,7 +682,8 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.current.velocity = 100;
             state.current.panning = 100;
             state.current.pitch = 0;
-            state.audio.preview_note(&state.current);
+            let (vol, stereo) = state.wheel_preview_vp();
+            state.audio.preview_note_vp(&state.current, vol, stereo);
         }
         Command::ToggleRecord => {
             state.record = !state.record;

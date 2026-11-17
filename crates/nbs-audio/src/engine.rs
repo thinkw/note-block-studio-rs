@@ -24,7 +24,14 @@ pub trait AudioEngine {
     /// 载入歌曲（构建事件表，必要时补载自定义采样）。
     fn prepare(&mut self, song: &Song);
     /// 原版 `play_sound()`：不动播放头，立刻用当前音色试听一个音。
-    fn preview_note(&mut self, note: &Note);
+    /// 除了 `layerhov_vppreview` 打开时的滚轮预览，原版所有试听调用传的都是 100/100。
+    fn preview_note(&mut self, note: &Note) {
+        self.preview_note_vp(note, 100, 100);
+    }
+    /// 原版 `play_sound(ins, key, vol, pan, pit)` 的 vol/pan 两个入参：
+    /// 按 `control_draw.gml:256-263`，它们是「图层音量 / 图层声道」，
+    /// 与音符自身的力度、声像一起进 [`crate::mixer::Voice::gains`]。
+    fn preview_note_vp(&mut self, note: &Note, layer_volume: u8, layer_stereo: u8);
     fn start(&mut self, from_tick: f64);
     fn stop(&mut self);
     fn is_playing(&self) -> bool;
@@ -228,13 +235,16 @@ impl AudioEngine for CpalEngine {
         self.clock.set_tempo(song.meta.tempo);
         self.last_song = Some(song.clone());
     }
-    fn preview_note(&mut self, note: &Note) {
+    fn preview_note_vp(&mut self, note: &Note, layer_volume: u8, layer_stereo: u8) {
         let mut st = self.shared.lock();
         let bank = st.bank.clone();
-        // 试听固定按图层音量 100 / 平衡 100，跟原版 `play_sound(ins, key, 100, 100, 0)` 一致。
+        // 层音量/声道由调用方给：原版 `play_sound(ins, key, vol, pan, 0)` 的 vol/pan
+        // 就是这两个位置，绝大多数调用传 100/100，只有 `layerhov_vppreview` 打开时的
+        // 滚轮预览传悬停层的值（`control_draw.gml:256-263`）。
         // 层号 0：原版预览调用不带层号，emitter 的 soundlayer 默认 0，
         // 区间消音掐不到它（只有 pitch<=0 的全消音能掐到）。tick -1：预览不抖动。
-        st.mixer.spawn(note, 100, 100, &bank, 0, -1);
+        st.mixer
+            .spawn(note, layer_volume, layer_stereo, &bank, 0, -1);
     }
     fn start(&mut self, from_tick: f64) {
         self.clock.seek(from_tick);
@@ -404,7 +414,7 @@ impl AudioEngine for SilentEngine {
             song.meta.loop_max,
         );
     }
-    fn preview_note(&mut self, _note: &Note) {
+    fn preview_note_vp(&mut self, _note: &Note, _layer_volume: u8, _layer_stereo: u8) {
         // 没有输出设备，试听无处可去；时钟照常推进。
     }
     fn start(&mut self, from_tick: f64) {

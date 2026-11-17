@@ -37,6 +37,9 @@ pub struct Preferences {
     pub mousewheel_scroll_speed: u8,
     /// 原版 `changepitch`：滚轮停在音符上时改音符属性，而不是移动视口。
     pub changepitch: bool,
+    /// 原版 `layerhov_vppreview`（`control_create.gml:410` 出厂 = 0）：滚轮换音色/换键
+    /// 时的试听声用鼠标悬停那条层的音量和声道，而不是固定的 100/100。
+    pub layerhov_vppreview: bool,
     /// 原版 `select_lastpressed`：键盘按下琴键后，选中的音跟到那个键。
     pub select_lastpressed: bool,
     pub show_layers: bool,
@@ -226,6 +229,7 @@ impl Default for Preferences {
             mousewheel: 0,
             mousewheel_scroll_speed: 1,
             changepitch: true,
+            layerhov_vppreview: false,
             select_lastpressed: true,
             show_layers: true,
             show_piano: true,
@@ -613,6 +617,22 @@ mod tests {
         p.accent = [10, 20, 30];
         let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(back.accent, [10, 20, 30], "accent1/2/3 要落盘（save_settings.gml:65-67）");
+    }
+
+    /// 原版 `layerhov_vppreview`：`control_create.gml:410` 出厂 0，
+    /// `save_settings.gml:51` 写盘、`load_settings.gml:58` 读回。
+    #[test]
+    fn layerhov_vppreview_defaults_off_and_persists() {
+        assert!(
+            !Preferences::default().layerhov_vppreview,
+            "悬停层预览出厂关闭（control_create.gml:410）"
+        );
+        let old: Preferences = serde_json::from_str(r#"{"version":1,"theme":3}"#).unwrap();
+        assert!(!old.layerhov_vppreview, "旧配置缺键时退回出厂关闭");
+        let mut p = Preferences::default();
+        p.layerhov_vppreview = true;
+        let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert!(back.layerhov_vppreview, "悬停层预览开关要落盘（save_settings.gml:51）");
     }
 
     /// `[schematic_export]` 段：整份选项 + 「警告已看过」都要能落盘，

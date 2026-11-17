@@ -1364,9 +1364,9 @@ mod gui_window_tests {
     }
 
     /// 原版页 3「访问」的两组：`draw_areaheader(22, 74, 456, 140, "鼠标滚轮")` 里的
-    /// 三个档位 + 「滚动速度」拖拽行（`y1 + 150`，出厂 1），和
-    /// `draw_areaheader(22, 240, 456, 105, "琴键与层")` 组名本身。
-    /// 组名此前被写成「琴键」、滚动速度整行缺失，这条用例把它们钉回原版。
+    /// 三个档位 + 「滚动速度」拖拽行（`y1 + 150`，出厂 1）+ 「悬停层预览」
+    /// （`y1 + 198`），和 `draw_areaheader(22, 240, 456, 105, "琴键与层")` 组名本身。
+    /// 组名此前被写成「琴键」、滚动速度与悬停层预览两行缺失，这条用例把它们钉回原版。
     #[test]
     fn preferences_usability_page_shows_wheel_and_layer_groups() {
         isolate_prefs();
@@ -1390,6 +1390,7 @@ mod gui_window_tests {
             "鼠标滚轮",
             "滚动速度：",
             "当在音符上使用鼠标滚轮改变音符属性",
+            "将悬停层的音量和声道调整应用于音符预览声音",
             "琴键与层",
             "选择按下的键",
             // 出厂步长 1 直接画在拖拽位上（原版 mousewheel = 0 时也是数字本体）。
@@ -1401,6 +1402,19 @@ mod gui_window_tests {
                 texts.join(" | ")
             );
         }
+        assert!(!state.prefs.layerhov_vppreview, "悬停层预览出厂关闭");
+        click_text(
+            &mut state,
+            &ctx,
+            "将悬停层的音量和声道调整应用于音符预览声音",
+        );
+        assert!(
+            state.prefs.layerhov_vppreview,
+            "点标签要真的打开悬停层预览"
+        );
+        state.save_prefs();
+        let back = nbs_io::prefs::Preferences::load();
+        assert!(back.layerhov_vppreview, "悬停层预览开关要落盘");
     }
 }
 

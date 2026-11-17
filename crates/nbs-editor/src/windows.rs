@@ -1661,7 +1661,8 @@ fn prefs_appearance(state: &mut EditorState, pg: &mut Page) {
     }
 }
 
-/// 原版页 3「访问」：滚轮行为（三个档位 + 滚动速度 + 两个开关）与琴键选中行为。
+/// 原版页 3「访问」：滚轮行为（三个档位 + 滚动速度 + 悬停改属性 + 悬停层预览）
+/// 与琴键选中行为。
 /// 源码末尾的「对琴键右键可更改键位。」和「重置键位」按钮依赖键位编辑功能，
 /// 我们只有固定键位，所以这两行也不出现。
 fn prefs_usability(state: &mut EditorState, pg: &mut Page) {
@@ -1750,6 +1751,25 @@ fn prefs_usability(state: &mut EditorState, pg: &mut Page) {
         false,
     ) {
         state.prefs.changepitch = !state.prefs.changepitch;
+        state.emit(Command::SavePreferences);
+    }
+    // 原版 `draw_checkbox(x1 + 40, y1 + 198, layerhov_vppreview, …)`。
+    if pg.check(
+        40.0,
+        198.0,
+        state.prefs.layerhov_vppreview,
+        tr(
+            "Apply hovered layer's volume and panning to note preview sounds",
+            "将悬停层的音量和声道调整应用于音符预览声音",
+        ),
+        tr(
+            "Whether the preview sound's volume and panning should be\nrelative to the layer the mouse is hovering over.",
+            "预览声音的音量和声道是否应与鼠标悬停的层相关。",
+        ),
+        false,
+        false,
+    ) {
+        state.prefs.layerhov_vppreview = !state.prefs.layerhov_vppreview;
         state.emit(Command::SavePreferences);
     }
 

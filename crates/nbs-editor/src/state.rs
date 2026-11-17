@@ -1539,6 +1539,24 @@ impl EditorState {
         rows
     }
 
+    /// 原版 `control_draw.gml:256-263`：滚轮换音色 / 换键的试听声，在
+    /// `layerhov_vppreview` 打开、鼠标确实悬在一条已有层上（`selby <= endb`）时
+    /// 用该层的音量和声道；此时 `selected_vel = selected_pan = 100`，所以原式的
+    /// `(layervol / 100) * 100` 与 `(layerstereo + 100) / 2` 就是层自身的两个值。
+    /// 其余情况回落到中性 100/100。
+    pub fn wheel_preview_vp(&self) -> (u8, u8) {
+        let Some((_, layer)) = self.hover_cell else {
+            return (100, 100);
+        };
+        if !self.prefs.layerhov_vppreview || layer > self.doc.song.endb {
+            return (100, 100);
+        }
+        match self.doc.song.layers.get(layer as usize) {
+            Some(l) => (l.volume, l.stereo),
+            None => (100, 100),
+        }
+    }
+
     pub fn add_recent(&mut self, path: PathBuf) {
         self.recent_files.retain(|p| p.path != path);
         self.recent_files.insert(
@@ -1930,5 +1948,52 @@ mod tests {
             "实测 {picked:?}"
         );
         assert_eq!(st.window, Some(WindowKind::Preferences));
+    }
+
+    /// 原版 `control_draw.gml:256-263`：只有 `layerhov_vppreview` 打开、且鼠标悬在
+    /// `0..=endb` 的层上时，滚轮换音色/换键的试听才用那条层的音量和声道，
+    /// 其余情况一律按中性 100/100（原版 `selected_vel = selected_pan = 100`）。
+    #[test]
+    fn wheel_preview_uses_the_hovered_layer_only_when_the_pref_is_on() {
+        use nbs_core::model::Layer;
+        let mut st = EditorState::new();
+        // 清掉新建模板自带的音符，好让 endb 由本用例说了算。
+        st.doc.song.columns.clear();
+        st.doc.song.layers = vec![
+            Layer::default(),
+            Layer {
+                volume: 60,
+                stereo: 30,
+                ..Layer::default()
+            },
+        ];
+        st.doc.song.set(0, 1, Note::default());
+        st.doc.song.recalculate();
+        assert_eq!(st.doc.song.endb, 1, "用例前提：最后一条有音符的层是 1");
+        st.hover_cell = Some((0, 1));
+        assert_eq!(
+            st.wheel_preview_vp(),
+            (100, 100),
+            "出厂关闭时试听按中性 100/100"
+        );
+        st.prefs.layerhov_vppreview = true;
+        assert_eq!(
+            st.wheel_preview_vp(),
+            (60, 30),
+            "打开后取悬停层的 volume/stereo"
+        );
+        // 原版条件 `selby <= current_song.endb`：endb 现在是 1，2 号层不算。
+        st.hover_cell = Some((0, 2));
+        assert_eq!(
+            st.wheel_preview_vp(),
+            (100, 100),
+            "超出 endb 的层不算（原版 selby <= endb）"
+        );
+        st.hover_cell = None;
+        assert_eq!(
+            st.wheel_preview_vp(),
+            (100, 100),
+            "鼠标不在格子上时按 100/100"
+        );
     }
 }
