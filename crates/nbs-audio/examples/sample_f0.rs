@@ -179,16 +179,18 @@ fn resample(x: &[f32], factor: f32) -> Vec<f32> {
     out
 }
 
-/// 归一化互相关，最多比 1 秒。
+/// 皮尔逊相关（减真实均值），最多比 10 秒重叠。
 fn ncc(a: &[f32], b: &[f32]) -> f32 {
-    let n = a.len().min(b.len()).min(44100);
+    let n = a.len().min(b.len()).min(441_000);
     if n < 1000 {
         return -2.0;
     }
-    let (ma, mb) = (rms(&a[..n]) as f64, rms(&b[..n]) as f64);
-    if ma < 1e-6 || mb < 1e-6 {
-        return -2.0;
+    let (mut sa, mut sb) = (0.0f64, 0.0f64);
+    for i in 0..n {
+        sa += a[i] as f64;
+        sb += b[i] as f64;
     }
+    let (ma, mb) = (sa / n as f64, sb / n as f64);
     let (mut sab, mut saa, mut sbb) = (0.0f64, 0.0f64, 0.0f64);
     for i in 0..n {
         let x = a[i] as f64 - ma;
@@ -205,7 +207,8 @@ fn ncc(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
-/// base 按候选半音移位后与 variant 比波形：(最优移位, 最优相关, 次优相关)。
+/// base 按候选半音移位后与 variant 比波形：粗步长 147 点找峰，再 ±147 点逐点细对齐。
+/// 返回 (最优移位, 最优相关, 次优移位的相关)。
 fn best_shift_corr(base: &[f32], variant: &[f32], shifts: &[i32]) -> (i32, f32, f32) {
     let mut res: Vec<(i32, f32)> = Vec::new();
     for &s in shifts {
@@ -213,16 +216,25 @@ fn best_shift_corr(base: &[f32], variant: &[f32], shifts: &[i32]) -> (i32, f32, 
         if shifted.len() < 2000 || shifted.len() > 4_000_000 {
             continue;
         }
-        let mut v_best = -2.0f32;
+        let mut coarse = (0usize, -2.0f32);
         let mut lag = 0usize;
         while lag + 2000 < shifted.len() {
             let v = ncc(&shifted[lag..], variant);
-            if v > v_best {
-                v_best = v;
+            if v > coarse.1 {
+                coarse = (lag, v);
             }
             lag += 147;
         }
-        res.push((s, v_best));
+        let mut best = coarse;
+        let lo = coarse.0.saturating_sub(147);
+        let hi = (coarse.0 + 147).min(shifted.len().saturating_sub(2000));
+        for l in lo..=hi {
+            let v = ncc(&shifted[l..], variant);
+            if v > best.1 {
+                best = (l, v);
+            }
+        }
+        res.push((s, best.1));
     }
     if res.is_empty() {
         return (0, -2.0, -2.0);
@@ -285,9 +297,9 @@ fn main() {
             }
         }
         println!(
-            "{event:16} {:6.1} {:4.1} {:5.2} {:6.1} | {:6.1} {:5.2} | {:6.1} {:5.2} | {:+3}({:4.2}/{:4.2}) | {:+3}({:4.2}/{:4.2}) | {:9} | {:.3} {:.3}",
+            "{event:16} {:6.1} {:4.1} {:5.2} {:6.1} | {:6.1} {:5.2} | {:6.1} {:5.2} | {:+3}({:.4}/{:.4}) | {:+3}({:.4}/{:.4}) | {:13} | {:.3} {:.3}",
             bh, bs, bspread, key, uh, usp, dh, dsp, su, cu, cu2, sd, cd, cd2,
-            pair.map(|(p, c, _)| format!("{:+3}({:4.2})", p, c)).unwrap_or("   -".into()),
+            pair.map(|(p, c, _)| format!("{:+3}({:.4})", p, c)).unwrap_or("   -".into()),
             b.len() as f32 / RATE,
             peak(&b)
         );
@@ -299,6 +311,6 @@ fn main() {
         keys.iter().map(|v| format!("{v:.1}")).collect::<Vec<_>>().join(" ")
     );
     println!("三窗不一致/无周期结构，基频不可信的 {} 件：{}", unstable.len(), unstable.join(" "));
-    println!("内置→变体 命中 +24/-24 且相关>0.5：{base_ok}/20");
-    println!("_-1→_1 配对命中 +48 且相关>0.8：{pair_ok}/20");
+    println!("内置→变体 命中 +24/-24 且 ρ>0.5：{base_ok}/20");
+    println!("_-1→_1 配对命中 +48 且 ρ>0.8：{pair_ok}/20");
 }
