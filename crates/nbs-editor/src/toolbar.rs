@@ -257,8 +257,10 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
             }
             ui.separator();
             // 原版右键菜单里模式操作（升/降调）和「更改音色」「Macros...」都带
-            // `inactive(current_song.selected = 0)`：没有选区就置灰；批量设置 /
-            // 宏条目保持可点，点了空选区静默无效（宏本体 `selected = 0` 早退）。
+            // `inactive(current_song.selected = 0)`：没有选区就置灰。宏条目本身不再
+            // 判空（宏窗口和宏本体各自在 `selected = 0` 时早退）。
+            // 原版这里没有「移调…」窗口，也没有「批量设置」二级菜单——三个
+            // Set velocity / panning / pitch... 都在 `Macros...` 子菜单里。
             let has_sel = !state.doc.selection.is_empty();
             let (up_oct, down_oct) = match state.tool {
                 crate::state::EditMode::Key => (
@@ -281,24 +283,6 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                 state.emit(Command::Transpose(-12));
                 ui.close_menu();
             }
-            if ui
-                .add_enabled(has_sel, egui::Button::new(tr("Transpose...", "移调…")))
-                .clicked()
-            {
-                state.emit(Command::ShowWindow(WindowKind::Transpose));
-                ui.close_menu();
-            }
-            ui.menu_button(tr("Set properties...", "批量设置"), |ui| {
-                if ui.button(tr("Velocity...", "力度…")).clicked() {
-                    state.emit(Command::ShowWindow(WindowKind::SetVelocity));
-                }
-                if ui.button(tr("Panning...", "声像…")).clicked() {
-                    state.emit(Command::ShowWindow(WindowKind::SetPanning));
-                }
-                if ui.button(tr("Pitch...", "微调…")).clicked() {
-                    state.emit(Command::ShowWindow(WindowKind::SetPitch));
-                }
-            });
             ui.separator();
             instrument_menus(state, ui);
             ui.separator();

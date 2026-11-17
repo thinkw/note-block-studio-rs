@@ -304,7 +304,7 @@ fn main() {
     let en_ok = kept_english(zh_mode);
     // (标签, 窗口, 首选项页签)
     let mut units: Vec<(String, Option<WindowKind>, u8)> = vec![("主界面".into(), None, 0)];
-    let named: [(&str, WindowKind); 32] = [
+    let named: [(&str, WindowKind); 31] = [
         ("歌曲信息", WindowKind::SongInfo),
         ("歌曲属性", WindowKind::Properties),
         ("歌曲数据", WindowKind::Statistics),
@@ -315,7 +315,6 @@ fn main() {
         ("设定音量", WindowKind::SetVelocity),
         ("设定声道", WindowKind::SetPanning),
         ("设定微调", WindowKind::SetPitch),
-        ("移调", WindowKind::Transpose),
         ("颤音", WindowKind::Tremolo),
         ("立体声", WindowKind::Stereo),
         ("采样编辑器", WindowKind::ClipEditor),

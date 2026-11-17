@@ -27,9 +27,11 @@ pub enum Macro {
     Reset,
     ReplaceKey,
     Tremolo {
-        spacing: u32,
+        spacing: i32,
         fade: TremoloFade,
-        amount: i32,
+        auto: bool,
+        dec: i32,
+        sus: i32,
     },
     Stereo {
         width: u8,
@@ -49,14 +51,14 @@ pub enum Macro {
         detune: i32,
     },
     SetVelocity {
-        value: u8,
+        value: i32,
         percent: bool,
     },
     SetPanning {
-        value: i16,
+        value: i32,
     },
     SetPitch {
-        value: i16,
+        value: i32,
         additive: bool,
     },
     SetInstrument {
@@ -127,9 +129,11 @@ impl Macro {
             Self::Reset,
             Self::ReplaceKey,
             Self::Tremolo {
-                spacing: 2,
+                spacing: 1,
                 fade: TremoloFade::None,
-                amount: 20,
+                auto: true,
+                dec: 20,
+                sus: 20,
             },
             Self::Stereo {
                 width: 60,
@@ -187,8 +191,19 @@ fn group_columns(items: &[(i64, i64, Note)]) -> BTreeMap<i64, Vec<(i64, i64, Not
     cols
 }
 
+/// 原版 `selection_change` 的取值写法：`if (val >= 0 && val <= 100)` 才写回，
+/// 算出界的那条音符**保持原值**，不是夹到边界。四个批量窗口里凡是可能出界的
+/// 那一支（力度、声道、音高，含加法模式）都走这里。
+fn change_or_keep(new: i32, min: i32, max: i32, old: i32) -> i32 {
+    if (min..=max).contains(&new) {
+        new
+    } else {
+        old
+    }
+}
+
 /// 纯函数变换：输入绝对坐标音符，输出（可能数量/坐标变化的）新音符列表。
-pub fn transform(items: Vec<(i64, i64, Note)>, m: &Macro) -> Vec<(i64, i64, Note)> {
+pub fn transform(items: Vec<(i64, i64, Note)>, m: &Macro, origin_x: i64) -> Vec<(i64, i64, Note)> {
     if items.is_empty() {
         return items;
     }
@@ -257,9 +272,13 @@ pub fn transform(items: Vec<(i64, i64, Note)>, m: &Macro) -> Vec<(i64, i64, Note
         }
         Macro::Stereo { width, reverse } => {
             let w = (*width).min(100) as i32;
+            // 原版 `draw_window_macro_stereo` 确定时按列交替写声道：不反转时第一列
+            // 拿 `200 + (width - 100)`（= 100 + width，偏右），第二列拿
+            // `0 - (width - 100)`（= 100 - width，偏左）；勾了反转两列对调。
+            // 原版那句 `// First column panned left` 与代码相反，这里按代码走。
             for (ci, &x) in col_keys.iter().enumerate() {
-                let left = (ci % 2 == 0) != *reverse;
-                let pan = if left { 100 - w } else { 100 + w };
+                let first_side = (ci % 2 == 0) != *reverse;
+                let pan = if first_side { 100 + w } else { 100 - w };
                 for &(xx, y, mut n) in &cols[&x] {
                     n.panning = pan.clamp(0, PAN_MAX as i32) as u8;
                     out.push((xx, y, n));
@@ -337,29 +356,35 @@ pub fn transform(items: Vec<(i64, i64, Note)>, m: &Macro) -> Vec<(i64, i64, Note
         Macro::SetVelocity { value, percent } => {
             for (x, y, mut n) in items {
                 n.velocity = if *percent {
-                    ((n.velocity as f32) * (*value as f32 / 100.0))
-                        .round()
-                        .clamp(0.0, VEL_MAX as f32) as u8
+                    // 百分比这一支原版不走 `selection_change`，而是自己遍历选区做
+                    // `vel * setvel / 100`：不判范围、结果是个实数（所以 25 的 40% 是
+                    // 10，而 30 的 40% 是 12.0000…），最后写进音符音量字节时向下取整。
+                    ((n.velocity as f32 * *value as f32 / 100.0).floor() as i32)
+                        .clamp(0, VEL_MAX as i32) as u8
                 } else {
-                    (*value).min(VEL_MAX)
+                    change_or_keep(*value, 0, VEL_MAX as i32, n.velocity as i32) as u8
                 };
                 out.push((x, y, n));
             }
         }
         Macro::SetPanning { value } => {
-            let p = (*value + 100).clamp(0, PAN_MAX as i16) as u8;
             for (x, y, mut n) in items {
-                n.panning = p;
+                // 窗口里 `setpan` 已经夹在 -100..100，+100 后必落在 0..200。
+                n.panning = change_or_keep(*value + 100, 0, PAN_MAX as i32, n.panning as i32) as u8;
                 out.push((x, y, n));
             }
         }
         Macro::SetPitch { value, additive } => {
             for (x, y, mut n) in items {
-                n.pitch = if *additive {
-                    (n.pitch as i32 + *value as i32).clamp(-PIT_MAX as i32, PIT_MAX as i32) as i16
-                } else {
-                    (*value).clamp(-PIT_MAX, PIT_MAX)
-                };
+                // 原版 `selection_change(m_pit, setpit, addpitch)`：加法模式把数值
+                // 叠在原音高上，两种模式都「超出 ±1200 就整条跳过」，保持原值而不是夹到边界。
+                let base = if *additive { n.pitch as i32 } else { 0 };
+                n.pitch = change_or_keep(
+                    base + *value,
+                    -(PIT_MAX as i32),
+                    PIT_MAX as i32,
+                    n.pitch as i32,
+                ) as i16;
                 out.push((x, y, n));
             }
         }
@@ -372,27 +397,100 @@ pub fn transform(items: Vec<(i64, i64, Note)>, m: &Macro) -> Vec<(i64, i64, Note
         Macro::Tremolo {
             spacing,
             fade,
-            amount,
+            auto,
+            dec,
+            sus,
         } => {
-            let sp = (*spacing).clamp(1, 8) as i64;
-            let total_out = ncol as i64 * sp;
+            // 原版 `macro_tremolo` / `macro_tremolo_fadein` / `macro_tremolo_fadeout`
+            // 是同一趟走查：每次取出一个列段（段头是这一列相对上一列的偏移），把这一列
+            // 重复「下一列的偏移 / 音符间隔」次，重复出来的每一段段头都改写成
+            // `trem_spacing`；最后一列只出一次、段头写成 1；收尾把整个数组的第 0 格强制
+            // 成 0，也就是让颤音结果贴住选区原点铺开。端口的位置是绝对 tick，
+            // 所以「第 0 格 = 0」换成「第一列落在选区原点 `origin_x`」。
+            let sp = (*spacing).max(1) as i64;
+            let last = col_keys.len() - 1;
+            let mut pos = origin_x;
+            let mut first = true;
             for (ci, &x) in col_keys.iter().enumerate() {
-                for (k, &(xx, y, mut n)) in cols[&x].iter().enumerate() {
-                    let _ = k;
-                    for j in 0..sp {
-                        let nx = xx * sp + j;
-                        let progress = if total_out <= 1 {
-                            0.0
-                        } else {
-                            (ci as f64 * sp as f64 + j as f64) / total_out as f64
+                let col = &cols[&x];
+                let is_last = ci == last;
+                // 原版 `replength = real(下一列偏移 / trem_spacing)`，循环条件却是
+                // `a < replength`（实数比较），等价于向下取整；偏移不足一个间隔的那一列
+                // 一次都不出，等于被丢掉。
+                let reps = if is_last {
+                    1
+                } else {
+                    let gap = col_keys[ci + 1] - x;
+                    ((gap as f64) / (sp as f64)).floor().max(0.0) as usize
+                };
+                // 斜坡的步进：自动音量按「本段重复出几列」算
+                // `if (c - 4 > 0) 100/(c-4) else if (c - 2 > 0) 100/(c-2) else 100/c`，
+                // 手动就直接取「触发/延长」那一格。
+                let inc = if !auto {
+                    *dec as f64
+                } else if reps > 4 {
+                    100.0 / (reps - 4) as f64
+                } else if reps > 2 {
+                    100.0 / (reps - 2) as f64
+                } else if reps == 0 {
+                    // 原版这一支会算 `100 / 0`，但 `while (f < 0)` 一次都不执行，
+                    // 效果只是把这一列丢掉；端口照样丢掉，不复现那次除零。
+                    continue;
+                } else {
+                    100.0 / reps as f64
+                };
+                for k in 0..reps {
+                    if !first {
+                        // 重复列之间隔一个「音符间隔」，只有最后一列那一步是 1。
+                        pos += if is_last { 1 } else { sp };
+                    }
+                    first = false;
+                    let start = out.len();
+                    for &(_, y, n) in col {
+                        out.push((pos, y, n));
+                    }
+                    // 最后一列在原版走的是 `if val >= total_vals` 那一支：整段倒出来
+                    // 就 break，既不重复也不上斜坡，力度保持原样。
+                    if is_last || *fade == TremoloFade::None {
+                        continue;
+                    }
+                    // 原版每出一列做一次 `decr += inc`，所以第 k 列（从 0 数）拿到
+                    // `inc * (k + 1)`。列内第一个音符和其余音符的分支不一样：
+                    // 第一格不看「触发/延长」，直接与 80 比。
+                    let d = inc * (k + 1) as f64;
+                    for (j, idx) in (start..out.len()).enumerate() {
+                        let v = match fade {
+                            TremoloFade::In if j == 0 => {
+                                if *auto {
+                                    d.min(80.0)
+                                } else if d < *sus as f64 {
+                                    d
+                                } else {
+                                    *sus as f64
+                                }
+                            }
+                            TremoloFade::In => {
+                                if d <= *dec as f64 {
+                                    d
+                                } else if *auto {
+                                    80.0
+                                } else {
+                                    *sus as f64
+                                }
+                            }
+                            TremoloFade::Out => {
+                                if 100.0 - d >= 20.0 {
+                                    100.0 - d
+                                } else if *auto {
+                                    20.0
+                                } else {
+                                    *sus as f64
+                                }
+                            }
+                            TremoloFade::None => d,
                         };
-                        let env = match fade {
-                            TremoloFade::None => 0,
-                            TremoloFade::In => (amount.abs() as f64 * progress) as i32,
-                            TremoloFade::Out => -(amount.abs() as f64 * progress) as i32,
-                        };
-                        n.velocity = (n.velocity as i32 + env).clamp(1, VEL_MAX as i32) as u8;
-                        out.push((nx, y, n));
+                        // 选区里的力度在原版是实数，写回音符时按字节截断。
+                        out[idx].2.velocity = (v as i32).clamp(0, VEL_MAX as i32) as u8;
                     }
                 }
             }
@@ -425,7 +523,7 @@ impl Document {
             .iter()
             .map(|n| (sel.x + n.dx as i64, sel.y + n.dy as i64, n.note))
             .collect();
-        let result = transform(abs, m);
+        let result = transform(abs, m, sel.x);
         let mut tx = self.begin(format!("{}: {}", crate::tr("Macro", "宏"), m.label()));
         tx.track_selection();
         let new_sel = selection_at_origin(sel.x, sel.y, &result);
@@ -486,16 +584,137 @@ mod tests {
         assert_eq!(d.selection.at(2, 0).unwrap().pitch, -40);
     }
 
+    /// 原版 `macro_tremolo`：每一列重复「下一列的列偏移 / 音符间隔」次，
+    /// 重复出来的列之间隔一个间隔；最后一列只出一次，而且那一步的偏移写成 1
+    /// （不是间隔），所以尾巴会贴到前一列后面一格。
+    fn tremolo(spacing: i32, fade: TremoloFade, auto: bool, dec: i32, sus: i32) -> Macro {
+        Macro::Tremolo {
+            spacing,
+            fade,
+            auto,
+            dec,
+            sus,
+        }
+    }
+
+    /// 两列：0 与 8，中间空 8 格；间隔 2 → 第一列出 4 列（0/2/4/6），
+    /// 最后一列出在 6 + 1 = 7。
     #[test]
-    fn tremolo_expands_notes() {
-        let mut d = doc_with_column();
-        d.select_rect(0, 0, 7, 0, false, false, false);
-        d.run_macro(&Macro::Tremolo {
-            spacing: 2,
-            fade: TremoloFade::None,
-            amount: 0,
-        });
-        assert_eq!(d.selection.len(), 16);
+    fn tremolo_repeats_each_column_by_the_tick_gap() {
+        let mut d = Document::with_song(Song::new());
+        d.place_note(0, 0, Note::new(0, 45));
+        d.place_note(8, 0, Note::new(0, 45));
+        d.select_rect(0, 0, 8, 0, false, false, false);
+        d.run_macro(&tremolo(2, TremoloFade::None, true, 20, 20));
+        assert_eq!(d.selection.len(), 5, "4 次重复 + 最后一列");
+        for x in [0u32, 2, 4, 6, 7] {
+            assert!(
+                d.selection.at(x, 0).is_some(),
+                "第 {x} 列该有一个音符，实际 =={:?}",
+                d.selection.at(x, 0)
+            );
+        }
+        assert_eq!(d.selection.at(1, 0), None, "重复之间隔的是间隔，不是每格");
+    }
+
+    /// 间隔 1 时原版退化成「把每一列铺满到下一列之前」，最后一列落在前一列后一格。
+    #[test]
+    fn tremolo_with_spacing_one_fills_every_tick() {
+        let mut d = Document::with_song(Song::new());
+        d.place_note(0, 0, Note::new(0, 45));
+        d.place_note(4, 0, Note::new(0, 45));
+        d.select_rect(0, 0, 4, 0, false, false, false);
+        d.run_macro(&tremolo(1, TremoloFade::None, true, 20, 20));
+        assert_eq!(d.selection.len(), 5, "0..3 四列 + 最后一列落在 4");
+        assert!(d.selection.at(4, 0).is_some(), "最后一列 = 前一列 + 1");
+    }
+
+    /// 自动音量的淡入：`inc = 100 / (重复列数 - 4)`（列数 >4 那一支），
+    /// 每出一列 `decr += inc`，列内第一个音符与 80 比。
+    #[test]
+    fn tremolo_fade_in_auto_ramps_and_caps_at_80() {
+        let mut d = Document::with_song(Song::new());
+        d.place_note(0, 0, Note::new(0, 45));
+        d.place_note(8, 0, Note::new(0, 45));
+        d.select_rect(0, 0, 8, 0, false, false, false);
+        d.run_macro(&tremolo(1, TremoloFade::In, true, 20, 20));
+        let vel: Vec<u8> = (0..8u32)
+            .map(|x| d.selection.at(x, 0).unwrap().velocity)
+            .collect();
+        assert_eq!(
+            vel,
+            vec![25, 50, 75, 80, 80, 80, 80, 80],
+            "100/4 = 25 起步，封顶 80"
+        );
+        // 最后一列走的是原版的「整段直接倒出来」那一支，力度不动。
+        assert_eq!(
+            d.selection.at(8, 0).unwrap().velocity,
+            100,
+            "最后一列不上斜坡"
+        );
+    }
+
+    /// 自动音量的淡出：同一列内除第一个音符外都按 `100 - decr` 走，最低 20。
+    #[test]
+    fn tremolo_fade_out_auto_ramps_down_to_20() {
+        let mut d = Document::with_song(Song::new());
+        d.place_note(0, 0, Note::new(0, 45));
+        d.place_note(8, 0, Note::new(0, 45));
+        d.select_rect(0, 0, 8, 0, false, false, false);
+        d.run_macro(&tremolo(1, TremoloFade::Out, true, 20, 20));
+        let vel: Vec<u8> = (0..8u32)
+            .map(|x| d.selection.at(x, 0).unwrap().velocity)
+            .collect();
+        assert_eq!(vel, vec![75, 50, 25, 20, 20, 20, 20, 20]);
+    }
+
+    /// 手动音量：`inc` 就是「触发/延长」那一格，超过它就换成「延长时间」。
+    #[test]
+    fn tremolo_fade_in_manual_uses_dec_then_sus() {
+        let mut d = Document::with_song(Song::new());
+        d.place_note(0, 0, Note::new(0, 45));
+        d.place_note(8, 0, Note::new(0, 45));
+        d.select_rect(0, 0, 8, 0, false, false, false);
+        d.run_macro(&tremolo(1, TremoloFade::In, false, 20, 60));
+        let vel: Vec<u8> = (0..8u32)
+            .map(|x| d.selection.at(x, 0).unwrap().velocity)
+            .collect();
+        // 20 / 40 还没到 60，第 3 列起 d = 60 不小于 sus，整段停在 60。
+        assert_eq!(vel, vec![20, 40, 60, 60, 60, 60, 60, 60]);
+    }
+
+    /// 同一列里第一个音符和其余音符的分支不一样：自动淡入时第一格与 80 比，
+    /// 其余格与「触发/延长」比，比不过就直接给 80。
+    #[test]
+    fn tremolo_fade_in_first_note_of_column_has_its_own_branch() {
+        let mut d = Document::with_song(Song::new());
+        for y in 0..2u32 {
+            d.place_note(0, y, Note::new(0, 45));
+        }
+        d.place_note(8, 0, Note::new(0, 45));
+        d.select_rect(0, 0, 8, 1, false, false, false);
+        d.run_macro(&tremolo(1, TremoloFade::In, true, 20, 20));
+        assert_eq!(d.selection.at(0, 0).unwrap().velocity, 25, "首格 = decr");
+        assert_eq!(
+            d.selection.at(0, 1).unwrap().velocity,
+            80,
+            "其余格 25 > dec 20 → 80"
+        );
+    }
+
+    /// 偏移不足一个间隔的那一列，原版 `replength` 算出 0，整列直接消失。
+    #[test]
+    fn tremolo_drops_columns_closer_than_the_spacing() {
+        let mut d = Document::with_song(Song::new());
+        d.place_note(0, 0, Note::new(0, 45));
+        d.place_note(1, 0, Note::new(0, 45));
+        d.place_note(2, 0, Note::new(0, 45));
+        d.select_rect(0, 0, 2, 0, false, false, false);
+        d.run_macro(&tremolo(2, TremoloFade::None, true, 20, 20));
+        // 前两列的偏移都是 1，除以 2 向下取整 = 0 → 丢掉；最后一列照出，
+        // 位置 = 原点 + 1（前一列都没出，`first` 让第一步也省了）。
+        assert_eq!(d.selection.len(), 1, "间隔大于列偏移时前面的列全被丢掉");
+        assert_eq!(d.selection.x, 0);
     }
 
     #[test]
@@ -518,8 +737,10 @@ mod tests {
             width: 60,
             reverse: false,
         });
-        assert_eq!(d.selection.at(0, 0).unwrap().panning, 40);
-        assert_eq!(d.selection.at(1, 0).unwrap().panning, 160);
+        // 原版不反转时第一列拿 `200 + (width - 100)` = 160（偏右），第二列拿
+        // `0 - (width - 100)` = 40（偏左）；那句 `// First column panned left` 是错的。
+        assert_eq!(d.selection.at(0, 0).unwrap().panning, 160);
+        assert_eq!(d.selection.at(1, 0).unwrap().panning, 40);
     }
 
     /// 原版每个宏开头都是 `if (songs[song].selected = 0) return 0`：没有选区
@@ -605,6 +826,7 @@ mod tests {
                 cents: 400,
                 reverse: true,
             },
+            0,
         );
         assert_eq!(out[0].2.pitch, 600);
         assert_eq!(out[1].2.pitch, 400);

@@ -264,11 +264,18 @@ fn main() -> Result<(), String> {
                 _ => {}
             }
         }
-        // 琶音 / 滑音 / 错开三个宏窗口照原版在绘制里自闸门：没有选区一帧就关窗。
+        // 宏窗口照原版在绘制里自闸门：没有选区一帧就关窗。
         // 空歌时先落两个音符再全选，截图才有东西可画；载了歌就不动别人的谱面。
         let macro_window = matches!(
             k,
-            WindowKind::Arpeggio | WindowKind::Portamento | WindowKind::Stagger
+            WindowKind::Arpeggio
+                | WindowKind::Portamento
+                | WindowKind::Stagger
+                | WindowKind::Tremolo
+                | WindowKind::Stereo
+                | WindowKind::SetVelocity
+                | WindowKind::SetPanning
+                | WindowKind::SetPitch
         );
         if macro_window && state.doc.selection.is_empty() {
             if state.doc.song.total_blocks == 0 {

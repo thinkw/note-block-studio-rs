@@ -7,7 +7,7 @@ use egui::{
 };
 use nbs_core::instruments::{instrument_name, INSTRUMENTS};
 use nbs_core::model::{key_name, SongMeta};
-use nbs_core::Macro;
+use nbs_core::{Macro, TremoloFade};
 
 use crate::commands::Command;
 use crate::state::{DialogAction, EditorState, Flag, ModalQueue, PrefsFolder, WindowKind};
@@ -66,10 +66,15 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         | WindowKind::SaveOptions
         | WindowKind::Arpeggio
         | WindowKind::Portamento
+        | WindowKind::SetVelocity
+        | WindowKind::SetPanning
+        | WindowKind::SetPitch
+        | WindowKind::Stereo
         | WindowKind::EditTempoChanger(..)
         | WindowKind::EditSoundStopper(..) => 140.0,
-        // 原版 `draw_window_macro_stagger`：`draw_window(x1, y1, x1 + 150, y1 + 160)`。
-        WindowKind::Stagger => 150.0,
+        // 原版 `draw_window_macro_stagger`：`draw_window(x1, y1, x1 + 150, y1 + 160)`；
+        // `draw_window_macro_tremolo` 同宽，240 高。
+        WindowKind::Stagger | WindowKind::Tremolo => 150.0,
         _ => 360.0,
     };
     egui::Window::new(title)
@@ -83,6 +88,11 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
                 | WindowKind::Arpeggio
                 | WindowKind::Portamento
                 | WindowKind::Stagger
+                | WindowKind::SetVelocity
+                | WindowKind::SetPanning
+                | WindowKind::SetPitch
+                | WindowKind::Stereo
+                | WindowKind::Tremolo
                 | WindowKind::EditTempoChanger(..)
                 | WindowKind::EditSoundStopper(..)
         ))
@@ -95,18 +105,17 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::Preferences => preferences(state, ui),
             WindowKind::Instruments => instruments_window(state, ui),
             WindowKind::About => about(ui),
-            WindowKind::SetTempo => numeric_window(state, ui, Numeric::Tempo),
+            WindowKind::SetTempo => set_tempo_window(state, ui),
             WindowKind::TempoTapper => tempo_tapper_window(state, ui),
             WindowKind::SaveOptions => save_options_window(state, ui),
             WindowKind::Arpeggio => arpeggio_window(state, ui),
             WindowKind::Portamento => portamento_window(state, ui),
             WindowKind::Stagger => stagger_window(state, ui),
-            WindowKind::SetVelocity => numeric_window(state, ui, Numeric::Velocity),
-            WindowKind::SetPanning => numeric_window(state, ui, Numeric::Panning),
-            WindowKind::SetPitch => numeric_window(state, ui, Numeric::Pitch),
-            WindowKind::Transpose => numeric_window(state, ui, Numeric::Transpose),
-            WindowKind::Tremolo => numeric_window(state, ui, Numeric::Tremolo),
-            WindowKind::Stereo => numeric_window(state, ui, Numeric::Stereo),
+            WindowKind::SetVelocity => batch_attr_window(state, ui, BatchAttr::Velocity),
+            WindowKind::SetPanning => batch_attr_window(state, ui, BatchAttr::Panning),
+            WindowKind::SetPitch => batch_attr_window(state, ui, BatchAttr::Pitch),
+            WindowKind::Tremolo => tremolo_window(state, ui),
+            WindowKind::Stereo => stereo_window(state, ui),
             WindowKind::ClipEditor => clip_editor(state, ui),
             WindowKind::Shortcuts => shortcuts_help(ui),
             WindowKind::FileOpen => file_dialog(state, ui, false),
@@ -2907,46 +2916,22 @@ fn instruments_window(state: &mut EditorState, ui: &mut Ui) {
     footer(state, ui);
 }
 
-#[derive(Clone, Copy)]
-enum Numeric {
-    Tempo,
-    Velocity,
-    Panning,
-    Pitch,
-    Transpose,
-    Tremolo,
-    Stereo,
-}
-
-fn numeric_window(state: &mut EditorState, ui: &mut Ui, which: Numeric) {
-    let (label_en, label_zh, hint_en, hint_zh) = match which {
-        Numeric::Tempo => ("Tempo (tick/s)", "速度 (tick/s)", "10 t/s = 150 BPM", "10 t/s = 150 BPM"),
-        Numeric::Velocity => ("Velocity 0..100", "力度 0..100", "Applies to the selection; has no effect without one (the original ignores an empty selection)", "应用到选区；无选区时无效（原版空选区直接忽略）"),
-        Numeric::Panning => ("Panning 0..200", "声像 0..200", "Applies to the selection; has no effect without one. 100 = center, <100 left, >100 right", "应用到选区；无选区时无效。100 = 中央，<100 偏左，>100 偏右"),
-        Numeric::Pitch => ("Pitch -1200..1200 ¢", "微调 -1200..1200 ¢", "Applies to the selection; has no effect without one. 100 ¢ = 1 semitone", "应用到选区；无选区时无效。100 ¢ = 1 半音"),
-        Numeric::Transpose => ("Transpose (semitones)", "移调（半音）", "Applies to the selection; positive values up, negative down", "应用到选区；正数为升，负数为降"),
-        Numeric::Tremolo => ("Tremolo depth", "颤音强度", "Alternates velocity by note-key parity", "按音高奇偶交替增减力度"),
-        Numeric::Stereo => ("Stereo width", "立体声展开量", "Alternates panning left/right by note order", "按音符顺序左右交替偏移声像"),
-    };
-    ui.label(tr(label_en, label_zh));
-    ui.label(RichText::new(tr(hint_en, hint_zh)).small().weak());
+/// 速度窗口。原版 `draw_window_set_tempo` 不是独立窗口，而是标尺速度格上就地弹出的
+/// 输入框（红石刻/秒一格、BPM 一格，点框外提交、Esc 取消，`>= 1000` 先除以 100，
+/// 再夹进 `median(0.25, 值, 180)`）。这一步只把原先那扇通吃多个宏的假窗口拆掉、
+/// 换成只服务速度的草稿框；就地输入框留给后面的任务按原版还原。
+fn set_tempo_window(state: &mut EditorState, ui: &mut Ui) {
+    ui.label(tr("Tempo (tick/s)", "速度 (tick/s)"));
+    ui.label(RichText::new("10 t/s = 150 BPM").small().weak());
     ui.horizontal(|ui| {
-        ui.add(egui::DragValue::new(&mut state.macro_amount).speed(1.0));
+        ui.add(egui::DragValue::new(&mut state.tempo_draft).speed(1.0));
         ui.label(tr("Value", "数值"));
     });
-    let a = state.macro_amount;
+    let tempo = state.tempo_draft;
     ui.separator();
     ui.horizontal(|ui| {
         if ui.button(tr("Apply", "应用")).clicked() {
-            state.emit(match which {
-                Numeric::Tempo => Command::SetTempo(a),
-                Numeric::Velocity => Command::BatchVelocity(a.clamp(0.0, 100.0) as u8),
-                Numeric::Panning => Command::BatchPanning(a.clamp(0.0, 200.0) as u8),
-                Numeric::Pitch => Command::BatchPitch(a.clamp(-1200.0, 1200.0) as i16),
-                Numeric::Transpose => Command::Transpose(a as i32),
-                Numeric::Tremolo => Command::Tremolo(a as i32),
-                Numeric::Stereo => Command::Stereo(a as i16),
-            });
+            state.emit(Command::SetTempo(tempo));
         }
         if ui.button(tr("Close", "关闭")).clicked() {
             state.emit(Command::CloseWindow);
@@ -3532,6 +3517,431 @@ fn stagger_window(state: &mut EditorState, ui: &mut Ui) {
             }
         }
         if pg.button2(75.0, 128.0, 60.0, tr("Cancel", "取消"), false, true) {
+            cmd = Some(Command::CloseWindow);
+        }
+    }
+    if let Some(c) = cmd {
+        state.emit(c);
+    }
+}
+
+/// 原版 `draw_window_macro_stereo`：140×130，一个「反转」勾选 + 立体程度拖拽。
+/// 确定时按列交替写声道（第一列偏右、第二列偏左，勾选后对调），
+/// 并且照例 Alt 确定不落位。
+fn stereo_window(state: &mut EditorState, ui: &mut Ui) {
+    if !macro_gate(state) {
+        return;
+    }
+    let th = state.theme.clone();
+    let fluent = th.kind == ThemeKind::Fluent;
+    let margin = ui.spacing().window_margin;
+    let (ml, mr) = (margin.left as f32, margin.right as f32);
+    let body = ui.allocate_exact_size(
+        egui::vec2(140.0 - ml - mr, if fluent { 106.0 } else { 104.0 }),
+        egui::Sense::hover(),
+    );
+    let o = body.0.min - egui::vec2(ml, 0.0);
+    let ry = if fluent { -8.0 } else { -26.0 };
+    let place = !ui.input(|i| i.modifiers.alt);
+    let mut cmd = None;
+    {
+        let mut pg = Page {
+            ui,
+            o,
+            ry,
+            th: &th,
+            fluent,
+        };
+        if th.kind == ThemeKind::Aqua {
+            let p = pg.ui.painter().clone();
+            let rect = pg.row_rect(6.0, 26.0, 134.0, 92.0);
+            p.rect_filled(rect, 0.0, Color32::WHITE);
+            p.rect_stroke(
+                rect,
+                0.0,
+                Stroke::new(1.0_f32, Color32::from_rgb(137, 140, 149)),
+                StrokeKind::Inside,
+            );
+        }
+        if pg.check(
+            10.0,
+            30.0,
+            state.stereo_reverse,
+            tr("Reversed", "反转"),
+            tr(
+                "Stereo is done in the inverse direction.",
+                "反方向应用立体效果。",
+            ),
+            false,
+            false,
+        ) {
+            state.stereo_reverse = !state.stereo_reverse;
+        }
+        pg.header(10.0, 53.0, 120.0, 35.0, tr("Stereo width", "立体程度"));
+        // 原版 `median(0, draw_dragvalue(11, x1 + 55, y1 + 65, stereo_width, 0.5), 100)`。
+        // 那个 0.5 是原版的浮点步长，端口沿用 `Page::drag` 的整数走查。
+        if let Some(v) = pg.drag(
+            55.0,
+            65.0,
+            state.stereo_width,
+            0.5,
+            0,
+            100,
+            false,
+            "",
+            &mut state.prefs_drag,
+        ) {
+            state.stereo_width = v;
+        }
+        if pg.button2(10.0, 98.0, 60.0, tr("OK", "确定"), false, false) {
+            cmd = Some(Command::MacroWindowOk {
+                m: Macro::Stereo {
+                    width: state.stereo_width.clamp(0, 100) as u8,
+                    reverse: state.stereo_reverse,
+                },
+                place,
+            });
+        }
+        if pg.button2(70.0, 98.0, 60.0, tr("Cancel", "取消"), false, true) {
+            cmd = Some(Command::CloseWindow);
+        }
+    }
+    if let Some(c) = cmd {
+        state.emit(c);
+    }
+}
+
+/// 原版三扇批量属性窗口里那一格拖拽的值分别写到哪个会话字段上。
+enum BatchAttr {
+    Velocity,
+    Panning,
+    Pitch,
+}
+
+/// 原版 `draw_window_macro_setvelocity` / `_setpanning` / `_setpitch` 是同一副壳：
+/// 140×130，白底框 `(6,26)-(134,92)`，`draw_areaheader(10, 53, 120, 35)` 里放一个
+/// 拖拽值 `(55,65)`（步长都是 0.1），确定/取消在 `(10,98)` / `(70,98)`。
+/// 三者只差标题文案、拖拽的钳位上下限，以及 `(15,80)` 那一格有没有勾选框：
+/// 音量配「百分比」（钳位上限跟着变成 `100 + 900`，所以原版这个值最大到 1000）、
+/// 音高配「加法模式」、声道什么都不配。
+/// 确定一律走 `MacroWindowOk`：Alt 按着就只改浮动选区，不落回歌曲。
+fn batch_attr_window(state: &mut EditorState, ui: &mut Ui, which: BatchAttr) {
+    if !macro_gate(state) {
+        return;
+    }
+    let th = state.theme.clone();
+    let fluent = th.kind == ThemeKind::Fluent;
+    let margin = ui.spacing().window_margin;
+    let (ml, mr) = (margin.left as f32, margin.right as f32);
+    let body = ui.allocate_exact_size(
+        egui::vec2(140.0 - ml - mr, if fluent { 106.0 } else { 104.0 }),
+        egui::Sense::hover(),
+    );
+    let o = body.0.min - egui::vec2(ml, 0.0);
+    let ry = if fluent { -8.0 } else { -26.0 };
+    let place = !ui.input(|i| i.modifiers.alt);
+    let mut cmd = None;
+    {
+        let mut pg = Page {
+            ui,
+            o,
+            ry,
+            th: &th,
+            fluent,
+        };
+        if th.kind == ThemeKind::Aqua {
+            let p = pg.ui.painter().clone();
+            let rect = pg.row_rect(6.0, 26.0, 134.0, 92.0);
+            p.rect_filled(rect, 0.0, Color32::WHITE);
+            p.rect_stroke(
+                rect,
+                0.0,
+                Stroke::new(1.0_f32, Color32::from_rgb(137, 140, 149)),
+                StrokeKind::Inside,
+            );
+        }
+        let (header, (min, max), val) = match which {
+            BatchAttr::Velocity => (
+                tr("Velocity", "音量"),
+                (0, 100 + 900 * i32::from(state.vel_percent)),
+                state.set_vel,
+            ),
+            BatchAttr::Panning => (tr("Panning", "声道"), (-100, 100), state.set_pan),
+            BatchAttr::Pitch => (tr("Pitch", "音高"), (-1200, 1200), state.set_pit),
+        };
+        pg.header(10.0, 53.0, 120.0, 35.0, header);
+        if let Some(v) = pg.drag(
+            55.0,
+            65.0,
+            val,
+            0.1,
+            min,
+            max,
+            false,
+            "",
+            &mut state.prefs_drag,
+        ) {
+            match which {
+                BatchAttr::Velocity => state.set_vel = v,
+                BatchAttr::Panning => state.set_pan = v,
+                BatchAttr::Pitch => state.set_pit = v,
+            }
+        }
+        match which {
+            BatchAttr::Velocity => {
+                if pg.check(
+                    15.0,
+                    80.0,
+                    state.vel_percent,
+                    tr("Percent", "百分比"),
+                    tr(
+                        "Apply the velocity as a percentage\nof each note's current velocity.",
+                        "按百分比应用至每个音符。",
+                    ),
+                    false,
+                    false,
+                ) {
+                    state.vel_percent = !state.vel_percent;
+                }
+            }
+            BatchAttr::Pitch => {
+                if pg.check(
+                    15.0,
+                    80.0,
+                    state.pitch_additive,
+                    tr("Add mode", "加法模式"),
+                    tr(
+                        "Add the pitch amount to each note,\ninstead of setting it.",
+                        "将数值叠加至音符上，而不是直接设置。",
+                    ),
+                    false,
+                    false,
+                ) {
+                    state.pitch_additive = !state.pitch_additive;
+                }
+            }
+            BatchAttr::Panning => {}
+        }
+        // 原版设定声道那扇窗的确定按钮没走 `condstr`：`draw_button2(..., "OK")`，
+        // 中文界面也显示 "OK"（`draw_window_macro_setpanning:31`）。如实照抄；
+        // 同一扇窗的取消按钮反倒是翻译过的。
+        let ok = match which {
+            BatchAttr::Panning => "OK",
+            _ => tr("OK", "确定"),
+        };
+        if pg.button2(10.0, 98.0, 60.0, ok, false, false) {
+            let m = match which {
+                BatchAttr::Velocity => Macro::SetVelocity {
+                    value: state.set_vel,
+                    percent: state.vel_percent,
+                },
+                BatchAttr::Panning => Macro::SetPanning {
+                    value: state.set_pan,
+                },
+                BatchAttr::Pitch => Macro::SetPitch {
+                    value: state.set_pit,
+                    additive: state.pitch_additive,
+                },
+            };
+            cmd = Some(Command::MacroWindowOk { m, place });
+        }
+        if pg.button2(70.0, 98.0, 60.0, tr("Cancel", "取消"), false, true) {
+            cmd = Some(Command::CloseWindow);
+        }
+    }
+    if let Some(c) = cmd {
+        state.emit(c);
+    }
+}
+
+/// 原版 `draw_window_macro_tremolo`：150×240，三枚淡入类型单选 + 两枚自动/手动单选
+/// + 触发/延长、延长时间、音符间隔三行拖拽。
+/// 五枚参数都是原版会话全局（`control_create.gml:653-657`：`tremolotype = 0`、
+/// `fade_auto = 1`、`leg_dec = 20`、`leg_sus = 20`、`trem_spacing = 1`），不落 settings.ini。
+/// 两处原版只改颜色的地方照搬不升级：`tremolotype = 0` 时下面两枚单选的标签被涂成
+/// c_gray，但 `draw_radiobox` 画字前自己 `draw_theme_color()`，Fluent 下这层灰根本盖不上；
+/// 自动音量时「触发/延长:」「延长时间:」两行标签涂灰，数字仍是主题色、照样能拖——
+/// 原版没锁控件，这里也不锁。
+fn tremolo_window(state: &mut EditorState, ui: &mut Ui) {
+    if !macro_gate(state) {
+        return;
+    }
+    let th = state.theme.clone();
+    let fluent = th.kind == ThemeKind::Fluent;
+    let margin = ui.spacing().window_margin;
+    let (ml, mr) = (margin.left as f32, margin.right as f32);
+    let body = ui.allocate_exact_size(
+        egui::vec2(150.0 - ml - mr, if fluent { 216.0 } else { 214.0 }),
+        egui::Sense::hover(),
+    );
+    let o = body.0.min - egui::vec2(ml, 0.0);
+    let ry = if fluent { -8.0 } else { -26.0 };
+    let place = !ui.input(|i| i.modifiers.alt);
+    let mut cmd = None;
+    {
+        let mut pg = Page {
+            ui,
+            o,
+            ry,
+            th: &th,
+            fluent,
+        };
+        if th.kind == ThemeKind::Aqua {
+            let p = pg.ui.painter().clone();
+            let rect = pg.row_rect(6.0, 26.0, 134.0, 208.0);
+            p.rect_filled(rect, 0.0, Color32::WHITE);
+            p.rect_stroke(
+                rect,
+                0.0,
+                Stroke::new(1.0_f32, Color32::from_rgb(137, 140, 149)),
+                StrokeKind::Inside,
+            );
+        }
+        let kinds = [
+            (
+                0,
+                tr("No fading", "无音量变化"),
+                tr("Just repeats notes.", "只放置音符。"),
+            ),
+            (
+                1,
+                tr("Fade in", "淡入"),
+                tr("Fades in until note changes.", "音符改变之前淡入。"),
+            ),
+            (
+                2,
+                tr("Fade out", "淡出"),
+                tr("Fades out until note changes.", "音符改变之前淡出。"),
+            ),
+        ];
+        for (i, (kind, label, tip)) in kinds.iter().enumerate() {
+            if pg.radio(
+                15.0,
+                43.0 + 15.0 * i as f32,
+                state.tremolotype == *kind,
+                label,
+                tip,
+                false,
+            ) {
+                state.tremolotype = *kind;
+            }
+        }
+        let modes = [
+            (
+                true,
+                tr("Automatic fade", "自动音量"),
+                tr(
+                    "Fade is calculated relative to tick duration of note.",
+                    "音量由音符长度决定。",
+                ),
+            ),
+            (
+                false,
+                tr("Manual fade", "手动音量"),
+                tr(
+                    "Specify decay and sustain of fade.",
+                    "手动指定音符的触发和延长。",
+                ),
+            ),
+        ];
+        for (i, (mode, label, tip)) in modes.iter().enumerate() {
+            if pg.radio(
+                15.0,
+                88.0 + 15.0 * i as f32,
+                state.fade_auto == *mode,
+                label,
+                tip,
+                false,
+            ) {
+                state.fade_auto = *mode;
+            }
+        }
+        let dim = if state.fade_auto {
+            ggray(128)
+        } else {
+            pg.ink()
+        };
+        let attack = tr("Attack/Decay:", "触发/延长:");
+        pg.text(pg.row(15.0, 123.0), &attack, PREFS_FONT, dim);
+        if let Some(v) = pg.drag(
+            15.0,
+            138.0,
+            state.leg_dec,
+            0.5,
+            1,
+            100,
+            false,
+            "",
+            &mut state.prefs_drag,
+        ) {
+            state.leg_dec = v;
+        }
+        let sustain = tr("Sustain:", "延长时间:");
+        pg.text(pg.row(15.0, 156.0), &sustain, PREFS_FONT, dim);
+        if let Some(v) = pg.drag(
+            15.0,
+            170.0,
+            state.leg_sus,
+            0.5,
+            1,
+            100,
+            false,
+            "",
+            &mut state.prefs_drag,
+        ) {
+            state.leg_sus = v;
+        }
+        let spacing = tr("Spacing:", "音符间隔:");
+        pg.text(pg.row(15.0, 188.0), &spacing, PREFS_FONT, pg.ink());
+        let spacing_tip = tr(
+            "The amount of ticks between repetitions.",
+            "重复音符中间的间隔。",
+        );
+        pg.tip_area(40.0, 183.0, 180.0, 21.0, &spacing_tip);
+        // 原版 `median(1, draw_dragvalue(3, x1 + 80, y1 + 188, trem_spacing, 1), 2)`：
+        // 间隔只可能是 1 或 2。
+        if let Some(v) = pg.drag(
+            80.0,
+            188.0,
+            state.trem_spacing,
+            1.0,
+            1,
+            2,
+            false,
+            "",
+            &mut state.prefs_drag,
+        ) {
+            state.trem_spacing = v;
+        }
+        if pg.button2(10.0, 215.0, 60.0, tr("OK", "确定"), false, false) {
+            // 原版只校验这两格（拖拽本身钳在 1..100，这条分支实际进不去），报错后
+            // 留着窗口不提交。
+            if !(0..=100).contains(&state.leg_dec) || !(0..=100).contains(&state.leg_sus) {
+                state.modals = ModalQueue::message(
+                    tr("Error", "错误"),
+                    tr(
+                        "Values must be between 1 and 100.",
+                        "所有值必须在 1 到 100 之间。",
+                    ),
+                );
+            } else {
+                cmd = Some(Command::MacroWindowOk {
+                    m: Macro::Tremolo {
+                        spacing: state.trem_spacing,
+                        fade: match state.tremolotype {
+                            0 => TremoloFade::None,
+                            1 => TremoloFade::In,
+                            _ => TremoloFade::Out,
+                        },
+                        auto: state.fade_auto,
+                        dec: state.leg_dec,
+                        sus: state.leg_sus,
+                    },
+                    place,
+                });
+            }
+        }
+        if pg.button2(80.0, 215.0, 60.0, tr("Cancel", "取消"), false, true) {
             cmd = Some(Command::CloseWindow);
         }
     }

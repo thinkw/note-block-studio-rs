@@ -181,7 +181,6 @@ pub enum WindowKind {
     SetVelocity,
     SetPanning,
     SetPitch,
-    Transpose,
     Tremolo,
     Stereo,
     ClipEditor,
@@ -226,19 +225,20 @@ impl WindowKind {
             Self::Preferences => tr("Preferences", "首选项"),
             Self::Instruments => tr("Instruments", "音色设置"),
             Self::About => tr("About nbs-rust", "关于 nbs-rust"),
-            // 以下批量/数值窗口是 port 自绘（原版对应入口是别的交互形式），
-            // 标题没有原版文字可抄，EN 自拟。
+            // 速度窗口是 port 自绘：原版 `draw_window_set_tempo` 是标尺上就地
+            // 弹出的输入框，不是带标题的一扇窗，标题没有原版文字可抄。
             Self::SetTempo => tr("Set Tempo", "设置速度"),
             // 原版 `draw_window_tempo_tapper` 的标题（`condstr(language != 1, "Tempo tapper", "速度测量器")`）。
             Self::TempoTapper => tr("Tempo tapper", "速度测量器"),
             // 原版 `draw_window_save_options:13-14` 的正文粗体标题。
             Self::SaveOptions => tr("Save options", "保存选项"),
-            Self::SetVelocity => tr("Set Velocity", "批量设置力度"),
-            Self::SetPanning => tr("Set Panning", "批量设置声像"),
-            Self::SetPitch => tr("Set Pitch", "批量设置微调"),
-            Self::Transpose => tr("Transpose", "移调"),
-            Self::Tremolo => tr("Tremolo", "颤音 / Tremolo"),
-            Self::Stereo => tr("Stereo", "立体声 / Stereo"),
+            Self::SetVelocity => tr("Set note velocity", "设置音量"),
+            Self::SetPanning => tr("Set note panning", "设置声道"),
+            Self::SetPitch => tr("Set note pitch", "设置音高"),
+            // 原版这两个窗口的粗体标题没有语言分支（`draw_window_macro_tremolo:16`、
+            // `draw_window_macro_stereo:16` 都是直接写英文），中文界面也显示英文。
+            Self::Tremolo => tr("Tremolo", "Tremolo"),
+            Self::Stereo => tr("Stereo", "Stereo"),
             Self::ClipEditor => tr("Clip Editor", "片段编辑器"),
             Self::Shortcuts => tr("Shortcuts", "快捷键一览"),
             Self::FileOpen => tr("Open Song", "打开歌曲"),
@@ -880,7 +880,6 @@ pub struct EditorState {
     /// 原版 `obj_removeeff` 实例：删除音符时格子上的淡出边框。
     /// `rel` 是相对当前视口左上格的格坐标（原版存 `xx - starta`，不随滚动移动）。
     pub remove_effects: Vec<RemoveFx>,
-    pub macro_amount: f32,
     /// 原版 `draw_window_macro_arpeggio` 的 57 号文本框（琶音规律）。原版把它存在
     /// `draw_text_edit` 的会话缓冲里：跨开关窗保留，但不落 settings.ini。
     pub arpeggio_pattern: String,
@@ -891,6 +890,31 @@ pub struct EditorState {
     /// 原版 `port_cent` 是浮点（拖拽灵敏度 0.1），端口沿用了 `Page::drag` 的整数走查。
     pub porta_reverse: bool,
     pub port_cent: i32,
+    /// 原版颤音窗口的五枚会话参数（`control_create.gml:653-657`：
+    /// `tremolotype = 0`、`trem_spacing = 1`、`fade_auto = 1`、`leg_dec = 20`、
+    /// `leg_sus = 20`）。`tremolotype` 是 0 无音量变化 / 1 淡入 / 2 淡出，
+    /// 决定确定时调 `macro_tremolo` / `_fadein` / `_fadeout` 哪一个。
+    /// 原版「音符间隔」那一格钳在 `median(1, 拖拽值, 2)`，也就是只有 1 和 2。
+    pub tremolotype: i32,
+    pub fade_auto: bool,
+    pub leg_dec: i32,
+    pub leg_sus: i32,
+    pub trem_spacing: i32,
+    /// 速度窗口的草稿（见 `windows::set_tempo_window`），开窗时由 `Command::ShowWindow`
+    /// 用当前速度播种，对应原版就地输入框里的 `tempo_input`。
+    pub tempo_draft: f32,
+    /// 原版会话全局 `setvel` / `percentvel` / `setpan` / `setpit` / `addpitch` /
+    /// `stereo_width` / `stereo_reverse`（`control_create.gml:566-663`，出厂
+    /// 100 / 0 / 0 / 0 / 0 / 50 / 0），四个批量窗口的草稿值，同样不落 settings.ini。
+    /// 原版 `setvel` 在百分比模式下能拖到 1000（`100 + percentvel * 900`），
+    /// 所以这里用 `i32` 而不是 `u8`。
+    pub set_vel: i32,
+    pub vel_percent: bool,
+    pub set_pan: i32,
+    pub set_pit: i32,
+    pub pitch_additive: bool,
+    pub stereo_width: i32,
+    pub stereo_reverse: bool,
     pub midi_options: MidiImportOptions,
     /// 原版 `midi_*` 那一堆全局：解析好的 MIDI。导入窗口只在这有值时才打开——
     /// 原版 `open_midi()` 是先解析、再 `window = w_midi`，没有「先开空窗口」这条路。
@@ -1112,11 +1136,23 @@ impl EditorState {
             event_edit: EventEditDraft::default(),
             layer_drag: None,
             remove_effects: Vec::new(),
-            macro_amount: 1.0,
+            tempo_draft: 10.0,
             arpeggio_pattern: String::new(),
             stagger_pattern: String::new(),
+            tremolotype: 0,
+            fade_auto: true,
+            leg_dec: 20,
+            leg_sus: 20,
+            trem_spacing: 1,
             porta_reverse: false,
             port_cent: 0,
+            set_vel: 100,
+            vel_percent: false,
+            set_pan: 0,
+            set_pit: 0,
+            pitch_additive: false,
+            stereo_width: 50,
+            stereo_reverse: false,
             midi_options,
             midi_data: None,
             midi_file: String::new(),

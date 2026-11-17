@@ -126,8 +126,6 @@ pub enum Command {
     BatchVelocity(u8),
     BatchPanning(u8),
     BatchPitch(i16),
-    Tremolo(i32),
-    Stereo(i16),
     SetTempo(f32),
     SetTimeSignature(u8),
     /// 原版文件菜单「保存选项......」（`menu_click.gml:46-49`）：先把全局
@@ -788,6 +786,10 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     .unwrap_or_default();
                 state.datapack_options.name = if meta.is_empty() { from_file } else { meta };
             }
+            if matches!(kind, WindowKind::SetTempo) {
+                // 原版就地速度输入框的初值就是当前速度，草稿字段同样每次开窗回填。
+                state.tempo_draft = state.doc.song.meta.tempo;
+            }
             // 文件选择不是自绘窗口：走和工具栏同一套对话框请求，起始目录和默认名
             // 都按原版 `load_song.gml` / `save_song.gml` 的写法来。
             match kind {
@@ -1024,25 +1026,6 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state
                 .doc
                 .batch_change(tr("Set pitch", "批量设置微调"), |n| n.pitch = v);
-        }
-        Command::Tremolo(amount) => {
-            // 按列交替升降力度，等价于原版 Tremolo 宏的简化版。
-            state.doc.batch_change(tr("Vibrato", "颤音"), |n| {
-                let d = if n.key % 2 == 0 { amount } else { -amount };
-                n.velocity = (n.velocity as i32 + d).clamp(0, VEL_MAX as i32) as u8;
-            });
-        }
-        Command::Stereo(amount) => {
-            let mut i = 0i32;
-            state.doc.batch_change(tr("Stereo", "立体声"), |n| {
-                let d = if i % 2 == 0 {
-                    amount as i32
-                } else {
-                    -(amount as i32)
-                };
-                n.panning = (n.panning as i32 + d).clamp(0, PAN_MAX as i32) as u8;
-                i += 1;
-            });
         }
         Command::SetTempo(t) => {
             state.doc.edit_meta(tr("Change tempo", "修改速度"), |m| {

@@ -107,7 +107,10 @@ static PREFS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// `isolate_prefs()` 交出来的串行凭据，持到用例结束。
 #[cfg(test)]
 #[must_use = "要持到用例结束：中途放掉，并行用例会把 prefs.json 删掉或改走"]
-pub(crate) struct PrefsLock(std::sync::MutexGuard<'static, ()>);
+pub(crate) struct PrefsLock(
+    #[allow(dead_code)] // 只为持到 drop 而存在，用例不读它。
+    std::sync::MutexGuard<'static, ()>,
+);
 
 /// 只把配置目录指到临时目录，不动里面的文件。给不校验首选项取值、
 /// 只是不想读写用户真配置的用例用。
@@ -1711,6 +1714,147 @@ mod gui_window_tests {
         assert_eq!(pitch(&state, 0), Some(200), "3 列 → 一个步长");
         assert_eq!(pitch(&state, 1), Some(400));
         assert_eq!(pitch(&state, 2), Some(600), "末列正好是要求的 cent");
+    }
+
+    /// 颤音窗口的五枚控件全部接到原版那五个会话全局：单选点了要改 `tremolotype` /
+    /// `fade_auto`，确定走 `macro_tremolo_fadein`（淡入那一支）。
+    /// 靶子谱三列列距只有 1，间隔 2 会把前两列整列吃掉，所以这里另铺一谱相隔 4 拍的。
+    /// 结果里最后一列落在第 3 拍而不是原来的第 4 拍，就是原版「末列段头写 1」那条。
+    #[test]
+    fn tremolo_window_radios_and_ok_reach_the_original_session_globals() {
+        let ctx = egui::Context::default();
+        let mut state = state_with_selection();
+        state.theme.apply(&ctx);
+        state.doc.replace_song(nbs_core::model::Song::new());
+        state
+            .doc
+            .place_note_raw(0, 0, nbs_core::model::Note::new(0, 50));
+        state
+            .doc
+            .place_note_raw(4, 0, nbs_core::model::Note::new(0, 52));
+        state.doc.select_all();
+        state.trem_spacing = 2;
+        state.leg_dec = 25;
+        state.leg_sus = 50;
+        state.fade_auto = false;
+        state.window = Some(WindowKind::Tremolo);
+        let texts = drawn_texts(&mut state, &ctx);
+        for want in [
+            "Tremolo",
+            "无音量变化",
+            "淡入",
+            "淡出",
+            "自动音量",
+            "手动音量",
+            "触发/延长:",
+            "延长时间:",
+            "音符间隔:",
+        ] {
+            assert!(texts.iter().any(|t| t == want), "颤音窗口少画了「{want}」");
+        }
+        click_text(&mut state, &ctx, "淡入");
+        assert_eq!(state.tremolotype, 1, "单选没接上原版 tremolotype");
+        click_text(&mut state, &ctx, "自动音量");
+        assert!(state.fade_auto, "单选没接上原版 fade_auto");
+        state.fade_auto = false;
+        click_text(&mut state, &ctx, "确定");
+        frame(&mut state, &ctx);
+        assert_eq!(state.window, None, "确定后关窗");
+        let cell = |st: &EditorState, col: u32| {
+            st.doc
+                .song
+                .get(col, 0)
+                .map(|n| (n.key, n.velocity))
+                .unwrap_or((0, 0))
+        };
+        assert_eq!(cell(&state, 0), (50, 25), "淡入第 1 列 = 触发 25");
+        assert_eq!(cell(&state, 2), (50, 50), "第 2 列到 50 就撞上延长值");
+        assert_eq!(cell(&state, 3), (52, 100), "末列只出一次、不上斜坡");
+        assert!(
+            state.doc.song.get(1, 0).is_none(),
+            "间隔 2 中间那一拍是空的"
+        );
+    }
+
+    /// 三扇批量属性窗口的草稿都是原版会话全局（`setvel` / `setpan` / `setpit` 加两个
+    /// 开关），点了确定才落到选区。声道窗口那颗确定按钮原版没走 `condstr`，
+    /// 中文界面也画 "OK"——这条也一并钉住，防止后面「顺手翻译」。
+    #[test]
+    fn batch_attr_windows_write_their_session_drafts() {
+        let ctx = egui::Context::default();
+        let mut state = state_with_selection();
+        state.theme.apply(&ctx);
+        state.set_vel = 40;
+        state.window = Some(WindowKind::SetVelocity);
+        click_text(&mut state, &ctx, "百分比");
+        assert!(state.vel_percent, "复选框没接上原版 percentvel");
+        state.vel_percent = false;
+        click_text(&mut state, &ctx, "确定");
+        frame(&mut state, &ctx);
+        assert_eq!(state.window, None, "确定后关窗");
+        assert_eq!(
+            state.doc.song.get(0, 0).map(|n| n.velocity),
+            Some(40),
+            "设定音量没按草稿写进选区"
+        );
+
+        let mut state = state_with_selection();
+        state.theme.apply(&ctx);
+        state.set_pan = -30;
+        state.window = Some(WindowKind::SetPanning);
+        let texts = drawn_texts(&mut state, &ctx);
+        assert!(
+            texts.iter().any(|t| t == "OK"),
+            "声道窗口的确定按钮原版写死 \"OK\""
+        );
+        click_text(&mut state, &ctx, "OK");
+        frame(&mut state, &ctx);
+        assert_eq!(
+            state.doc.song.get(0, 0).map(|n| n.panning),
+            Some(70),
+            "原版存的是 100 + 值"
+        );
+
+        let mut state = state_with_selection();
+        state.theme.apply(&ctx);
+        state.set_pit = 300;
+        state.window = Some(WindowKind::SetPitch);
+        click_text(&mut state, &ctx, "加法模式");
+        assert!(state.pitch_additive, "复选框没接上原版 addpitch");
+        state.pitch_additive = false;
+        click_text(&mut state, &ctx, "确定");
+        frame(&mut state, &ctx);
+        assert_eq!(
+            state.doc.song.get(0, 0).map(|n| n.pitch),
+            Some(300),
+            "设定微调没按草稿写进选区"
+        );
+    }
+
+    /// 立体声窗口：「反转」接 `stereo_reverse`，确定按列交替写声道。
+    /// 原版不反转时第一列写的是 `100 + 立体程度`（源码那句注释反了，代码为准）。
+    #[test]
+    fn stereo_window_alternates_the_pan_by_column() {
+        let ctx = egui::Context::default();
+        let mut state = state_with_selection();
+        state.theme.apply(&ctx);
+        state.stereo_width = 20;
+        state.window = Some(WindowKind::Stereo);
+        let texts = drawn_texts(&mut state, &ctx);
+        assert!(
+            texts.iter().any(|t| t == "立体程度"),
+            "立体声窗口少画了「立体程度」"
+        );
+        click_text(&mut state, &ctx, "反转");
+        assert!(state.stereo_reverse, "复选框没接上原版 stereo_reverse");
+        state.stereo_reverse = false;
+        click_text(&mut state, &ctx, "确定");
+        frame(&mut state, &ctx);
+        assert_eq!(state.window, None, "确定后关窗");
+        let pan = |st: &EditorState, col: u32| st.doc.song.get(col, 0).map(|n| n.panning);
+        assert_eq!(pan(&state, 0), Some(120), "第一列偏右");
+        assert_eq!(pan(&state, 1), Some(80), "第二列偏左");
+        assert_eq!(pan(&state, 2), Some(120), "第三列回到偏右：按列交替");
     }
 
     /// 原版错开那句警示带真换行（`draw_text_dynamic` 的 `\n`），而 `Page::text`
