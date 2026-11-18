@@ -188,6 +188,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
+        crate::fonts::warm_up(&ctx, state.prefs.language);
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::pos2(0.0, 0.0),
@@ -220,6 +221,7 @@ mod tests {
         let mut state = EditorState::for_test();
         state.doc.replace_song(song);
         state.theme.apply(&ctx);
+        crate::fonts::warm_up(&ctx, state.prefs.language);
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::pos2(0.0, 0.0),
@@ -421,6 +423,7 @@ mod gui_export_tests {
     use super::*;
 
     fn frame(state: &mut EditorState, ctx: &egui::Context) {
+        crate::fonts::warm_up(ctx, state.prefs.language);
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::pos2(0.0, 0.0),
@@ -552,6 +555,7 @@ mod gui_window_tests {
         ctx: &egui::Context,
         input: egui::RawInput,
     ) -> egui::FullOutput {
+        crate::fonts::warm_up(ctx, state.prefs.language);
         let _lock = frame_lock();
         ctx.run(input, |ctx| crate::show(ctx, state))
     }
@@ -3268,6 +3272,7 @@ mod gui_piano_tests {
     }
 
     fn run(state: &mut EditorState, ctx: &egui::Context, inp: egui::RawInput) -> egui::FullOutput {
+        crate::fonts::warm_up(ctx, state.prefs.language);
         let _lock = frame_lock();
         ctx.run(inp, |ctx| crate::show(ctx, state))
     }

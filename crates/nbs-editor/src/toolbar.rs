@@ -10,9 +10,10 @@
 
 use std::sync::Arc;
 
-use egui::{pos2, Align2, Color32, FontId, Id, OpenUrl, Pos2, Rect, Sense, Ui, Vec2};
+use egui::{pos2, Align2, Color32, Id, OpenUrl, Pos2, Rect, Sense, Ui, Vec2};
 
 use crate::commands::Command;
+use crate::fonts::bold_font;
 use crate::icons::{frame, Bank, IconHit};
 use crate::state::{EditMode, EditorState, WindowKind};
 use crate::theme::{Theme, ThemeKind};
@@ -1082,7 +1083,7 @@ fn compat_cluster(state: &mut EditorState, ui: &mut Ui, bar: &Bar, compat: u8, a
         pos2(rw - 65.0, area.min.y + 15.0),
         Align2::RIGHT_CENTER,
         text,
-        FontId::proportional(12.0),
+        bold_font(),
         color,
     );
     let hot = Rect::from_min_size(pos2(rw - 160.0, area.min.y + 4.0), Vec2::new(160.0, 25.0));

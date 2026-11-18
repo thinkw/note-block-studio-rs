@@ -64,9 +64,11 @@ impl NbsApp {
             state.sound_import.fetcher = Some(std::sync::Arc::new(mc_fetch::WinMinecraftFetcher));
         }
         state.theme.apply(&cc.egui_ctx);
-        // egui 自带字体没有中文字形，不装系统字体整个界面会是一排空框。
-        if nbs_editor::fonts::install(&cc.egui_ctx).is_none() {
-            eprintln!("警告: 未找到可用的系统中文字体，界面中文会显示成空框");
+        // 必须在首帧渲染前装入：set_fonts 下一帧生效，而首帧就会画到粗体族
+        // （黑键标签），默认字体表没有这个族，epaint 会直接 panic。
+        // creator 在第一次 pass 之前运行，这里调用正好赶上首帧。
+        if nbs_editor::fonts::install(&cc.egui_ctx, state.prefs.language).is_none() {
+            eprintln!("警告: 未找到 assets/fonts，界面退回 egui 默认字体");
         }
 
         // 原版 create 事件的更新检查（control_create.gml:593-616）：开关开着才发请求，

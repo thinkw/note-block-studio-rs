@@ -10,12 +10,13 @@
 //! 横向偏移和图标尺寸保持原版像素，纵向按 `(cell - 32) / 2` 居中。
 
 use egui::{
-    pos2, vec2, Align, Align2, Color32, CursorIcon, FontId, Id, Key, Layout, PointerButton, Pos2,
-    Rect, Sense, TextEdit, Ui, UiBuilder,
+    pos2, vec2, Align, Align2, Color32, CursorIcon, Id, Key, Layout, PointerButton, Pos2, Rect,
+    Sense, TextEdit, Ui, UiBuilder,
 };
 use nbs_core::model::{Layer, LockMode, PAN_CENTER};
 
 use crate::commands::Command;
+use crate::fonts::{info_med_bold_font, main_font, small_font};
 use crate::icons::Bank;
 use crate::state::{ContextKind, ContextMenu, EditorState, LayerDrag, WindowKind};
 use crate::theme::{Theme, ThemeKind};
@@ -144,14 +145,14 @@ fn header(
             pos2(start.x + 9.0, band - 2.0),
             Align2::LEFT_TOP,
             elapsed,
-            FontId::proportional(11.0),
+            info_med_bold_font(),
             th.text,
         );
         p.text(
             pos2(start.x + 26.0, band + 15.0),
             Align2::LEFT_TOP,
             length,
-            FontId::proportional(8.0),
+            small_font(),
             th.text,
         );
     } else {
@@ -159,14 +160,14 @@ fn header(
             pos2(start.x + 93.0, band - 2.0),
             Align2::RIGHT_TOP,
             elapsed,
-            FontId::proportional(11.0),
+            info_med_bold_font(),
             th.text,
         );
         p.text(
             pos2(start.x + 93.0, band + 15.0),
             Align2::RIGHT_TOP,
             length,
-            FontId::proportional(8.0),
+            small_font(),
             th.text,
         );
     }
@@ -174,7 +175,7 @@ fn header(
     // 小节·拍·十六分：原版只画，不给交互（悬停出说明）。
     let sig = song.meta.time_signature.max(1) as f64;
     bank.tempo_box(p, pos2(start.x + 184.0, band + 3.0), false, th);
-    let digits = FontId::proportional(9.0);
+    let digits = main_font();
     for (x, t) in [
         (215.0, ".".to_string()),
         (230.0, ".".to_string()),
@@ -434,7 +435,7 @@ fn row(
 
     // ---- 名称：原版的常驻输入框 ----
     let fluent = th.kind == ThemeKind::Fluent;
-    let font = FontId::proportional(if fluent { 9.0 } else { 8.0 });
+    let font = if fluent { main_font() } else { small_font() };
     let name_rect = Rect::from_min_size(pos2(x1 + 10.0, y1 + 10.0 + yo), vec2(75.0, 13.0));
     let name_resp = ui.interact(name_rect, Id::new(("layername", idx)), Sense::click());
     let name_clicked = idle && name_resp.clicked();
@@ -558,7 +559,7 @@ fn row(
                 pos2(x1 + 98.0, y1 + 18.0 + yo),
                 Align2::CENTER_TOP,
                 format!("{vol}%"),
-                FontId::proportional(8.0),
+                small_font(),
                 th.text,
             );
         }
@@ -622,7 +623,7 @@ fn row(
                 pos2(x1 + 116.0, y1 + 18.0 + yo),
                 Align2::CENTER_TOP,
                 label,
-                FontId::proportional(8.0),
+                small_font(),
                 th.text,
             );
         }

@@ -950,6 +950,8 @@ pub struct EditorState {
     /// 真实音频引擎（无音频设备时自动降级为静音时钟）。
     pub audio: Box<dyn AudioEngine>,
     pub prefs: Preferences,
+    /// 已装入字体的语言（`fonts::install` 只在切换语言时重跑一次）。
+    pub installed_language: Option<u8>,
     pub marker_follow: bool,
     /// 原版 `marker_pagebypage`：1 = 按页，0 = 按刻，2 = 按帧。
     pub follow_mode: u8,
@@ -1292,6 +1294,7 @@ impl EditorState {
             message: None,
             audio,
             prefs,
+            installed_language: None,
             marker_follow: follow_marker,
             follow_mode,
             section_exists: false,

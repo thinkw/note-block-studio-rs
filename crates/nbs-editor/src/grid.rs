@@ -7,8 +7,8 @@
 //! （原版 `control_draw` 就是这个顺序：线在下、方块在上）。
 
 use egui::{
-    pos2, Align2, Color32, CornerRadius, CursorIcon, FontId, Painter, Pos2, Rect, Sense, Shape,
-    Stroke, StrokeKind, Ui, Vec2,
+    pos2, Align2, Color32, CornerRadius, CursorIcon, Painter, Pos2, Rect, Sense, Shape, Stroke,
+    StrokeKind, Ui, Vec2,
 };
 use nbs_core::model::{
     key_name, panning_velocity_to_short, Note, FIRST_CUSTOM_INDEX, MC_KEY_MAX, MC_KEY_MIN,
@@ -16,6 +16,7 @@ use nbs_core::model::{
 };
 
 use crate::commands::Command;
+use crate::fonts::{main_font, small_font};
 use crate::icons::BlockSet;
 use crate::interaction::{DragMode, InputSnapshot};
 use crate::layers_panel::time_str;
@@ -24,10 +25,6 @@ use crate::theme::{Theme, ThemeKind};
 use crate::tr;
 use crate::viewport::{Viewport, SCROLLBAR_SIZE, TIMELINE_HEIGHT};
 
-/// 原版标尺用的 `font_small`（fnt_small / fnt_wslui_small 的 size 都是 8）。
-const RULER_FONT: FontId = FontId::proportional(8.0);
-/// 原版 `font_main`，音符数值和标尺上的 BPM 盒都是它。
-const MAIN_FONT: FontId = FontId::proportional(9.0);
 /// 原版标尺刻度线的 `draw_set_alpha(0.6)`。
 const RULER_A: u8 = 153;
 
@@ -760,7 +757,7 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
                 Align2::CENTER_TOP
             },
             time_str(sec),
-            RULER_FONT,
+            small_font(),
             th.text,
         );
         first = false;
@@ -796,7 +793,7 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
                     Align2::CENTER_TOP
                 },
                 tick.to_string(),
-                RULER_FONT,
+                small_font(),
                 th.text,
             );
         }
@@ -820,7 +817,7 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
                 continue;
             };
             let xx = vp.tick_x(tick as i64);
-            let galley = p.layout_no_wrap(format!("BPM = {}", n.pitch.abs()), MAIN_FONT, th.text);
+            let galley = p.layout_no_wrap(format!("BPM = {}", n.pitch.abs()), main_font(), th.text);
             let w = galley.size().x;
             let fill = if th.kind == ThemeKind::Dark {
                 Color32::from_gray(54)
@@ -1266,7 +1263,7 @@ fn push_note(
     } else {
         (block_alpha + 0.25).min(1.0)
     };
-    let font = MAIN_FONT;
+    let font = main_font();
 
     if flags.show_numbers {
         // 原版 `xx + 16 - 8 * use_icons`：勾了图标位就把数值往左挪半格。

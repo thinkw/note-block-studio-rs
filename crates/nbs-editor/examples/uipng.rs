@@ -291,8 +291,8 @@ fn main() -> Result<(), String> {
 
     let ctx = egui::Context::default();
     state.theme.apply(&ctx);
-    if nbs_editor::fonts::install(&ctx).is_none() {
-        eprintln!("提示: 没装系统中文字体，中文会画成空框");
+    if nbs_editor::fonts::install(&ctx, state.prefs.language).is_none() {
+        eprintln!("提示: 找不到 assets/fonts，界面会退回 egui 默认字体");
     }
 
     let mut texs: HashMap<TextureId, Tex> = HashMap::new();

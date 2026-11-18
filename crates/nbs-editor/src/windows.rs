@@ -2185,12 +2185,10 @@ fn language_menu(state: &mut EditorState, ui: &Ui, at: Pos2) {
     }
 }
 
-/// 首选项正文的字号。原版是 `fnt_main` 9 像素、菜单栏是 `fnt_small` 8 像素，
-/// 但重写版其余界面（菜单栏、面板、状态栏）都走 egui 默认档，9 像素夹在里面明显偏小，
-/// 所以按用户要求取菜单栏同一档：`TextStyle::Button`，下面那条测试盯着这个等式。
-const PREFS_FONT: f32 = 12.5;
-/// 分组标题与页签：原版 `fnt_info_med` 11 对 `fnt_main` 9（约 1.22 倍），这里同比例放大一档。
-const PREFS_FONT_MED: f32 = 14.0;
+/// 首选项正文：原版 `fnt_main` 9pt = 12px（`fonts::MAIN_SIZE`）。
+const PREFS_FONT: f32 = crate::fonts::MAIN_SIZE;
+/// 分组标题与页签：原版 `fnt_info_med` 11pt = 14.67px（`fonts::INFO_MED_SIZE`）。
+const PREFS_FONT_MED: f32 = crate::fonts::INFO_MED_SIZE;
 
 /// 原版「帧率限制」下拉的五项，下标就是 `refreshrate`。
 fn rate_items() -> [&'static str; 5] {
@@ -8817,15 +8815,19 @@ fn minecraft_compat_window(state: &mut EditorState, ui: &mut Ui) {
 mod tests {
     use super::*;
 
-    /// 首选项正文要和菜单栏同一档：菜单栏用的是 egui 的 `TextStyle::Button`，
-    /// 谁改了那边就得同步改这里，否则窗口里会同时出现两种字号。
+    /// 首选项正文 = `fnt_main` 12px、分组标题 = `fnt_info_med` 14.67px，
+    /// 都来自 fonts.rs 的原版字号常量，谁改了那边就得同步改这里。
     #[test]
     fn prefs_font_matches_the_menu_bar() {
-        let style = egui::Style::default();
         assert_eq!(
             PREFS_FONT,
-            style.text_styles[&egui::TextStyle::Button].size,
-            "菜单栏字号变了"
+            crate::fonts::MAIN_SIZE,
+            "首选项正文应等于 fnt_main"
+        );
+        assert_eq!(
+            PREFS_FONT_MED,
+            crate::fonts::INFO_MED_SIZE,
+            "分组标题应等于 fnt_info_med"
         );
     }
 

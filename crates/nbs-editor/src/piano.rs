@@ -4,10 +4,11 @@
 //! （原版 `d` + `delay`）。`spr_piano` 资源缺失时整排不画 —— 原版没有「无贴图键盘」，
 //! 所以这里也不画一个假的出来。
 
-use egui::{pos2, Align2, Color32, FontId, Painter, Pos2, Rect, Sense, Stroke, Ui, Vec2};
+use egui::{pos2, Align2, Color32, Painter, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use nbs_core::model::{key_name, KEY_MAX, MC_KEY_MAX, MC_KEY_MIN};
 
 use crate::commands::Command;
+use crate::fonts::{bold_font, main_font};
 use crate::icons::{piano_frame, Bank};
 use crate::state::EditorState;
 use crate::theme::{Theme, ThemeKind};
@@ -38,8 +39,6 @@ const FADE_LIMIT: usize = 54;
 const OUT_OF_RANGE: Color32 = Color32::from_rgb(255, 126, 125);
 /// 原版 16753828 = RGB(164,164,255)，非 Fluent 主题下当前选中的键。
 const SELECTED: Color32 = Color32::from_rgb(164, 164, 255);
-/// 原版 `font_main` 在琴键上的字号（`fnt_main` 的 size = 9）。
-const TEXT: FontId = FontId::proportional(9.0);
 /// 原版 `draw_text` 在这里的有效对齐：`draw_text_edit` 把全局 valign 留在了 `fa_top`，
 /// 琴键 / 方块上的文字都是「顶边贴 y」，量过的像素也是这个（键名顶边 = yy + 85）。
 const TEXT_AT: Align2 = Align2::CENTER_TOP;
@@ -402,7 +401,7 @@ fn draw_white_key(
             pos2(x, at.y + 85.0 - lift(kb, clicks)),
             TEXT_AT,
             key_name(key, true, o.flats),
-            TEXT,
+            main_font(),
             ink,
         );
     }
@@ -411,13 +410,19 @@ fn draw_white_key(
             pos2(x, at.y + 85.0 + 5.0 - 8.0 * kb as u8 as f32),
             TEXT_AT,
             (key as i32 - MC_KEY_MIN as i32).to_string(),
-            TEXT,
+            main_font(),
             ink,
         );
     }
     if kb {
         if let Some(c) = keybind(key) {
-            p.text(pos2(x, at.y + 95.0), TEXT_AT, c.to_string(), TEXT, ink);
+            p.text(
+                pos2(x, at.y + 95.0),
+                TEXT_AT,
+                c.to_string(),
+                main_font(),
+                ink,
+            );
         }
     }
 }
@@ -457,7 +462,7 @@ fn draw_black_key(
             pos2(x, face.y + 29.0 - lift(kb, clicks)),
             TEXT_AT,
             key_name(key, true, o.flats),
-            TEXT,
+            bold_font(),
             ink,
         );
     }
@@ -466,13 +471,19 @@ fn draw_black_key(
             pos2(x, face.y + 34.0 - 8.0 * kb as u8 as f32),
             TEXT_AT,
             (key as i32 - MC_KEY_MIN as i32).to_string(),
-            TEXT,
+            bold_font(),
             ink,
         );
     }
     if kb {
         if let Some(c) = keybind(key) {
-            p.text(pos2(x, face.y + 39.0), TEXT_AT, c.to_string(), TEXT, ink);
+            p.text(
+                pos2(x, face.y + 39.0),
+                TEXT_AT,
+                c.to_string(),
+                bold_font(),
+                ink,
+            );
         }
     }
 }

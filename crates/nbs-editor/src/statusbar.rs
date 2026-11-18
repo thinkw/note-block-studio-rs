@@ -4,8 +4,9 @@
 //! 实时 MIDI 输入我们还没有，那一列整列不画；状态栏消息（「已复制 3 个音符」这类）
 //! 借用这个位置显示，这样左边每一格都还落在原版坐标上。
 
-use egui::{pos2, vec2, Align2, Color32, FontId, Painter, Rect, Ui};
+use egui::{pos2, vec2, Align2, Color32, Painter, Rect, Ui};
 
+use crate::fonts::main_font;
 use crate::icons::Bank;
 use crate::state::EditorState;
 use crate::theme::{Theme, ThemeKind};
@@ -43,7 +44,7 @@ impl<'a> Fields<'a> {
             pos2(self.x, self.y),
             Align2::LEFT_TOP,
             s,
-            FontId::proportional(9.0),
+            main_font(),
             color,
         );
     }
@@ -125,7 +126,7 @@ pub fn show_status_bar(state: &EditorState, ui: &mut Ui) {
             pos2(area.max.x - 6.0, area.min.y + TEXT_Y),
             Align2::RIGHT_TOP,
             msg.to_string(),
-            FontId::proportional(9.0),
+            main_font(),
             th.accent,
         );
     }
