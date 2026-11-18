@@ -260,22 +260,35 @@ fn cached(language: u8) -> Option<FontDefinitions> {
     Some(pair[usize::from(language == 1)].clone())
 }
 
-/// 把界面字体装进 `ctx`，返回资产目录。找不到 `assets/fonts` 时原样返回 `None`，
-/// 界面退回 egui 默认字体（此时系统字体兜底也一并失效 —— 资产是主路径）。
+/// 找不到打包字体时的最后兜底：把端口自己的两个自定义族绑到 egui 默认字体上。
+/// epaint 遇到未绑定的族名会直接 panic（部署时丢了 assets 目录就是闪退），
+/// 宁可字不好看也不能炸。
+fn fallback() -> FontDefinitions {
+    let mut fonts = FontDefinitions::default();
+    let prop = fonts
+        .families
+        .get(&FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    fonts.families.insert(bold_family(), prop.clone());
+    fonts.families.insert(small_family(), prop);
+    fonts
+}
+
+/// 把界面字体装进 `ctx`，返回资产目录。找不到 `assets/fonts` 时装 [`fallback`]
+/// 并返回 `None`（界面退回 egui 默认字体）。
 /// `set_fonts` 要到下一次 pass 开头才生效，所以必须在**首帧渲染前**调用
 /// （eframe 的 creator / 测试的第一次 `ctx.run` 之前），否则首帧画到
 /// [`bold_family`] 就会 panic。
 pub fn install(ctx: &Context, language: u8) -> Option<PathBuf> {
-    ctx.set_fonts(cached(language)?);
+    ctx.set_fonts(cached(language).unwrap_or_else(fallback));
     font_root()
 }
 
 /// 同 [`install`]，但只装字体不找目录：给测试 helper 在每次 `ctx.run` 前调用，
 /// 幂等（epaint 用 TTF 等值比较跳过重复重建）。
 pub fn warm_up(ctx: &Context, language: u8) {
-    if let Some(defs) = cached(language) {
-        ctx.set_fonts(defs);
-    }
+    ctx.set_fonts(cached(language).unwrap_or_else(fallback));
 }
 
 #[cfg(test)]
