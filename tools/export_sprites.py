@@ -62,6 +62,11 @@ ALL_SPRITES = [
     # 主题色取色器（draw_window_set_accent）：色相/饱和方块 187x225、明度条 240x8
     # （按当前色相/饱和整条调制），两个游标取 spr_radiobox 的第 18、21 帧。
     "spr_hsv", "spr_value", "spr_radiobox",
+    # hires 档（window_scale > 1.25 且 Fluent 主题时原版换 4 倍源图）：只导画布内的六条，
+    # 工具栏/弹窗属于 chrome、方块与乐器图标原版就不换。帧号与普通条一致，
+    # 唯独 frame4_hires 去掉了主题偏移（只有 Fluent 的 6 帧 = 状态 + 3*暗色）。
+    "spr_frame4_hires", "spr_layericons_f_hires", "spr_macroicons_hires",
+    "spr_tempobox_hires", "spr_volume_f_hires", "spr_stereo_f_hires",
 ]
 
 
@@ -108,6 +113,9 @@ DIRS = {
     "spr_volume_f": "volume_fluent",
     "spr_Gclef": "gclef",
     "spr_Fclef": "fclef",
+    "spr_layericons_f_hires": "layer_fluent_hires",
+    "spr_volume_f_hires": "volume_fluent_hires",
+    "spr_stereo_f_hires": "stereo_fluent_hires",
 }
 
 

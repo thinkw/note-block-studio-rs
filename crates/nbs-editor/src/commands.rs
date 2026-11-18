@@ -2973,12 +2973,14 @@ mod tests {
         );
         assert_eq!(state.viewport.scale, 2.0, "倍率落到画布");
         assert_eq!(state.viewport.cell(), 64.0, "每格 32 × scale px");
+        assert!(state.canvas_hires, "2.0 > 1.25 触发原版的 hires 贴图档");
         // 「重置」存回 None，必须真的退回系统倍率，不然按下去没反应。
         state.prefs.window_scale = None;
         let _ = ctx.run(raw_input(), |c| state.tick_transport(c));
         let out = ctx.run(raw_input(), |c| state.tick_transport(c));
         assert_eq!(out.pixels_per_point, 1.0);
         assert_eq!(state.viewport.scale, 1.0, "重置后画布退回出厂缩放");
+        assert!(!state.canvas_hires, "1.0 ≤ 1.25 退回普通贴图");
     }
 
     /// 原版 `control_draw.gml:736-751` 的那串 `else if`：Ctrl+滚轮 / Ctrl+± 只能停在

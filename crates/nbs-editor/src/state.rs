@@ -929,6 +929,9 @@ pub fn tap_clock_ms() -> i64 {
 pub struct EditorState {
     pub doc: Document,
     pub viewport: Viewport,
+    /// 原版 `hires`（`control_create.gml:110`：`window_scale > 1.25`，绝对倍率含
+    /// DPI）：Fluent 主题的画布精灵换 4 倍源图。每帧随 `apply_ui_scale` 更新。
+    pub canvas_hires: bool,
     pub interaction: Interaction,
     pub tool: EditMode,
     /// 当前画笔（放置音符时的 instrument/key/vel/pan/pit）。
@@ -1281,6 +1284,7 @@ impl EditorState {
         let mut state = Self {
             doc: Document::with_song(song),
             viewport,
+            canvas_hires: false,
             interaction: Interaction::default(),
             tool: EditMode::Key,
             current: Note::default(),
@@ -1588,7 +1592,9 @@ impl EditorState {
     /// 菜单 / 工具栏 / 状态栏 / 钢琴栏保持系统原生尺寸。
     fn apply_ui_scale(&mut self, ctx: &Context) {
         let native = ctx.native_pixels_per_point().unwrap_or(1.0);
-        self.viewport.scale = self.prefs.effective_scale(native) / native;
+        let effective = self.prefs.effective_scale(native);
+        self.viewport.scale = effective / native;
+        self.canvas_hires = effective > 1.25;
     }
 
     /// 原版 `control_draw.gml:736-751`：Ctrl+滚轮 / Ctrl+± 把 `window_scale` 推到

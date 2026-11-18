@@ -12,7 +12,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use egui::{pos2, Color32, ColorImage, Context, Id, Pos2, Rect, Sense, TextureHandle, Vec2};
+use egui::{
+    pos2, Color32, ColorImage, Context, Id, Pos2, Rect, Sense, TextureHandle, TextureOptions, Vec2,
+};
 
 use crate::theme::{Theme, ThemeKind};
 
@@ -144,7 +146,9 @@ struct Strip {
 }
 
 impl Strip {
-    fn load(ctx: &Context, dir: &Path, fw: u32, fh: u32) -> Option<Strip> {
+    /// `nearest`：原版 Fluent+hires 用 `gpu_set_texfilter(false)`（最近邻）画 4 倍源图，
+    /// 最近邻采样才等效；其余精灵维持线性过滤。
+    fn load(ctx: &Context, dir: &Path, fw: u32, fh: u32, nearest: bool) -> Option<Strip> {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
             .ok()?
             .filter_map(|e| e.ok().map(|e| e.path()))
@@ -173,8 +177,13 @@ impl Strip {
             }
         }
         let name = dir.file_name()?.to_string_lossy().into_owned();
+        let options = if nearest {
+            TextureOptions::NEAREST
+        } else {
+            TextureOptions::LINEAR
+        };
         Some(Strip {
-            tex: ctx.load_texture(name, img, Default::default()),
+            tex: ctx.load_texture(name, img, options),
             fw: fw as f32,
             fh: fh as f32,
             count: paths.len(),
@@ -289,6 +298,15 @@ pub struct Bank {
     hsv: Strip,
     value: Strip,
     radiobox: Strip,
+    /// hires 档（原版 `hires = window_scale > 1.25`，`control_create.gml:110`，只在
+    /// Fluent 主题生效）：画布内的六条换 4 倍源图。工具栏 / 弹窗属于 chrome 不缩放、
+    /// 方块与乐器图标原版就不换，都不在这里。缺素材时为 None，绘制处退回普通条。
+    frame4_hires: Option<Strip>,
+    layer_fluent_hires: Option<Strip>,
+    macro_ikon_hires: Option<Strip>,
+    volume_fluent_hires: Option<Strip>,
+    stereo_fluent_hires: Option<Strip>,
+    tempobox_hires: Option<Strip>,
 }
 
 /// 三态：0 常态、1 悬停、2 悬停且按住。
@@ -365,7 +383,8 @@ fn event_label_frame(name: &str) -> Option<usize> {
 
 impl Bank {
     fn load(ctx: &Context, root: &Path) -> Option<Bank> {
-        let strip = |dir: &str, w: u32, h: u32| Strip::load(ctx, &root.join(dir), w, h);
+        let strip = |dir: &str, w: u32, h: u32| Strip::load(ctx, &root.join(dir), w, h, false);
+        let hires = |dir: &str, w: u32, h: u32| Strip::load(ctx, &root.join(dir), w, h, true);
         Some(Bank {
             icons: strip("icons_classic", 25, 25)?,
             icons_light: strip("icons_light", 25, 25)?,
@@ -427,12 +446,41 @@ impl Bank {
             hsv: strip("hsv", 187, 225)?,
             value: strip("value", 240, 8)?,
             radiobox: strip("radiobox", 12, 12)?,
+            // hires 条不传播 None：缺素材时退普通条，只是放大后糊一点。
+            frame4_hires: hires("frame4_hires", 64, 64),
+            layer_fluent_hires: hires("layer_fluent_hires", 64, 64),
+            macro_ikon_hires: hires("macroicons_hires", 64, 64),
+            volume_fluent_hires: hires("volume_fluent_hires", 48, 40),
+            stereo_fluent_hires: hires("stereo_fluent_hires", 48, 40),
+            tempobox_hires: hires("tempobox_hires", 296, 88),
         })
     }
 
     /// 原版 `spr_frame1` / `spr_frame4` 每套主题 3 帧（常态 / 悬停 / 按下）。
     fn base(kind: ThemeKind) -> usize {
         3 * theme_index(kind)
+    }
+
+    /// frame4 按钮底图。Fluent+hires 时换 4 倍条 `spr_frame4_hires`——它只有 Fluent
+    /// 的 6 帧，帧号去掉主题偏移 = `状态 + 3*暗色`（`draw_layericon.gml`）；缺素材
+    /// 或非 hires 退回普通条（帧号 = 3*主题 + 状态）。
+    fn frame4_blit(
+        &self,
+        p: &egui::Painter,
+        at: Pos2,
+        state: usize,
+        size: Vec2,
+        th: &Theme,
+        hires: bool,
+    ) {
+        if hires && th.kind == ThemeKind::Fluent {
+            if let Some(s) = &self.frame4_hires {
+                s.blit(p, at, 3 * th.dark as usize + state, size, Color32::WHITE);
+                return;
+            }
+        }
+        self.frame4
+            .blit(p, at, Self::base(th.kind) + state, size, Color32::WHITE);
     }
 
     fn ptr(ui: &egui::Ui, rect: Rect, id: Id) -> (egui::Response, bool) {
@@ -594,8 +642,8 @@ impl Bank {
         }
     }
 
-    /// 原版 `draw_layericon()`：图层行里的 16×16 按钮（尺寸乘 `scale`）。
-    /// `row` 用来给每行的同一个按钮生成不同的 widget id。
+    /// 原版 `draw_layericon()`：图层行里的 16×16 按钮（尺寸乘 `scale`）。`hires`
+    /// 且 Fluent 时换 4 倍贴图。`row` 用来给每行的同一个按钮生成不同的 widget id。
     /// 返回值对应原版的 `mouse_entered || (a && mouse_check_button_pressed)`：
     /// 按下那一刻、或按住左键从别的行划进来都算一次触发（原版靠这个跨行批量操作）。
     #[allow(clippy::too_many_arguments)]
@@ -609,6 +657,7 @@ impl Bank {
         pressed: bool,
         th: &Theme,
         scale: f32,
+        hires: bool,
     ) -> bool {
         let size = Vec2::splat(LAYER_ICON * scale);
         let rect = Rect::from_min_size(at, size);
@@ -626,12 +675,19 @@ impl Bank {
         }
         let state = pointer_state(hovered, hovered && down);
         let p = ui.painter();
-        self.frame4.blit(p, at, Self::base(th.kind) + if pressed { 2 } else { state }, size, Color32::WHITE);
+        self.frame4_blit(p, at, if pressed { 2 } else { state }, size, th, hires);
         let push = if state == 2 || pressed { Vec2::splat(scale) } else { Vec2::ZERO };
         let at = at + push;
         if th.kind == ThemeKind::Fluent {
-            self.layer_fluent.blit(p, at, index + 9, size, Color32::WHITE);
-            self.layer_fluent.blit(p, at, index + 18, size, th.accent);
+            let strip = if hires {
+                self.layer_fluent_hires
+                    .as_ref()
+                    .unwrap_or(&self.layer_fluent)
+            } else {
+                &self.layer_fluent
+            };
+            strip.blit(p, at, index + 9, size, Color32::WHITE);
+            strip.blit(p, at, index + 18, size, th.accent);
         } else {
             // 原版：非 Fluent 用 c_black，暗黑主题用 c_white，透明度 0.7。
             self.layer.blit(p, at, index, size, glyph_tint(th, 0.7));
@@ -641,6 +697,7 @@ impl Bank {
     }
 
     /// 原版 `draw_macroicon()`：宏条里的 16×16 按钮（间距 25，尺寸乘 `scale`）。
+    /// `hires` 且 Fluent 时换 4 倍贴图。
     pub fn macro_button(
         &self,
         ui: &mut egui::Ui,
@@ -649,19 +706,26 @@ impl Bank {
         tooltip: &str,
         th: &Theme,
         scale: f32,
+        hires: bool,
     ) -> bool {
         let size = Vec2::splat(LAYER_ICON * scale);
         let rect = Rect::from_min_size(at, size);
         let (resp, holding) = Self::ptr(ui, rect, Id::new(("macroicon", index, tooltip)));
         let state = pointer_state(resp.hovered(), holding);
         let p = ui.painter();
-        self.frame4.blit(p, at, Self::base(th.kind) + state, size, Color32::WHITE);
+        self.frame4_blit(p, at, state, size, th, hires);
         let push = if state == 2 { Vec2::splat(scale) } else { Vec2::ZERO };
-        self.macro_ikon.blit(p, at + push, index, size, glyph_tint(th, 0.7));
+        let strip = if hires {
+            self.macro_ikon_hires.as_ref().unwrap_or(&self.macro_ikon)
+        } else {
+            &self.macro_ikon
+        };
+        strip.blit(p, at + push, index, size, glyph_tint(th, 0.7));
         resp.on_hover_text(tooltip).clicked()
     }
 
     /// 原版 `spr_volume[a / 30]`（12×10），悬停时字形上移 5px；尺寸乘 `scale`。
+    /// `hires` 且 Fluent 时换 4 倍贴图（帧号同普通条）。
     pub fn volume_glyph(
         &self,
         p: &egui::Painter,
@@ -670,19 +734,28 @@ impl Bank {
         hovered: bool,
         th: &Theme,
         scale: f32,
+        hires: bool,
     ) {
         let at = at - Vec2::new(0.0, if hovered { 5.0 * scale } else { 0.0 });
         let size = Vec2::new(GLYPH_W * scale, GLYPH_H * scale);
         if th.kind == ThemeKind::Fluent {
+            let strip = if hires {
+                self.volume_fluent_hires
+                    .as_ref()
+                    .unwrap_or(&self.volume_fluent)
+            } else {
+                &self.volume_fluent
+            };
             // 原版 Fluent 用 `!fdark` 那一帧当底，再叠一格强调色进度。
-            self.volume_fluent.blit(p, at, if th.dark { 0 } else { 1 }, size, Color32::WHITE);
-            self.volume_fluent.blit(p, at, (value / 30) as usize + 2, size, th.accent);
+            strip.blit(p, at, if th.dark { 0 } else { 1 }, size, Color32::WHITE);
+            strip.blit(p, at, (value / 30) as usize + 2, size, th.accent);
         } else {
             self.volume.blit(p, at, (value / 30) as usize, size, glyph_tint(th, 0.7));
         }
     }
 
     /// 原版 `spr_stereo[a / 50]`（12×10），悬停时字形上移 5px；尺寸乘 `scale`。
+    /// `hires` 且 Fluent 时换 4 倍贴图（帧号同普通条）。
     pub fn stereo_glyph(
         &self,
         p: &egui::Painter,
@@ -691,31 +764,50 @@ impl Bank {
         hovered: bool,
         th: &Theme,
         scale: f32,
+        hires: bool,
     ) {
         let at = at - Vec2::new(0.0, if hovered { 5.0 * scale } else { 0.0 });
         let size = Vec2::new(GLYPH_W * scale, GLYPH_H * scale);
         if th.kind == ThemeKind::Fluent {
-            self.stereo_fluent.blit(p, at, if th.dark { 0 } else { 1 }, size, Color32::WHITE);
-            self.stereo_fluent.blit(p, at, (value / 50) as usize + 2, size, th.accent);
+            let strip = if hires {
+                self.stereo_fluent_hires
+                    .as_ref()
+                    .unwrap_or(&self.stereo_fluent)
+            } else {
+                &self.stereo_fluent
+            };
+            strip.blit(p, at, if th.dark { 0 } else { 1 }, size, Color32::WHITE);
+            strip.blit(p, at, (value / 50) as usize + 2, size, th.accent);
         } else {
             self.stereo.blit(p, at, (value / 50) as usize, size, glyph_tint(th, 0.7));
         }
     }
 
     /// 原版 `spr_tempobox`：0/1 = 经典 t/s / BPM，2/3 = Fluent t/s / BPM，4/5 = Fluent 暗黑。
-    /// 原生 74×22，尺寸乘 `scale`（缩放后跟图层栏其他内容一起放大）。
-    pub fn tempo_box(&self, p: &egui::Painter, at: Pos2, bpm: bool, th: &Theme, scale: f32) {
+    /// 原生 74×22，尺寸乘 `scale`（缩放后跟图层栏其他内容一起放大）；`hires` 且
+    /// Fluent 时换 4 倍的 `spr_tempobox_hires`，帧号与普通条一致。
+    pub fn tempo_box(
+        &self,
+        p: &egui::Painter,
+        at: Pos2,
+        bpm: bool,
+        th: &Theme,
+        scale: f32,
+        hires: bool,
+    ) {
         let base = match th.kind {
             ThemeKind::Fluent => 2 + if th.dark { 2 } else { 0 },
             _ => 0,
         };
-        self.tempobox.blit(
-            p,
-            at,
-            base + bpm as usize,
-            Vec2::new(self.tempobox.fw * scale, self.tempobox.fh * scale),
-            Color32::WHITE,
-        );
+        let size = Vec2::new(self.tempobox.fw * scale, self.tempobox.fh * scale);
+        if hires && th.kind == ThemeKind::Fluent {
+            if let Some(s) = &self.tempobox_hires {
+                s.blit(p, at, base + bpm as usize, size, Color32::WHITE);
+                return;
+            }
+        }
+        self.tempobox
+            .blit(p, at, base + bpm as usize, size, Color32::WHITE);
     }
 
     /// 原版 `spr_layerbox` 的行底：0 经典浅色、1 经典暗黑、2/3 Fluent 浅/深。

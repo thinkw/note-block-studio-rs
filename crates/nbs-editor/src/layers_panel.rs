@@ -200,7 +200,14 @@ fn header(
 
     // 小节·拍·十六分：原版只画，不给交互（悬停出说明）。
     let sig = song.meta.time_signature.max(1) as f64;
-    bank.tempo_box(p, pos2(start.x + 184.0 * u, band + 3.0 * u), false, th, u);
+    bank.tempo_box(
+        p,
+        pos2(start.x + 184.0 * u, band + 3.0 * u),
+        false,
+        th,
+        u,
+        state.canvas_hires,
+    );
     let digits = crate::fonts::scaled(main_font(), u);
     for (x, t) in [
         (215.0, ".".to_string()),
@@ -229,7 +236,14 @@ fn header(
     // （`draw_window_set_tempo.gml:14-21`）；点击 / 拖拽的判定框固定 (108, 57, 64, 22)。
     let (box_x, box_w) = if bpm_on { (101.0, 74.0) } else { (108.0, 64.0) };
     let mult = if bpm_on { 15.0 } else { 1.0 };
-    bank.tempo_box(p, pos2(start.x + box_x * u, band + 3.0 * u), bpm_on, th, u);
+    bank.tempo_box(
+        p,
+        pos2(start.x + box_x * u, band + 3.0 * u),
+        bpm_on,
+        th,
+        u,
+        state.canvas_hires,
+    );
     if state.tempo_input.is_none() {
         // 原版把数值文字整段包在 `if (window != w_settempo)` 里（`control_draw.gml:2453`）：
         // 就地框开着时不画数值，输入框直接盖在同一格上。
@@ -594,6 +608,7 @@ fn row(
             active,
             th,
             u,
+            state.canvas_hires,
         );
         if active {
             ui.painter().text(
@@ -659,6 +674,7 @@ fn row(
             active,
             th,
             u,
+            state.canvas_hires,
         );
         let (tip, label) = pan_label(pan);
         if active {
@@ -715,6 +731,7 @@ fn row(
             layer.lock == LockMode::Locked,
             th,
             u,
+            state.canvas_hires,
         )
     {
         let next = if layer.lock == LockMode::Locked {
@@ -735,6 +752,7 @@ fn row(
             layer.lock == LockMode::Solo,
             th,
             u,
+            state.canvas_hires,
         )
     {
         let next = if layer.lock == LockMode::Solo {
@@ -747,7 +765,7 @@ fn row(
     if exists && idle && bank.layer_button(ui, pos2(bx(162.0), by), 2, idx, tr(
         "Select all note blocks in this layer\n(Click and drag to select multiple; click again to deselect)",
         "选择本层所有方块\n（拖拽可批量选择，再次点选取消选择）",
-    ), false, th, u) {
+    ), false, th, u, state.canvas_hires) {
         state.emit(Command::SelectLayer(idx));
     }
     if idle
@@ -763,6 +781,7 @@ fn row(
             false,
             th,
             u,
+            state.canvas_hires,
         )
     {
         state.emit(Command::InsertLayer(idx));
@@ -781,6 +800,7 @@ fn row(
             false,
             th,
             u,
+            state.canvas_hires,
         )
     {
         state.emit(Command::RemoveLayer(idx));
@@ -801,6 +821,7 @@ fn row(
             false,
             th,
             u,
+            state.canvas_hires,
         )
     {
         state.emit(Command::MoveLayerUp(idx));
@@ -821,6 +842,7 @@ fn row(
             false,
             th,
             u,
+            state.canvas_hires,
         )
     {
         state.emit(Command::MoveLayerDown(idx));
@@ -882,7 +904,17 @@ fn macro_bar(
         } else {
             pos2(row2.x + (i - 10) as f32 * step, row2.y)
         };
-        if idle && bank.macro_button(ui, at, i, tr(btn.tip_en, btn.tip_zh), th, u) {
+        if idle
+            && bank.macro_button(
+                ui,
+                at,
+                i,
+                tr(btn.tip_en, btn.tip_zh),
+                th,
+                u,
+                state.canvas_hires,
+            )
+        {
             emit_macro(state, &btn.action);
         }
     }
