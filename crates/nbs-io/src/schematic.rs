@@ -6121,10 +6121,18 @@ mod tests {
     /// 按截图那套选项重导一遍，size / palette / 方块表 / 牌面文字逐条比对。
     #[test]
     fn structure_export_matches_the_original_reference_file() {
-        let dir = reference_songs_dir().expect("assets/Songs 不在仓库里");
+        // 参照曲是用户自己的音乐，不入库（assets/Songs 在 .gitignore 里）。
+        let Some(dir) = reference_songs_dir() else {
+            eprintln!("跳过：本机没有 assets/Songs（参照曲不入库）");
+            return;
+        };
         let stem = "祭司王约翰的黄金境1.9(导出准备";
         let nbs_path = dir.join(format!("{stem}.nbs"));
         let nbt_path = dir.join(format!("{stem}.nbt"));
+        if !nbs_path.is_file() || !nbt_path.is_file() {
+            eprintln!("跳过：本机没有参照曲 {stem}");
+            return;
+        }
         let song = nbs_core::nbs::load(&nbs_path).unwrap();
         let theirs = crate::nbt::parse(&gzip_decode(&nbt_path)).unwrap();
 

@@ -7,3 +7,5 @@ __pycache__/
 assets/target/
 # 排查用的临时工程、原始数据和试听文件，不入库
 .work/
+# 曲子目录：用户自己的音乐不入库
+assets/Songs/
