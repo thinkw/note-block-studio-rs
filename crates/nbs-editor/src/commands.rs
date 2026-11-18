@@ -195,6 +195,11 @@ pub enum Command {
     OpenSchematicExport,
     /// 原版「导出」按钮：两道闸门都过才弹保存框。
     ExportSchematicChecked,
+    /// 原版 `menu_click` 的导出直轨入口：与 Schematic 共用同一个 `calculate_size()`
+    /// 闸门（menu_click.gml:66-68），警告与兼容问句一样不少。
+    OpenTrackExport,
+    /// 原版直轨窗口「导出」按钮（draw_window_track_export.gml:270-278）。
+    TrackExportChecked,
     /// 原版「使用默认值」= `reset_schematic_export(1)`。
     ResetSchematicOptions,
     /// 原版导入窗口的「导入」= `import_midi()`，随后 `save_settings()`。
@@ -320,6 +325,8 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         }
         Command::ConfirmNew => {
             state.doc.replace_song(Song::new());
+            // 原版换歌 = 新实例 id，声源分配方案随之失效。
+            state.song_session += 1;
             state.prepare_audio();
             state.viewport.start_tick = 0;
             state.viewport.start_layer = 0;
@@ -358,6 +365,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     && state.prefs.show_old_warning;
                 let text = nbs_io::prefs::old_file_warning("NBS");
                 state.doc.replace_song(song);
+                state.song_session += 1;
                 state.prepare_audio();
                 state.viewport.start_tick = 0;
                 state.viewport.start_layer = 0;
@@ -858,9 +866,16 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.prefs_theme_menu = false;
             state.prefs_rate_menu = false;
         }
-        // ------------------------------------------------------------ 导出 Schematic
-        // 原版 `menu_click`：`if (calculate_size()) window = w_schematic_export`。
-        Command::OpenSchematicExport => {
+        // ---------------------------------------------- 导出 Schematic / 导出直轨
+        // 原版 `menu_click`：两个入口都走 `if (calculate_size()) window = …`
+        // （menu_click.gml:66-68），警告弹窗与兼容问句是 calculate_size() 的，
+        // 所以直轨入口一样不少；差别只在最后开的窗口。
+        Command::OpenSchematicExport | Command::OpenTrackExport => {
+            let target = if cmd == Command::OpenTrackExport {
+                WindowKind::TrackExport
+            } else {
+                WindowKind::SchematicExport
+            };
             state.schematic_stats = nbs_io::schematic::calculate_stats(&state.doc.song);
             state.schematic_options.tempo_mode = state.schematic_stats.tempo_mode;
             let st = &state.schematic_stats;
@@ -905,12 +920,10 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             }
             state.modals = ModalQueue {
                 items,
-                then: guard
-                    .ok()
-                    .map(|_| Command::ShowWindow(WindowKind::SchematicExport)),
+                then: guard.ok().map(|_| Command::ShowWindow(target.clone())),
             };
             if state.modals.is_empty() {
-                dispatch(state, Command::ShowWindow(WindowKind::SchematicExport), ctx);
+                dispatch(state, Command::ShowWindow(target), ctx);
             }
         }
         Command::AnswerModal(yes) => {
@@ -931,6 +944,9 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         }
         Command::ResetSchematicOptions => {
             state.schematic_options.reset();
+            // 原版 `reset_schematic_export.gml:70`：plan 与签名一并清空。
+            state.invalidate_command_plan();
+            state.schematic_command_signature.clear();
             state.set_message(tr(
                 "Schematic export defaults restored",
                 "导出 Schematic 的设定已还原",
@@ -952,6 +968,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.midi_file.clear();
             state.midi_tab = 0;
             state.doc.replace_song(song);
+            state.song_session += 1;
             state.prepare_audio();
             state.viewport.start_tick = 0;
             state.viewport.start_layer = 0;
@@ -986,13 +1003,56 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.midi_tab = 0;
         }
         Command::ExportSchematicChecked => {
+            // 原版按钮闸（draw_window_schematic_export.gml:323-331）：
+            // 先查「没有方块」，尺寸闸只在非命令模式生效——命令模式的尺寸
+            // 由声源分配方案决定，留给 schematic_export() 内部检查。
             let st = state.schematic_stats.clone();
-            match nbs_io::schematic::export_check(&st, &state.schematic_options).dialog() {
+            let o = state.schematic_options.clone();
+            let blocked = if st.totalblocks[o.include_locked as usize] == 0 {
+                Some(nbs_io::schematic::ExportCheck::NoBlocks.dialog().unwrap())
+            } else if !(o.structure && o.command_block) {
+                nbs_io::schematic::export_check(&st, &o).dialog()
+            } else {
+                None
+            };
+            match blocked {
                 None => dispatch(
                     state,
                     Command::OpenDialog(DialogAction::ExportSchematic),
                     ctx,
                 ),
+                Some((title, msg)) => {
+                    state.modals = ModalQueue::message(title, msg);
+                }
+            }
+        }
+        Command::TrackExportChecked => {
+            // 原版按钮闸（draw_window_track_export.gml:270-278）：先查「没有方块」，
+            // 尺寸闸只在非命令模式生效且只看 40+enda*2；CN 的太大文案比 Schematic
+            // 窗口少一行。
+            let st = state.schematic_stats.clone();
+            let o = state.schematic_options.clone();
+            let blocked = if st.totalblocks[o.include_locked as usize] == 0 {
+                Some((
+                    tr("Schematic export", "导出结构"),
+                    tr("There are no blocks to export!", "没有方块可以导出！"),
+                ))
+            } else if !(o.structure && o.command_block)
+                && 40u64 + state.doc.song.enda as u64 * 2 >= 2000
+            {
+                Some((
+                    tr("Error", "错误"),
+                    if crate::lang() == 1 {
+                        "这个结构太大了。大小限制为 2000x2000x256。".into()
+                    } else {
+                        "The Schematic is too big. The maximum size is 2000x2000x256.\nTry changing the \"Repeaters per row\" value to decrease the size.".into()
+                    },
+                ))
+            } else {
+                None
+            };
+            match blocked {
+                None => dispatch(state, Command::OpenDialog(DialogAction::ExportTrack), ctx),
                 Some((title, msg)) => {
                     state.modals = ModalQueue::message(title, msg);
                 }
@@ -1381,6 +1441,19 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     dialog.refresh();
                 }
             }
+            if action == DialogAction::ExportTrack {
+                // 原版 track_export.gml:8-11：默认名规则与 Schematic 导出一致。
+                let structure = state.schematic_options.structure;
+                dialog.set_ext(if structure { "nbt" } else { "schematic" });
+                if structure {
+                    let stem = std::path::Path::new(&dialog.name)
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    dialog.name = format!("{}.nbt", stem.to_lowercase().replace(' ', "_"));
+                    dialog.refresh();
+                }
+            }
             if action == DialogAction::SaveExtraNotes {
                 // 原版 `datapack_getextranotes.gml:6`：默认名写死 "Extra Note Blocks"（中文
                 // 分支是「更多音符盒」），跟当前歌曲完全无关；扩展名交给对话框的 *.zip 过滤器补。
@@ -1465,10 +1538,34 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                         path.with_extension("schematic")
                     };
                     state.window = None;
-                    match nbs_io::schematic::export_schematic(&state.doc.song, &path, &opts) {
+                    // 原版 `schematic_export.gml:16-17`：命令模式先以全预算重算
+                    // 声源分配方案（get_schematic_plan(true)），校验通过才落盘。
+                    let command_mode = opts.structure && opts.command_block && opts.layout < 2;
+                    let plan = if command_mode {
+                        // 克隆一份绕开与 song 的借用冲突；导出每次只做一次，代价可忽略。
+                        Some(state.rebuild_command_plan_forced().clone())
+                    } else {
+                        None
+                    };
+                    match nbs_io::schematic::export_schematic(
+                        &state.doc.song,
+                        &path,
+                        &opts,
+                        plan.as_ref(),
+                    ) {
                         // 原版：保存成功后 `message("Schematic 已保存！")`，
                         // 关掉提示再把导出窗口重新打开。
                         Ok(info) => {
+                            // 原版 `schematic_export.gml:1107`：命令模式附声源分配报告。
+                            if let Some(p) = plan.as_ref() {
+                                for line in nbs_io::mc_export::log_report(
+                                    p,
+                                    &opts.command_source,
+                                    "Standard command-block structure",
+                                ) {
+                                    state.log_strs.push(line);
+                                }
+                            }
                             state.set_message(if crate::lang() == 1 {
                                 format!(
                                     "Schematic 已保存：{}×{}×{}，{} 个音符盒",
@@ -1492,6 +1589,84 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                         } else {
                             format!("Schematic export failed: {e}")
                         }),
+                    }
+                }
+                DialogAction::ExportTrack => {
+                    // 原版 track_export()：对话框确认后才关窗、做命令模式闸门，再生成。
+                    let opts = state.schematic_options.clone();
+                    let structure = opts.structure;
+                    let path = if structure {
+                        path.with_extension("nbt")
+                    } else {
+                        path.with_extension("schematic")
+                    };
+                    state.window = None;
+                    // 原版 track_export.gml:14-29：命令模式先取全预算方案并补 9 条
+                    // 车道表，两道闸门都过才生成；失败只弹消息，窗口保持关闭。
+                    let mut plan: Option<nbs_io::mc_export::Plan> = None;
+                    let mut blocked: Option<ModalQueue> = None;
+                    if structure && opts.command_block {
+                        let mut p = state.rebuild_command_plan_forced().clone();
+                        nbs_io::mc_export::prepare_track_plan(&mut p, &state.doc.song);
+                        if p.rows.is_empty() {
+                            blocked = Some(ModalQueue::message(
+                                tr("Schematic export", "导出结构"),
+                                tr(
+                                    "There are no sound commands to export!",
+                                    "没有声音命令可以导出！",
+                                ),
+                            ));
+                        } else {
+                            let planned_height =
+                                20i64.max(((p.track_maximum_slots as i64 + 3) / 4) * 4 + 4);
+                            let planned_length = 40 + p.last_command_grid * 2;
+                            if planned_length > 2147483647 || planned_height > 2147483647 {
+                                blocked = Some(ModalQueue::message(
+                                    tr("Error", "错误"),
+                                    tr(
+                                        "The Track dimensions exceed the signed 32-bit Structure NBT limit.",
+                                        "直轨尺寸超过了结构 NBT 的 32 位有符号整数限制。",
+                                    ),
+                                ));
+                            } else {
+                                plan = Some(p);
+                            }
+                        }
+                    }
+                    if let Some(q) = blocked {
+                        state.modals = q;
+                    } else if let Err(e) = nbs_io::schematic::export_track(
+                        &state.doc.song,
+                        &opts,
+                        plan.as_ref(),
+                        &path,
+                    ) {
+                        state.set_message(if crate::lang() == 1 {
+                            format!("导出直轨失败: {e}")
+                        } else {
+                            format!("Track export failed: {e}")
+                        });
+                    } else {
+                        // 原版 `track_export.gml:1401`：命令模式附声源分配报告。
+                        if let Some(p) = plan.as_ref() {
+                            for line in nbs_io::mc_export::log_report(
+                                p,
+                                &opts.command_source,
+                                "Track command-block structure",
+                            ) {
+                                state.log_strs.push(line);
+                            }
+                        }
+                        let mut q = ModalQueue::message(
+                            crate::tr("Track Export", "导出直轨"),
+                            if structure {
+                                crate::tr("Structure saved!", "结构已保存！")
+                            } else {
+                                crate::tr("Schematic saved!", "Schematic 已保存！")
+                            },
+                        );
+                        q.then = Some(Command::ShowWindow(WindowKind::TrackExport));
+                        state.modals = q;
                     }
                 }
                 DialogAction::ExportDatapack => {
@@ -1667,6 +1842,8 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             let dir = state.prefs.sounds_dir_path();
             state.audio.reload_bank(dir.as_deref());
             state.prepare_audio();
+            // 原版 `set_resourcepack.gml:462`：音色变化使声源分配方案失效。
+            state.invalidate_command_plan();
             state.set_message(if crate::lang() == 1 {
                 format!("采样已重新加载：{}", state.audio.sample_status())
             } else {
@@ -1896,6 +2073,7 @@ fn import_schematic(state: &mut EditorState, path: &std::path::Path) {
             let inputs = info.inputs;
             let n = info.added_notes;
             state.doc.replace_song(info.song);
+            state.song_session += 1;
             state.prepare_audio();
             state.viewport.start_tick = 0;
             state.viewport.start_layer = 0;

@@ -8,7 +8,7 @@
 //! `block_get_namespaced_id.gml` 与 `block_get_name.gml`（方块名表）。
 //!
 //! 原版自身的怪癖按原样保留、不做"修正"，每处都有注释说明：
-//! - structure 的 `size[0]` 恒写成 32（与真实 len 无关）。
+//! - structure 的 `size` 头：Litematica 写精确边长，其余写 `min(边长, 32)`。
 //! - id 68（地板上的按钮）在 palette 里没有对应项，因此按 else 分支落成 air。
 //! - `75, 4` 被原版注释成 "north lit walltorch"，但 75 其实是不亮的火把。
 //! - `!compress` 时非音符层会占一个空位（原版用 `nblockins = -1` 表达），
@@ -22,8 +22,6 @@ use std::path::Path;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use nbs_core::model::Song;
-
-use crate::datapack::{dat_pitch, instrument_sound};
 
 /// 16 种内置乐器对应的「音符盒下方方块」数值 id（原版 `reset_schematic_export.gml`）。
 ///
@@ -69,6 +67,7 @@ const LEVER: u8 = 69;
 const TORCHOFF: u8 = 75;
 const TORCHON: u8 = 76;
 const BUTTON_WALL: u8 = 77;
+const SLAB: u8 = 44;
 const REPEATER: u8 = 93;
 /// `block_repeater(..., powered = 1)` 写出的 `93 + 1`。
 const REPEATER_POWERED: u8 = 94;
@@ -616,11 +615,27 @@ pub struct SchematicOptions {
     /// `sch_exp_glass`（仅 Classic 生效）。
     pub glass: bool,
     /// `structure`：true 走 1.13+ 结构方块，false 走经典 schematic。
+    /// 原版是全局变量，出厂 `control_create.gml:638` 的 `structure = 1`，
+    /// 随后在 format 下拉（`menu_click.gml:254-256`）、加载设置
+    /// （`load_settings.gml:155`）与导出入口（`schematic_export.gml:5`）由
+    /// `sch_exp_format <= 1` 重算——写 format 时必须同步。
     pub structure: bool,
+    /// `sch_exp_format`（reset_schematic_export.gml:42）：0 = 结构方块 NBT，
+    /// 1 = Litematica NBT（精确尺寸头），2 = 1.11-1.12 Schematic，
+    /// 3 = pre-1.11 Schematic。落盘键 `format`；`structure` / `minecraft_old`
+    /// 都是它的派生（`load_settings.gml:154-156`），原版没有独立的
+    /// litematica 开关。
+    pub format: u8,
     /// `sch_exp_minecraft_old`：pre-1.11 的 id 命名与 Version 段。
     pub minecraft_old: bool,
     /// `command_block`：仅 structure 生效，用命令方块换取更广音域。
     pub command_block: bool,
+    /// `sch_command_source`：首选声源（0..9 的 minecraft_export_sources 名）。
+    pub command_source: String,
+    /// `sch_command_allowed_sources`：允许分配器使用的声源（master 默认关）。
+    pub command_allowed_sources: [bool; 10],
+    /// `sch_command_tempo_grid`：音符吸附到所选红石网格。
+    pub command_tempo_grid: bool,
     /// `sch_exp_tempo`：0 = 10 t/s，1 = 5 t/s，2 = 2.5 t/s。
     /// 原版在打开窗口时由 `calculate_size()` 按歌曲 tempo 覆写一次，之后可手动改。
     pub tempo_mode: u8,
@@ -643,9 +658,13 @@ impl Default for SchematicOptions {
             chest: true,
             loop_option: true,
             glass: true,
-            structure: false,
+            structure: true,
+            format: 0,
             minecraft_old: false,
             command_block: false,
+            command_source: crate::mc_export::SOURCES[1].to_string(),
+            command_allowed_sources: crate::mc_export::default_allowed_sources(),
+            command_tempo_grid: false,
             tempo_mode: 0,
             walkway: McBlock::new(STONE, 0),
             circuit: McBlock::new(STONE, 0),
@@ -667,6 +686,8 @@ impl SchematicOptions {
     /// 原版「使用默认值」按钮：`reset_schematic_export(1)`。
     /// `sch_exp_tempo`、`structure`、`command_block` 都不在这张默认值表里，
     /// 原版只把前两者写在 `[schematic_export]` / `[preferences]` 中持久化，重置时原样保留。
+    /// 命令声源三项则按 `reset_schematic_export.gml:66-68` 恢复出厂；
+    /// `sch_exp_format` 在表里（gml:42）重置为 0；命令方案缓存（`sch_command_plan`）由调用方清空。
     pub fn reset(&mut self) {
         *self = Self {
             tempo_mode: self.tempo_mode,
@@ -674,6 +695,14 @@ impl SchematicOptions {
             command_block: self.command_block,
             ..Default::default()
         };
+    }
+
+    /// 原版 format 菜单（`menu_click.gml:254-256`）：`sch_exp_format = sel;
+    /// structure = (sel <= 1); sch_exp_minecraft_old = (sel = 3)`。
+    pub fn set_format(&mut self, v: u8) {
+        self.format = v.min(3);
+        self.structure = self.format <= 1;
+        self.minecraft_old = self.format == 3;
     }
 
     /// 原版的 `median(5, drag, 100)` 夹取。
@@ -886,15 +915,38 @@ pub fn schematic_width(opts: &SchematicOptions) -> usize {
     }
 }
 
-/// 原版 `schematic_height()`。
-pub fn schematic_height(stats: &SchematicStats, opts: &SchematicOptions) -> usize {
-    4 + 3 * ceil_div(stats.maxheight[opts.compress as usize], 4)
+/// 原版 `schematic_height()`：命令方案存在时 `maximum` 用
+/// `command_plan.maximum_slots`，且仅 `sch_exp_layout < 2`（schematic_height.gml:5-6）。
+pub fn schematic_height_with(
+    stats: &SchematicStats,
+    opts: &SchematicOptions,
+    plan: Option<&crate::mc_export::Plan>,
+) -> usize {
+    let maximum = match plan {
+        Some(p) if opts.layout < 2 => p.maximum_slots,
+        _ => stats.maxheight[opts.compress as usize],
+    };
+    4 + 3 * ceil_div(maximum, 4)
 }
 
-/// 原版 `schematic_length()`。
-pub fn schematic_length(stats: &SchematicStats, opts: &SchematicOptions) -> usize {
+/// 原版 `schematic_height()`。
+pub fn schematic_height(stats: &SchematicStats, opts: &SchematicOptions) -> usize {
+    schematic_height_with(stats, opts, None)
+}
+
+/// 原版 `schematic_length()`：命令方案存在时中继器数用
+/// `plan_repeaters(plan)`。注意原版 length 没有 layout 闸——方案由调用方按
+/// `structure && command_block && layout < 2` 传入（与 `schematic_export.gml:72` 一致）。
+pub fn schematic_length_with(
+    stats: &SchematicStats,
+    opts: &SchematicOptions,
+    plan: Option<&crate::mc_export::Plan>,
+) -> usize {
     let rows = opts.notesperrow;
-    let repeaters = stats.repeaters[opts.include_locked as usize][opts.tempo_mode as usize];
+    let repeaters = match plan {
+        Some(p) => crate::mc_export::plan_repeaters(p, opts.tempo_mode),
+        None => stats.repeaters[opts.include_locked as usize][opts.tempo_mode as usize],
+    };
     if opts.layout < 2 {
         let mut len = 2 + ceil_div(repeaters, rows) * 3;
         // 原版 `len += 3*!(rows mod 2)`：GML 的 `!` 让偶数行才补这 3。
@@ -907,13 +959,33 @@ pub fn schematic_length(stats: &SchematicStats, opts: &SchematicOptions) -> usiz
     }
 }
 
-pub fn calc_size(stats: &SchematicStats, opts: &SchematicOptions) -> SchematicSize {
+/// 原版 `schematic_length()`。
+pub fn schematic_length(stats: &SchematicStats, opts: &SchematicOptions) -> usize {
+    schematic_length_with(stats, opts, None)
+}
+
+/// 尺寸计算；`plan` 是命令方案（由调用方按 `structure && command_block &&
+/// layout < 2` 传入，与 `schematic_export.gml:72` 一致）。
+pub fn calc_size_with(
+    stats: &SchematicStats,
+    opts: &SchematicOptions,
+    plan: Option<&crate::mc_export::Plan>,
+) -> SchematicSize {
     SchematicSize {
-        len: schematic_length(stats, opts),
+        len: schematic_length_with(stats, opts, plan),
         wid: schematic_width(opts),
-        hei: schematic_height(stats, opts),
-        layers: ceil_div(stats.maxheight[opts.compress as usize], 4),
+        hei: schematic_height_with(stats, opts, plan),
+        // 原版 `layers = ceil((command_plan 存在 ? maximum_slots : maxheight) / 4)`
+        // （schematic_export.gml:73，闸门在 command_plan 的赋值处）。
+        layers: match plan {
+            Some(p) => ceil_div(p.maximum_slots, 4),
+            None => ceil_div(stats.maxheight[opts.compress as usize], 4),
+        },
     }
+}
+
+pub fn calc_size(stats: &SchematicStats, opts: &SchematicOptions) -> SchematicSize {
+    calc_size_with(stats, opts, None)
 }
 
 fn ceil_div(a: usize, b: usize) -> usize {
@@ -992,10 +1064,12 @@ struct Slot {
     /// 乐器索引；-1 表示空位（原版 `nblockins = -1`）。
     ins: i32,
     key: u8,
-    pit: i16,
+    /// 非命令模式：原曲音高；命令模式：方案行号（供 TileEntity 查 `rows[pit].command`）。
+    pit: i32,
 }
 
-/// 原版 `noteblockx/y/z/note/ins/pit` 六张平行表。
+/// 原版 `noteblockx/y/z/note/ins` 平行表（`pit` 在放置时已被命令查询消费，
+/// 不再随表携带）。
 #[derive(Clone, Copy, Debug)]
 struct NoteEntry {
     x: i32,
@@ -1003,13 +1077,14 @@ struct NoteEntry {
     z: i32,
     note: i32,
     ins: usize,
-    pit: i16,
 }
 
 /// 一次导出的完整中间结果：网格 + 音符盒表 + 原版在导出时算出的所有开关。
 pub struct Built {
     grid: Grid,
     notes: Vec<NoteEntry>,
+    /// 与 notes 平行：命令模式为方案行命令，其余 None。
+    commands: Vec<Option<String>>,
     size: SchematicSize,
     opts: SchematicOptions,
     /// 原版界面里「中继器」那一行显示的 `sch_exp_repeaters[includelocked][tempo]`。
@@ -1032,10 +1107,14 @@ pub struct Built {
 struct Builder<'a> {
     song: &'a Song,
     o: &'a SchematicOptions,
+    /// 命令模式（structure + command_block + layout<2）的声源分配方案；其余为 None。
+    plan: Option<&'a crate::mc_export::Plan>,
     locked: Vec<bool>,
     size: SchematicSize,
     g: Grid,
     notes: Vec<NoteEntry>,
+    /// 与 notes 平行：命令模式为 `Some(rows[pit].command)`，其余 None。
+    commands: Vec<Option<String>>,
     tempo_mode: u8,
     compress: bool,
     include_locked: bool,
@@ -1085,7 +1164,7 @@ impl<'a> Builder<'a> {
                         out.push(Slot {
                             ins: n.instrument as i32,
                             key: n.key,
-                            pit: n.pitch,
+                            pit: n.pitch as i32,
                         });
                     } else if !self.compress {
                         out.push(Slot {
@@ -1107,6 +1186,38 @@ impl<'a> Builder<'a> {
             }
         }
         out
+    }
+
+    /// 命令模式下原版 `command_plan.slots_by_grid[a]` 的取值（schematic_export.gml:236-248）：
+    /// 每项是方案行号，undefined（我们的 usize::MAX）→ `ins=-1, key=33, pit=-1`，
+    /// 否则 `ins=instrument, key=33, pit=行号`。
+    fn plan_slots(&self, grid: u32) -> Vec<Slot> {
+        let p = match self.plan {
+            Some(p) => p,
+            None => return Vec::new(),
+        };
+        p.slots_by_grid
+            .get(grid as usize)
+            .map(|rows| {
+                rows.iter()
+                    .map(|&r| {
+                        if r == usize::MAX {
+                            Slot {
+                                ins: -1,
+                                key: 33,
+                                pit: -1,
+                            }
+                        } else {
+                            Slot {
+                                ins: p.rows[r].instrument as i32,
+                                key: 33,
+                                pit: r as i32,
+                            }
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// 原版一次成行时放的 4 个音符盒位（每层 b 一组，最多消耗 4 个 slot）。
@@ -1186,13 +1297,16 @@ impl<'a> Builder<'a> {
         let block = self.o.ins(s.ins as usize);
         self.block_other(x, y, z, NOTE_BLOCK, 0);
         self.block_other(x, y, z_below, block.id, block.data);
+        // 原版 TileEntity 直接查 `command_plan.rows[noteblockpit[a]].command`
+        // （schematic_export.gml:1014）；命令模式下 pit 就是方案行号。
+        let command = self.plan.map(|p| p.rows[s.pit as usize].command.clone());
+        self.commands.push(command);
         self.notes.push(NoteEntry {
             x,
             y,
             z,
             note: s.key as i32 - 33,
             ins: s.ins as usize,
-            pit: s.pit,
         });
     }
 
@@ -1321,7 +1435,12 @@ impl<'a> Builder<'a> {
             d = 1 - d;
         }
 
-        // 音符盒排布
+        // 音符盒排布。原版 `export_end = plan ? plan.last_command_grid : enda`
+        // （schematic_export.gml:229）。
+        let export_end = self
+            .plan
+            .map(|p| p.last_command_grid)
+            .unwrap_or(self.song.enda as i64);
         let mut xx = 3i32;
         let mut yy = 0i32;
         let mut rep = 0u32;
@@ -1330,10 +1449,15 @@ impl<'a> Builder<'a> {
         let mut lturnx = -1i32;
         let mut lturny = -1i32;
         let mut lturndel = 0i32;
-        for a in 0..=self.song.enda {
+        for a in 0..=export_end {
+            let a = a as u32;
             let mut nblocks = 0i32;
             rep += rep_step(self.tempo_mode);
-            let slots = self.tick_slots(a);
+            let slots = if self.plan.is_some() {
+                self.plan_slots(a)
+            } else {
+                self.tick_slots(a)
+            };
             if !slots.is_empty() {
                 nblocks = slots.len() as i32;
             }
@@ -1388,7 +1512,7 @@ impl<'a> Builder<'a> {
                         turn = yy <= 2;
                     }
                 }
-                if a == self.song.enda {
+                if a as i64 == export_end {
                     turn = false;
                 }
                 if turn {
@@ -1415,7 +1539,7 @@ impl<'a> Builder<'a> {
                     if circ == -1 && dir == 1 {
                         lturnx = xx;
                         lturny = yy - 1;
-                        lturndel = self.song.enda as i32 - a as i32 - 8;
+                        lturndel = export_end as i32 - a as i32 - 8;
                     }
                     xx += 3 * circ;
                     if xx <= 0 {
@@ -1607,23 +1731,34 @@ impl<'a> Builder<'a> {
 }
 
 /// 把歌曲 + 选项展开成网格与音符盒表。
-pub fn build(song: &Song, opts: &SchematicOptions) -> Built {
+///
+/// `plan` 是命令模式的声源分配方案；调用方按原版闸门
+/// `structure && command_block && layout < 2` 传入（schematic_export.gml:16/72），
+/// 其余情况传 None——生成器在 layout>=2（经典排布）不用方案，与原版一致。
+pub fn build(song: &Song, opts: &SchematicOptions, plan: Option<&crate::mc_export::Plan>) -> Built {
     let stats = calculate_stats(song);
-    build_with_stats(song, opts, &stats)
+    build_with_stats(song, opts, &stats, plan)
 }
 
-pub fn build_with_stats(song: &Song, opts: &SchematicOptions, stats: &SchematicStats) -> Built {
-    let size = calc_size(stats, opts);
+pub fn build_with_stats(
+    song: &Song,
+    opts: &SchematicOptions,
+    stats: &SchematicStats,
+    plan: Option<&crate::mc_export::Plan>,
+) -> Built {
+    let size = calc_size_with(stats, opts, plan);
     let sch_loop = opts.loop_option && opts.layout == 0;
     let minecart = opts.minecart && opts.layout < 2;
     let want_chest = opts.chest && minecart;
     let mut b = Builder {
         song,
         o: opts,
+        plan,
         locked: song.locked_layers(),
         size,
         g: Grid::new(size.len, size.wid, size.hei),
         notes: Vec::new(),
+        commands: Vec::new(),
         tempo_mode: opts.tempo_mode,
         compress: opts.compress,
         include_locked: opts.include_locked,
@@ -1641,6 +1776,7 @@ pub fn build_with_stats(song: &Song, opts: &SchematicOptions, stats: &SchematicS
     let Builder {
         g,
         notes,
+        commands,
         cyy,
         sign,
         chest,
@@ -1649,6 +1785,7 @@ pub fn build_with_stats(song: &Song, opts: &SchematicOptions, stats: &SchematicS
     Built {
         grid: g,
         notes,
+        commands,
         size,
         opts: opts.clone(),
         repeaters: stats.repeaters[opts.include_locked as usize][opts.tempo_mode as usize],
@@ -1681,7 +1818,7 @@ impl Built {
     pub fn classic_nbt(&self) -> Vec<u8> {
         let mut n = Nbt::default();
         let wid = self.size.wid as i32;
-        let old = self.opts.minecraft_old;
+        let old = self.opts.format == 3;
         n.compound("Schematic");
         n.short("Height", self.size.hei as i16);
         n.short("Length", self.size.len as i16);
@@ -1796,17 +1933,24 @@ impl Built {
     }
 
     /// 原版开启 `structure` 时写的 1.13+ 结构方块 NBT。
-    pub fn structure_nbt(&self, song: &Song) -> Vec<u8> {
+    pub fn structure_nbt(&self) -> Vec<u8> {
         let mut n = Nbt::default();
         let insnum = self.insnum;
         let wid = self.size.wid as i32;
         n.compound("");
         n.int("DataVersion", 1519);
-        // 原版把 size[0] 硬编码成 32，与真实 len 无关（保持原样）。
+        // 原版（schematic_export.gml:774-783）：`sch_exp_format = 1`（Litematica）
+        // 写精确尺寸；其余 structure 格式写 `min(边长, 32)`（结构方块 UI 的 32 格预览上限）。
         n.list("size", 3, 3);
-        n.item_int(32);
-        n.item_int(self.size.hei as i32);
-        n.item_int(self.size.len.min(32) as i32);
+        if self.opts.format == 1 {
+            n.item_int(wid);
+            n.item_int(self.size.hei as i32);
+            n.item_int(self.size.len as i32);
+        } else {
+            n.item_int(wid.min(32));
+            n.item_int((self.size.hei as i32).min(32));
+            n.item_int(self.size.len.min(32) as i32);
+        }
 
         n.list("palette", 29 + insnum as i32 * 26, 10);
         for blk in [self.opts.walkway, self.opts.circuit, self.opts.ground] {
@@ -2033,23 +2177,13 @@ impl Built {
             n.end();
             written += 1;
         }
-        for t in &self.notes {
+        for (t, cmd) in self.notes.iter().zip(self.commands.iter()) {
             if self.opts.command_block {
-                // 原版的音源名/音高拼接：pitch 用 note+33+pit/100，但加后缀的判断
-                // 却用 note+pit/100（不含 +33），照抄。
-                let mut soundname = instrument_sound(song, t.ins);
-                let soundpitch = dat_pitch(t.note as f64 + 33.0 + t.pit as f64 / 100.0);
-                let offset = t.note as f64 + t.pit as f64 / 100.0;
-                if offset < 0.0 {
-                    soundname += "_-1";
-                } else if offset > 24.0 {
-                    soundname += "_1";
-                }
+                // 原版 `TAG_String("Command", command_plan.rows[noteblockpit[a]].command)`
+                // （schematic_export.gml:1014）：命令由声源分配方案给出，不在导出时合成。
                 n.compound("nbt");
-                n.string(
-                    "Command",
-                    &format!("playsound {soundname} block @a ~ ~ ~ 3 {soundpitch}"),
-                );
+                n.string("id", "minecraft:command_block");
+                n.string("Command", cmd.as_deref().unwrap_or_default());
                 n.byte("TrackOutput", 0);
                 n.byte("powered", 0);
                 n.byte("auto", 0);
@@ -2225,6 +2359,1017 @@ fn prop(n: &mut Nbt, name: &str, props: &[(&str, &str)]) {
     n.end();
 }
 
+// ------------------------------------------------------------------ 直轨导出
+
+/// 直轨一个车道占位：原版 `nblockins/key/pit` 平行数组的一项，从尾部消费。
+/// `ins == -1` 表示这一格只消耗名额不放方块（原版 `idx * C - !C` 的产物）。
+#[derive(Clone, Copy, Debug)]
+struct TrackSlot {
+    ins: i32,
+    key: i32,
+    pit: i32,
+}
+
+/// 已放置的音符盒记录（原版 `noteblockx/y/z/note/ins/pit` 平行表）。
+#[derive(Clone, Copy, Debug)]
+struct TrackNote {
+    x: i32,
+    y: i32,
+    z: i32,
+    /// 原版 `noteblocknote`：key - 33。
+    note: i32,
+    ins: i32,
+    /// 命令模式下指向方案行号（`rows[pit].command`），classic 模式不用。
+    pit: i32,
+}
+
+/// 原版 `track_export()` 的 dummy 对象：structure 模式直接累积 NBT 字节流，
+/// classic 模式只有网格（布线写网格，最后组装 Schematic compound）。
+struct TrackBuilder<'a> {
+    song: &'a Song,
+    opts: &'a SchematicOptions,
+    plan: Option<&'a crate::mc_export::Plan>,
+    insnum: usize,
+    structure: bool,
+    command_block: bool,
+    old: bool,
+    track_tick_delay: i32,
+    len: usize,
+    hei: usize,
+    yy: i64,
+    layers: usize,
+    export_end: u32,
+    grid: Option<Grid>,
+    nbt: Nbt,
+    /// structure 模式：`size` 三个 int 与 `blocks` 列表头的回填位置。
+    sizepos: usize,
+    blocktagpos: usize,
+    totalblocksc: usize,
+    /// 原版 `structure_max_x/y/z`。classic 模式停在 sign 初值（辅助函数不更新）。
+    smax_x: i64,
+    smax_y: i64,
+    smax_z: i64,
+    /// 原版 `xx`：每 tick 结束 +2*dir（dir 恒 1，直轨无转向）。
+    xx: i64,
+    notes: Vec<TrackNote>,
+}
+
+impl<'a> TrackBuilder<'a> {
+    fn new(
+        song: &'a Song,
+        opts: &'a SchematicOptions,
+        plan: Option<&'a crate::mc_export::Plan>,
+    ) -> Self {
+        let insnum = nbs_core::model::FIRST_CUSTOM_INDEX as usize + song.custom_instruments.len();
+        let layers = match plan {
+            Some(p) => 1.max((p.track_maximum_slots + 3) / 4),
+            None => 4,
+        };
+        let export_end = match plan {
+            Some(p) => p.last_command_grid.max(0) as u32,
+            None => song.enda,
+        };
+        let len = 40 + export_end as usize * 2;
+        let hei = 20usize.max(layers * 4 + 4);
+        let yy = 49i64; // round(99/2) - 1
+        let grid = if opts.structure {
+            None
+        } else {
+            Some(Grid::new(len, 100, hei))
+        };
+        let (smax_x, smax_y, smax_z) = if opts.structure {
+            (99 - yy, hei as i64 - 1, 2)
+        } else {
+            (2, yy, hei as i64 - 1)
+        };
+        let track_tick_delay = match opts.tempo_mode {
+            0 => 0,
+            1 => 1,
+            _ => 3,
+        };
+        Self {
+            song,
+            opts,
+            plan,
+            insnum,
+            structure: opts.structure,
+            command_block: opts.command_block,
+            old: opts.minecraft_old,
+            track_tick_delay,
+            len,
+            hei,
+            yy,
+            layers,
+            export_end,
+            grid,
+            nbt: Nbt::default(),
+            sizepos: 0,
+            blocktagpos: 0,
+            totalblocksc: 0,
+            smax_x,
+            smax_y,
+            smax_z,
+            xx: 39,
+            notes: Vec::new(),
+        }
+    }
+
+    fn ins_name(&self, a: usize) -> &'static str {
+        INS_NAMES.get(a).copied().unwrap_or("harp")
+    }
+
+    /// 原版 `sch_block_write` 的 classic 分支：越界丢弃。原版写的是那张
+    /// 2000×2000×256 的大表，序列化只读 [0, len) 区间，写在其外的方块读不到。
+    fn grid_set(&mut self, x: i64, y: i64, z: i64, id: u8, data: u8) {
+        if let Some(g) = &mut self.grid {
+            g.set(x as i32, y as i32, z as i32, id, data);
+        }
+    }
+
+    /// structure 模式条目的公共段：structure_max 更新 + pos 列表。
+    fn entry_pos(&mut self, x: i64, y: i64, z: i64) {
+        let blockx = 99 - y;
+        self.smax_x = self.smax_x.max(blockx);
+        self.smax_y = self.smax_y.max(z);
+        self.smax_z = self.smax_z.max(x);
+        self.nbt.list("pos", 3, 3);
+        self.nbt.item_int(blockx as i32);
+        self.nbt.item_int(z as i32);
+        self.nbt.item_int(x as i32);
+    }
+
+    fn ins_block_at(&self, i: i32) -> (u8, u8) {
+        (
+            self.opts
+                .ins_block
+                .get(i as usize)
+                .copied()
+                .unwrap_or(STONE),
+            self.opts.ins_data.get(i as usize).copied().unwrap_or(0),
+        )
+    }
+
+    /// 原版 `block_walkway_track`。
+    fn walkway(&mut self, x: i64, y: i64, z: i64) {
+        if !self.structure {
+            let (id, data) = (self.opts.walkway.id, self.opts.walkway.data);
+            self.grid_set(x, y, z, id, data);
+            return;
+        }
+        self.entry_pos(x, y, z);
+        self.nbt.int("state", 0);
+        self.nbt.end();
+        self.totalblocksc += 1;
+    }
+
+    /// 原版 `block_circuit_track`。
+    fn circuit(&mut self, x: i64, y: i64, z: i64) {
+        if !self.structure {
+            let (id, data) = (self.opts.circuit.id, self.opts.circuit.data);
+            self.grid_set(x, y, z, id, data);
+            return;
+        }
+        self.entry_pos(x, y, z);
+        self.nbt.int("state", 1);
+        self.nbt.end();
+        self.totalblocksc += 1;
+    }
+
+    /// 原版 `block_other_track` 的 id/data 判定链（顺序与原版逐字一致）。
+    fn other_state(&self, id: u8, data: u8) -> i32 {
+        let base = (self.insnum * 26) as i32;
+        if id == AIR {
+            base + 4
+        } else if id == WOOL && data == 11 {
+            base + 3
+        } else if id == LADDER {
+            base + 5
+        } else if id == REDSTONE_WIRE {
+            base + 6
+        } else if id == TORCHOFF && data == 5 {
+            base + 16
+        } else if id == TORCHON && data == 5 {
+            base + 17
+        } else if id == BUTTON_WALL {
+            base + 18
+        } else if id == POWEREDRAIL {
+            base + 20
+        } else if id == RAIL {
+            base + 22
+        } else if id == TORCHOFF && data == 1 {
+            base + 23
+        } else if id == TORCHON && data == 1 {
+            base + 24
+        } else if id == TORCHOFF && data == 2 {
+            base + 25
+        } else if id == TORCHON && data == 2 {
+            base + 26
+        } else if id == LEVER {
+            base + 27
+        } else if id == TORCHOFF && data == 4 {
+            // 原版注释写作 "north lit walltorch"，但 75 是不亮的火把。
+            base + 28
+        } else if id == SLAB {
+            base + 29
+        } else {
+            for i in 0..self.insnum {
+                let (bid, bdata) = self.ins_block_at(i as i32);
+                if id == bid && data == bdata {
+                    return (3 + i) as i32;
+                }
+            }
+            base + 4
+        }
+    }
+
+    /// 原版 `block_other_track`。id = 25 在 structure 模式提前返回（音符盒由
+    /// 收尾循环统一写出）；classic 模式照常写网格。
+    fn other(&mut self, x: i64, y: i64, z: i64, id: u8, data: u8) {
+        if !self.structure {
+            self.grid_set(x, y, z, id, data);
+            return;
+        }
+        if id == NOTE_BLOCK {
+            return;
+        }
+        let state = self.other_state(id, data);
+        self.entry_pos(x, y, z);
+        self.nbt.int("state", state);
+        self.nbt.end();
+        self.totalblocksc += 1;
+    }
+
+    /// 原版 `block_repeater_track`（powered 参数所有调用都传 0）。
+    fn repeater(&mut self, x: i64, y: i64, z: i64, delay: i32, direction: i32, powered: u8) {
+        if !self.structure {
+            let data = (delay * 4 + direction) as u8;
+            self.grid_set(x, y, z, REPEATER + powered, data);
+            return;
+        }
+        let dir: i32 = match direction {
+            1 => match delay {
+                0 => 11,
+                1 => 12,
+                2 => 13,
+                _ => 14,
+            },
+            2 => match delay {
+                0 => 7,
+                1 => 8,
+                2 => 9,
+                _ => 10,
+            },
+            3 => 15,
+            _ => 0,
+        };
+        self.entry_pos(x, y, z);
+        self.nbt.int("state", (self.insnum * 26) as i32 + dir);
+        self.nbt.end();
+        self.totalblocksc += 1;
+    }
+
+    fn run(&mut self) {
+        if self.structure {
+            self.begin_structure();
+        } else {
+            let (y, z) = (self.yy as i32, self.hei as i32 - 1);
+            if let Some(g) = &mut self.grid {
+                g.set(2, y, z, BUTTON_FLOOR, 3);
+            }
+        }
+        self.build_wiring();
+        self.build_notes();
+        self.finish();
+    }
+
+    /// 原版 gml:124-321：根 compound、size/palette/entities/blocks 头与 sign 条目。
+    fn begin_structure(&mut self) {
+        self.nbt.compound("");
+        self.nbt.int("DataVersion", 1519);
+        self.nbt.list("size", 3, 3);
+        self.sizepos = self.nbt.buf.len();
+        self.nbt.item_int(99);
+        self.nbt.item_int(self.hei as i32);
+        self.nbt.item_int(self.len as i32);
+        self.nbt.list("palette", (30 + self.insnum * 26) as i32, 10);
+        let (w, wd) = (self.opts.walkway.id, self.opts.walkway.data);
+        prop(
+            &mut self.nbt,
+            &format!("minecraft:{}", namespaced_id(w, wd)),
+            &[],
+        );
+        let (c, cd) = (self.opts.circuit.id, self.opts.circuit.data);
+        prop(
+            &mut self.nbt,
+            &format!("minecraft:{}", namespaced_id(c, cd)),
+            &[],
+        );
+        let (g, gd) = (self.opts.ground.id, self.opts.ground.data);
+        prop(
+            &mut self.nbt,
+            &format!("minecraft:{}", namespaced_id(g, gd)),
+            &[],
+        );
+        for a in 0..self.insnum {
+            let blk = self.opts.ins(a);
+            let props: &[(&str, &str)] = if a == 9 { &[("axis", "y")] } else { &[] };
+            prop(
+                &mut self.nbt,
+                &format!("minecraft:{}", namespaced_id(blk.id, blk.data)),
+                props,
+            );
+        }
+        for a in 0..self.insnum {
+            for b in 0..25 {
+                if !self.command_block {
+                    let note_str = b.to_string();
+                    let instrument = self.ins_name(a);
+                    prop(
+                        &mut self.nbt,
+                        "minecraft:note_block",
+                        &[
+                            ("instrument", instrument),
+                            ("note", note_str.as_str()),
+                            ("powered", "false"),
+                        ],
+                    );
+                } else {
+                    prop(
+                        &mut self.nbt,
+                        "minecraft:command_block",
+                        &[("facing", "up")],
+                    );
+                }
+            }
+        }
+        // 27 条固定尾部（gml:168-298），属性顺序逐字照原版。
+        prop(&mut self.nbt, "minecraft:blue_wool", &[]);
+        prop(&mut self.nbt, "minecraft:air", &[]);
+        prop(
+            &mut self.nbt,
+            "minecraft:ladder",
+            &[("facing", "north"), ("waterlogged", "false")],
+        );
+        prop(
+            &mut self.nbt,
+            "minecraft:redstone_wire",
+            &[
+                ("east", "side"),
+                ("north", "side"),
+                ("power", "0"),
+                ("south", "side"),
+                ("west", "side"),
+            ],
+        );
+        for a in 1..5 {
+            let d = a.to_string();
+            prop(
+                &mut self.nbt,
+                "minecraft:repeater",
+                &[
+                    ("delay", d.as_str()),
+                    ("facing", "north"),
+                    ("locked", "false"),
+                    ("powered", "false"),
+                ],
+            );
+        }
+        for a in 1..5 {
+            let d = a.to_string();
+            prop(
+                &mut self.nbt,
+                "minecraft:repeater",
+                &[
+                    ("delay", d.as_str()),
+                    ("facing", "west"),
+                    ("locked", "false"),
+                    ("powered", "false"),
+                ],
+            );
+        }
+        prop(
+            &mut self.nbt,
+            "minecraft:repeater",
+            &[
+                ("delay", "0"),
+                ("facing", "east"),
+                ("locked", "false"),
+                ("powered", "false"),
+            ],
+        );
+        prop(
+            &mut self.nbt,
+            "minecraft:redstone_torch",
+            &[("lit", "false")],
+        );
+        prop(
+            &mut self.nbt,
+            "minecraft:redstone_torch",
+            &[("lit", "true")],
+        );
+        prop(
+            &mut self.nbt,
+            "minecraft:stone_button",
+            &[("face", "wall"), ("facing", "south"), ("powered", "false")],
+        );
+        prop(
+            &mut self.nbt,
+            "minecraft:oak_wall_sign",
+            &[("facing", "south"), ("waterlogged", "false")],
+        );
+        prop(
+            &mut self.nbt,
+            "minecraft:powered_rail",
+            &[("powered", "false"), ("shape", "north_south")],
+        );
+        prop(
+            &mut self.nbt,
+            "minecraft:chest",
+            &[
+                ("facing", "west"),
+                ("type", "single"),
+                ("waterlogged", "false"),
+            ],
+        );
+        prop(
+            &mut self.nbt,
+            "minecraft:rail",
+            &[("shape", "north_south"), ("waterlogged", "false")],
+        );
+        prop(
+            &mut self.nbt,
+            "minecraft:redstone_wall_torch",
+            &[("lit", "false"), ("facing", "east")],
+        );
+        prop(
+            &mut self.nbt,
+            "minecraft:redstone_wall_torch",
+            &[("lit", "true"), ("facing", "east")],
+        );
+        prop(
+            &mut self.nbt,
+            "minecraft:redstone_wall_torch",
+            &[("lit", "false"), ("facing", "west")],
+        );
+        prop(
+            &mut self.nbt,
+            "minecraft:redstone_wall_torch",
+            &[("lit", "true"), ("facing", "west")],
+        );
+        prop(
+            &mut self.nbt,
+            "minecraft:lever",
+            &[("powered", "true"), ("facing", "south"), ("face", "wall")],
+        );
+        prop(
+            &mut self.nbt,
+            "minecraft:redstone_wall_torch",
+            &[("lit", "true"), ("facing", "north")],
+        );
+        prop(
+            &mut self.nbt,
+            "minecraft:smooth_stone_slab",
+            &[("type", "top")],
+        );
+        self.nbt.list("entities", 0, 10);
+        self.blocktagpos = self.nbt.buf.len();
+        self.nbt.list("blocks", 114514, 10);
+        // sign 条目（gml:303-317）：牌面文字与 schematic 版不同，写死四行。
+        self.nbt.compound("nbt");
+        self.nbt.string("Color", "black");
+        self.nbt.string("id", "minecraft:sign");
+        self.nbt.string("Text1", "{\"text\": \"Song generated\"}");
+        self.nbt.string("Text2", "{\"text\": \"by the\"}");
+        self.nbt.string("Text3", "{\"text\": \"Note Block\"}");
+        self.nbt.string("Text4", "{\"text\": \"Studio\"}");
+        self.nbt.end();
+        self.nbt.list("pos", 3, 3);
+        self.nbt.item_int((99 - self.yy) as i32);
+        self.nbt.item_int(self.hei as i32 - 1);
+        self.nbt.item_int(2);
+        self.nbt.int("state", (self.insnum * 26 + 19) as i32);
+        self.nbt.end();
+        self.totalblocksc += 1;
+    }
+
+    /// 原版 gml:323-472 的固定布线：过道、控制、回程电路与节拍阶梯。
+    fn build_wiring(&mut self) {
+        let yy = self.yy;
+        let hei = self.hei as i64;
+        let len = self.len as i64;
+        // Create walkway
+        for a in 0..3 {
+            for b in 2..len + 2 {
+                self.walkway(b, yy + a, hei - 3);
+            }
+        }
+        // Controls
+        self.circuit(1, yy, hei - 2);
+        self.circuit(1, yy + 1, hei - 2);
+        self.other(1, yy, hei - 1, WOOL, 11);
+        self.other(1, yy + 1, hei - 1, WOOL, 11);
+        self.other(2, yy + 1, hei - 1, BUTTON_WALL, 3);
+        // Back
+        self.circuit(0, yy + 1, hei - 2);
+        self.other(0, yy + 1, hei - 1, REDSTONE_WIRE, 0);
+        self.other(0, yy, hei - 2, TORCHON, 1);
+        self.other(0, yy, hei - 3, REDSTONE_WIRE, 0);
+        self.circuit(0, yy, hei - 4);
+        self.other(0, yy + 1, hei - 4, TORCHOFF, 2);
+        self.other(0, yy + 1, hei - 5, REDSTONE_WIRE, 0);
+        self.circuit(0, yy + 1, hei - 6);
+        for a in 0..13i64 {
+            self.repeater(1 + 2 * a, yy + 1, hei - 5 - a, 0, 2, 0);
+            self.other(2 + 2 * a, yy + 1, hei - 5 - a, REDSTONE_WIRE, 0);
+            self.circuit(1 + 2 * a, yy + 1, hei - 6 - a);
+            self.circuit(2 + 2 * a, yy + 1, hei - 6 - a);
+        }
+        for a in 0..4i64 {
+            self.repeater(27 + a * 2, yy + 1, hei - 18, 0, 2, 0);
+            self.circuit(27 + a * 2, yy + 1, hei - 19);
+            self.circuit(28 + a * 2, yy + 1, hei - 18);
+        }
+        for a in 0..11i64 {
+            self.circuit(34, yy - a, hei - 19);
+            self.other(34, yy - a, hei - 18, REDSTONE_WIRE, 0);
+            self.circuit(34, yy + 2 + a, hei - 19);
+            self.other(34, yy + 2 + a, hei - 18, REDSTONE_WIRE, 0);
+        }
+        for a in 0..12i64 {
+            self.circuit(34, yy - 11 - a, hei - 18);
+            if a != 4 {
+                self.other(34, yy - 11 - a, hei - 17, REDSTONE_WIRE, 0);
+            } else {
+                self.repeater(34, yy - 11 - a, hei - 17, 0, 1, 0);
+            }
+            self.circuit(34, yy + 13 + a, hei - 18);
+            if a != 4 {
+                self.other(34, yy + 13 + a, hei - 17, REDSTONE_WIRE, 0);
+            } else {
+                self.repeater(34, yy + 13 + a, hei - 17, 0, 3, 0);
+            }
+        }
+        for a in 0..12i64 {
+            self.circuit(34, yy - 23 - a, hei - 17);
+            if a != 8 {
+                self.other(34, yy - 23 - a, hei - 16, REDSTONE_WIRE, 0);
+            } else {
+                self.repeater(34, yy - 23 - a, hei - 16, 0, 1, 0);
+            }
+            self.circuit(34, yy + 25 + a, hei - 17);
+            if a != 8 {
+                self.other(34, yy + 25 + a, hei - 16, REDSTONE_WIRE, 0);
+            } else {
+                self.repeater(34, yy + 25 + a, hei - 16, 0, 3, 0);
+            }
+        }
+        for a in 0..12i64 {
+            self.circuit(34, yy - 35 - a, hei - 16);
+            self.other(34, yy - 35 - a, hei - 15, REDSTONE_WIRE, 0);
+            self.circuit(34, yy + 37 + a, hei - 16);
+            self.other(34, yy + 37 + a, hei - 15, REDSTONE_WIRE, 0);
+        }
+        // 角落电路（gml:392-420，原版逐字展开，左右两翼镜像）。
+        self.circuit(35, yy - 11, hei - 18);
+        self.circuit(36, yy - 11, hei - 18);
+        self.circuit(37, yy - 11, hei - 18);
+        self.circuit(35, yy - 11 - 12, hei - 17);
+        self.circuit(36, yy - 11 - 12, hei - 17);
+        self.circuit(37, yy - 11 - 12, hei - 17);
+        self.circuit(35, yy - 11 - 12 - 12, hei - 16);
+        self.circuit(36, yy - 11 - 12 - 12, hei - 16);
+        self.circuit(37, yy - 11 - 12 - 12, hei - 16);
+        self.circuit(35, yy - 11 - 12 - 12 - 12, hei - 16);
+        self.circuit(36, yy - 11 - 12 - 12 - 12, hei - 15);
+        self.circuit(37, yy - 11 - 12 - 12 - 12, hei - 15);
+        self.circuit(34, yy - 11 - 12 - 12 - 12, hei - 15);
+        self.circuit(35, yy + 11 + 2, hei - 18);
+        self.circuit(36, yy + 11 + 2, hei - 18);
+        self.circuit(37, yy + 11 + 2, hei - 18);
+        self.circuit(35, yy + 11 + 12 + 2, hei - 17);
+        self.circuit(36, yy + 11 + 12 + 2, hei - 17);
+        self.circuit(37, yy + 11 + 12 + 2, hei - 17);
+        self.circuit(35, yy + 11 + 12 + 12 + 2, hei - 16);
+        self.circuit(36, yy + 11 + 12 + 12 + 2, hei - 16);
+        self.circuit(37, yy + 11 + 12 + 12 + 2, hei - 16);
+        self.circuit(35, yy + 11 + 12 + 12 + 12 + 2, hei - 16);
+        self.circuit(36, yy + 11 + 12 + 12 + 12 + 2, hei - 15);
+        self.circuit(37, yy + 11 + 12 + 12 + 12 + 2, hei - 15);
+        self.circuit(34, yy + 11 + 12 + 12 + 12 + 2, hei - 15);
+        self.circuit(35, yy + 1, hei - 19);
+        self.circuit(36, yy + 1, hei - 18);
+        self.circuit(37, yy + 1, hei - 19);
+        // 竖向红石线列（gml:422-438）。
+        self.other(36, yy - 11, hei - 17, REDSTONE_WIRE, 0);
+        self.other(37, yy - 11, hei - 17, REDSTONE_WIRE, 0);
+        self.other(36, yy - 11 - 12, hei - 16, REDSTONE_WIRE, 0);
+        self.other(37, yy - 11 - 12, hei - 16, REDSTONE_WIRE, 0);
+        self.other(36, yy - 11 - 12 - 12, hei - 15, REDSTONE_WIRE, 0);
+        self.other(37, yy - 11 - 12 - 12, hei - 15, REDSTONE_WIRE, 0);
+        self.other(36, yy - 11 - 12 - 12 - 12, hei - 14, REDSTONE_WIRE, 0);
+        self.other(37, yy - 11 - 12 - 12 - 12, hei - 14, REDSTONE_WIRE, 0);
+        self.other(36, yy + 11 + 2, hei - 17, REDSTONE_WIRE, 0);
+        self.other(37, yy + 11 + 2, hei - 17, REDSTONE_WIRE, 0);
+        self.other(36, yy + 11 + 12 + 2, hei - 16, REDSTONE_WIRE, 0);
+        self.other(37, yy + 11 + 12 + 2, hei - 16, REDSTONE_WIRE, 0);
+        self.other(36, yy + 11 + 12 + 12 + 2, hei - 15, REDSTONE_WIRE, 0);
+        self.other(37, yy + 11 + 12 + 12 + 2, hei - 15, REDSTONE_WIRE, 0);
+        self.other(36, yy + 11 + 12 + 12 + 12 + 2, hei - 14, REDSTONE_WIRE, 0);
+        self.other(37, yy + 11 + 12 + 12 + 12 + 2, hei - 14, REDSTONE_WIRE, 0);
+        self.other(37, yy + 1, hei - 18, REDSTONE_WIRE, 0);
+        // 九组中继器（gml:440-448）。
+        self.repeater(35, yy - 11, hei - 17, 2, 2, 0);
+        self.repeater(35, yy - 11 - 12, hei - 16, 1, 2, 0);
+        self.repeater(35, yy - 11 - 12 - 12, hei - 15, 0, 2, 0);
+        self.repeater(35, yy - 11 - 12 - 12 - 12, hei - 15, 0, 2, 0);
+        self.repeater(35, yy + 11 + 2, hei - 17, 2, 2, 0);
+        self.repeater(35, yy + 11 + 12 + 2, hei - 16, 1, 2, 0);
+        self.repeater(35, yy + 11 + 12 + 12 + 2, hei - 15, 0, 2, 0);
+        self.repeater(35, yy + 11 + 12 + 12 + 12 + 2, hei - 15, 0, 2, 0);
+        self.repeater(35, yy + 1, hei - 18, 2, 2, 0);
+        // 37/38 交替的台阶 + 39 列中继器（gml:450-472）。
+        for a in 0..4i64 {
+            for b in 0..13i64 {
+                let x = 37 + (b % 2 == 0) as i64;
+                self.other(x, yy - 11 - 12 * a, hei - 17 + b + a, SLAB, 2);
+                self.other(x, yy - 11 - 12 * a, hei - 16 + b + a, REDSTONE_WIRE, 2);
+                self.other(x, yy + 11 + 12 * a + 2, hei - 17 + b + a, SLAB, 2);
+                self.other(x, yy + 11 + 12 * a + 2, hei - 16 + b + a, REDSTONE_WIRE, 2);
+            }
+            for b in 0..4i64 {
+                self.circuit(39, yy - 11 - 12 * a, hei - 17 + 4 * b + a);
+                self.repeater(39, yy - 11 - 12 * a, hei - 16 + 4 * b + a, 0, 2, 0);
+                self.circuit(39, yy + 11 + 12 * a + 2, hei - 17 + 4 * b + a);
+                self.repeater(39, yy + 11 + 12 * a + 2, hei - 16 + 4 * b + a, 0, 2, 0);
+            }
+        }
+        for b in 0..13i64 {
+            let x = 37 + (b % 2 == 0) as i64;
+            self.other(x, yy + 1, hei - 18 + b, SLAB, 2);
+            self.other(x, yy + 1, hei - 17 + b, REDSTONE_WIRE, 2);
+        }
+        for b in 0..4i64 {
+            self.circuit(39, yy + 1, hei - 18 + 4 * b);
+            self.repeater(39, yy + 1, hei - 17 + 4 * b, 0, 2, 0);
+        }
+    }
+
+    /// 原版 gml:474-1270：逐 tick 把 9 条车道的名额放进车道组（每组 4 个音符盒）。
+    /// 命令模式读方案的 `track_rows_by_grid`；非命令模式对每个音符按 9 条判定式
+    /// 独立入道——判定不互斥，同一音符可同时落两条车道（原版语义，勿合并）。
+    fn build_notes(&mut self) {
+        let yy = self.yy;
+        let dir = 1i64;
+        for a in 0..=self.export_end {
+            let mut lanes: [Vec<TrackSlot>; 9] = Default::default();
+            match self.plan {
+                Some(plan) => {
+                    let channels = &plan.track_rows_by_grid[a as usize];
+                    for ch in 0..9 {
+                        for &row_index in &channels[ch] {
+                            let row = &plan.rows[row_index];
+                            lanes[ch].push(TrackSlot {
+                                ins: row.instrument as i32,
+                                key: 33,
+                                pit: row.index as i32,
+                            });
+                        }
+                    }
+                }
+                None => {
+                    if let Some(col) = self.song.columns.get(&a) {
+                        if col.amount() > 0 {
+                            let locked = self.song.locked_layers();
+                            for b in 0..self.song.layers.len() {
+                                let Some(note) = self.song.get(a, b as u32) else {
+                                    continue;
+                                };
+                                let is_locked = locked.get(b).copied().unwrap_or(false);
+                                if is_locked && !self.opts.include_locked {
+                                    continue;
+                                }
+                                let key = note.key as i32;
+                                if !((key > 32 && key < 58)
+                                    || (self.structure
+                                        && self.command_block
+                                        && key >= 9
+                                        && key <= 81))
+                                {
+                                    continue;
+                                }
+                                let layer = &self.song.layers[b];
+                                let layerstereo = layer.stereo as f64;
+                                let song_pan = note.panning as f64;
+                                let song_vel = note.velocity as f64;
+                                let cpan = if layerstereo == 100.0 {
+                                    song_pan
+                                } else {
+                                    (layerstereo + song_pan) / 2.0
+                                };
+                                let cvol = (layer.volume as f64 / 100.0) * song_vel;
+                                let cpanvol = (cpan - 100.0) * cvol + 100.0;
+                                // 原版 `ds_list_find_index(instrument_list, song_ins)`：
+                                // .nbs 加载的整数恒找不到（-1），编辑器/MIDI 放置的才
+                                // 有索引。我们的模型统一存索引，按编辑器语义取值。
+                                let idx = note.instrument as i32;
+                                let pit = note.pitch as i32;
+                                let push = |c: i32| TrackSlot {
+                                    ins: idx * c - (1 - c),
+                                    key: key * c,
+                                    pit: pit * c,
+                                };
+                                let l =
+                                    (cpan > 80.0 && cpan < 120.0) || (cpan > 0.0 && cpan <= 80.0);
+                                let r = (cpan > 80.0 && cpan < 120.0)
+                                    || (cpan > 120.0 && cpan <= 200.0);
+                                // l4..r3 共用一套 `idx*C - !C`（gml:579-610，逐字）。
+                                let c =
+                                    ((l && cvol > 0.0 && cvol <= 0.2) || cpanvol >= 180.0) as i32;
+                                lanes[0].push(push(c));
+                                let c = ((l && cvol > 0.2 && cvol <= 0.4)
+                                    || (cpanvol >= 160.0 && cpanvol < 180.0))
+                                    as i32;
+                                lanes[1].push(push(c));
+                                let c = ((l && cvol > 0.4 && cvol <= 0.6)
+                                    || (cpanvol >= 140.0 && cpanvol < 160.0))
+                                    as i32;
+                                lanes[2].push(push(c));
+                                let c = ((((cpan > 80.0 && cpan < 120.0 && cvol <= 0.8)
+                                    || (cpan > 0.0 && cpan <= 80.0))
+                                    && cvol > 0.6)
+                                    || (cpanvol >= 120.0 && cpanvol < 140.0))
+                                    as i32;
+                                lanes[3].push(push(c));
+                                let c = (cpan > 80.0 && cpan < 120.0 && cvol > 0.8) as i32;
+                                lanes[4].push(push(c));
+                                let c = ((((cpan > 80.0 && cpan < 120.0 && cvol <= 0.8)
+                                    || (cpan > 120.0 && cpan <= 200.0))
+                                    && cvol > 0.6)
+                                    || (cpanvol > 60.0 && cpanvol <= 80.0))
+                                    as i32;
+                                lanes[5].push(push(c));
+                                let c = ((r && cvol > 0.4 && cvol <= 0.6)
+                                    || (cpanvol > 40.0 && cpanvol <= 60.0))
+                                    as i32;
+                                lanes[6].push(push(c));
+                                let c = ((r && cvol > 0.2 && cvol <= 0.4)
+                                    || (cpanvol > 20.0 && cpanvol <= 40.0))
+                                    as i32;
+                                lanes[7].push(push(c));
+                                // r4 的取反项与乘法项条件不同（gml:611 逐字）：
+                                // 乘法项看 cpanvol <= 20，取反项看 cpan <= 20。
+                                let cm =
+                                    ((r && cvol > 0.0 && cvol <= 0.2) || cpanvol <= 20.0) as i32;
+                                let cn = ((r && cvol > 0.0 && cvol <= 0.2) || cpan <= 20.0) as i32;
+                                lanes[8].push(TrackSlot {
+                                    ins: idx * cm - (1 - cn),
+                                    key: key * cm,
+                                    pit: pit * cm,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            // 消费：中央 + 左四道 + 右四道，从车道缓冲尾部 pop（原版计数器向
+            // -1 递减等价）。y1 = yy + dir ± 12k，adds = 1..5。
+            self.emit_lane(&mut lanes[4], yy + dir, 1);
+            self.emit_lane(&mut lanes[3], yy + dir - 12, 2);
+            self.emit_lane(&mut lanes[2], yy + dir - 24, 3);
+            self.emit_lane(&mut lanes[1], yy + dir - 36, 4);
+            self.emit_lane(&mut lanes[0], yy + dir - 48, 5);
+            self.emit_lane(&mut lanes[5], yy + dir + 12, 2);
+            self.emit_lane(&mut lanes[6], yy + dir + 24, 3);
+            self.emit_lane(&mut lanes[7], yy + dir + 36, 4);
+            self.emit_lane(&mut lanes[8], yy + dir + 48, 5);
+            self.xx += 2 * dir;
+        }
+    }
+
+    /// 原版每组车道（gml:629-1266 九段的公共形状）：固定布线 + 从车道尾部
+    /// 逐个消费最多 4 个名额（#1/#2 在 x1+dir*2 的 y∓1，#3/#4 在 x1+dir 的 y∓1）。
+    fn emit_lane(&mut self, lane: &mut Vec<TrackSlot>, y1: i64, adds: i64) {
+        let dir = 1i64;
+        let x1 = self.xx;
+        for b in 0..self.layers {
+            let bz = (b * 4) as i64;
+            self.repeater(x1 + 2, y1, bz + 2 + adds, self.track_tick_delay, 2, 0);
+            self.circuit(x1 + dir, y1, bz + 2 + adds);
+            self.circuit(x1 + 2, y1, bz + adds);
+            self.circuit(x1 + dir, y1, bz + adds);
+            self.circuit(x1 + dir * 2, y1, bz + 1 + adds);
+            self.other(x1 + dir, y1, bz + 1 + adds, REDSTONE_WIRE, 0);
+            for part in 0..4 {
+                let Some(s) = lane.pop() else { break };
+                if s.ins < 0 {
+                    continue;
+                }
+                let (nx, ny, nz) = match part {
+                    0 => {
+                        self.other(x1 + dir * 2, y1 - 1, bz + 1 + adds, NOTE_BLOCK, 0);
+                        let (id, data) = self.ins_block_at(s.ins);
+                        self.other(x1 + dir * 2, y1 - 1, bz + adds, id, data);
+                        self.circuit(x1 + dir * 2, y1 - 1, bz - 1 + adds);
+                        (x1 + dir * 2, y1 - 1, bz + 1 + adds)
+                    }
+                    1 => {
+                        self.other(x1 + dir * 2, y1 + 1, bz + 1 + adds, NOTE_BLOCK, 0);
+                        let (id, data) = self.ins_block_at(s.ins);
+                        self.other(x1 + dir * 2, y1 + 1, bz + adds, id, data);
+                        self.circuit(x1 + dir * 2, y1 + 1, bz - 1 + adds);
+                        (x1 + dir * 2, y1 + 1, bz + 1 + adds)
+                    }
+                    2 => {
+                        self.other(x1 + dir, y1 - 1, bz + 2 + adds, NOTE_BLOCK, 0);
+                        let (id, data) = self.ins_block_at(s.ins);
+                        self.other(x1 + dir, y1 - 1, bz + 1 + adds, id, data);
+                        self.circuit(x1 + dir, y1 - 1, bz + adds);
+                        (x1 + dir, y1 - 1, bz + 2 + adds)
+                    }
+                    _ => {
+                        self.other(x1 + dir, y1 + 1, bz + 2 + adds, NOTE_BLOCK, 0);
+                        let (id, data) = self.ins_block_at(s.ins);
+                        self.other(x1 + dir, y1 + 1, bz + 1 + adds, id, data);
+                        self.circuit(x1 + dir, y1 + 1, bz + adds);
+                        (x1 + dir, y1 + 1, bz + 2 + adds)
+                    }
+                };
+                self.notes.push(TrackNote {
+                    x: nx as i32,
+                    y: ny as i32,
+                    z: nz as i32,
+                    note: s.key - 33,
+                    ins: s.ins,
+                    pit: s.pit,
+                });
+            }
+        }
+    }
+
+    /// 原版 gml:1272-1373：structure 补音符盒条目并回填 size/blocks 头；
+    /// classic 组装 Schematic compound（TileEntities + Blocks/Data + Version）。
+    fn finish(&mut self) {
+        if self.structure {
+            for i in 0..self.notes.len() {
+                let note = self.notes[i];
+                self.nbt.compound("nbt");
+                if self.command_block {
+                    self.nbt.string("id", "minecraft:command_block");
+                }
+                let command = if self.command_block {
+                    self.plan
+                        .and_then(|p| p.rows.get(note.pit as usize))
+                        .map(|r| r.command.clone())
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                self.nbt.string("Command", &command);
+                self.nbt.byte("TrackOutput", 0);
+                self.nbt.byte("powered", 0);
+                self.nbt.byte("auto", 0);
+                self.nbt.byte("conditionMet", 1);
+                self.nbt.byte("UpdateLastExecution", 1);
+                self.nbt.end();
+                self.entry_pos(note.x as i64, note.y as i64, note.z as i64);
+                let state = 3
+                    + self.insnum as i32
+                    + if self.command_block {
+                        0
+                    } else {
+                        note.ins * 25 + note.note
+                    };
+                self.nbt.int("state", state);
+                self.nbt.end();
+                self.totalblocksc += 1;
+            }
+            // TAG_End 闭合 blocks 列表。根 compound 没有闭合字节——与
+            // schematic_export 同款（装机版如此，structure_nbt 已实测可加载）。
+            self.nbt.end();
+            let blockamount = self.totalblocksc as i32;
+            let (sx, sy, sz) = if self.opts.format == 1 {
+                (
+                    (self.smax_x + 1) as i32,
+                    (self.smax_y + 1) as i32,
+                    (self.smax_z + 1) as i32,
+                )
+            } else {
+                (
+                    (self.smax_x + 1).min(32) as i32,
+                    (self.smax_y + 1).min(32) as i32,
+                    (self.smax_z + 1).min(32) as i32,
+                )
+            };
+            let at = self.sizepos;
+            self.nbt.buf[at..at + 4].copy_from_slice(&sx.to_be_bytes());
+            self.nbt.buf[at + 4..at + 8].copy_from_slice(&sy.to_be_bytes());
+            self.nbt.buf[at + 8..at + 12].copy_from_slice(&sz.to_be_bytes());
+            let mut hdr = Vec::with_capacity(14);
+            hdr.push(9);
+            hdr.extend_from_slice(&6u16.to_be_bytes());
+            hdr.extend_from_slice(b"blocks");
+            hdr.push(10);
+            hdr.extend_from_slice(&blockamount.to_be_bytes());
+            let at = self.blocktagpos;
+            self.nbt.buf[at..at + hdr.len()].copy_from_slice(&hdr);
+        } else {
+            let signx = 2i64;
+            let signy = self.yy;
+            let signz = self.hei as i64 - 1;
+            // classic 的 structure_max 不被辅助函数更新，三向实际不变：
+            // len 不扩、wid = max(100, 50) = 100、hei 不扩。
+            let len = (self.len as i64).max(self.smax_x + 1) as usize;
+            let wid = 100usize.max(self.smax_y as usize + 1);
+            let hei = (self.hei as i64).max(self.smax_z + 1) as usize;
+            self.nbt.compound("Schematic");
+            self.nbt.short("Height", hei as i16);
+            self.nbt.short("Length", len as i16);
+            self.nbt.short("Width", wid as i16);
+            self.nbt.list("Entities", 0, 10);
+            self.nbt
+                .list("TileEntities", (1 + self.notes.len()) as i32, 10);
+            if self.old {
+                self.nbt.string("id", "Sign");
+            } else {
+                self.nbt.string("id", "minecraft:sign");
+            }
+            self.nbt.int("x", (wid as i64 - 1 - signy) as i32);
+            self.nbt.int("y", signz as i32);
+            self.nbt.int("z", signx as i32);
+            if self.old {
+                self.nbt.string("Text1", "Song generated");
+                self.nbt.string("Text2", "by the");
+                self.nbt.string("Text3", "Note Block");
+                self.nbt.string("Text4", "Studio");
+            } else {
+                self.nbt.string("Text1", "{\"text\": \"Song generated\"}");
+                self.nbt.string("Text2", "{\"text\": \"by the\"}");
+                self.nbt.string("Text3", "{\"text\": \"Note Block\"}");
+                self.nbt.string("Text4", "{\"text\": \"Studio\"}");
+            }
+            self.nbt.end();
+            for note in &self.notes {
+                if self.old {
+                    self.nbt.string("id", "Music");
+                } else {
+                    self.nbt.string("id", "minecraft:noteblock");
+                }
+                self.nbt.int("x", (wid as i64 - 1 - note.y as i64) as i32);
+                self.nbt.int("y", note.z);
+                self.nbt.int("z", note.x);
+                self.nbt.byte("note", note.note as i8 as u8);
+                self.nbt.end();
+            }
+            self.nbt.string("Materials", "Alpha");
+            let (blocks, data) = self
+                .grid
+                .as_ref()
+                .map(|g| g.serialize())
+                .unwrap_or_default();
+            self.nbt.byte_array("Blocks", &blocks);
+            self.nbt.byte_array("Data", &data);
+            self.nbt.compound("Version");
+            if self.old {
+                self.nbt.string("Name", "1.8");
+                self.nbt.byte("Snapshot", 0);
+            } else {
+                self.nbt.int("Id", 922);
+                self.nbt.string("Name", "1.11.2");
+                self.nbt.byte("Snapshot", 0);
+            }
+            self.nbt.end();
+            self.nbt.end();
+        }
+    }
+}
+
+/// 原版 `track_export()` 的生成与落盘（保存对话框与消息弹窗由编辑器层负责）。
+/// `plan` 只在 structure && command_block 下生效（与原版入口闸门一致），
+/// 由 `mc_export::prepare_track_plan` 填充后传入。
+pub fn export_track(
+    song: &Song,
+    opts: &SchematicOptions,
+    plan: Option<&crate::mc_export::Plan>,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    let plan = if opts.structure && opts.command_block {
+        plan
+    } else {
+        None
+    };
+    let mut b = TrackBuilder::new(song, opts, plan);
+    b.run();
+    let gz = gzip(&b.nbt.buf)?;
+    std::fs::write(path, gz).map_err(|e| {
+        crate::tr(
+            &format!("failed to write track file: {e}"),
+            &format!("写入直轨文件失败: {e}"),
+        )
+        .to_string()
+    })?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------- 导出
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -2307,6 +3452,38 @@ pub fn export_check(stats: &SchematicStats, opts: &SchematicOptions) -> ExportCh
     ExportCheck::Ok
 }
 
+/// 原版 `schematic_export.gml:16-26` 命令模式的两道闸门（方案行数为空 / 方案尺寸
+/// 超限），返回 `(标题, 正文)`；通过时 `None`。与按钮闸门不同：尺寸按方案算，
+/// 且不做「没有方块」检查（那是按钮用歌曲计数器做的）。
+pub fn command_export_check(
+    plan: &crate::mc_export::Plan,
+    stats: &SchematicStats,
+    opts: &SchematicOptions,
+) -> Option<(&'static str, &'static str)> {
+    if plan.rows.is_empty() {
+        return Some((
+            crate::tr("Schematic export", "导出结构"),
+            crate::tr(
+                "There are no sound commands to export!",
+                "没有声音命令可以导出！",
+            ),
+        ));
+    }
+    if schematic_length_with(stats, opts, Some(plan)) >= MAX_LEN
+        || schematic_width(opts) >= MAX_WID
+        || schematic_height_with(stats, opts, Some(plan)) >= MAX_HEI
+    {
+        return Some((
+            crate::tr("Error", "错误"),
+            crate::tr(
+                "The Schematic is too big. The maximum size is 2000x2000x256.\nTry changing the \"Repeaters per row\" value to decrease the size.",
+                "这个结构太大了。大小限制为 2000x2000x256。\n可以更改“每行中继器个数”来减小大小。",
+            ),
+        ));
+    }
+    None
+}
+
 pub fn export_guard(stats: &SchematicStats, opts: &SchematicOptions) -> Result<(), String> {
     match export_check(stats, opts).dialog() {
         Some((_, msg)) => Err(msg.into()),
@@ -2314,16 +3491,25 @@ pub fn export_guard(stats: &SchematicStats, opts: &SchematicOptions) -> Result<(
     }
 }
 
+/// 导出结构到 `path`。
+///
+/// `plan` 是命令模式的声源分配方案：原版在 `schematic_export()` 里以
+/// `get_schematic_plan(true)` 现算（全预算）再校验（schematic_export.gml:16-26），
+/// 这里由调用方传入。命令方块 + 经典排布（layout>=2）在原版里不可达且必崩
+/// （`command_plan` 未定义就被读 `rows`），这里提前报错而不是写出空命令。
 pub fn export_schematic(
     song: &Song,
     path: &Path,
     opts: &SchematicOptions,
+    plan: Option<&crate::mc_export::Plan>,
 ) -> Result<SchematicInfo, String> {
     let stats = calculate_stats(song);
-    export_guard(&stats, opts)?;
-    let built = build_with_stats(song, opts, &stats);
-    let nbt = if opts.structure {
-        built.structure_nbt(song)
+    check_export_gates(&stats, opts, plan)?;
+    let built = build_with_stats(song, opts, &stats, plan);
+    // 原版导出入口重算 `structure = (sch_exp_format <= 1)`（schematic_export.gml:5），
+    // 所以 NBT 形态以 format 为准，不读可能滞后的全局字段。
+    let nbt = if opts.format <= 1 {
+        built.structure_nbt()
     } else {
         built.classic_nbt()
     };
@@ -2339,15 +3525,50 @@ pub fn export_schematic(
 }
 
 /// 生成未压缩的 NBT 字节，供测试与检查用。
-pub fn build_nbt(song: &Song, opts: &SchematicOptions) -> Result<Vec<u8>, String> {
+pub fn build_nbt(
+    song: &Song,
+    opts: &SchematicOptions,
+    plan: Option<&crate::mc_export::Plan>,
+) -> Result<Vec<u8>, String> {
     let stats = calculate_stats(song);
-    export_guard(&stats, opts)?;
-    let built = build_with_stats(song, opts, &stats);
-    Ok(if opts.structure {
-        built.structure_nbt(song)
+    check_export_gates(&stats, opts, plan)?;
+    let built = build_with_stats(song, opts, &stats, plan);
+    Ok(if opts.format <= 1 {
+        built.structure_nbt()
     } else {
         built.classic_nbt()
     })
+}
+
+/// 原版按钮闸门 + `schematic_export()` 内部闸门的合并：命令模式查方案
+/// （schematic_export.gml:16-26），其余走「没有方块/尺寸超限」。
+fn check_export_gates(
+    stats: &SchematicStats,
+    opts: &SchematicOptions,
+    plan: Option<&crate::mc_export::Plan>,
+) -> Result<(), String> {
+    if opts.format <= 1 && opts.command_block {
+        if opts.layout >= 2 {
+            return Err(crate::tr(
+                "Internal error: command-block export needs a walkway layout.",
+                "内部错误：命令方块导出需要过道布局。",
+            )
+            .to_string());
+        }
+        let Some(plan) = plan else {
+            return Err(crate::tr(
+                "Internal error: command-block export is missing the sound-source plan.",
+                "内部错误：命令方块导出缺少声源分配方案。",
+            )
+            .to_string());
+        };
+        if let Some((_, msg)) = command_export_check(plan, stats, opts) {
+            return Err(msg.into());
+        }
+        Ok(())
+    } else {
+        export_guard(stats, opts)
+    }
 }
 
 /// 解压并读出文件里真实存在的尺寸/音符统计，供界面与测试核对。
@@ -3439,6 +4660,13 @@ mod tests {
         s
     }
 
+    /// 经典 1.11-1.12 格式选项（出厂 format=0 是结构方块，classic 测试要显式切过去）。
+    fn classic_options() -> SchematicOptions {
+        let mut o = SchematicOptions::default();
+        o.set_format(2);
+        o
+    }
+
     /// 钉住中文文案：串行化语言敏感断言，退出时恢复原语言。
     struct CnGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>, u8);
     impl Drop for CnGuard {
@@ -3490,7 +4718,9 @@ mod tests {
         assert_eq!(o.chest, true);
         assert_eq!(o.loop_option, true);
         assert_eq!(o.glass, true);
-        assert_eq!(o.structure, false);
+        // control_create.gml:638 出厂 `structure = 1`，format 默认 0（reset 表 42 行）。
+        assert_eq!(o.structure, true);
+        assert_eq!(o.format, 0);
         assert_eq!(o.minecraft_old, false);
         assert_eq!(o.command_block, false);
         assert_eq!(o.tempo_mode, 0);
@@ -3527,6 +4757,10 @@ mod tests {
         };
         o.ins_block[0] = 99;
         o.ins_data[3] = 12;
+        o.command_source = "music".into();
+        o.command_allowed_sources = [false; 10];
+        o.command_tempo_grid = true;
+        o.format = 1;
         o.reset();
         let d = SchematicOptions::default();
         assert_eq!(o.layout, d.layout);
@@ -3540,6 +4774,31 @@ mod tests {
         assert_eq!(o.tempo_mode, 2, "sch_exp_tempo 不在默认值表里");
         assert_eq!(o.structure, true, "structure 是全局变量，不被重置");
         assert_eq!(o.command_block, true, "command_block 同样不在表里");
+        // gml:66-68：声源三项在默认值表里；gml:42：format 重置为 0。
+        assert_eq!(o.command_source, "block");
+        assert_eq!(
+            o.command_allowed_sources,
+            crate::mc_export::default_allowed_sources()
+        );
+        assert_eq!(o.command_tempo_grid, false);
+        assert_eq!(o.format, 0);
+    }
+
+    #[test]
+    fn set_format_derives_structure_and_minecraft_old() {
+        // menu_click.gml:254-256：structure = (sel <= 1)，old = (sel = 3)。
+        let mut o = SchematicOptions::default();
+        o.set_format(1);
+        assert!(o.structure && o.format == 1 && !o.minecraft_old);
+        o.set_format(3);
+        assert!(!o.structure && o.minecraft_old && o.format == 3);
+        o.set_format(2);
+        assert!(!o.structure && !o.minecraft_old && o.format == 2);
+        o.set_format(7);
+        assert!(
+            !o.structure && o.minecraft_old && o.format == 3,
+            "越界下拉值夹到 3"
+        );
     }
 
     #[test]
@@ -3737,7 +4996,7 @@ mod tests {
     #[test]
     fn classic_root_tags_follow_the_original_order() {
         let s = song_with(&[(0, 0, 0, 45), (1, 0, 1, 50)]);
-        let nbt = build_nbt(&s, &SchematicOptions::default()).unwrap();
+        let nbt = build_nbt(&s, &classic_options(), None).unwrap();
         let (name, root) = crate::nbt::parse_named(&nbt).unwrap();
         assert_eq!(name, "Schematic");
         assert_eq!(
@@ -3777,7 +5036,7 @@ mod tests {
     #[test]
     fn classic_tile_entities_carry_sign_then_notes() {
         let s = song_with(&[(0, 0, 0, 45), (1, 0, 1, 50)]);
-        let nbt = build_nbt(&s, &SchematicOptions::default()).unwrap();
+        let nbt = build_nbt(&s, &classic_options(), None).unwrap();
         let root = crate::nbt::parse(&nbt).unwrap();
         let (ty, tes) = root.get("TileEntities").unwrap().as_list().unwrap();
         assert_eq!(ty, 10);
@@ -3807,9 +5066,9 @@ mod tests {
     #[test]
     fn classic_minecraft_old_uses_legacy_ids_and_plain_text() {
         let s = song_with(&[(0, 0, 0, 45)]);
-        let mut o = SchematicOptions::default();
-        o.minecraft_old = true;
-        let nbt = build_nbt(&s, &o).unwrap();
+        let mut o = classic_options();
+        o.set_format(3);
+        let nbt = build_nbt(&s, &o, None).unwrap();
         let root = crate::nbt::parse(&nbt).unwrap();
         let tes = items(root.get("TileEntities").unwrap());
         assert_eq!(tes[0].get("id").and_then(Value::as_str), Some("Sign"));
@@ -3826,9 +5085,9 @@ mod tests {
     #[test]
     fn classic_minecart_entity_has_the_original_fields() {
         let s = song_with(&[(0, 0, 0, 45)]);
-        let mut o = SchematicOptions::default();
+        let mut o = classic_options();
         o.minecart = true;
-        let nbt = build_nbt(&s, &o).unwrap();
+        let nbt = build_nbt(&s, &o, None).unwrap();
         let root = crate::nbt::parse(&nbt).unwrap();
         let ents = items(root.get("Entities").unwrap());
         assert_eq!(ents.len(), 1);
@@ -3867,7 +5126,7 @@ mod tests {
         let s = song_with(&[(0, 0, 0, 45), (1, 0, 1, 50)]);
         let mut o = SchematicOptions::default();
         o.structure = true;
-        let nbt = build_nbt(&s, &o).unwrap();
+        let nbt = build_nbt(&s, &o, None).unwrap();
         let (name, root) = crate::nbt::parse_named(&nbt).unwrap();
         assert_eq!(name, "");
         assert_eq!(
@@ -3945,13 +5204,90 @@ mod tests {
     }
 
     #[test]
+    fn size_header_follows_notesperrow_and_litematica() {
+        let s = song_with(&[(0, 0, 0, 45)]);
+        let mut o = SchematicOptions::default();
+        o.structure = true;
+        // notesperrow=5 时宽 5*2+3=13 < 32：size[0] 就是真实宽度，不是硬编码 32。
+        o.notesperrow = 5;
+        let nbt = build_nbt(&s, &o, None).unwrap();
+        let root = crate::nbt::parse(&nbt).unwrap();
+        let size = items(root.get("size").unwrap());
+        assert_eq!(size[0].as_i32(), Some(13));
+        assert_eq!(size[0].as_i32(), Some(built2_size(&s, &o).0));
+        // format=1（Litematica）写精确三围；同歌默认格式宽 43 会被截成 32。
+        o.notesperrow = 20;
+        o.format = 1;
+        let nbt = build_nbt(&s, &o, None).unwrap();
+        let root = crate::nbt::parse(&nbt).unwrap();
+        let size = items(root.get("size").unwrap());
+        let (w, h, l) = built2_size(&s, &o);
+        assert_eq!(
+            size.iter().map(|v| v.as_i32()).collect::<Vec<_>>(),
+            vec![Some(w), Some(h), Some(l)]
+        );
+        assert_eq!(size[0].as_i32(), Some(43), "Litematica 不截 32");
+    }
+
+    /// 换个写法拿尺寸，避免依赖 Builder 的私有构造。
+    fn built2_size(s: &Song, o: &SchematicOptions) -> (i32, i32, i32) {
+        let size = calc_size_with(&calculate_stats(s), o, None);
+        (size.wid as i32, size.hei as i32, size.len as i32)
+    }
+
+    #[test]
+    fn plan_aware_size_functions_use_the_command_plan() {
+        let s = song_with(&[(0, 0, 0, 45), (2, 0, 0, 45), (4, 1, 0, 45)]);
+        let st = calculate_stats(&s);
+        let mut o = SchematicOptions::default();
+        o.structure = true;
+        o.command_block = true;
+        o.layout = 0;
+        let plan = crate::mc_export::build_plan(
+            &s,
+            "command",
+            "block",
+            &crate::mc_export::default_allowed_sources(),
+            true,
+            true,
+            true,
+            false,
+            10.0,
+            false,
+            false,
+            true,
+            1.0,
+            &|_| None,
+            &|_| None,
+        );
+        assert!(!plan.rows.is_empty(), "真实方案才测得准");
+        // 原版 schematic_height.gml：4 + 3*ceil(maximum/4)，maximum 取方案的 maximum_slots。
+        let hei = schematic_height_with(&st, &o, Some(&plan));
+        assert_eq!(hei, 4 + 3 * ceil_div(plan.maximum_slots, 4));
+        // 证明函数真消费方案：抬最大槽数，高度跟着抬一层（3 格）。
+        let mut bigger = plan.clone();
+        bigger.maximum_slots += 4;
+        assert_eq!(schematic_height_with(&st, &o, Some(&bigger)), hei + 3);
+        // 原版 schematic_length.gml：2 + ceil(中继器/每行数)*3，偶数圈再补 3。
+        let rep = crate::mc_export::plan_repeaters(&plan, o.tempo_mode);
+        let rows = o.notesperrow;
+        let expect = 2 + ceil_div(rep, rows) * 3 + if ceil_div(rep, rows) % 2 == 0 { 3 } else { 0 };
+        assert_eq!(schematic_length_with(&st, &o, Some(&plan)), expect);
+        // 原版 schematic_export.gml:73：层数 = ceil(maximum_slots / 4)。
+        let size = calc_size_with(&st, &o, Some(&plan));
+        assert_eq!(size.layers, ceil_div(plan.maximum_slots, 4));
+        assert_eq!(size.hei, hei);
+        assert_eq!(size.len, schematic_length_with(&st, &o, Some(&plan)));
+    }
+
+    #[test]
     fn structure_block_entries_skip_note_blocks_and_chests() {
         let s = song_with(&[(0, 0, 0, 45)]);
         let mut o = SchematicOptions::default();
         o.structure = true;
         o.minecart = true;
-        let built = build(&s, &o);
-        let nbt = built.structure_nbt(&s);
+        let built = build(&s, &o, None);
+        let nbt = built.structure_nbt();
         let root = crate::nbt::parse(&nbt).unwrap();
         let blocks = items(root.get("blocks").unwrap());
         // 装机版：网格扫描跳过已写过牌子的格子，所以条数正好等于网格体积。
@@ -4006,8 +5342,8 @@ mod tests {
         let s = song_with(&[(0, 0, 16, 45), (1, 0, 19, 57)]);
         let mut o = SchematicOptions::default();
         o.structure = true;
-        let built = build(&s, &o);
-        let root = crate::nbt::parse(&built.structure_nbt(&s)).unwrap();
+        let built = build(&s, &o, None);
+        let root = crate::nbt::parse(&built.structure_nbt()).unwrap();
         let pal = items(root.get("palette").unwrap());
         let instrument_of = |state: usize| -> String {
             pal[state]
@@ -4045,10 +5381,30 @@ mod tests {
         let mut o = SchematicOptions::default();
         o.structure = true;
         o.command_block = true;
-        let built = build(&s, &o);
+        // 原版 TileEntity 的 Command 来自声源分配方案（schematic_export.gml:1014），
+        // 不在导出时合成——用一份真实方案喂给生成器。
+        let plan = crate::mc_export::build_plan(
+            &s,
+            "command",
+            "block",
+            &crate::mc_export::default_allowed_sources(),
+            true,
+            true,
+            true,
+            false,
+            10.0,
+            false,
+            false,
+            true,
+            1.0,
+            &|_| None,
+            &|_| None,
+        );
+        assert!(!plan.rows.is_empty(), "命令方案要装下 9..81 里的音符");
+        let built = build(&s, &o, Some(&plan));
         // 20 个内置 + 一个自定义音色让 insnum 变成 21，palette 也随之增长。
         assert_eq!(built.insnum, 21);
-        let nbt = built.structure_nbt(&s);
+        let nbt = built.structure_nbt();
         let root = crate::nbt::parse(&nbt).unwrap();
         let pal = items(root.get("palette").unwrap());
         assert_eq!(pal.len(), 29 + 21 * 26);
@@ -4076,13 +5432,12 @@ mod tests {
             .get("Command")
             .and_then(Value::as_str)
             .unwrap();
-        assert_eq!(
-            command,
-            "playsound minecraft:block.note_block.harp block @a ~ ~ ~ 3 1.000000"
-        );
+        assert_eq!(command, plan.rows[0].command, "命令直接来自方案行");
+        assert!(command.starts_with("playsound "));
         assert_eq!(
             keys_of(cmd.get("nbt").unwrap()),
             [
+                "id",
                 "Command",
                 "TrackOutput",
                 "powered",
@@ -4098,7 +5453,7 @@ mod tests {
     fn classic_export_roundtrips_sizes_and_notes() {
         let s = song_with(&[(0, 0, 0, 45), (1, 0, 1, 50), (2, 0, 2, 40)]);
         let path = scratch("roundtrip.schematic");
-        let info = export_schematic(&s, &path, &SchematicOptions::default()).unwrap();
+        let info = export_schematic(&s, &path, &classic_options(), None).unwrap();
         assert_eq!((info.width, info.height, info.length), (43, 7, 5));
         assert_eq!(info.note_blocks, 3);
         assert_eq!(info.repeaters, 3);
@@ -4118,7 +5473,7 @@ mod tests {
         let mut o = SchematicOptions::default();
         o.structure = true;
         let path = scratch("roundtrip.nbt");
-        let info = export_schematic(&s, &path, &o).unwrap();
+        let info = export_schematic(&s, &path, &o, None).unwrap();
         let back = inspect_schematic(&path).unwrap();
         assert_eq!(back.note_blocks, info.note_blocks);
         assert_eq!(back.height, info.height);
@@ -4134,7 +5489,7 @@ mod tests {
         let mut o = SchematicOptions::default();
         o.layout = 0;
         o.loop_option = true;
-        let built = build(&s, &o);
+        let built = build(&s, &o, None);
         assert!(built.sch_loop);
         let nbt = built.classic_nbt();
         let root = crate::nbt::parse(&nbt).unwrap();
@@ -4149,7 +5504,7 @@ mod tests {
         );
         // 关掉循环选项后签名只剩一个。
         o.loop_option = false;
-        let built = build(&s, &o);
+        let built = build(&s, &o, None);
         assert!(!built.sch_loop);
     }
 
@@ -4161,18 +5516,18 @@ mod tests {
         o.chest = true;
         o.loop_option = true;
         o.layout = 2;
-        let built = build(&s, &o);
+        let built = build(&s, &o, None);
         assert!(!built.minecart);
         assert!(!built.chest_on);
         assert!(!built.sch_loop);
         o.layout = 0;
-        let built = build(&s, &o);
+        let built = build(&s, &o, None);
         assert!(built.minecart);
         assert!(built.chest_on);
         assert!(built.sch_loop);
         // 箱子依赖矿车：关掉矿车后箱子也不会出现。
         o.minecart = false;
-        let built = build(&s, &o);
+        let built = build(&s, &o, None);
         assert!(!built.chest_on);
     }
 
@@ -4185,13 +5540,13 @@ mod tests {
         o.compress = false;
         let st = calculate_stats(&s);
         assert_eq!(st.maxheight, [1, 1]);
-        let built = build_with_stats(&s, &o, &st);
+        let built = build_with_stats(&s, &o, &st, None);
         assert_eq!(built.size.layers, 1);
         assert_eq!(built.size.hei, 7);
         assert_eq!(built.notes.len(), 1);
         // 压缩模式下 layers 用单 tick 最多音符数，这里同样是 1。
         o.compress = true;
-        let built = build(&s, &o);
+        let built = build(&s, &o, None);
         assert_eq!(built.size.layers, 1);
         assert_eq!(built.notes.len(), 1);
     }
@@ -4256,14 +5611,18 @@ mod tests {
         let s = song_with(&[(0, 0, 0, 45), (0, 1, 0, 20)]);
         let mut o = SchematicOptions::default();
         o.structure = true;
-        assert_eq!(build(&s, &o).notes.len(), 1, "普通音符盒模式只认 33..57");
+        assert_eq!(
+            build(&s, &o, None).notes.len(),
+            1,
+            "普通音符盒模式只认 33..57"
+        );
         o.command_block = true;
-        assert_eq!(build(&s, &o).notes.len(), 2, "命令方块模式认 9..81");
+        assert_eq!(build(&s, &o, None).notes.len(), 2, "命令方块模式认 9..81");
         // 但 layers 仍按 33..57 计数：整首都用范围外音高时一行都不放。
-        assert_eq!(build(&song_with(&[(0, 0, 0, 20)]), &o).notes.len(), 0);
+        assert_eq!(build(&song_with(&[(0, 0, 0, 20)]), &o, None).notes.len(), 0);
         // 连 9..81 之外（key 8）也不算。
         let s = song_with(&[(0, 0, 0, 45), (0, 1, 0, 8)]);
-        assert_eq!(build(&s, &o).notes.len(), 1);
+        assert_eq!(build(&s, &o, None).notes.len(), 1);
     }
 
     #[test]
@@ -4289,7 +5648,7 @@ mod tests {
         let s = song_with(&[(0, 0, 0, 45)]);
         let mut o = SchematicOptions::default();
         o.structure = true;
-        let built = build(&s, &o);
+        let built = build(&s, &o, None);
         let base = built.insnum * 26;
         assert_eq!(built.state_of(0, 0), (base + 4) as i32); // air
         assert_eq!(built.state_of(1, 0), 0); // walkway
@@ -4326,9 +5685,9 @@ mod tests {
             for structure in [false, true] {
                 let mut o = SchematicOptions::default();
                 o.layout = layout;
-                o.structure = structure;
+                o.set_format(if structure { 0 } else { 2 });
                 let path = scratch(&format!("demo-{layout}-{structure}.out"));
-                let info = export_schematic(&s, &path, &o).unwrap();
+                let info = export_schematic(&s, &path, &o, None).unwrap();
                 assert!(
                     info.note_blocks > 0,
                     "layout {layout} structure {structure}"
@@ -4739,7 +6098,7 @@ mod tests {
         let song = Song::demo();
         let opts = SchematicOptions::default();
         let stats = calculate_stats(&song);
-        let packed = gzip(&build_with_stats(&song, &opts, &stats).classic_nbt()).unwrap();
+        let packed = gzip(&build_with_stats(&song, &opts, &stats, None).classic_nbt()).unwrap();
         let got = import_bytes(&packed, "demo").unwrap();
         assert_eq!(got.inputs, 1, "经典图样只写一个拉杆");
         let mut want: Vec<_> = song
@@ -4783,7 +6142,7 @@ mod tests {
         o.command_block = false;
         o.tempo_mode = 0;
 
-        let ours = crate::nbt::parse(&build_nbt(&song, &o).unwrap()).unwrap();
+        let ours = crate::nbt::parse(&build_nbt(&song, &o, None).unwrap()).unwrap();
 
         // 骨架与矿车实体必须逐字段相同（blockPos 曾因过道中线取整差 1）。
         assert_eq!(keys_of(&ours), keys_of(&theirs), "根节点的键序不同");
@@ -4931,6 +6290,414 @@ mod tests {
         let mut out = Vec::new();
         GzDecoder::new(f).read_to_end(&mut out).unwrap();
         out
+    }
+
+    // ------------------------------------------------------------- 直轨导出
+
+    /// 直轨测试专用：能同时指定力度/声像（默认 100/100）。
+    fn track_song(notes: &[(u32, u32, u8, u8, u8, u8)]) -> Song {
+        let mut s = Song::new();
+        let max_layer = notes.iter().map(|n| n.1).max().unwrap_or(0) as usize;
+        s.layers = vec![Layer::default(); max_layer + 1];
+        for (t, l, ins, key, pan, vel) in notes {
+            let mut n = Note::new(*ins, *key);
+            n.panning = *pan;
+            n.velocity = *vel;
+            s.set(*t, *l, n);
+        }
+        s.recalculate();
+        s
+    }
+
+    fn fget<'v>(v: &'v Value, name: &str) -> &'v Value {
+        v.fields()
+            .unwrap_or_else(|| panic!("不是 compound: {v:?}"))
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v)
+            .unwrap_or_else(|| panic!("缺字段 {name}"))
+    }
+
+    fn palette(v: &Value) -> &[Value] {
+        fget(v, "palette").as_list().unwrap().1
+    }
+
+    fn block_entries(v: &Value) -> &[Value] {
+        fget(v, "blocks").as_list().unwrap().1
+    }
+
+    fn pos_of(entry: &Value) -> Vec<i32> {
+        fget(entry, "pos")
+            .as_list()
+            .unwrap()
+            .1
+            .iter()
+            .map(|p| p.as_i32().unwrap())
+            .collect()
+    }
+
+    /// classic 网格序列化下标：外层 c→中层 a，内层 b 从宽-1 递减（gml:1348 逐字）。
+    fn classic_idx(a: usize, b: usize, c: usize, len: usize, wid: usize) -> usize {
+        (c * len + a) * wid + (wid - 1 - b)
+    }
+
+    fn no_track_mappings(_: usize) -> Option<String> {
+        None
+    }
+
+    fn no_track_durations(_: usize) -> Option<f64> {
+        None
+    }
+
+    fn track_plan(song: &Song) -> crate::mc_export::Plan {
+        let mut plan = crate::mc_export::build_plan(
+            song,
+            "command",
+            "block",
+            &crate::mc_export::default_allowed_sources(),
+            false,
+            true,
+            false,
+            false,
+            10.0,
+            false,
+            true,
+            true,
+            0.0,
+            &no_track_mappings,
+            &no_track_durations,
+        );
+        crate::mc_export::prepare_track_plan(&mut plan, song);
+        plan
+    }
+
+    #[test]
+    fn classic_track_roundtrip_matches_schematic_layout() {
+        // 两个音符：tick0 在网格内，tick1（最后一个 tick）出界只剩 TileEntity。
+        let song = song_with(&[(0, 0, 0, 45), (1, 0, 0, 57)]);
+        let opts = classic_options(); // format=2 → classic .schematic
+        let path = scratch("track_classic.schematic");
+        export_track(&song, &opts, None, &path).unwrap();
+        let v = crate::nbt::parse(&gzip_decode(&path)).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        let names: Vec<&str> = v
+            .fields()
+            .unwrap()
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "Height",
+                "Length",
+                "Width",
+                "Entities",
+                "TileEntities",
+                "Materials",
+                "Blocks",
+                "Data",
+                "Version"
+            ]
+        );
+        // len = 40 + enda*2 = 42，宽固定 100，高 = max(20, 层*4+4)。
+        assert_eq!(fget(&v, "Height").as_i16(), Some(20));
+        assert_eq!(fget(&v, "Length").as_i16(), Some(42));
+        assert_eq!(fget(&v, "Width").as_i16(), Some(100));
+        assert_eq!(fget(&v, "Materials").as_str(), Some("Alpha"));
+
+        let (blocks, data) = match (fget(&v, "Blocks"), fget(&v, "Data")) {
+            (Value::ByteArray(b), Value::ByteArray(d)) => (b, d),
+            _ => panic!("Blocks/Data 不是字节数组"),
+        };
+        assert_eq!(blocks.len(), 42 * 100 * 20);
+        assert_eq!(data.len(), blocks.len());
+
+        // 网格里的牌子：(2, 49, hei-1) id 68 data 3。
+        let i = classic_idx(2, 49, 19, 42, 100);
+        assert_eq!(blocks[i], 68);
+        assert_eq!(data[i], 3);
+        // 过道（出厂石头）：(10, 49, hei-3)。
+        let i = classic_idx(10, 49, 17, 42, 100);
+        assert_eq!(blocks[i], 1);
+        assert_eq!(data[i], 0);
+        // 车道中继器：tempo_mode 0 → delay 0、direction 2 → data 2，id 93。
+        let i = classic_idx(41, 50, 3, 42, 100);
+        assert_eq!(blocks[i], 93);
+        assert_eq!(data[i], 2);
+        // tick0 音符盒在网格 (41, 49, 2)；tick1 的 x=43 出界 → 网格里只有 1 个音符盒。
+        let i = classic_idx(41, 49, 2, 42, 100);
+        assert_eq!(blocks[i], 25);
+        assert_eq!(blocks.iter().filter(|&&b| b == 25).count(), 1);
+
+        // TileEntities：牌子 + 两个音符盒（出界的那个也记录，指向网格外的空位）。
+        let tes = fget(&v, "TileEntities").as_list().unwrap().1;
+        assert_eq!(tes.len(), 3);
+        assert_eq!(fget(&tes[0], "id").as_str(), Some("minecraft:sign"));
+        assert_eq!(fget(&tes[0], "x").as_i32(), Some(50)); // wid-1-signy
+        assert_eq!(fget(&tes[0], "y").as_i32(), Some(19));
+        assert_eq!(fget(&tes[0], "z").as_i32(), Some(2));
+        assert_eq!(
+            fget(&tes[0], "Text1").as_str(),
+            Some("{\"text\": \"Song generated\"}")
+        );
+        assert_eq!(fget(&tes[1], "id").as_str(), Some("minecraft:noteblock"));
+        assert_eq!(fget(&tes[1], "x").as_i32(), Some(50));
+        assert_eq!(fget(&tes[1], "y").as_i32(), Some(2));
+        assert_eq!(fget(&tes[1], "z").as_i32(), Some(41));
+        assert_eq!(fget(&tes[1], "note").as_i8(), Some(12)); // key-33
+        assert_eq!(fget(&tes[2], "z").as_i32(), Some(43));
+        assert_eq!(fget(&tes[2], "note").as_i8(), Some(24)); // 57-33
+
+        let version = fget(&v, "Version");
+        assert_eq!(fget(version, "Id").as_i32(), Some(922));
+        assert_eq!(fget(version, "Name").as_str(), Some("1.11.2"));
+    }
+
+    #[test]
+    fn classic_track_old_format_uses_plain_sign_and_1_8() {
+        let song = song_with(&[(0, 0, 0, 45)]);
+        let mut opts = classic_options();
+        opts.minecraft_old = true;
+        let path = scratch("track_classic_old.schematic");
+        export_track(&song, &opts, None, &path).unwrap();
+        let v = crate::nbt::parse(&gzip_decode(&path)).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        let tes = fget(&v, "TileEntities").as_list().unwrap().1;
+        assert_eq!(tes.len(), 2);
+        assert_eq!(fget(&tes[0], "id").as_str(), Some("Sign"));
+        assert_eq!(fget(&tes[0], "Text1").as_str(), Some("Song generated"));
+        assert_eq!(fget(&tes[1], "id").as_str(), Some("Music"));
+        let version = fget(&v, "Version");
+        let names: Vec<&str> = version
+            .fields()
+            .unwrap()
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert_eq!(names, vec!["Name", "Snapshot"]);
+        assert_eq!(fget(version, "Name").as_str(), Some("1.8"));
+    }
+
+    #[test]
+    fn structure_track_palette_and_size_header() {
+        let song = song_with(&[(0, 0, 0, 45)]);
+        let opts = SchematicOptions::default(); // structure=1、format=0
+        let path = scratch("track_struct.nbt");
+        export_track(&song, &opts, None, &path).unwrap();
+        let v = crate::nbt::parse(&gzip_decode(&path)).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        // 根 compound 没有 TAG_End（与 schematic_export 同款，装机版如此）；
+        // 字段顺序与原版 gml:124-133 一致。
+        let names: Vec<&str> = v
+            .fields()
+            .unwrap()
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["DataVersion", "size", "palette", "entities", "blocks"]
+        );
+        assert_eq!(fget(&v, "DataVersion").as_i32(), Some(1519));
+
+        // size：smax=(50,19,41) → (min(51,32), 20, min(42,32))，format=0 每向封顶 32。
+        let size: Vec<i32> = fget(&v, "size")
+            .as_list()
+            .unwrap()
+            .1
+            .iter()
+            .map(|n| n.as_i32().unwrap())
+            .collect();
+        assert_eq!(size, vec![32, 20, 32]);
+
+        // palette = 30 + 26*insnum，insnum = 20（无自定义乐器）。
+        let pal = palette(&v);
+        assert_eq!(pal.len(), 30 + 26 * 20);
+        assert_eq!(fget(&pal[0], "Name").as_str(), Some("minecraft:stone"));
+        assert_eq!(fget(&pal[1], "Name").as_str(), Some("minecraft:stone"));
+        assert_eq!(fget(&pal[2], "Name").as_str(), Some("minecraft:stone"));
+        // 乐器 9（钢琴 → 木头）是唯一带 axis:y 的乐器底块。
+        let props = fget(&pal[12], "Properties");
+        let pnames: Vec<&str> = props
+            .fields()
+            .unwrap()
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert_eq!(pnames, vec!["axis"]);
+        assert_eq!(fget(props, "axis").as_str(), Some("y"));
+        // 音符条目：state = 3 + insnum + ins*25 + note；harp note 12 → 35。
+        let nb = &pal[35];
+        assert_eq!(fget(nb, "Name").as_str(), Some("minecraft:note_block"));
+        let props = fget(nb, "Properties");
+        let pnames: Vec<&str> = props
+            .fields()
+            .unwrap()
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert_eq!(pnames, vec!["instrument", "note", "powered"]);
+        assert_eq!(fget(props, "instrument").as_str(), Some("harp"));
+        assert_eq!(fget(props, "note").as_str(), Some("12"));
+        assert_eq!(fget(props, "powered").as_str(), Some("false"));
+        // 27 条固定尾巴：首 blue_wool、air，尾 smooth_stone_slab type top。
+        let tail = 3 + 20 + 20 * 25;
+        assert_eq!(
+            fget(&pal[tail], "Name").as_str(),
+            Some("minecraft:blue_wool")
+        );
+        assert_eq!(fget(&pal[tail + 1], "Name").as_str(), Some("minecraft:air"));
+        let slab = &pal[pal.len() - 1];
+        assert_eq!(
+            fget(slab, "Name").as_str(),
+            Some("minecraft:smooth_stone_slab")
+        );
+        assert_eq!(fget(fget(slab, "Properties"), "type").as_str(), Some("top"));
+
+        // sign 条目：pos [50,19,2]、state = insnum*26+19 = 539、四行牌面。
+        let entries = block_entries(&v);
+        let sign = entries
+            .iter()
+            .find(|e| pos_of(e) == vec![50, 19, 2])
+            .expect("缺 sign 条目");
+        assert_eq!(fget(sign, "state").as_i32(), Some(20 * 26 + 19));
+        let nbt = fget(sign, "nbt");
+        assert_eq!(fget(nbt, "Color").as_str(), Some("black"));
+        assert_eq!(fget(nbt, "id").as_str(), Some("minecraft:sign"));
+        assert_eq!(
+            fget(nbt, "Text1").as_str(),
+            Some("{\"text\": \"Song generated\"}")
+        );
+        assert_eq!(fget(nbt, "Text4").as_str(), Some("{\"text\": \"Studio\"}"));
+
+        // 音符条目（中央车道 part#1）：pos [50,2,41]、state 35、
+        // 非命令模式也带 nbt compound + 空 Command（原版 gml:1275 注释「magic」）。
+        let note_entry = entries
+            .iter()
+            .find(|e| pos_of(e) == vec![50, 2, 41])
+            .expect("缺音符条目");
+        let efields: Vec<&str> = note_entry
+            .fields()
+            .unwrap()
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert_eq!(efields, vec!["nbt", "pos", "state"]);
+        assert_eq!(fget(note_entry, "state").as_i32(), Some(3 + 20 + 12));
+        let nbt = fget(note_entry, "nbt");
+        let nfields: Vec<&str> = nbt
+            .fields()
+            .unwrap()
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert_eq!(
+            nfields,
+            vec![
+                "Command",
+                "TrackOutput",
+                "powered",
+                "auto",
+                "conditionMet",
+                "UpdateLastExecution"
+            ]
+        );
+        assert_eq!(fget(nbt, "Command").as_str(), Some(""));
+        assert_eq!(fget(nbt, "TrackOutput").as_i8(), Some(0));
+        assert_eq!(fget(nbt, "conditionMet").as_i8(), Some(1));
+    }
+
+    #[test]
+    fn structure_track_lanes_split_by_pan_and_volume() {
+        // 四拍（cvol 是 0..100 量纲，原版那些 cvol<=0.2 分支几乎恒假）：
+        // tick0 中央 pan100/vel100 → 车道 center；
+        // tick1 极左 pan0/vel100 → 只有 r4 收下（cpanvol<=20 与 cpan<=20 都成立）；
+        // tick2 极右 pan200/vel100 → cpanvol>=180 让左翼 l4 也收一份（判定不互斥，
+        //   同一音符落两条车道：l4 + r1）；
+        // tick3 pan10/vel0 → cm=0 而 cn=1 → key*0 → note=-33 的原版负 state bug。
+        let song = track_song(&[
+            (0, 0, 0, 45, 100, 100),
+            (1, 0, 0, 45, 0, 100),
+            (2, 0, 0, 45, 200, 100),
+            (3, 0, 0, 45, 10, 0),
+        ]);
+        let opts = SchematicOptions::default();
+        let path = scratch("track_lanes.nbt");
+        export_track(&song, &opts, None, &path).unwrap();
+        let v = crate::nbt::parse(&gzip_decode(&path)).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        // 音符条目 = nbt 里有 Command 字段的条目（布线条目没有 nbt，sign 的 nbt 没有）。
+        let entries = block_entries(&v);
+        let notes: Vec<(Vec<i32>, i32)> = entries
+            .iter()
+            .filter(|e| {
+                e.fields().unwrap().iter().any(|(k, _)| k == "nbt")
+                    && fget(e, "nbt")
+                        .fields()
+                        .unwrap()
+                        .iter()
+                        .any(|(k, _)| k == "Command")
+            })
+            .map(|e| (pos_of(e), fget(e, "state").as_i32().unwrap()))
+            .collect();
+        // pos = [99-y, z, x]；y1 = yy+dir±12k，part#1 在 (x1+2, y1∓1, bz+1+adds)。
+        let expected = vec![
+            (vec![50, 2, 41], 35), // tick0 center: y1=50, adds=1
+            (vec![2, 6, 43], 35),  // tick1 r4: y1=98, adds=5
+            (vec![98, 6, 45], 35), // tick2 l4: y1=2
+            (vec![38, 3, 45], 35), // tick2 r1: y1=62, adds=2
+            (vec![2, 6, 47], -10), // tick3 r4: note = 0*key-33
+        ];
+        assert_eq!(notes.len(), expected.len(), "实际落点: {notes:?}");
+        for (p, s) in &expected {
+            assert!(
+                notes.contains(&(p.clone(), *s)),
+                "缺落点 pos={p:?} state={s}，实际: {notes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn structure_track_command_mode_uses_plan_rows() {
+        let song = song_with(&[(0, 0, 0, 45)]);
+        let plan = track_plan(&song);
+        let mut opts = SchematicOptions::default();
+        opts.command_block = true;
+        let path = scratch("track_command.nbt");
+        export_track(&song, &opts, Some(&plan), &path).unwrap();
+        let v = crate::nbt::parse(&gzip_decode(&path)).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        // 命令模式 palette 里 ins*25 全是 command_block，不再有 note_block。
+        let pal = palette(&v);
+        assert_eq!(
+            fget(&pal[35], "Name").as_str(),
+            Some("minecraft:command_block")
+        );
+        assert_eq!(
+            fget(fget(&pal[35], "Properties"), "facing").as_str(),
+            Some("up")
+        );
+
+        // 音符条目：state = 3+insnum（没有 ins*25+note 项），
+        // Command 逐字取自方案行。
+        let row_index = plan.track_rows_by_grid[0][4][0];
+        let entries = block_entries(&v);
+        let note_entry = entries
+            .iter()
+            .find(|e| pos_of(e) == vec![50, 2, 41])
+            .expect("缺命令方块条目");
+        assert_eq!(fget(note_entry, "state").as_i32(), Some(3 + 20));
+        let nbt = fget(note_entry, "nbt");
+        assert_eq!(fget(nbt, "id").as_str(), Some("minecraft:command_block"));
+        let command = plan.rows[row_index].command.clone();
+        assert!(!command.is_empty());
+        assert_eq!(fget(nbt, "Command").as_str(), Some(command.as_str()));
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {

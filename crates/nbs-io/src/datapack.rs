@@ -238,7 +238,7 @@ pub fn dat_pitch(key: f64) -> String {
 }
 
 /// GML `string()` 对实数的输出：整数不带小数点，非整数按 6 位有效数字并去掉尾零。
-fn gml_num(x: f64) -> String {
+pub(crate) fn gml_num(x: f64) -> String {
     if !x.is_finite() {
         return "0".into();
     }

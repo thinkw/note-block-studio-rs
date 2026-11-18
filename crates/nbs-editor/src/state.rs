@@ -199,6 +199,9 @@ pub enum WindowKind {
     /// 415×310，本地 `.minecraft` 与 Mojang 下载两条路。
     SoundImport,
     SchematicExport,
+    /// 原版 `w_track_export`（`draw_window_track_export.gml`）：550×400，
+    /// 「普通过道」直轨布局的结构/schematic 导出。
+    TrackExport,
     PngExport,
     /// 原版 `w_arpeggio`（`draw_window_macro_arpeggio.gml`）：140×130，只有一个规律框。
     Arpeggio,
@@ -274,6 +277,8 @@ impl WindowKind {
             Self::SoundImport => tr("Import sounds", "导入音效"),
             // 原版 `draw_window_schematic_export.gml:14`：CN "导出结构"。
             Self::SchematicExport => tr("Schematic Export", "导出结构"),
+            // 原版 `draw_window_track_export.gml:13`：CN "导出直轨"。
+            Self::TrackExport => tr("Track Export", "导出直轨"),
             Self::PngExport => tr("Export PNG chart", "导出 PNG 谱面"),
             // 原版三个宏窗口的正文标题都是 `draw_text_dynamic(x1 + 8, y1 + 8, "Arpeggio")`
             // 这种不分语言的写法，中文界面里也保持英文，照抄。
@@ -485,6 +490,8 @@ pub enum DialogAction {
     ExportMidi,
     ExportPng,
     ExportSchematic,
+    /// 原版 `track_export()` 的保存对话框：structure 选 .nbt，classic 选 .schematic。
+    ExportTrack,
     ExportPattern,
     ImportMidi,
     ImportPattern,
@@ -504,7 +511,8 @@ impl DialogAction {
         matches!(
             self,
             Self::SaveSong | Self::ExportAudio | Self::ExportDatapack | Self::ExportMidi
-                | Self::ExportPng | Self::ExportSchematic | Self::ExportPattern
+                | Self::ExportPng | Self::ExportSchematic | Self::ExportTrack
+                | Self::ExportPattern
                 | Self::SaveExtraNotes
                 // 原版选文件夹走的是 `get_save_filename_ext`（见 `picker_spec` 里那条），
                 // 不是目录选择器，所以这里也算「保存」式对话框。
@@ -522,6 +530,9 @@ impl DialogAction {
             Self::ExportPng => "png",
             // 原版：get_open_filename_ext("Minecraft Schematics (*.schematic)|*.schematic", …)。
             Self::ExportSchematic | Self::ImportSchematic => "schematic",
+            // 直轨导出 structure 用 .nbt、classic 用 .schematic，
+            // 对话框打开前的默认名已按模式选好扩展名（commands.rs 的 ExportTrack 分支）。
+            Self::ExportTrack => "nbt",
             Self::ExportPattern | Self::ImportPattern => "nbp",
             // 原版：get_save_filename_ext("Resource pack (*.zip)|*.zip", "更多音符盒", "", …)。
             Self::SaveExtraNotes => "zip",
@@ -709,6 +720,21 @@ impl FileDialog {
                 } else {
                     (
                         "Export Schematic",
+                        vec![filter("Minecraft Schematics (*.schematic)", "*.schematic")],
+                    )
+                }
+            }
+            DialogAction::ExportTrack => {
+                // 原版 `track_export.gml:7-11`：标题两种语言都是 "Export Track"，
+                // 过滤器跟 Schematic 导出同款（结构方块 .nbt / 经典 .schematic）。
+                if ext == "nbt" {
+                    (
+                        "Export Track",
+                        vec![filter("Minecraft Structures (*.nbt)", "*.nbt")],
+                    )
+                } else {
+                    (
+                        "Export Track",
                         vec![filter("Minecraft Schematics (*.schematic)", "*.schematic")],
                     )
                 }
@@ -1044,6 +1070,15 @@ pub struct EditorState {
     pub schematic_tab: u8,
     /// 原版 `sch_exp_remember`。
     pub schematic_remember: bool,
+    /// 原版 `sch_command_plan`：结构导出「声源分配」的缓存方案（有界预算）。
+    pub schematic_command_plan: Option<nbs_io::mc_export::Plan>,
+    /// 原版 `sch_command_signature`：方案缓存签名，歌/选项任一变化即失效。
+    pub schematic_command_signature: String,
+    /// 原版 `string(o.songs[o.song])` 的替代：开档 / 新建才变化的会话号，
+    /// 内容编辑不变（与原版实例 id 语义一致）。
+    pub song_session: u64,
+    /// 原版 `obj_controller.log_strs`：导出报告等日志行（暂不落盘文件）。
+    pub log_strs: Vec<String>,
     /// 原版 `message()` / `question()` 的待弹队列。
     pub modals: ModalQueue,
     pub datapack_options: DatapackOptions,
@@ -1312,6 +1347,10 @@ impl EditorState {
             midi_drags: [0.0; 3],
             midi_gm,
             schematic_options,
+            schematic_command_plan: None,
+            schematic_command_signature: String::new(),
+            song_session: 1,
+            log_strs: Vec::new(),
             schematic_stats: nbs_io::schematic::SchematicStats::default(),
             schematic_tab: 0,
             schematic_remember: true,
@@ -1996,6 +2035,92 @@ impl EditorState {
                 format!("Failed to save preferences: {e}")
             });
         }
+    }
+
+    /// 原版 `minecraft_export_get_schematic_plan` 的签名
+    /// （minecraft_export.gml:1030）：歌实例 + 会影响方案的那六个 sch_exp_* 项。
+    fn command_plan_signature(&self) -> String {
+        let o = &self.schematic_options;
+        let allowed: String = o
+            .command_allowed_sources
+            .iter()
+            .map(|&b| if b { "1" } else { "0" })
+            .collect();
+        format!(
+            "{}:{}:{}:{}:{}:{}:{}",
+            self.song_session,
+            o.include_locked,
+            o.compress,
+            o.command_tempo_grid,
+            o.tempo_mode,
+            o.command_source,
+            allowed
+        )
+    }
+
+    /// 原版 `minecraft_export_command_tps`：速度档 0/1/其它 → 10/5/2.5。
+    fn command_tps(&self) -> f64 {
+        match self.schematic_options.tempo_mode {
+            0 => 10.0,
+            1 => 5.0,
+            _ => 2.5,
+        }
+    }
+
+    /// 有界预算的方案构建（原版 `full_search = false`），供窗口计数/尺寸查询；
+    /// 真正导出用 [`Self::rebuild_command_plan_forced`]（全预算）。
+    fn build_command_plan(&self, full_search: bool) -> nbs_io::mc_export::Plan {
+        use nbs_io::mc_export;
+        let o = &self.schematic_options;
+        let bank = self.audio.bank();
+        let radius = 1.0 + (self.datapack_options.radius.saturating_sub(16)) as f64 * 0.06;
+        mc_export::build_plan(
+            &self.doc.song,
+            "command",
+            &o.command_source,
+            &o.command_allowed_sources,
+            o.include_locked,
+            true,
+            true,
+            o.command_tempo_grid,
+            self.command_tps(),
+            o.layout == 0 && o.loop_option,
+            o.compress,
+            full_search,
+            radius,
+            &|_| None,
+            &|i: usize| {
+                bank.samples
+                    .get(i)
+                    .map(|s| s.duration())
+                    .filter(|d| *d > 0.0)
+            },
+        )
+    }
+
+    /// 原版 `minecraft_export_get_schematic_plan(false)`：签名没变就复用缓存。
+    pub fn ensure_command_plan(&mut self) -> &nbs_io::mc_export::Plan {
+        let signature = self.command_plan_signature();
+        if self.schematic_command_plan.is_none() || self.schematic_command_signature != signature {
+            let plan = self.build_command_plan(false);
+            self.schematic_command_signature = signature;
+            self.schematic_command_plan = Some(plan);
+        }
+        self.schematic_command_plan.as_ref().unwrap()
+    }
+
+    /// 原版 `minecraft_export_get_schematic_plan(true)`：导出时全预算重建并替换缓存。
+    pub fn rebuild_command_plan_forced(&mut self) -> &nbs_io::mc_export::Plan {
+        let signature = self.command_plan_signature();
+        let plan = self.build_command_plan(true);
+        self.schematic_command_signature = signature;
+        self.schematic_command_plan = Some(plan);
+        self.schematic_command_plan.as_ref().unwrap()
+    }
+
+    /// 原版在乐器编辑/音色重载时 `sch_command_plan = undefined`。
+    pub fn invalidate_command_plan(&mut self) {
+        self.schematic_command_plan = None;
     }
 
     /// 每 30 秒静默持久化一次，避免意外退出丢失主题/音频设置。

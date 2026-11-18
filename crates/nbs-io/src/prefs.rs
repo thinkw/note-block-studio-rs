@@ -669,15 +669,22 @@ mod tests {
         let mut p = Preferences::default();
         p.warning_schematic = true;
         p.schematic.layout = 2;
-        p.schematic.structure = true;
+        p.schematic.set_format(1);
         p.schematic.command_block = true;
+        p.schematic.command_source = "music".into();
+        p.schematic.command_allowed_sources[1] = false;
+        p.schematic.command_tempo_grid = true;
         p.schematic.ins_block[0] = 99;
         p.schematic.ins_data[0] = 7;
         let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert!(back.warning_schematic);
         assert_eq!(back.schematic.layout, 2);
         assert!(back.schematic.structure);
+        assert_eq!(back.schematic.format, 1);
         assert!(back.schematic.command_block);
+        assert_eq!(back.schematic.command_source, "music");
+        assert!(!back.schematic.command_allowed_sources[1]);
+        assert!(back.schematic.command_tempo_grid);
         assert_eq!(back.schematic.ins_block[0], 99);
         assert_eq!(back.schematic.ins_data[0], 7);
 
@@ -685,6 +692,14 @@ mod tests {
         assert!(!old.warning_schematic);
         assert_eq!(old.schematic.layout, 1, "旧文件缺 [schematic_export] 时退回原版默认");
         assert_eq!(old.schematic.ins_block, crate::schematic::default_ins_block());
+        // 原版 reset_schematic_export.gml:66-70：声源页四项的出厂值；format 出厂 0。
+        assert_eq!(old.schematic.command_source, "block");
+        assert_eq!(
+            old.schematic.command_allowed_sources,
+            crate::mc_export::default_allowed_sources()
+        );
+        assert!(!old.schematic.command_tempo_grid);
+        assert_eq!(old.schematic.format, 0);
         assert_eq!(old.theme, 2, "已有的键照常读出来");
     }
 

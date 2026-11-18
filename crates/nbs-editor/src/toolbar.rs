@@ -161,6 +161,13 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                     state.emit(Command::OpenSchematicExport);
                     ui.close_menu();
                 }
+                if ui
+                    .button(tr("Track schematic...", "直轨结构......"))
+                    .clicked()
+                {
+                    state.emit(Command::OpenTrackExport);
+                    ui.close_menu();
+                }
                 if ui.button(tr("Data pack...", "Minecraft 数据包…")).clicked() {
                     state.emit(Command::ShowWindow(WindowKind::DatapackExport));
                     ui.close_menu();

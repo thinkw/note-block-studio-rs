@@ -72,6 +72,8 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         WindowKind::DatapackExport => 560.0,
         // 原版 `draw_window_schematic_export` 是 550×400。
         WindowKind::SchematicExport => 560.0,
+        // 原版 `draw_window_track_export` 也是 550×400。
+        WindowKind::TrackExport => 560.0,
         // 原版 `draw_window(x1, y1, x1 + 490, y1 + 450)`。
         WindowKind::MinecraftCompat => 490.0,
         // 原版 `draw_window(x1, y1, x1 + 600, y1 + 400 + navigation_space)`。
@@ -151,6 +153,7 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::MidiDevices => midi_devices_window(state, ui),
             WindowKind::SoundImport => sound_import_window(state, ui),
             WindowKind::SchematicExport => schematic_export_window(state, ui),
+            WindowKind::TrackExport => track_export_window(state, ui),
             WindowKind::DatapackExport => datapack_export_window(state, ui),
             WindowKind::PngExport => png_export_window(state, ui),
             WindowKind::Autosaves => autosaves_window(state, ui),
@@ -187,17 +190,23 @@ fn show_modal(state: &mut EditorState, ctx: &Context) {
         .show(ctx, |ui| {
             ui.label(&modal.text);
             ui.separator();
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if modal.yes_no {
-                    if ui.button(tr("No", "否")).clicked() {
-                        answer = Some(false);
-                    }
-                    if ui.button(tr("Yes", "是")).clicked() {
+            // 按钮行圈进一行高的定界区域：锚定窗口首帧可用区很大，
+            // 直接 with_layout(RTL) 会把按钮垂直居中进大空区，把窗口撑高且
+            // egui 的 Resize 状态只增不减，之后永远缩不回去。
+            let row_h = ui.spacing().interact_size.y;
+            ui.allocate_ui(egui::vec2(ui.available_width(), row_h), |ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if modal.yes_no {
+                        if ui.button(tr("No", "否")).clicked() {
+                            answer = Some(false);
+                        }
+                        if ui.button(tr("Yes", "是")).clicked() {
+                            answer = Some(true);
+                        }
+                    } else if ui.button(tr("OK", "确定")).clicked() {
                         answer = Some(true);
                     }
-                } else if ui.button(tr("OK", "确定")).clicked() {
-                    answer = Some(true);
-                }
+                });
             });
         });
     if answer.is_none() && !open {
@@ -7196,13 +7205,25 @@ fn midi_popup(
     (picked, dismissed)
 }
 
-/// 原版 `draw_window_schematic_export`：设计 / 方块两页 + 记住我的更改 + 三个底部按钮。
+/// 原版 `draw_window_schematic_export`：设计 / 方块 / 声音三页 + 记住我的更改 + 底部按钮。
 fn schematic_export_window(state: &mut EditorState, ui: &mut Ui) {
-    let mut tab = state.schematic_tab;
+    let mut tab = state.schematic_tab.min(2);
+    // 原版 `selected_tab_sch += vk_right - vk_left`，越过首尾绕回（gml:92-94）。
+    let (left, right) = ui.input(|i| {
+        (
+            i.key_pressed(egui::Key::ArrowLeft),
+            i.key_pressed(egui::Key::ArrowRight),
+        )
+    });
+    tab = ((tab as i8 + right as i8 - left as i8).rem_euclid(3)) as u8;
     ui.horizontal(|ui| {
-        for (i, name) in [tr("Design", "设计"), tr("Blocks", "方块")]
-            .iter()
-            .enumerate()
+        for (i, name) in [
+            tr("Design", "设计"),
+            tr("Blocks", "方块"),
+            tr("Sounds", "声音"),
+        ]
+        .iter()
+        .enumerate()
         {
             if ui.selectable_label(tab == i as u8, *name).clicked() {
                 tab = i as u8;
@@ -7215,12 +7236,16 @@ fn schematic_export_window(state: &mut EditorState, ui: &mut Ui) {
     let stats = state.schematic_stats.clone();
     let names = state.instrument_list();
     let opts = &mut state.schematic_options;
-    if tab == 0 {
-        design_tab(opts, &stats, ui);
-    } else {
-        blocks_tab(opts, &names, ui);
+    match tab {
+        0 => design_tab(opts, &stats, ui),
+        1 => blocks_tab(opts, &names, ui, true),
+        _ => sounds_tab(opts, ui),
     }
 
+    // 原版 structure = true 时多一枚「更多音符资源包」按钮，勾着命令方块时禁用
+    // （gml:338-342，命令模式不需要音符盒）。先拷出标志，按钮闭包里才能再用 state。
+    let pack_visible = opts.structure;
+    let pack_enabled = !opts.command_block;
     ui.separator();
     ui.horizontal(|ui| {
         ui.checkbox(
@@ -7232,6 +7257,20 @@ fn schematic_export_window(state: &mut EditorState, ui: &mut Ui) {
             "下次导出 Schematic 时是否使用同样的设定。",
         ));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if pack_visible {
+                let pack = ui
+                    .add_enabled(
+                        pack_enabled,
+                        egui::Button::new(tr("Get extra notes pack", "保存更多音符资源包")),
+                    )
+                    .on_hover_text(tr(
+                        "Downloads the extra notes resource pack for command-block exports.",
+                        "下载命令方块导出所需的更多音符资源包。",
+                    ));
+                if pack.clicked() {
+                    state.emit(Command::SaveExtraNotesPack);
+                }
+            }
             if ui.button(tr("Use default", "使用默认值")).clicked() {
                 state.modals = ModalQueue::question(
                     tr("Confirm", "确定"),
@@ -7244,6 +7283,247 @@ fn schematic_export_window(state: &mut EditorState, ui: &mut Ui) {
             }
             if ui.button(tr("Export", "导出")).clicked() {
                 state.emit(Command::ExportSchematicChecked);
+            }
+        });
+    });
+}
+
+/// 原版 `draw_window_track_export`：三页签与 Schematic 导出窗共用同一组
+/// `sch_exp_*` 选项和 `selected_tab_sch`（gml:10 起）。design 页没有每行中继器、
+/// 矿车、压缩等项；布局单选两种语言都是 `draw_radiobox(..., 1)` 锁定的纯展示
+/// （gml:151/174，要改布局得去 Schematic 导出窗），CN 分支还恒亮。
+fn track_export_window(state: &mut EditorState, ui: &mut Ui) {
+    let mut tab = state.schematic_tab.min(2);
+    let (left, right) = ui.input(|i| {
+        (
+            i.key_pressed(egui::Key::ArrowLeft),
+            i.key_pressed(egui::Key::ArrowRight),
+        )
+    });
+    tab = ((tab as i8 + right as i8 - left as i8).rem_euclid(3)) as u8;
+    ui.horizontal(|ui| {
+        for (i, name) in [
+            tr("Design", "设计"),
+            tr("Blocks", "方块"),
+            tr("Sounds", "声音"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            if ui.selectable_label(tab == i as u8, *name).clicked() {
+                tab = i as u8;
+            }
+        }
+    });
+    state.schematic_tab = tab;
+    ui.separator();
+
+    let stats = state.schematic_stats.clone();
+    let enda = state.doc.song.enda;
+    let names = state.instrument_list();
+    let opts = &mut state.schematic_options;
+    match tab {
+        0 => track_design_tab(opts, &stats, enda, ui),
+        1 => blocks_tab(opts, &names, ui, false),
+        _ => sounds_tab(opts, ui),
+    }
+
+    // 原版 gml:338-342：structure 时多一枚资源包按钮，命令模式禁用；这里没有悬停说明。
+    let pack_visible = opts.structure;
+    let pack_enabled = !opts.command_block;
+    ui.separator();
+    ui.horizontal(|ui| {
+        // 原版 CN 的说明是「结构」而非「Schematic」（gml:18）。
+        let remember_tip = if nbs_core::lang() == 1 {
+            "下次导出结构时是否使用同样的设定。"
+        } else {
+            "Whether to use these settings the\nnext time you export a Schematic."
+        };
+        ui.checkbox(
+            &mut state.schematic_remember,
+            tr("Remember changes", "记住我的更改"),
+        )
+        .on_hover_text(remember_tip);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if pack_visible {
+                let pack = ui.add_enabled(
+                    pack_enabled,
+                    egui::Button::new(tr("Get extra notes pack", "保存更多音符资源包")),
+                );
+                if pack.clicked() {
+                    state.emit(Command::SaveExtraNotesPack);
+                }
+            }
+            if ui.button(tr("Use default", "使用默认值")).clicked() {
+                state.modals = ModalQueue::question(
+                    tr("Confirm", "确定"),
+                    tr("Are you sure?", "你确定吗？"),
+                    Command::ResetSchematicOptions,
+                );
+            }
+            if ui.button(tr("Cancel", "取消")).clicked() {
+                state.emit(Command::CloseWindow);
+            }
+            if ui.button(tr("Export", "导出")).clicked() {
+                state.emit(Command::TrackExportChecked);
+            }
+        });
+    });
+}
+
+/// 原版 `draw_window_track_export` design 页（gml:147-197/168-219）：计数器公式
+/// `66 + enda*9` 与 `(39 + enda*2)x98x20` 直用歌曲 enda（不经 include_locked 分档）。
+fn track_design_tab(
+    o: &mut nbs_io::schematic::SchematicOptions,
+    st: &nbs_io::schematic::SchematicStats,
+    enda: u32,
+    ui: &mut Ui,
+) {
+    let cn = nbs_core::lang() == 1;
+    ui.horizontal_top(|ui| {
+        ui.vertical(|ui| {
+            ui.label(tr("Layout:", "分布:"));
+            let checked = if cn { true } else { o.layout == 1 };
+            ui.add_enabled(
+                false,
+                egui::RadioButton::new(checked, tr("Simple walkway", "普通过道")),
+            )
+            .on_hover_text(tr(
+                "Generate a simple walkway that stretches\nas far as the length of the song.",
+                "生成过道延伸到歌曲末尾。",
+            ));
+            ui.label(tr("Format:", "格式:"));
+            // 与 Schematic 导出窗同一枚下拉（原版连菜单 id 都相同，gml:159/182）。
+            const FORMATS: [&str; 4] = [
+                ".nbt (Structure Block)",
+                ".nbt (Litematica)",
+                ".schematic (1.11-1.12)",
+                ".schematic (pre 1.11)",
+            ];
+            const FORMATS_CN: [&str; 4] = [
+                ".nbt (结构方块)",
+                ".nbt (Litematica)",
+                ".schematic (1.11-1.12)",
+                ".schematic (pre 1.11)",
+            ];
+            let names = if cn { FORMATS_CN } else { FORMATS };
+            let combo = egui::ComboBox::from_id_salt("schexport_format")
+                .selected_text(names[o.format as usize % 4])
+                .show_ui(ui, |ui| {
+                    for (i, name) in names.iter().enumerate() {
+                        if ui
+                            .selectable_label(o.format == i as u8, *name)
+                            .clicked()
+                        {
+                            o.set_format(i as u8);
+                        }
+                    }
+                });
+            combo.response.on_hover_text(tr(
+                "Structure Block writes a 1.13-compatible 32-block size header.\nLitematica writes the exact structure dimensions.",
+                "结构方块格式写入兼容 1.13 的 32 格尺寸。\nLitematica 格式写入结构的实际尺寸。",
+            ));
+        });
+        ui.add_space(12.0);
+        ui.vertical(|ui| {
+            // 原版 CN 的说明也是「结构」（gml:180）。
+            let locked_tip = if cn {
+                "是否在结构内包括已静音的层。"
+            } else {
+                "Whether to include locked layers in the Schematic."
+            };
+            ui.checkbox(
+                &mut o.include_locked,
+                tr("Include locked layers", "包括已静音的层"),
+            )
+            .on_hover_text(locked_tip);
+            if o.structure {
+                ui.checkbox(&mut o.command_block, tr("Use command blocks", "使用命令方块"))
+                    .on_hover_text(tr(
+                        "Whether to use command blocks instead of note blocks for a wider octave range.\n(Extra notes pack required)",
+                        "是否使用命令方块代替音符盒以获得更广音域。\n（需要更多音符资源包）",
+                    ));
+            }
+        });
+        ui.add_space(12.0);
+        ui.vertical(|ui| {
+            // 原版 gml:156-167：命令模式三项都等到导出时才算（要过声源分配器）。
+            let on_export = o.structure && o.command_block;
+            let incl = o.include_locked as usize;
+            let note_cells = tr("On export", "导出时计算");
+            egui::Grid::new("track_stats").num_columns(2).show(ui, |ui| {
+                ui.label(tr("Note blocks:", "音符盒:"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if on_export {
+                        ui.label(note_cells);
+                    } else {
+                        ui.label(st.totalblocks[incl].to_string());
+                    }
+                });
+                ui.end_row();
+                ui.label(tr("Repeaters:", "中继器:"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if on_export {
+                        ui.label(note_cells);
+                    } else {
+                        ui.label((66 + enda as usize * 9).to_string());
+                    }
+                });
+                ui.end_row();
+                ui.label(tr("Size:", "大小:"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if on_export {
+                        ui.label(note_cells);
+                    } else {
+                        ui.label(format!("{}x98x20", 39 + enda as usize * 2));
+                    }
+                });
+                ui.end_row();
+            });
+            ui.label(tr("Tempo:", "速度:"));
+            // 直轨窗口的三条提示与 Schematic 导出窗措辞不同（gml:171-173/189-191）。
+            let tempos = [
+                (
+                    tr("10 ticks / second", "10 红石刻 / 秒"),
+                    tr(
+                        "Generate song on a 10 redstone-tick grid.",
+                        "在每秒 10 个红石刻的网格上生成歌曲。",
+                    ),
+                ),
+                (
+                    tr("5 ticks / second", "5 红石刻 / 秒"),
+                    tr(
+                        "Generate song on a 5 redstone-tick grid.",
+                        "在每秒 5 个红石刻的网格上生成歌曲。",
+                    ),
+                ),
+                (
+                    tr("2.5 ticks / second", "2.5 红石刻 / 秒"),
+                    tr(
+                        "Generate song on a 2.5 redstone-tick grid.",
+                        "在每秒 2.5 个红石刻的网格上生成歌曲。",
+                    ),
+                ),
+            ];
+            for (i, (name, tip)) in tempos.iter().enumerate() {
+                if ui
+                    .radio(o.tempo_mode == i as u8, *name)
+                    .on_hover_text(*tip)
+                    .clicked()
+                {
+                    o.tempo_mode = i as u8;
+                }
+            }
+            // 原版 gml:176/196：吸附开关只出现在结构 + 命令方块组合下。
+            if o.structure && o.command_block {
+                ui.checkbox(
+                    &mut o.command_tempo_grid,
+                    tr("Snap song tempo to selected grid", "按歌曲速度吸附到所选网格"),
+                )
+                .on_hover_text(tr(
+                    "Use the song tempo and Tempo Changers, snapped to the selected redstone-tick grid.",
+                    "使用歌曲速度和速度更改事件，并吸附到所选的红石刻网格。",
+                ));
             }
         });
     });
@@ -7302,26 +7582,38 @@ fn design_tab(
             if ui.radio(o.layout == 0, tr("Circular walkway", "环形过道")).on_hover_text(tr("Generate a walkway where the\nplayer travels back and forth.", "生成让玩家来回走的过道。")).clicked() {
                 o.layout = 0;
             }
-            ui.label(tr("Export as Minecraft version:", "导出为 Minecraft 版本:"));
-            if ui.radio(o.structure, "1.13+").on_hover_text(tr("Create a Structure Block file compatible with 1.13+.", "创建一个兼容 1.13+ 的结构方块文件。")).clicked() {
-                o.structure = true;
-            }
-            if ui
-                .radio(!o.structure && !o.minecraft_old, "1.11-1.12")
-                .on_hover_text(tr("Create a Schematic file compatible with 1.11 and 1.12.", "创建一个兼容 1.11 和 1.12 的 Schematic 文件。"))
-                .clicked()
-            {
-                o.minecraft_old = false;
-                o.structure = false;
-            }
-            if ui
-                .radio(!o.structure && o.minecraft_old, "pre 1.11")
-                .on_hover_text(tr("Create a Schematic file only compatible with versions before 1.11.", "创建一个只兼容 1.11 之前旧版本的 Schematic 文件。"))
-                .clicked()
-            {
-                o.minecraft_old = true;
-                o.structure = false;
-            }
+            ui.label(tr("Format:", "格式:"));
+            // 原版 4 项下拉（gml:103-111）：选择时 structure = sel<=1、old = sel==3
+            // （menu_click.gml:254-256，由 set_format 完成）。
+            const FORMATS: [&str; 4] = [
+                ".nbt (Structure Block)",
+                ".nbt (Litematica)",
+                ".schematic (1.11-1.12)",
+                ".schematic (pre 1.11)",
+            ];
+            const FORMATS_CN: [&str; 4] = [
+                ".nbt (结构方块)",
+                ".nbt (Litematica)",
+                ".schematic (1.11-1.12)",
+                ".schematic (pre 1.11)",
+            ];
+            let names = if nbs_core::lang() == 1 { FORMATS_CN } else { FORMATS };
+            let combo = egui::ComboBox::from_id_salt("schexport_format")
+                .selected_text(names[o.format as usize % 4])
+                .show_ui(ui, |ui| {
+                    for (i, name) in names.iter().enumerate() {
+                        if ui
+                            .selectable_label(o.format == i as u8, *name)
+                            .clicked()
+                        {
+                            o.set_format(i as u8);
+                        }
+                    }
+                });
+            combo.response.on_hover_text(tr(
+                "Structure Block writes a 1.13-compatible 32-block size header.\nLitematica writes the exact structure dimensions.",
+                "结构方块格式写入兼容 1.13 的 32 格尺寸。\nLitematica 格式写入结构的实际尺寸。",
+            ));
         });
         ui.add_space(12.0);
         ui.vertical(|ui| {
@@ -7362,20 +7654,39 @@ fn design_tab(
         ui.vertical(|ui| {
             let size = calc_size(st, o);
             let incl = o.include_locked as usize;
+            // 原版 gml:137-145：命令模式下三项都等到导出时才算（要过声源分配器）。
+            let on_export = o.structure && o.command_block;
+            let note_cells = tr("On export", "导出时计算");
             egui::Grid::new("sch_stats").num_columns(2).show(ui, |ui| {
                 ui.label(tr("Note blocks:", "音符盒:"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(st.totalblocks[incl].to_string());
+                    if on_export {
+                        ui.label(note_cells);
+                    } else {
+                        ui.label(st.totalblocks[incl].to_string());
+                    }
                 });
                 ui.end_row();
                 ui.label(tr("Repeaters:", "中继器:"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(format!("{}x{}", st.repeaters[incl][o.tempo_mode as usize], size.layers));
+                    if on_export {
+                        ui.label(note_cells);
+                    } else {
+                        ui.label(format!(
+                            "{}x{}",
+                            st.repeaters[incl][o.tempo_mode as usize],
+                            size.layers
+                        ));
+                    }
                 });
                 ui.end_row();
                 ui.label(tr("Size:", "大小:"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(format!("{}x{}x{}", size.len, size.wid, size.hei));
+                    if on_export {
+                        ui.label(note_cells);
+                    } else {
+                        ui.label(format!("{}x{}x{}", size.len, size.wid, size.hei));
+                    }
                 });
                 ui.end_row();
             });
@@ -7390,6 +7701,14 @@ fn design_tab(
                     o.tempo_mode = i as u8;
                 }
             }
+            // 原版 gml:151/206：吸附开关只出现在结构 + 命令方块组合下。
+            if o.structure && o.command_block {
+                ui.checkbox(&mut o.command_tempo_grid, tr("Snap notes to grid", "将音符吸附到网格"))
+                    .on_hover_text(tr(
+                        "Use the song tempo and Tempo Changers, snapped to the selected 10, 5, or 2.5 redstone-tick grid.",
+                        "使用歌曲速度和速度更改事件，并吸附到所选的每秒 10、5 或 2.5 个红石刻网格。",
+                    ));
+            }
             // 超限的红字提示与原版的报错同源。
             if let Err(e) = export_guard(st, o) {
                 ui.label(RichText::new(e.replace('\n', " ")).small().color(egui::Color32::from_rgb(200, 90, 90)));
@@ -7398,7 +7717,149 @@ fn design_tab(
     });
 }
 
-fn blocks_tab(o: &mut nbs_io::schematic::SchematicOptions, names: &[(u8, String)], ui: &mut Ui) {
+/// 原版 `minecraft_export_draw_schematic_sound_settings`（minecraft_export.gml:1111-1130）
+/// + `minecraft_export_draw_source_allowlist`（gml:1077-1106）：首选声源 5 列单选、
+/// 允许列表 2 列勾选、三个预设按钮、首选源被禁用时的红色警告。声源改动靠
+/// 方案签名自动失效，无需手动清缓存。
+fn sounds_tab(o: &mut nbs_io::schematic::SchematicOptions, ui: &mut Ui) {
+    let sources = nbs_io::mc_export::SOURCES;
+    let allowed_default = nbs_io::mc_export::default_allowed_sources();
+    if !(o.structure && o.command_block) {
+        ui.label(tr(
+            "Sound-source assignment is used by Structure exports with command blocks.",
+            "声源分配仅用于启用命令方块的结构导出。",
+        ));
+        return;
+    }
+    ui.strong(tr("Preferred sound source", "首选声源"));
+    // 原版 5 列 × 2 行，每列 100 像素。
+    egui::Grid::new("sch_sound_preferred")
+        .num_columns(5)
+        .min_col_width(100.0)
+        .show(ui, |ui| {
+            for row in 0..2 {
+                for col in 0..5 {
+                    let i = row * 5 + col;
+                    let name = sources[i];
+                    if ui
+                        .radio(o.command_source == name, label_of(name))
+                        .on_hover_text(tr(
+                            "Use this Minecraft volume category first.",
+                            "优先使用此 Minecraft 音量类别。",
+                        ))
+                        .clicked()
+                    {
+                        o.command_source = name.to_string();
+                    }
+                }
+                ui.end_row();
+            }
+        });
+    ui.strong(tr(
+        "Allowed Sound Stopper sources",
+        "允许声音抑制器使用的声源",
+    ));
+    let mut preferred_enabled = false;
+    egui::Grid::new("sch_sound_allow")
+        .num_columns(2)
+        .min_col_width(180.0)
+        .show(ui, |ui| {
+            for row in 0..5 {
+                for col in 0..2 {
+                    let i = row * 2 + col;
+                    let name = sources[i];
+                    let mut on = o.command_allowed_sources[i];
+                    let label = if name == "master" {
+                        format!("{}{}", label_of(name), tr(" (opt-in)", "（需单独启用）"))
+                    } else {
+                        label_of(name).to_string()
+                    };
+                    if ui
+                        .checkbox(&mut on, label)
+                        .on_hover_text(tr(
+                            "Allow the allocator to place song sounds on this Minecraft volume category.",
+                            "允许分配器将歌曲声音放在此 Minecraft 音量类别。",
+                        ))
+                        .changed()
+                    {
+                        o.command_allowed_sources[i] = on;
+                    }
+                    if name == o.command_source {
+                        preferred_enabled = on;
+                    }
+                }
+                ui.end_row();
+            }
+        });
+    ui.horizontal(|ui| {
+        if ui
+            .button(tr("Default (no Master)", "默认（不含主音量）"))
+            .clicked()
+        {
+            o.command_allowed_sources = allowed_default;
+        }
+        if ui.button(tr("All", "全选")).clicked() {
+            o.command_allowed_sources = [true; 10];
+        }
+        if ui.button(tr("Preferred only", "仅首选声源")).clicked() {
+            o.command_allowed_sources = sources.map(|s| s == o.command_source);
+        }
+    });
+    // 原版 gml:1095-1105：首选源不在允许列表时的红色提示。
+    if !preferred_enabled {
+        let warning = if o.command_source == "master" {
+            tr(
+                "Master is disabled; another allowed source will be preferred.",
+                "主音量类别已禁用；将优先使用其他允许的声源。",
+            )
+        } else {
+            tr(
+                "Preferred source is disabled; it will be enabled during export.",
+                "首选声源已禁用；导出时会启用。",
+            )
+        };
+        ui.label(RichText::new(warning).color(egui::Color32::from_rgb(200, 90, 90)));
+    }
+    ui.label(
+        RichText::new(tr(
+            "Source assignment is calculated when Export is pressed.",
+            "声源分配将在按下导出时计算。",
+        ))
+        .small(),
+    );
+    ui.label(
+        RichText::new(tr(
+            "No-op Sound Stoppers are ignored. Custom mappings are edited in Instrument Settings.",
+            "无目标的声音抑制器会被忽略。自定义映射可在乐器设置中编辑。",
+        ))
+        .small(),
+    );
+}
+
+/// 原版 `minecraft_export_source_label`：EN 显示命令内部值，CN 用 Minecraft 官方简中分类名。
+fn label_of(source: &str) -> &'static str {
+    match source {
+        "ambient" => tr("ambient", "环境"),
+        "block" => tr("block", "方块"),
+        "hostile" => tr("hostile", "敌对生物"),
+        "master" => tr("master", "主音量"),
+        "music" => tr("music", "音乐"),
+        "neutral" => tr("neutral", "友好生物"),
+        "player" => tr("player", "玩家"),
+        "record" => tr("record", "唱片机/音符盒"),
+        "voice" => tr("voice", "复述功能/语音"),
+        "weather" => tr("weather", "天气"),
+        _ => "",
+    }
+}
+
+/// `ground`：Schematic 导出窗带地面槽；直轨导出窗只有过道/电路两槽（gml:268-272）。
+fn blocks_tab(
+    o: &mut nbs_io::schematic::SchematicOptions,
+    names: &[(u8, String)],
+    ui: &mut Ui,
+    ground: bool,
+) {
     use nbs_io::schematic::{
         block_display_name, instrument_block_menu, misc_block_menu, McBlock, INS_COUNT,
     };
@@ -7443,11 +7904,21 @@ fn blocks_tab(o: &mut nbs_io::schematic::SchematicOptions, names: &[(u8, String)
     }
 
     ui.separator();
-    let slots = [
+    let mut slots = vec![
         (tr("Block for walkway:", "过道所用方块:"), &mut o.walkway, 0u8, tr("The block that should be used for the walkway, \nand everything else that isn't circuitry or ground.", "用于过道和除电路和地面的方块。")),
         (tr("Block for circuitry:", "电路所用方块:"), &mut o.circuit, 1, tr("The block that should be used for the circuitry.", "为电路用的方块。")),
-        (tr("Block for ground:", "地面所用方块:"), &mut o.ground, 2, tr("The block that should be used for the ground.\nChoosing grass will result with a bunch of animals spawning.", "为地面用的方块。选草方块会刷新很多生物。")),
     ];
+    if ground {
+        slots.push((
+            tr("Block for ground:", "地面所用方块:"),
+            &mut o.ground,
+            2,
+            tr(
+                "The block that should be used for the ground.\nChoosing grass will result with a bunch of animals spawning.",
+                "为地面用的方块。选草方块会刷新很多生物。",
+            ),
+        ));
+    }
     for (label, slot, which, tip) in slots {
         ui.horizontal(|ui| {
             ui.label(label);

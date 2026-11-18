@@ -1105,11 +1105,23 @@ mod gui_window_tests {
 
         click_text(&mut state, &ctx, "环形过道");
         assert_eq!(state.schematic_options.layout, 0, "布局单选没接上选项");
-        click_text(&mut state, &ctx, "1.13+");
-        assert!(state.schematic_options.structure);
+        // 格式下拉：选 1.11-1.12 再切回结构方块，structure/minecraft_old 跟着 set_format 派生。
+        click_text(&mut state, &ctx, ".nbt (结构方块)");
+        click_text(&mut state, &ctx, ".schematic (1.11-1.12)");
+        assert!(!state.schematic_options.structure && state.schematic_options.format == 2);
         assert!(!state.schematic_options.minecraft_old);
+        click_text(&mut state, &ctx, ".schematic (1.11-1.12)");
+        click_text(&mut state, &ctx, ".nbt (结构方块)");
+        assert!(state.schematic_options.structure && state.schematic_options.format == 0);
         click_text(&mut state, &ctx, "使用命令方块");
         assert!(state.schematic_options.command_block);
+        // 计数器：structure+command_block 时改走「导出时计算」分支（原版 gml:137-145）。
+        assert!(
+            drawn_texts(&mut state, &ctx)
+                .iter()
+                .any(|t| t == "导出时计算"),
+            "命令方块开启后三个计数器都应显示「导出时计算」"
+        );
 
         // 「使用默认值」先问「你确定吗？」，答否保持原样。
         click_text(&mut state, &ctx, "使用默认值");
@@ -1138,6 +1150,16 @@ mod gui_window_tests {
             "下拉选择没写回选项"
         );
         assert_eq!(state.schematic_options.ins_data[0], 0);
+
+        // 声音页：structure+command_block 开着，应显示首选声源而不是闸门提示。
+        click_text(&mut state, &ctx, "声音");
+        assert_eq!(state.schematic_tab, 2, "第三个页签是声音");
+        assert!(
+            drawn_texts(&mut state, &ctx)
+                .iter()
+                .any(|t| t == "首选声源"),
+            "声音页应有首选声源单选"
+        );
 
         click_text(&mut state, &ctx, "导出");
         assert_eq!(
@@ -1182,12 +1204,11 @@ mod gui_window_tests {
         let _prefs = isolate_prefs();
         let dir = scratch("schematic-import");
         let file = dir.join("demo.schematic");
-        nbs_io::schematic::export_schematic(
-            &nbs_core::Song::demo(),
-            &file,
-            &nbs_io::schematic::SchematicOptions::default(),
-        )
-        .expect("导出经典图样");
+        // 经典图样要选 1.11-1.12 格式造：原版出厂 format=0（结构方块），那不是 .schematic。
+        let mut classic = nbs_io::schematic::SchematicOptions::default();
+        classic.set_format(2);
+        nbs_io::schematic::export_schematic(&nbs_core::Song::demo(), &file, &classic, None)
+            .expect("导出经典图样");
 
         let mut state = EditorState::for_test();
         state.theme.apply(&ctx);

@@ -374,6 +374,7 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                 &song,
                 output,
                 &nbs_io::schematic::SchematicOptions::default(),
+                None,
             )?;
             println!(
                 "已导出原理图 {}×{}×{} / {} 音符盒 → {}",
