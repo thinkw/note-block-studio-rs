@@ -229,6 +229,32 @@ pub enum Command {
     OpenUrl(String),
     /// 首选项「检查开发版本」确认框答「是」之后的落盘开关。
     SetCheckPrerelease(bool),
+    /// 原版设置菜单的「导入音效」入口：开窗前先 `update_asset_index_menu(0)`
+    /// （menu_click.gml:196；实参那个 0 原版自己也没用上）。
+    OpenSoundImport,
+    /// 向导「从 Mojang 下载」勾选框：翻转 + 清列表 + 刷新（draw_window_sound_import.gml:56-59）。
+    SoundImportToggleDownload,
+    /// 向导「获取」按钮（下载模式第 1 步）：先过 EULA 确认框。
+    SoundImportGetIndexes,
+    /// EULA 答应后：起线程拉版本清单（原版 stage 1）。
+    SoundImportStartVersionList,
+    /// 版本下拉换选项：`sound_import_asset_index_select = sel` + 刷新
+    /// （menu_click.gml:470-473）。
+    SoundImportSelectIndex(usize),
+    /// 向导「更改」按钮：`get_directory` 目录选择框。
+    SoundImportChangeDir,
+    /// 「使用默认设定」：`mc_install_path = mc_default_path` + 刷新。
+    SoundImportUseDefaultPath,
+    /// 「获取音效」按钮：本地走覆盖确认 + 拷贝；下载模式起线程（原版 stage 2..4 / 续传）。
+    SoundImportGet,
+    /// 本地覆盖确认答「是」后的实际拷贝。
+    SoundImportCopyGo,
+    /// 下载模式覆盖确认答「是」：唤醒后台线程继续。
+    SoundImportReplaceAnswered,
+    /// 「打开已获取音效目录」：`open_url(sounds_directory)`。
+    SoundImportOpenSoundsFolder,
+    /// 向导「确定」：`sound_import_status = 0` + 关窗（下载中按钮是锁着的，不会带线程走）。
+    SoundImportOk,
 }
 
 /// 原版 `selection_delete.gml:24-28`：删除选区前按当前视口收集格子，
@@ -889,6 +915,10 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         }
         Command::AnswerModal(yes) => {
             if !yes {
+                // 下载模式的覆盖确认答「否/取消」也要告诉后台线程停下，否则它一直挂着。
+                if state.sound_import.replace_asked {
+                    crate::sound_import::answer_replace(&mut state.sound_import, false);
+                }
                 state.modals = ModalQueue::default();
             } else {
                 state.modals.items.pop_front();
@@ -1309,6 +1339,11 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 | DialogAction::PickFolder(PrefsFolder::Pattern) => {
                     Some(state.prefs.pattern_folder_path())
                 }
+                // 原版 `get_directory(mc_install_path)`：起始目录就是当前那个 .minecraft。
+                DialogAction::PickMinecraftDir => {
+                    let p = PathBuf::from(&state.sound_import.mc_install_path);
+                    p.is_dir().then_some(p)
+                }
                 _ => None,
             };
             let mut dialog = FileDialog::for_action(action, initial.as_ref(), start.as_deref());
@@ -1378,6 +1413,14 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     // 原版的系统对话框叠在首选项窗口上；我们同时只开一个窗口，
                     // 选完把首选项放回去（页签存在 `state.prefs_tab`，不会丢）。
                     state.window = Some(WindowKind::Preferences);
+                }
+                DialogAction::PickMinecraftDir => {
+                    // 原版：`mc_install_path = filename_dir(fn)`（再清掉泄漏的标题）；
+                    // 目录选择器直接给目录，等价于清理后的结果。
+                    state.sound_import.mc_install_path = path.to_string_lossy().into_owned();
+                    state.sound_import.update_menu();
+                    state.file_dialog = None;
+                    state.window = Some(WindowKind::SoundImport);
                 }
                 DialogAction::ExportAudio => {
                     export_audio(state, &path);
@@ -1648,6 +1691,163 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         Command::SetCheckPrerelease(on) => {
             state.prefs.check_prerelease = on;
             dispatch(state, Command::SavePreferences, ctx);
+        }
+        Command::OpenSoundImport => {
+            // 原版 menu_click.gml:196：`window = w_sound_import update_asset_index_menu(0)`。
+            state.sound_import.update_menu();
+            dispatch(state, Command::ShowWindow(WindowKind::SoundImport), ctx);
+        }
+        Command::SoundImportToggleDownload => {
+            // 原版：翻转后 `sound_import_asset_indexes = []` + update_asset_index_menu()。
+            let si = &mut state.sound_import;
+            si.download_toggle = !si.download_toggle;
+            si.indexes.clear();
+            si.update_menu();
+        }
+        Command::SoundImportGetIndexes => {
+            // 原版 Get 按钮：先 `question(EULA)`，答「是」才 stage = 1 起请求。
+            state.modals = ModalQueue::question(
+                tr("Import sounds", "导入音效"),
+                tr(
+                    "By pressing \"Yes\", you agree to the Minecraft EULA and the Microsoft Service Agreement:\nhttps://www.minecraft.net/eula\nhttps://www.microsoft.com/en-us/servicesagreement",
+                    "如果你选择“是”，即代表你同意 Minecraft EULA 及 Microsoft 服务协议：\nhttps://www.minecraft.net/zh-hans/eula\nhttps://www.microsoft.com/zh-cn/servicesagreement",
+                ),
+                Command::SoundImportStartVersionList,
+            );
+        }
+        Command::SoundImportStartVersionList => {
+            let si = &mut state.sound_import;
+            let Some(fetcher) = si.fetcher.clone() else {
+                return;
+            };
+            if si
+                .pending
+                .as_ref()
+                .is_some_and(|h| h.shared.lock().map(|g| !g.finished).unwrap_or(true))
+            {
+                // 原版允许重复点击叠加请求；这里有线程在跑就不叠加（偏差已记账）。
+                return;
+            }
+            let handle = crate::sound_import::spawn_download(
+                fetcher,
+                crate::sound_import::DownloadMode::VersionList,
+            );
+            si.pending = Some(handle);
+        }
+        Command::SoundImportSelectIndex(i) => {
+            let si = &mut state.sound_import;
+            si.select = i;
+            si.update_menu();
+        }
+        Command::SoundImportChangeDir => {
+            dispatch(
+                state,
+                Command::OpenDialog(DialogAction::PickMinecraftDir),
+                ctx,
+            );
+        }
+        Command::SoundImportUseDefaultPath => {
+            let si = &mut state.sound_import;
+            si.mc_install_path = si.mc_default_path.clone();
+            si.update_menu();
+        }
+        Command::SoundImportGet => {
+            let si = &mut state.sound_import;
+            if !si.download_toggle {
+                // 原版 `load_asset_index(true)`：覆盖确认 → 删目录 → 拷贝，全程同步。
+                si.sounds_root = crate::sound_import::sounds_dir(&state.prefs);
+                match si.load_asset_index(true) {
+                    crate::sound_import::LocateOutcome::MissingIndex => {
+                        state.modals = ModalQueue::message(
+                            tr("Note Block Studio", "Note Block Studio"),
+                            tr(
+                                "The file for the specified asset index could not be found!",
+                                "未找到该索引所指向的文件！",
+                            ),
+                        );
+                    }
+                    crate::sound_import::LocateOutcome::NeedsReplace(matching) => {
+                        state.modals = ModalQueue::question(
+                            tr("Warning", "警告"),
+                            tr(
+                                "An existing folder with imported Minecraft sounds has been found in your Sounds folder. Would you like to replace it?",
+                                "在您的Sounds文件夹中发现已经存在一个包含已导入Minecraft音效的文件夹，您想要覆盖它吗？",
+                            ),
+                            Command::SoundImportCopyGo,
+                        );
+                        state.sound_import.staged = matching;
+                    }
+                    crate::sound_import::LocateOutcome::None => {}
+                }
+            } else {
+                let root = crate::sound_import::sounds_dir(&state.prefs);
+                let si = &mut state.sound_import;
+                let Some(fetcher) = si.fetcher.clone() else {
+                    return;
+                };
+                if si.files_index == 0 {
+                    // 原版：`files_index = 0` → stage 2 从版本 JSON 重新走。
+                    let Some(url) = si.version_urls.get(si.select).cloned() else {
+                        return;
+                    };
+                    if si
+                        .pending
+                        .as_ref()
+                        .is_some_and(|h| h.shared.lock().map(|g| !g.finished).unwrap_or(true))
+                    {
+                        return;
+                    }
+                    let handle = crate::sound_import::spawn_download(
+                        fetcher,
+                        crate::sound_import::DownloadMode::Import {
+                            version_url: url,
+                            sounds_root: root,
+                        },
+                    );
+                    si.pending = Some(handle);
+                } else if si.files_index < si.files_total {
+                    // 原版：`files_index < array_length(files_list)` → stage 4 续传。
+                    let Some(handle) = si.pending.clone() else {
+                        return;
+                    };
+                    {
+                        let Ok(mut g) = handle.shared.lock() else {
+                            return;
+                        };
+                        if !g.finished {
+                            return;
+                        }
+                        g.failed = false;
+                        g.finished = false;
+                        g.stage = 4;
+                        g.status = 1;
+                    }
+                    crate::sound_import::spawn_on(
+                        handle,
+                        fetcher,
+                        crate::sound_import::DownloadMode::Resume,
+                    );
+                }
+            }
+        }
+        Command::SoundImportCopyGo => {
+            let root = crate::sound_import::sounds_dir(&state.prefs);
+            state.sound_import.copy_staged(&root);
+        }
+        Command::SoundImportReplaceAnswered => {
+            crate::sound_import::answer_replace(&mut state.sound_import, true);
+        }
+        Command::SoundImportOpenSoundsFolder => {
+            let dir = crate::sound_import::sounds_dir(&state.prefs);
+            dispatch(
+                state,
+                Command::OpenUrl(dir.to_string_lossy().into_owned()),
+                ctx,
+            );
+        }
+        Command::SoundImportOk => {
+            state.sound_import.status = 0;
+            dispatch(state, Command::CloseWindow, ctx);
         }
     }
 }
@@ -2762,7 +2962,11 @@ mod tests {
         state.audio.clock_mut().seek(2.0);
         state.begin_playback();
 
-        dispatch(&mut state, Command::ShowWindow(WindowKind::TempoTapper), &ctx);
+        dispatch(
+            &mut state,
+            Command::ShowWindow(WindowKind::TempoTapper),
+            &ctx,
+        );
         assert_eq!(state.window, Some(WindowKind::TempoTapper));
         assert!(
             state.is_playing(),
@@ -2777,7 +2981,11 @@ mod tests {
             "关窗清 tapping / ltime"
         );
 
-        dispatch(&mut state, Command::HotkeyWindow(WindowKind::TempoTapper), &ctx);
+        dispatch(
+            &mut state,
+            Command::HotkeyWindow(WindowKind::TempoTapper),
+            &ctx,
+        );
         assert_eq!(state.window, Some(WindowKind::TempoTapper));
         assert!(!state.is_playing(), "原版 playing = 0");
     }
@@ -2802,7 +3010,10 @@ mod tests {
             assert!(state.is_playing());
             dispatch(&mut state, Command::HotkeyWindow(kind.clone()), &ctx);
             assert_eq!(state.window, Some(kind.clone()), "{kind:?} 要真的开起来");
-            assert!(!state.is_playing(), "{kind:?} 走快捷键必须停播放（playing = 0）");
+            assert!(
+                !state.is_playing(),
+                "{kind:?} 走快捷键必须停播放（playing = 0）"
+            );
 
             let mut state = state_with(four_case_song(10.0));
             state.begin_playback();
@@ -3185,7 +3396,11 @@ mod tests {
         let ctx = Context::default();
         let current = nbs_core::nbs::NBS_VERSION;
         let mut state = state_with(Song::new());
-        dispatch(&mut state, Command::ShowWindow(WindowKind::SaveOptions), &ctx);
+        dispatch(
+            &mut state,
+            Command::ShowWindow(WindowKind::SaveOptions),
+            &ctx,
+        );
         dispatch(
             &mut state,
             Command::ApplySaveOptions { version: current },
@@ -3197,7 +3412,11 @@ mod tests {
         assert!(state.doc.history.can_undo(), "原版 cursong.changed = 1");
 
         let mut state = state_with(Song::new());
-        dispatch(&mut state, Command::ShowWindow(WindowKind::SaveOptions), &ctx);
+        dispatch(
+            &mut state,
+            Command::ShowWindow(WindowKind::SaveOptions),
+            &ctx,
+        );
         dispatch(&mut state, Command::ApplySaveOptions { version: 0 }, &ctx);
         assert_eq!(titles(&state), vec!["确定"]);
         assert_eq!(
@@ -3210,7 +3429,11 @@ mod tests {
             state.save_options_version, 6,
             "原版否分支要 `save_options_version = cursong.save_version`，提前做掉"
         );
-        assert_eq!(state.window, Some(WindowKind::SaveOptions), "问话时窗口还留着");
+        assert_eq!(
+            state.window,
+            Some(WindowKind::SaveOptions),
+            "问话时窗口还留着"
+        );
     }
 
     /// 上面那问的答否：不改歌曲、窗口留着（原版是 `return`）。答是：走
@@ -3219,7 +3442,11 @@ mod tests {
     fn save_options_question_branches_apply_or_keep_the_song_version() {
         let ctx = Context::default();
         let mut state = state_with(Song::new());
-        dispatch(&mut state, Command::ShowWindow(WindowKind::SaveOptions), &ctx);
+        dispatch(
+            &mut state,
+            Command::ShowWindow(WindowKind::SaveOptions),
+            &ctx,
+        );
         dispatch(&mut state, Command::ApplySaveOptions { version: 3 }, &ctx);
         dispatch(&mut state, Command::AnswerModal(false), &ctx);
         assert!(state.modals.is_empty());
@@ -3227,7 +3454,11 @@ mod tests {
         assert_eq!(state.window, Some(WindowKind::SaveOptions));
 
         let mut state = state_with(Song::new());
-        dispatch(&mut state, Command::ShowWindow(WindowKind::SaveOptions), &ctx);
+        dispatch(
+            &mut state,
+            Command::ShowWindow(WindowKind::SaveOptions),
+            &ctx,
+        );
         dispatch(&mut state, Command::ApplySaveOptions { version: 3 }, &ctx);
         dispatch(&mut state, Command::AnswerModal(true), &ctx);
         assert_eq!(state.doc.song.meta.save_version, 3, "答是才写回");

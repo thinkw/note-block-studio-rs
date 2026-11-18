@@ -195,6 +195,9 @@ pub enum WindowKind {
     /// 原版 `w_mididevices`（`draw_window_mididevices.gml`）：实时 MIDI 输入的
     /// 设备管理器，500×350，设备名 + 指派音色两列。
     MidiDevices,
+    /// 原版 `w_sound_import`（`draw_window_sound_import.gml`）：导入音效向导，
+    /// 415×310，本地 `.minecraft` 与 Mojang 下载两条路。
+    SoundImport,
     SchematicExport,
     PngExport,
     /// 原版 `w_arpeggio`（`draw_window_macro_arpeggio.gml`）：140×130，只有一个规律框。
@@ -268,6 +271,7 @@ impl WindowKind {
             Self::MidiImport => tr("MIDI Import", "导入MIDI"),
             // 原版 draw_window_mididevices.gml:11-12：窗口标题就在框里。
             Self::MidiDevices => tr("MIDI device manager", "MIDI 设备管理器"),
+            Self::SoundImport => tr("Import sounds", "导入音效"),
             // 原版 `draw_window_schematic_export.gml:14`：CN "导出结构"。
             Self::SchematicExport => tr("Schematic Export", "导出结构"),
             Self::PngExport => tr("Export PNG chart", "导出 PNG 谱面"),
@@ -490,6 +494,9 @@ pub enum DialogAction {
     /// 原版「修改」按钮：`get_save_filename_ext("", "选择歌曲文件夹", songfolder, "歌曲文件夹")`。
     /// 原版取的是那个假文件名所在的目录，所以这里确定后认的是当前目录本身。
     PickFolder(PrefsFolder),
+    /// 音色导入向导「更改」：原版走的是真正的目录选择器 `get_directory(mc_install_path)`
+    /// （`draw_window_sound_import.gml:71`），与首选项那条占位文件名路子不同。
+    PickMinecraftDir,
 }
 
 impl DialogAction {
@@ -520,6 +527,8 @@ impl DialogAction {
             Self::SaveExtraNotes => "zip",
             // 原版这两个对话框的过滤器是空字符串：不做过滤，选的是目录。
             Self::PickFolder(_) => "",
+            // 原版 get_directory 是目录选择器，没有过滤器。
+            Self::PickMinecraftDir => "",
         }
     }
 }
@@ -560,6 +569,9 @@ impl FileDialog {
         let ext = action.extension();
         let name = if let DialogAction::PickFolder(f) = action {
             f.placeholder().to_string()
+        } else if matches!(action, DialogAction::PickMinecraftDir) {
+            // 目录选择器没有文件名栏。
+            String::new()
         } else if action.is_save() {
             if ext.is_empty() {
                 base
@@ -730,10 +742,20 @@ impl FileDialog {
             // 过滤器整串为空，文件名栏塞的是占位串，按下保存后取的是它所在的目录
             // （换算回来见 `EditorState::run_pending_dialog`）。不是目录选择器。
             DialogAction::PickFolder(f) => (f.title(), Vec::new()),
+            // 原版 `draw_window_sound_import.gml:70-71`：`widget_set_caption(...)` +
+            // `get_directory(mc_install_path)`，真目录选择器，标题即 caption。
+            DialogAction::PickMinecraftDir => (
+                tr(
+                    "Select Minecraft installation directory",
+                    "选择Minecraft安装目录",
+                ),
+                Vec::new(),
+            ),
         };
         PickerSpec {
             title: title.to_string(),
             filters,
+            pick_folder: matches!(self.action, DialogAction::PickMinecraftDir),
         }
     }
 }
@@ -769,6 +791,9 @@ pub struct FilterSpec {
 pub struct PickerSpec {
     pub title: String,
     pub filters: Vec<FilterSpec>,
+    /// 真目录选择器（原版 `get_directory`）：原生组件加 `FOS_PICKFOLDERS`，
+    /// 不设文件类型与文件名。
+    pub pick_folder: bool,
 }
 
 fn filter(name: &str, patterns: &str) -> FilterSpec {
@@ -869,7 +894,10 @@ impl TempoTapper {
 /// 首次调用作原点，够单调且不受系统时间调整影响。
 pub fn tap_clock_ms() -> i64 {
     static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    EPOCH.get_or_init(std::time::Instant::now).elapsed().as_millis() as i64
+    EPOCH
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as i64
 }
 
 pub struct EditorState {
@@ -1067,6 +1095,8 @@ pub struct EditorState {
     /// 原版实时 MIDI 那一堆全局：设备表、指派、本帧按下/松开队列，见
     /// [`crate::live_midi`]。
     pub live_midi: crate::live_midi::LiveMidi,
+    /// 原版「导入音效」向导的一组全局（`sound_import_*` + `mc_install_path`）。
+    pub sound_import: crate::sound_import::SoundImport,
     /// 原版 `tempodrag`：拖速度框时的未量化累加值。
     pub tempo_drag: Option<f32>,
     /// 原版 `window = w_settempo` + `text_value[64]`：标尺速度格上就地弹出的输入框，
@@ -1314,6 +1344,7 @@ impl EditorState {
             record_armed: false,
             keys_held: [false; nbs_core::model::KEY_MAX as usize + 1],
             live_midi: crate::live_midi::LiveMidi::new(),
+            sound_import: crate::sound_import::SoundImport::default(),
             tempo_drag: None,
             tempo_input: None,
             tempo_press_in: false,
@@ -1433,6 +1464,8 @@ impl EditorState {
                     DialogAction::PickFolder(_) => {
                         path.parent().map(|p| p.to_path_buf()).unwrap_or(path)
                     }
+                    // 目录选择器交回来的本身就是目录（原版 get_directory 语义）。
+                    DialogAction::PickMinecraftDir => path,
                     _ => path,
                 };
                 // `Command::DialogConfirm` 靠 `file_dialog.action` 认是哪一种导出。

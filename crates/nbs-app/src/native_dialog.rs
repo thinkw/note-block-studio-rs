@@ -23,6 +23,7 @@ use winapi::um::objbase::COINIT_APARTMENTTHREADED;
 use winapi::um::shobjidl::{
     IFileDialog, IFileOpenDialog, IFileSaveDialog, FOS_CREATEPROMPT, FOS_FILEMUSTEXIST,
     FOS_FORCEFILESYSTEM, FOS_NOREADONLYRETURN, FOS_OVERWRITEPROMPT, FOS_PATHMUSTEXIST,
+    FOS_PICKFOLDERS,
 };
 use winapi::um::shobjidl_core::{
     CLSID_FileOpenDialog, CLSID_FileSaveDialog, IShellItem, SHCreateItemFromParsingName,
@@ -99,8 +100,12 @@ unsafe fn configure(dlg: &FileDialog, fd: *mut IFileDialog) {
 
     // 原版只有两种对话框：`get_open_filename_ext` 和 `get_save_filename_ext`，
     // 连「选文件夹」都是后者（按下保存再取那个占位名所在的目录），所以这里没有目录模式。
+    // 例外是导入音效的 Minecraft 安装目录：原版走真正的目录选择器 `get_directory`，
+    // 这里对应 FOS_PICKFOLDERS（filters/name 为空，下面自然跳过文件类型与文件名）。
     let mut options = FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST;
-    if dlg.save {
+    if spec.pick_folder {
+        options |= FOS_PICKFOLDERS;
+    } else if dlg.save {
         options |= FOS_OVERWRITEPROMPT | FOS_CREATEPROMPT | FOS_NOREADONLYRETURN;
     } else {
         options |= FOS_FILEMUSTEXIST;

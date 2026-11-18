@@ -46,10 +46,7 @@ fn resolve(body: &str, check_prerelease: bool, current: &str) -> Result<(i8, Str
     } else {
         &json
     };
-    let tag = release
-        .get("tag_name")
-        .and_then(|t| t.as_str())
-        .ok_or(())?;
+    let tag = release.get("tag_name").and_then(|t| t.as_str()).ok_or(())?;
     // `if (string_char_at(new_version, 1) == "v") new_version = string_delete(new_version, 1, 1)`
     let new_version = tag.strip_prefix('v').unwrap_or(tag).to_string();
     match compare_versions(&new_version, current) {
@@ -131,7 +128,10 @@ pub fn compare_versions(candidate: &str, installed: &str) -> Option<i32> {
         let new_numeric = is_all_digits(new_part);
         let old_numeric = is_all_digits(old_part);
         if new_numeric && old_numeric {
-            let (a, b) = (new_part.parse::<f64>().unwrap(), old_part.parse::<f64>().unwrap());
+            let (a, b) = (
+                new_part.parse::<f64>().unwrap(),
+                old_part.parse::<f64>().unwrap(),
+            );
             return Some(sign(a - b) as i32);
         }
         if new_numeric != old_numeric {
@@ -143,85 +143,11 @@ pub fn compare_versions(candidate: &str, installed: &str) -> Option<i32> {
     Some(sign(np.len() as f64 - op.len() as f64) as i32)
 }
 
-/// GameMaker `http_get` 的底层就是 WinINet，直接同路：状态码 200 才算成功。
+/// GameMaker `http_get` 的底层就是 WinINet；WinINet 实现收在 `mc_fetch`，
+/// 更新检查与音效导入共用同一份。
 #[cfg(windows)]
 fn fetch(url: &str) -> Result<String, ()> {
-    use std::ffi::CString;
-    use winapi::um::wininet::*;
-
-    let agent = CString::new("nbs-rust").map_err(|_| ())?;
-    let url = CString::new(url).map_err(|_| ())?;
-    // GitHub API 没有 UA 一律 403
-    let headers = CString::new("User-Agent: nbs-rust\r\n").map_err(|_| ())?;
-    unsafe {
-        let session = InternetOpenA(
-            agent.as_ptr(),
-            INTERNET_OPEN_TYPE_PRECONFIG,
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-        );
-        if session.is_null() {
-            return Err(());
-        }
-        let request = InternetOpenUrlA(
-            session,
-            url.as_ptr(),
-            headers.as_ptr(),
-            (headers.as_bytes().len() - 1) as u32,
-            INTERNET_FLAG_RELOAD,
-            0,
-        );
-        if request.is_null() {
-            InternetCloseHandle(session);
-            return Err(());
-        }
-        let mut code_buf = [0u8; 16];
-        let mut len = code_buf.len() as u32;
-        let mut index = 0u32;
-        let ok = HttpQueryInfoA(
-            request,
-            HTTP_QUERY_STATUS_CODE,
-            code_buf.as_mut_ptr() as *mut winapi::ctypes::c_void,
-            &mut len,
-            &mut index,
-        );
-        let status_ok = ok != 0
-            && code_buf
-                .iter()
-                .position(|&b| b == 0)
-                .and_then(|n| core::str::from_utf8(&code_buf[..n]).ok())
-                .and_then(|s| s.trim().parse::<u32>().ok())
-                == Some(200);
-        let mut body = Vec::new();
-        if status_ok {
-            let mut buf = [0u8; 4096];
-            loop {
-                let mut read = 0u32;
-                let ok = InternetReadFile(
-                    request,
-                    buf.as_mut_ptr() as *mut winapi::ctypes::c_void,
-                    buf.len() as u32,
-                    &mut read,
-                );
-                if ok == 0 {
-                    body.clear();
-                    break;
-                }
-                if read == 0 {
-                    break;
-                }
-                body.extend_from_slice(&buf[..read as usize]);
-            }
-        }
-        InternetCloseHandle(request);
-        InternetCloseHandle(session);
-        if status_ok && !body.is_empty() {
-            Ok(String::from_utf8_lossy(&body).into_owned())
-        } else {
-            Err(())
-        }
-    }
+    crate::mc_fetch::fetch_bytes(url).map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
 #[cfg(test)]
@@ -317,11 +243,17 @@ mod tests {
         // 空列表 → 原版 release = -1 → update = -1
         assert_eq!(resolve(r#"[]"#, true, "0.1.0"), Err(()));
         // 不比当前新 → 2
-        assert_eq!(resolve(r#"{"tag_name":"v0.1.0"}"#, false, "0.1.0"), Ok((2, String::new())));
+        assert_eq!(
+            resolve(r#"{"tag_name":"v0.1.0"}"#, false, "0.1.0"),
+            Ok((2, String::new()))
+        );
         // tag 缺失 / tag 无法解析成版本 / JSON 坏 → 原版里这些会让 GML 直接报错，
         // 重写版统一按「检查失败」处理（-1）
         assert_eq!(resolve(r#"{"name":"x"}"#, false, "0.1.0"), Err(()));
-        assert_eq!(resolve(r#"{"tag_name":"nope"}"#, false, "0.1.0"), Ok((-1, String::new())));
+        assert_eq!(
+            resolve(r#"{"tag_name":"nope"}"#, false, "0.1.0"),
+            Ok((-1, String::new()))
+        );
         assert_eq!(resolve(r#"not json"#, false, "0.1.0"), Err(()));
     }
 }

@@ -25,6 +25,7 @@ pub mod layers_panel;
 pub mod live_midi;
 pub mod piano;
 pub mod shortcuts;
+pub mod sound_import;
 pub mod state;
 pub mod statusbar;
 pub mod theme;
@@ -2096,10 +2097,7 @@ mod gui_window_tests {
             &ctx,
             "将悬停层的音量和声道调整应用于音符预览声音",
         );
-        assert!(
-            state.prefs.layerhov_vppreview,
-            "点标签要真的打开悬停层预览"
-        );
+        assert!(state.prefs.layerhov_vppreview, "点标签要真的打开悬停层预览");
         state.save_prefs();
         let back = nbs_io::prefs::Preferences::load();
         assert!(back.layerhov_vppreview, "悬停层预览开关要落盘");
@@ -2219,8 +2217,7 @@ mod gui_window_tests {
         click_text(&mut state, &ctx, "确认");
         frame(&mut state, &ctx);
         assert_eq!(
-            state.doc.song.meta.tempo,
-            16.0,
+            state.doc.song.meta.tempo, 16.0,
             "120 BPM 双倍 = 240 / 15 = 16 t/s"
         );
         assert_eq!(state.window, None, "确认即关窗（原版 windowclose = 1）");
@@ -2300,7 +2297,10 @@ mod gui_window_tests {
         dispatch(&mut state, Command::OpenSaveOptions, &ctx);
         frame(&mut state, &ctx);
         frame_out(&mut state, &ctx, base_input());
-        assert_eq!(state.save_options_version, 5, "低于 min_version 的单选要抬上来");
+        assert_eq!(
+            state.save_options_version, 5,
+            "低于 min_version 的单选要抬上来"
+        );
         click_text(&mut state, &ctx, "经典");
         frame(&mut state, &ctx);
         assert_eq!(state.save_options_version, 5, "v0 那行是锁的，点不动");

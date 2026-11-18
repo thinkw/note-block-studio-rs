@@ -78,6 +78,8 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         WindowKind::MidiImport => 600.0,
         // 原版 `draw_window(x1, y1, x1 + 500, y1 + 350)`。
         WindowKind::MidiDevices => 500.0,
+        // 原版 `draw_window(x1, y1, x1 + 415, y1 + 310)`。
+        WindowKind::SoundImport => 415.0,
         // 原版 `draw_window(x1, y1, x1 + 140, y1 + 130/162/180)`。
         WindowKind::TempoTapper
         | WindowKind::SaveOptions
@@ -147,6 +149,7 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::AudioSettings => audio_settings_window(state, ui),
             WindowKind::MidiImport => midi_import_window(state, ui),
             WindowKind::MidiDevices => midi_devices_window(state, ui),
+            WindowKind::SoundImport => sound_import_window(state, ui),
             WindowKind::SchematicExport => schematic_export_window(state, ui),
             WindowKind::DatapackExport => datapack_export_window(state, ui),
             WindowKind::PngExport => png_export_window(state, ui),
@@ -1866,7 +1869,13 @@ fn prefs_usability(state: &mut EditorState, pg: &mut Page) {
 
     // 原版 `draw_areaheader(x1 + 22, y1 + 240, 456, 105, "琴键与层")`；
     // 组里剩下的「对琴键右键可更改键位。」+「重置键位」按钮依赖键位编辑，端口没有，整行不画。
-    pg.header(22.0, 240.0, 456.0, 105.0, tr("Piano and layers", "琴键与层"));
+    pg.header(
+        22.0,
+        240.0,
+        456.0,
+        105.0,
+        tr("Piano and layers", "琴键与层"),
+    );
     if pg.check(
         40.0,
         256.0,
@@ -3587,6 +3596,11 @@ fn file_dialog(state: &mut EditorState, ui: &mut Ui, save: bool) {
         RichText::new(match action {
             // 原版这两个框的过滤器是空字符串，选的是目录不是文件。
             crate::state::DialogAction::PickFolder(f) => f.tip().to_string(),
+            crate::state::DialogAction::PickMinecraftDir => tr(
+                "Select Minecraft installation directory",
+                "选择Minecraft安装目录",
+            )
+            .to_string(),
             _ => format!(
                 "{}: *.{}   {}",
                 tr("File type", "文件类型"),
@@ -3611,7 +3625,11 @@ fn file_dialog(state: &mut EditorState, ui: &mut Ui, save: bool) {
                 }
             }
         });
-        let pick_folder = matches!(action, crate::state::DialogAction::PickFolder(_));
+        let pick_folder = matches!(
+            action,
+            crate::state::DialogAction::PickFolder(_)
+                | crate::state::DialogAction::PickMinecraftDir
+        );
         if !pick_folder {
             ui.horizontal(|ui| {
                 ui.label(tr("File name", "文件名"));
@@ -5316,6 +5334,239 @@ impl MidiCtx<'_> {
 /// OK + 刷新设备。下拉项和行间距照原版 `show_menu_ext` 的清单
 /// （`:76-84`）：三个固定项后一条分隔线接音色表，内置和自定义音色之间
 /// 还有一条分隔线；分隔线不占菜单序号。
+/// 原版 `draw_window_sound_import`（415×310）：导入音效向导，本地 `.minecraft`
+/// 与 Mojang 下载两条路。每帧先 `pump` 抄后台进度、排覆盖确认/失败模态框。
+fn sound_import_window(state: &mut EditorState, ui: &mut Ui) {
+    crate::sound_import::pump(state);
+
+    // 原版 info 文案（非 macOS 才有 Mojang 分支；我们是 Windows 版）。
+    ui.label(tr(
+        "This assistant will help you get sound files from your Minecraft:\nJava Edition installation or from the Mojang server.",
+        "本向导将帮助您从您的 Minecraft：Java 版或 Mojang 服务器获取音效。",
+    ));
+    ui.add_space(6.0);
+
+    // 「从 Mojang 下载」勾选框：下载中锁住（原版 draw_checkbox 的 lock 参数）。
+    // 展示态拷贝到本地，点击走命令翻转真实状态（emit 里同步派发）。
+    let busy = state.sound_import.download_toggle && state.sound_import.status == 1;
+    let mut shown = state.sound_import.download_toggle;
+    if ui
+        .add_enabled(
+            !busy,
+            egui::Checkbox::new(&mut shown, tr("Download from Mojang", "从 Mojang 下载")),
+        )
+        .clicked()
+    {
+        state.emit(Command::SoundImportToggleDownload);
+    }
+    ui.add_space(4.0);
+
+    if !state.sound_import.download_toggle {
+        ui.label(tr(
+            "Before continuing, ensure you have launched the version you want from\nthe Minecraft Launcher.\nSelect a version from the list, and then click 'Get sounds' to import the\nsounds from that version!",
+            "在开始之前，请确保您从您的启动器至少启动过一次您想要选择的版本。\n从列表中选择一个游戏版本，然后点击“获取音效”来导入该版本的音效！",
+        ));
+        ui.add_space(10.0);
+        ui.label(tr(
+            "1. Set your Minecraft installation path:",
+            "1. 设定您的.minecraft目录：",
+        ));
+        ui.add_space(4.0);
+        // 原版 string_truncate(mc_install_path, 280, true)；「更改」按钮与路径同一行。
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(state.sound_import.mc_install_path.clone()).weak(),
+                )
+                .truncate(),
+            );
+            if ui
+                .add(egui::Button::new(tr("Change", "更改")).min_size(egui::vec2(72.0, 0.0)))
+                .clicked()
+            {
+                state.emit(Command::SoundImportChangeDir);
+            }
+        });
+        ui.add_space(4.0);
+        if ui
+            .add(
+                egui::Button::new(tr("Use default", "使用默认设定"))
+                    .min_size(egui::vec2(72.0, 0.0)),
+            )
+            .clicked()
+        {
+            state.emit(Command::SoundImportUseDefaultPath);
+        }
+    } else {
+        ui.label(tr(
+            "Before continuing, you will need to fetch the asset indexes of Minecraft\nversions from Mojang.\nSelect a version from the list, and then click 'Get sounds' to import the\nsounds from that version!",
+            "在开始之前，请从 Mojang 获取 Minecraft 版本的资产索引。\n从列表中选择一个游戏版本，然后点击“获取音效”来导入该版本的音效！",
+        ));
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.label(tr(
+                "1. Get asset indexes from Mojang",
+                "1. 从 Mojang 获取资产索引",
+            ));
+            if ui
+                .add_enabled(
+                    !busy,
+                    egui::Button::new(tr("Get", "获取")).min_size(egui::vec2(72.0, 0.0)),
+                )
+                .clicked()
+            {
+                state.emit(Command::SoundImportGetIndexes);
+            }
+        });
+    }
+    ui.add_space(8.0);
+
+    // 第 2 步：版本下拉 + 状态文字。
+    ui.label(tr(
+        "2. Select the asset list to copy sounds from:",
+        "2. 选择想从中提取音效的版本：",
+    ));
+    ui.add_space(4.0);
+    let combo_locked = state.sound_import.indexes.is_empty() || state.sound_import.files_index > 0;
+    ui.horizontal(|ui| {
+        ui.add_space(16.0);
+        let (selected, download) = (
+            state.sound_import.selected.clone(),
+            state.sound_import.download_toggle,
+        );
+        let shown = if download {
+            selected
+        } else {
+            crate::sound_import::friendly_name(&selected)
+        };
+        egui::ComboBox::from_id_salt("sound_import_asset_index")
+            .selected_text(shown)
+            .width(86.0)
+            .show_ui(ui, |ui| {
+                let (indexes, select, download) = (
+                    state.sound_import.indexes.clone(),
+                    state.sound_import.select,
+                    state.sound_import.download_toggle,
+                );
+                for (i, id) in indexes.iter().enumerate() {
+                    let label = if download {
+                        id.clone()
+                    } else {
+                        crate::sound_import::friendly_name(id)
+                    };
+                    if ui
+                        .add_enabled(
+                            !combo_locked,
+                            egui::SelectableLabel::new(select == i, label),
+                        )
+                        .clicked()
+                    {
+                        state.emit(Command::SoundImportSelectIndex(i));
+                    }
+                }
+            });
+        // 状态文字（原版在 x+86+8 处）。
+        let (status, count, files_index, files_total, download) = (
+            state.sound_import.status,
+            state.sound_import.count,
+            state.sound_import.files_index,
+            state.sound_import.files_total,
+            state.sound_import.download_toggle,
+        );
+        if status == 2 {
+            ui.label(
+                egui::RichText::new(format!(
+                    "{}{}",
+                    crate::sound_import::format_thousands(count),
+                    tr(" sounds have been copied!", " 个音效获取成功！")
+                ))
+                .color(egui::Color32::from_rgb(60, 170, 60)),
+            );
+        } else if status == 1 {
+            ui.label(tr(
+                "Copying sounds... please wait!",
+                "正在获取音效...... 请稍候！",
+            ));
+            if download {
+                ui.label(format!(
+                    "{}/{}{}",
+                    files_index.max(1) - 1,
+                    files_total,
+                    tr(" sounds downloaded", " 个音效已下载")
+                ));
+            }
+        } else if count > 0 {
+            ui.label(format!(
+                "{}{}",
+                crate::sound_import::format_thousands(count),
+                tr(" sounds located!", " 个音效已被找到！")
+            ));
+        } else if !download {
+            ui.label(
+                egui::RichText::new(tr(
+                    "No sounds located! Check your\nMinecraft installation path.",
+                    "未找到音效！请检查您的 Minecraft\n安装目录。",
+                ))
+                .color(egui::Color32::RED),
+            );
+        }
+    });
+    ui.add_space(6.0);
+
+    // 获取音效（右对齐 86 宽）。
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.add_space(12.0);
+        let get_locked = state.sound_import.selected.is_empty() || state.sound_import.status == 1;
+        if ui
+            .add_enabled(
+                !get_locked,
+                egui::Button::new(tr("Get sounds", "获取音效")).min_size(egui::vec2(86.0, 0.0)),
+            )
+            .clicked()
+        {
+            state.emit(Command::SoundImportGet);
+        }
+    });
+    ui.add_space(8.0);
+
+    // 底行：音色设置... | 打开已获取音效目录 | ... | 确定。
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(
+                !busy,
+                egui::Button::new(tr("Instrument settings...", "音色设置…"))
+                    .min_size(egui::vec2(120.0, 0.0)),
+            )
+            .clicked()
+        {
+            state.emit(Command::ShowWindow(WindowKind::Instruments));
+        }
+        if ui
+            .add(
+                egui::Button::new(tr("Open Sounds folder", "打开已获取音效目录"))
+                    .min_size(egui::vec2(120.0, 0.0)),
+            )
+            .clicked()
+        {
+            state.emit(Command::SoundImportOpenSoundsFolder);
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_space(8.0);
+            let busy = state.sound_import.download_toggle && state.sound_import.status == 1;
+            if ui
+                .add_enabled(
+                    !busy,
+                    egui::Button::new(tr("OK", "确定")).min_size(egui::vec2(72.0, 0.0)),
+                )
+                .clicked()
+            {
+                state.emit(Command::SoundImportOk);
+            }
+        });
+    });
+}
+
 fn midi_devices_window(state: &mut EditorState, ui: &mut Ui) {
     ui.label(tr(
         "Here you can see and select the MIDI devices connected via USB.",
@@ -5363,10 +5614,7 @@ fn midi_devices_window(state: &mut EditorState, ui: &mut Ui) {
                             if i as u8 == nbs_core::model::FIRST_CUSTOM_INDEX {
                                 ui.separator();
                             }
-                            if ui
-                                .selectable_label(assignment == *id as i8, name)
-                                .clicked()
-                            {
+                            if ui.selectable_label(assignment == *id as i8, name).clicked() {
                                 assign_midi_device(state, d, *id as i8);
                             }
                         }
@@ -5398,7 +5646,11 @@ fn midi_assignment_label(assignment: i8, list: &[(u8, String)]) -> String {
             .map(|(_, n)| n.clone())
             .unwrap_or_else(|| {
                 let n = assignment as usize - nbs_core::model::FIRST_CUSTOM_INDEX as usize + 1;
-                tr(&format!("Custom instrument {n}"), &format!("自定义音色 {n}")).to_string()
+                tr(
+                    &format!("Custom instrument {n}"),
+                    &format!("自定义音色 {n}"),
+                )
+                .to_string()
             }),
     }
 }

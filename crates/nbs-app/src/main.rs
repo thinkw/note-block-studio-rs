@@ -24,13 +24,15 @@ use eframe::egui;
 use nbs_editor::EditorState;
 
 #[cfg(windows)]
+mod mc_fetch;
+#[cfg(windows)]
+mod midi_win;
+#[cfg(windows)]
 mod native_dialog;
 #[cfg(windows)]
 mod update;
 #[cfg(windows)]
 mod window_icon;
-#[cfg(windows)]
-mod midi_win;
 
 struct NbsApp {
     state: EditorState,
@@ -58,6 +60,8 @@ impl NbsApp {
             let midi = std::sync::Arc::new(midi_win::WinMidiIn::new());
             state.live_midi.backend = Some(midi);
             state.live_midi.refresh_devices();
+            // 导入音效向导的 HTTP 腿：WinINet（原版 http_get / http_get_file 同底层）。
+            state.sound_import.fetcher = Some(std::sync::Arc::new(mc_fetch::WinMinecraftFetcher));
         }
         state.theme.apply(&cc.egui_ctx);
         // egui 自带字体没有中文字形，不装系统字体整个界面会是一排空框。

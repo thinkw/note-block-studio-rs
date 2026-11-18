@@ -331,6 +331,16 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                 state.emit(Command::ShowWindow(WindowKind::Instruments));
                 ui.close_menu();
             }
+            if ui
+                .button(tr(
+                    "Import sounds from Minecraft...",
+                    "从 Minecraft 游戏文件中获取音效……",
+                ))
+                .clicked()
+            {
+                state.emit(Command::OpenSoundImport);
+                ui.close_menu();
+            }
             if ui.button(tr("Song info...", "歌曲信息…")).clicked() {
                 state.emit(Command::ShowWindow(WindowKind::SongInfo));
                 ui.close_menu();
