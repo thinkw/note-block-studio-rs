@@ -450,6 +450,35 @@ fn commit_tempo_input(state: &mut EditorState, text: &str, mult: f32) {
     }
 }
 
+/// 原版图层名是常驻 `draw_text_edit` / `draw_textarea`（内容宽 72）：超框的字符断行
+/// 到下一行，而框高只够一行，视觉上就是「只显示放得下的前缀」。非编辑态直接画文本
+/// 没有框会溢出压到音量/声像图标，这里按同样的可视宽度截断。
+fn clip_label(p: &egui::Painter, label: &str, font: &egui::FontId, max_w: f32) -> String {
+    if p.layout_no_wrap(label.to_owned(), font.clone(), Color32::WHITE)
+        .size()
+        .x
+        <= max_w
+    {
+        return label.to_owned();
+    }
+    let chars: Vec<char> = label.chars().collect();
+    let (mut lo, mut hi) = (0usize, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        let cand: String = chars[..mid].iter().collect();
+        if p.layout_no_wrap(cand, font.clone(), Color32::WHITE)
+            .size()
+            .x
+            <= max_w
+        {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    chars[..lo].iter().collect()
+}
+
 /// 一行图层。`at` 是原版行底左上角（已含 `ROW_LIFT`），内部坐标一律乘 `u`
 /// （`u = cell / BASE_CELL`，与原版「整个画面等比缩放」同构）。
 /// `exists` 为 false 表示原版那种「越界初始化出来的空白行」：框和图标照画，但没有图层可改。
@@ -565,6 +594,7 @@ fn row(
         } else {
             (layer.name.clone(), th.text)
         };
+        let label = clip_label(ui.painter(), &label, &font, 72.0 * u);
         ui.painter().text(
             pos2(x1 + 11.0 * u, y1 + 10.0 * u),
             Align2::LEFT_TOP,

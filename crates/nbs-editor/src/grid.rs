@@ -37,16 +37,22 @@ const C_RED: Color32 = Color32::from_rgb(255, 0, 0);
 const C_BLUE: Color32 = Color32::from_rgb(0, 0, 255);
 const C_YELLOW: Color32 = Color32::from_rgb(255, 255, 0);
 
+/// 滚动条专用缩放：条宽、滑块最小宽、内边距、描边全部用这个，不跟窗口缩放
+/// （偏离原版，用户要求恒定为 67% 档的尺寸，缩小界面时也抓得住）。
+const BAR_SCALE: f32 = 0.67;
+
 /// 切分布局：时间轴 / 网格 / 水平滚动条 / 垂直滚动条。
 ///
 /// 行区只取整行（原版 `totalrows = floor((rh - rhval) / 32)`），水平滚动条紧贴行区底
 /// （原版 `y1 + totalrows * 32 + 34`），而不是贴着窗口底边——这样图层栏的宏条
 /// （`y1 + 32`）和网格最后一行才会落在同一条线上。
 fn split(area: Rect, cell: f32) -> (Rect, Rect, Rect, Rect) {
-    // 画布缩放：标尺带 / 滚动条是画布的一部分，随格距一起放大。
+    // 画布缩放：标尺带随格距一起放大。
+    // 偏离原版（用户要求）：滚动条不随缩放，恒定为 67% 档的尺寸——
+    // 缩到 10% 时条还在原尺寸，抓得住。
     let u = cell / BASE_CELL;
     let band = TIMELINE_HEIGHT * u;
-    let bar = SCROLLBAR_SIZE * u;
+    let bar = SCROLLBAR_SIZE * BAR_SCALE;
     let w = (area.width() - bar).max(64.0);
     let h = (((area.height() - band - bar) / cell).floor().max(1.0)) * cell;
     let timeline = Rect::from_min_size(area.min, Vec2::new(w, band));
@@ -71,6 +77,7 @@ pub fn show_grid(state: &mut EditorState, ui: &mut Ui, area: Rect) {
     // 占住整块区域，避免 egui 布局把它分配给别的 widget。
     let _response = ui.allocate_rect(area, Sense::click_and_drag());
     let input = InputSnapshot::read(ui);
+    state.interaction.latest_pos = input.pointer;
 
     handle_timeline_input(state, &input, timeline_rect, grid_rect);
     handle_grid_input(state, &input, grid_rect);
@@ -445,13 +452,31 @@ fn edge_scroll(state: &mut EditorState, input: &InputSnapshot, rect: Rect) {
     e.y = (e.y + dy * 0.18).clamp(-4.0, 4.0);
     let ix = e.x.trunc() as i64;
     let iy = e.y.trunc() as i64;
+    let mut moved_x = 0i64;
+    let mut moved_y = 0i64;
     if ix != 0 {
-        state.viewport.start_tick = (state.viewport.start_tick as i64 + ix).max(0) as u32;
+        let before = state.viewport.start_tick as i64;
+        state.viewport.start_tick = (before + ix).max(0) as u32;
         e.x -= ix as f32;
+        moved_x = state.viewport.start_tick as i64 - before;
     }
     if iy != 0 {
-        state.viewport.start_layer = (state.viewport.start_layer as i64 + iy).max(0) as u32;
+        let before = state.viewport.start_layer as i64;
+        state.viewport.start_layer = (before + iy).max(0) as u32;
         e.y -= iy as f32;
+        moved_y = state.viewport.start_layer as i64 - before;
+    }
+    // 原版 `control_draw.gml:1092-1095`：拖框期间视口被边缘滚动推动时，
+    // 按下像素跟着平移（`select_pressx += 32 * (a - starta)`），
+    // 矩形才不会锚在屏幕上漂。滚轮滚动原版不补偿，这里也不补。
+    if (moved_x != 0 || moved_y != 0)
+        && matches!(state.interaction.mode, DragMode::BoxSelect { .. })
+    {
+        let cell = state.viewport.cell();
+        if let Some(pos) = state.interaction.pressed_pos.as_mut() {
+            pos.x -= moved_x as f32 * cell;
+            pos.y -= moved_y as f32 * cell;
+        }
     }
     if dx == 0.0 {
         e.x *= 0.8;
@@ -587,12 +612,11 @@ fn finish_drag(state: &mut EditorState, input: &InputSnapshot, hover: Option<(i6
 // ---------------------------------------------------------------- 滚动条
 
 fn h_geometry(state: &EditorState, rect: Rect) -> (f32, f32, Rect) {
-    let u = state.viewport.u();
     let visible = state.viewport.columns().max(1) as f32;
     let max_units = (state.doc.song.enda.max(state.viewport.start_tick) as f32 + visible + 8.0)
         .max(visible * 2.0);
     let thumb_w = ((visible / max_units) * rect.width())
-        .max(24.0 * u)
+        .max(24.0 * BAR_SCALE)
         .min(rect.width());
     let thumb_x = rect.min.x
         + (state.viewport.start_tick as f32 / max_units.max(1.0)) * (rect.width() - thumb_w);
@@ -600,20 +624,19 @@ fn h_geometry(state: &EditorState, rect: Rect) -> (f32, f32, Rect) {
         max_units,
         thumb_w,
         Rect::from_min_size(
-            pos2(thumb_x, rect.min.y + 2.0 * u),
-            Vec2::new(thumb_w, rect.height() - 4.0 * u),
+            pos2(thumb_x, rect.min.y + 2.0 * BAR_SCALE),
+            Vec2::new(thumb_w, rect.height() - 4.0 * BAR_SCALE),
         ),
     )
 }
 
 fn v_geometry(state: &EditorState, rect: Rect) -> (f32, f32, Rect) {
-    let u = state.viewport.u();
     let visible = state.viewport.rows().max(1) as f32;
     let max_units =
         (state.doc.song.layer_count().max(state.viewport.start_layer) as f32 + visible + 4.0)
             .max(visible * 2.0);
     let thumb_h = ((visible / max_units) * rect.height())
-        .max(24.0 * u)
+        .max(24.0 * BAR_SCALE)
         .min(rect.height());
     let thumb_y = rect.min.y
         + (state.viewport.start_layer as f32 / max_units.max(1.0)) * (rect.height() - thumb_h);
@@ -621,8 +644,8 @@ fn v_geometry(state: &EditorState, rect: Rect) -> (f32, f32, Rect) {
         max_units,
         thumb_h,
         Rect::from_min_size(
-            pos2(rect.min.x + 2.0 * u, thumb_y),
-            Vec2::new(rect.width() - 4.0 * u, thumb_h),
+            pos2(rect.min.x + 2.0 * BAR_SCALE, thumb_y),
+            Vec2::new(rect.width() - 4.0 * BAR_SCALE, thumb_h),
         ),
     )
 }
@@ -679,24 +702,23 @@ fn handle_scrollbar_input(state: &mut EditorState, input: &InputSnapshot, hbar: 
 fn draw_scrollbars(state: &EditorState, ui: &Ui, hbar: Rect, vbar: Rect) {
     let p = ui.painter();
     let th = &state.theme;
-    let u = state.viewport.u();
     let mut shapes = Vec::new();
     shapes.push(Shape::rect_filled(hbar, 0.0, th.panel));
     shapes.push(Shape::rect_filled(vbar, 0.0, th.panel));
     let (_, _, ht) = h_geometry(state, hbar);
     let (_, _, vt) = v_geometry(state, vbar);
-    shapes.push(Shape::rect_filled(ht, 3.0 * u, th.accent_soft));
+    shapes.push(Shape::rect_filled(ht, 3.0 * BAR_SCALE, th.accent_soft));
     shapes.push(Shape::rect_stroke(
         ht,
-        3.0 * u,
-        Stroke::new(1.0_f32 * u, th.accent),
+        3.0 * BAR_SCALE,
+        Stroke::new(1.0_f32 * BAR_SCALE, th.accent),
         StrokeKind::Inside,
     ));
-    shapes.push(Shape::rect_filled(vt, 3.0 * u, th.accent_soft));
+    shapes.push(Shape::rect_filled(vt, 3.0 * BAR_SCALE, th.accent_soft));
     shapes.push(Shape::rect_stroke(
         vt,
-        3.0 * u,
-        Stroke::new(1.0_f32 * u, th.accent),
+        3.0 * BAR_SCALE,
+        Stroke::new(1.0_f32 * BAR_SCALE, th.accent),
         StrokeKind::Inside,
     ));
     p.extend(shapes);
@@ -1029,7 +1051,18 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
             c += 0.5;
         }
         let at = vp.cell_rect(tick, layer).min;
-        push_note(state, &p, at, note, c, if in_box { 0.8 } else { 0.0 });
+        push_note(
+            state,
+            &p,
+            at,
+            note,
+            c,
+            if in_box {
+                state.prefs.selection_alpha
+            } else {
+                0.0
+            },
+        );
     }
 
     // 消音器导引带：原版 `control_draw.gml:352-366` 也是逐列扫完整列（不限可见层），
@@ -1103,6 +1136,36 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
         }
     }
     state.interaction.visible_notes = visible_count + sel.len();
+
+    // 原版 `control_draw.gml:903-922`：拖框时画半透明矩形——左键加选=蓝
+    // （Fluent 主题换成亮蓝 14120960=RGB(0,127,215)），右键减选=红；填充
+    // α0.25、1px 描边。矩形从按下时的原始鼠标像素拉到当前鼠标（不吸附格子）；
+    // starta/startb=0 时把远端夹回网格左/上缘（原版 `max(x1+2, mouse_x)`）。
+    if let (DragMode::BoxSelect { subtract, .. }, Some(p0), Some(p1)) = (
+        &state.interaction.mode,
+        state.interaction.pressed_pos,
+        state.interaction.latest_pos,
+    ) {
+        let mut x2 = p1.x;
+        let mut y2 = p1.y;
+        if state.viewport.start_tick == 0 {
+            x2 = x2.max(rect.min.x);
+        }
+        if state.viewport.start_layer == 0 {
+            y2 = y2.max(rect.min.y);
+        }
+        let far = pos2(x2, y2);
+        let r = Rect::from_min_max(p0.min(far), p0.max(far));
+        let col = if *subtract {
+            C_RED
+        } else if th.kind == ThemeKind::Fluent {
+            Color32::from_rgb(0, 127, 215)
+        } else {
+            C_BLUE
+        };
+        p.rect_filled(r, 0.0, alpha(col, 64));
+        p.rect_stroke(r, 0.0, Stroke::new(1.0_f32 * u, col), StrokeKind::Inside);
+    }
 
     // 锁定层：原版把 32×32 的 spr_lock（整张纯黑）横向拉满整行，以 0.25 不透明度压在音符上面。
     for layer in l0..l1 {
@@ -1621,7 +1684,11 @@ mod tests {
         scroll_viewport(&mut st, 1.0, true);
         let ticks = st.viewport.start_tick as i64 - from;
         assert_eq!(layers.abs(), 1, "出厂纵向一格一层");
-        assert_eq!(ticks.abs(), 1, "出厂横向一格一刻（原版槽位），不再是硬编码的 4");
+        assert_eq!(
+            ticks.abs(),
+            1,
+            "出厂横向一格一刻（原版槽位），不再是硬编码的 4"
+        );
 
         st.prefs.mousewheel_scroll_speed = 7;
         st.viewport.start_layer = from as u32;
@@ -1907,5 +1974,135 @@ mod tests {
         handle_timeline_input(&mut st, &mouse_xy(210.0, 96.0, false, false, true), r, g);
         assert_eq!(st.interaction.mode, DragMode::None);
         assert_eq!(st.marker(), 6.5625, "松手不回跳");
+    }
+
+    /// 原版框选（`control_draw.gml:323-341` + `control_input`）：空白格按下只记起点，
+    /// 拖开进入框选、hover 每帧跟手，松手整框落成浮动选区（音符抬出 song）。
+    /// 用户验收 #83 反馈「没有框 / 选中外观不对」，先用真状态机钉住行为再谈外观。
+    #[test]
+    fn box_select_drag_lifts_notes_into_the_floating_selection() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = ruler_state();
+        st.doc.song.set(0, 1, nbs_core::model::Note::new(0, 45));
+        st.doc.song.set(1, 1, nbs_core::model::Note::new(0, 47));
+        st.doc.song.set(2, 1, nbs_core::model::Note::new(0, 48));
+        let g = grid_rect();
+        let ctx = egui::Context::default();
+
+        // 空白格 (0,3) 按下：只记起点，还不进框选。
+        handle_grid_input(&mut st, &mouse_xy(16.0, 112.0, true, true, false), g);
+        assert_eq!(st.interaction.mode, DragMode::None, "按下本身不该进框选");
+        assert_eq!(
+            st.interaction.pressed_cell,
+            Some((0, 3)),
+            "按下要记住框选锚点"
+        );
+
+        // 拖到 (5,1)：进入框选，hover 每帧跟手（原版 select=1 的 s*selection_alpha）。
+        handle_grid_input(&mut st, &mouse_xy(170.0, 50.0, false, true, false), g);
+        assert!(
+            matches!(st.interaction.mode, DragMode::BoxSelect { .. }),
+            "拖开应进框选: {:?}",
+            st.interaction.mode
+        );
+        assert_eq!(st.hover_cell, Some((5, 1)), "框选中的 hover 要跟手");
+
+        // 松手：整框（列 0..5、层 1..3）落成浮动选区，3 个音符抬出 song。
+        handle_grid_input(&mut st, &mouse_xy(170.0, 50.0, false, false, true), g);
+        for _ in 0..6 {
+            if st.pending.is_empty() {
+                break;
+            }
+            st.flush(&ctx);
+        }
+        assert_eq!(st.interaction.mode, DragMode::None, "松手要收掉拖拽状态");
+        assert_eq!(st.doc.selection.len(), 3, "框内 3 个音符应抬进选区");
+        assert!(
+            !st.doc.song.has(0, 1) && !st.doc.song.has(1, 1) && !st.doc.song.has(2, 1),
+            "音符应从谱面抬出（原版框选松手即清格）"
+        );
+    }
+
+    /// 偏离原版（用户要求）：滚动条不随窗口缩放，恒定为 BAR_SCALE（0.67）档尺寸。
+    /// 两种格距下 split() 分出的条带、h/v_geometry 的滑块几何必须一致，
+    /// 内边距钉在 `4 × BAR_SCALE`、最小滑块钉在 `24 × BAR_SCALE`。
+    #[test]
+    fn the_scrollbar_bands_do_not_scale_with_the_window() {
+        let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let (_, _, h1, v1) = split(area, 32.0);
+        let (_, _, h2, v2) = split(area, 32.0 * 0.4);
+        assert_eq!(h1.height(), h2.height(), "横条带高不随缩放");
+        assert_eq!(v1.width(), v2.width(), "竖条带宽不随缩放");
+        assert!((h1.height() - SCROLLBAR_SIZE * BAR_SCALE).abs() < 0.01);
+        assert!((v1.width() - SCROLLBAR_SIZE * BAR_SCALE).abs() < 0.01);
+
+        let mut st = ruler_state();
+        let (_, _, t1) = h_geometry(&st, h1);
+        let (_, _, t2) = h_geometry(&st, h2);
+        assert_eq!(t1.height(), t2.height(), "滑块高不随缩放");
+        assert!(
+            (t1.height() - (h1.height() - 4.0 * BAR_SCALE)).abs() < 0.01,
+            "滑块上下内边距 = 4 × BAR_SCALE"
+        );
+
+        // 拉满谱长把比例压到最小，滑块钉在 24 × BAR_SCALE。
+        let mut song = nbs_core::model::Song::new();
+        song.enda = 100_000;
+        st.doc.replace_song(song);
+        let (_, _, t3) = h_geometry(&st, h1);
+        assert!(
+            (t3.width() - 24.0 * BAR_SCALE).abs() < 0.01,
+            "最小滑块宽 = 24 × BAR_SCALE，实际 {}",
+            t3.width()
+        );
+    }
+
+    /// 原版 `control_draw.gml:1092-1095`：拖框期间边缘自动滚动推动视口时，
+    /// 按下像素跟着平移（`select_pressx += 32 * (a - starta)`），矩形锚在格子上不漂。
+    /// 移动浮动选区（锚在格子空间）不需要补偿，按下像素原样不动。
+    #[test]
+    fn box_select_edge_scroll_shifts_the_press_pixel_with_the_viewport() {
+        let _prefs = crate::isolate_prefs();
+        let g = grid_rect();
+        let mut input = InputSnapshot::default();
+        input.pointer = Some(pos2(1.0, 100.0)); // 压在左边缘 → dx = -1
+
+        let mut st = ruler_state();
+        st.viewport.start_tick = 10;
+        st.interaction.mode = DragMode::BoxSelect {
+            anchor: (0, 0),
+            subtract: false,
+            alt_copy: false,
+        };
+        st.interaction.pressed_pos = Some(pos2(100.0, 100.0));
+        let from = st.viewport.start_tick;
+        for _ in 0..8 {
+            edge_scroll(&mut st, &input, g);
+        }
+        let moved = from as i64 - st.viewport.start_tick as i64;
+        assert!(moved > 0, "左边缘滚动应把视口往左推，实际移动 {moved}");
+        let press = st.interaction.pressed_pos.unwrap();
+        assert!(
+            (press.x - (100.0 + moved as f32 * st.viewport.cell())).abs() < 0.01,
+            "按下像素应随视口右移 {moved} 格 × 格距，实际 x={}",
+            press.x
+        );
+
+        let mut st = ruler_state();
+        st.viewport.start_tick = 10;
+        st.interaction.mode = DragMode::MoveSelection {
+            grab: (0, 0),
+            origin: (0, 0),
+            before: Default::default(),
+        };
+        st.interaction.pressed_pos = Some(pos2(100.0, 100.0));
+        for _ in 0..8 {
+            edge_scroll(&mut st, &input, g);
+        }
+        assert_ne!(st.viewport.start_tick, 0, "对照组：滚视口确实发生了");
+        assert!(
+            (st.interaction.pressed_pos.unwrap().x - 100.0).abs() < 0.01,
+            "移选区不补偿按下像素"
+        );
     }
 }

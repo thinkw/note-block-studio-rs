@@ -83,10 +83,16 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
         .show(ctx, |ui| show_status_bar(state, ui));
 
     if state.flags.show_piano {
+        // 端口自加（用户要求）：琴键面板独立缩放，高度跟 `piano_scale`，
+        // 不随 `window_scale`（与 #80「钢琴栏不随界面缩放」一致）。
         egui::TopBottomPanel::bottom("nbs_piano")
             .frame(tight())
-            .exact_height(PIANO_HEIGHT)
+            .exact_height(PIANO_HEIGHT * state.prefs.piano_scale)
             .show(ctx, |ui| show_piano(state, ui));
+    } else {
+        // 悬停路由用的矩形是每帧由面板写入的；面板关掉后必须清掉，
+        // 否则悬停在原琴键位置时缩放键还会走琴键档。
+        state.piano_rect = None;
     }
 
     if state.flags.show_layers {

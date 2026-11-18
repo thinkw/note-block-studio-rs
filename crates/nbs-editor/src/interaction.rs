@@ -48,6 +48,9 @@ pub struct Interaction {
     pub mode: DragMode,
     pub pressed_cell: Option<(i64, i64)>,
     pub pressed_pos: Option<Pos2>,
+    /// 本帧指针最新位置（`InputSnapshot::pointer` 的镜像），
+    /// 供绘制阶段画框选矩形用 —— `draw_grid` 不直接读输入。
+    pub latest_pos: Option<Pos2>,
     pub hover: Option<(i64, i64)>,
     /// 拖拽越过网格边界时的自动滚动增量（每帧累加，上限 4 格）。
     pub edge_scroll: Vec2,
@@ -69,6 +72,7 @@ impl Default for Interaction {
             mode: DragMode::None,
             pressed_cell: None,
             pressed_pos: None,
+            latest_pos: None,
             hover: None,
             edge_scroll: Vec2::ZERO,
             cursor: CursorIcon::Default,

@@ -103,6 +103,10 @@ pub enum Command {
     /// （每格 `32 × scale` px），菜单 / 工具栏 / 状态栏 / 钢琴栏不动。
     WindowScaleUp,
     WindowScaleDown,
+    /// 端口自加（用户要求）：琴键面板独立缩放档位，指针悬停在琴键面板上时
+    /// Ctrl+滚轮 / Ctrl+± 改 `piano_scale`，不影响其他面板。
+    PianoScaleUp,
+    PianoScaleDown,
     /// 原版 `control_draw.gml:732-735`：Ctrl+0 回到出厂缩放 `get_default_window_scale()`。
     WindowScaleReset,
     /// 按页平移视口（Home/End/PageUp/PageDown）。
@@ -775,6 +779,8 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         Command::WindowScaleUp => state.step_window_scale(ctx, true),
         Command::WindowScaleDown => state.step_window_scale(ctx, false),
         Command::WindowScaleReset => state.reset_window_scale(ctx),
+        Command::PianoScaleUp => state.step_piano_scale(ctx, true),
+        Command::PianoScaleDown => state.step_piano_scale(ctx, false),
         Command::PageHorizontal(d) => {
             let cols = state.viewport.columns() as i64;
             let max = state.doc.song.enda.max(64) as i64;
@@ -3012,14 +3018,19 @@ mod tests {
             step(false, &mut state);
             assert_eq!(state.prefs.window_scale, Some(want), "往下漏了一档");
         }
+        // 偏离原版（用户要求下界 10%）：0.5 之下自加 0.4/0.3/0.2/0.1 四档。
+        for want in [0.4, 0.3, 0.2, 0.1] {
+            step(false, &mut state);
+            assert_eq!(state.prefs.window_scale, Some(want), "往下漏了一档");
+        }
         step(false, &mut state);
         assert_eq!(
             state.prefs.window_scale,
-            Some(0.5),
-            "0.5 是原版下界，不能再小"
+            Some(0.1),
+            "0.1 是当前下界（原版 0.5，用户要求放开），不能再小"
         );
         for want in [
-            0.67, 0.75, 0.8, 0.9, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0,
+            0.2, 0.3, 0.4, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0,
         ] {
             step(true, &mut state);
             assert_eq!(state.prefs.window_scale, Some(want), "往上漏了一档");
@@ -3030,6 +3041,50 @@ mod tests {
         assert_eq!(state.prefs.window_scale, Some(4.0), "4 是原版上界");
         dispatch(&mut state, Command::WindowScaleReset, &ctx);
         assert_eq!(state.prefs.window_scale, None, "Ctrl+0 要存回出厂值");
+    }
+
+    /// 端口自加（用户要求）：琴键缩放和窗口缩放共用同一张档位表，但落到
+    /// `prefs.piano_scale` 上、不碰 `window_scale`。
+    #[test]
+    fn piano_scale_ladder_is_the_same_discrete_steps() {
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        let step = |up: bool, state: &mut EditorState| {
+            dispatch(
+                state,
+                if up {
+                    Command::PianoScaleUp
+                } else {
+                    Command::PianoScaleDown
+                },
+                &ctx,
+            )
+        };
+        // 出厂 1.0，往上一档 1.25；窗口缩放停在出厂值（测试态 Some(1.0)）不动。
+        step(true, &mut state);
+        assert_eq!(state.prefs.piano_scale, 1.25, "琴键 1.0 的上一档应是 1.25");
+        assert_eq!(
+            state.prefs.window_scale,
+            Some(1.0),
+            "琴键缩放不许影响窗口缩放"
+        );
+        for want in [1.0, 0.9, 0.8, 0.75, 0.67, 0.5, 0.4, 0.3, 0.2] {
+            step(false, &mut state);
+            assert_eq!(state.prefs.piano_scale, want, "往下漏了一档");
+        }
+        step(false, &mut state);
+        assert_eq!(
+            state.prefs.piano_scale, 0.1,
+            "琴键与窗口共用下界 0.1，不能再小"
+        );
+        for want in [
+            0.2, 0.3, 0.4, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0,
+        ] {
+            step(true, &mut state);
+            assert_eq!(state.prefs.piano_scale, want, "往上漏了一档");
+        }
+        step(true, &mut state);
+        assert_eq!(state.prefs.piano_scale, 4.0, "琴键上界与窗口一致为 4");
     }
 
     /// 原版 `game_set_speed(N, gamespeed_fps)`：帧数上限压的是整个程序的步进，

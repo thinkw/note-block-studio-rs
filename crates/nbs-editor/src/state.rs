@@ -1111,6 +1111,9 @@ pub struct EditorState {
     pub piano_keys_shown: u8,
     /// 原版 `delay`：边缘自动平移的节流计时（秒）。
     pub piano_scroll_delay: f32,
+    /// 端口自加：上一帧琴键面板的屏幕矩形，缩放快捷键靠它判断指针是否悬停在
+    /// 琴键上（悬停时 Ctrl+滚轮 / ± 调 `piano_scale` 而不是 `window_scale`）。
+    pub piano_rect: Option<egui::Rect>,
     pub last_autosave: Instant,
     pub last_prefs_save: Instant,
     /// 已同步给音频引擎的 `Song::rev`，用于只在内容真变化时重建事件表。
@@ -1378,6 +1381,7 @@ impl EditorState {
             piano_start: 12,
             piano_keys_shown: 0,
             piano_scroll_delay: 0.0,
+            piano_rect: None,
             last_autosave: Instant::now(),
             last_prefs_save: Instant::now(),
             audio_rev: 0,
@@ -1600,24 +1604,31 @@ impl EditorState {
     /// 原版 `control_draw.gml:736-751`：Ctrl+滚轮 / Ctrl+± 把 `window_scale` 推到
     /// 下一个（上一个）固定档位，档位表就是那串 `else if` 里的数，两端是 0.5 和 4。
     /// 网格本身恒 32px，缩放的是整块界面。
+    /// 偏离原版：用户要求下界放开到 10%，低档 0.1–0.4 是自加的（原版止步 0.5）。
     pub fn step_window_scale(&mut self, ctx: &Context, up: bool) {
-        const STEPS: [f32; 14] = [
-            0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0,
-        ];
         let cur = self
             .prefs
             .effective_scale(ctx.native_pixels_per_point().unwrap_or(1.0));
-        let next = if up {
-            STEPS.iter().find(|s| **s > cur + 1e-4).copied()
-        } else {
-            STEPS.iter().rev().find(|s| cur > **s + 1e-4).copied()
+        let Some(next) = step_in_ladder(cur, up) else {
+            return;
         };
-        let Some(next) = next else { return };
         self.prefs.window_scale = Some(next);
         // 原版 `control_draw.gml:666`：`condstr(language = 1, "窗口缩放", "Window scale") + " => " + … + "%"`。
         self.set_message(format!(
             "{} => {}%",
             crate::tr("Window scale", "窗口缩放"),
+            (next * 100.0).round()
+        ));
+    }
+
+    /// 端口自加（用户要求）：琴键面板独立缩放，与 `window_scale` 各走各的档位表。
+    pub fn step_piano_scale(&mut self, _ctx: &Context, up: bool) {
+        let next = step_in_ladder(self.prefs.piano_scale, up);
+        let Some(next) = next else { return };
+        self.prefs.piano_scale = next;
+        self.set_message(format!(
+            "{} => {}%",
+            crate::tr("Piano scale", "琴键缩放"),
             (next * 100.0).round()
         ));
     }
@@ -2152,6 +2163,20 @@ impl EditorState {
         };
         let mark = if self.doc.song.dirty { " *" } else { "" };
         format!("{name}{mark} — nbs-rust")
+    }
+}
+
+/// 缩放档位表：原版 `control_draw.gml:736-751` 的 `else if` 链（两端 0.5/4），
+/// 低档 0.1–0.4 是自加偏离（用户要求下界 10%）。窗口与琴键共用同一张表。
+const SCALE_STEPS: [f32; 18] = [
+    0.1, 0.2, 0.3, 0.4, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0,
+];
+
+fn step_in_ladder(cur: f32, up: bool) -> Option<f32> {
+    if up {
+        SCALE_STEPS.iter().find(|s| **s > cur + 1e-4).copied()
+    } else {
+        SCALE_STEPS.iter().rev().find(|s| cur > **s + 1e-4).copied()
     }
 }
 

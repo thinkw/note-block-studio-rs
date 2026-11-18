@@ -1,8 +1,11 @@
 //! 底部钢琴键盘 —— 照原版 `draw_piano` / `draw_piano_key` 逐帧贴 `spr_piano`：
-//! 白键 0、黑键背面 2 / 正面 1、边缘淡出蒙版 3/4/5；每列先画白键再画黑键（黑键压在上面）。
+//! 白键 0、黑键背面 2 / 正面 1；每列先画白键再画黑键（黑键压在上面）。
 //! 白键固定 39px 步进、整排按窗口宽度居中，鼠标停在最左 / 最右白键上每 0.1 秒平移一个音
 //! （原版 `d` + `delay`）。`spr_piano` 资源缺失时整排不画 —— 原版没有「无贴图键盘」，
 //! 所以这里也不画一个假的出来。
+//! 端口自加（用户要求）：① 面板独立缩放，`u = prefs.piano_scale` 乘所有原版像素常量；
+//! ② 去掉原版 `draw_piano.gml:12/119-120` 的两侧渐隐蒙版（alpha 机制），恒全亮度
+//! ——原版播放器模式（isplayer）本来就不渐隐。
 
 use egui::{pos2, Align2, Color32, Painter, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use nbs_core::model::{key_name, KEY_MAX, MC_KEY_MAX, MC_KEY_MIN};
@@ -33,8 +36,6 @@ const RIGHT_BLACK_HIT_X: f32 = 27.0;
 const PRESS_DOWN: f32 = 5.0;
 /// 原版右移上限 `startkey + k < 52`。
 const RIGHT_LIMIT: usize = 52;
-/// 原版尾部淡出阈值 `min(5, 54 - (startkey + k))`。
-const FADE_LIMIT: usize = 54;
 /// 原版 8224255 = RGB(255,126,125)，超出 MC 音域的键。
 const OUT_OF_RANGE: Color32 = Color32::from_rgb(255, 126, 125);
 /// 原版 16753828 = RGB(164,164,255)，非 Fluent 主题下当前选中的键。
@@ -111,21 +112,6 @@ impl FrameMap {
     fn key(&self, frame: usize) -> usize {
         self.offset + self.dark + frame
     }
-
-    fn fade(&self, frame: usize) -> usize {
-        self.offset + frame
-    }
-}
-
-/// 原版 `draw_sprite_ext(spr_piano, 3/4/5, …, window_background, 0.8 - alpha / 3)`。
-fn fade_tint(th: &Theme, alpha: i32) -> Color32 {
-    let a = (0.8 - alpha as f32 / 3.0).clamp(0.0, 1.0);
-    Color32::from_rgba_unmultiplied(
-        th.window_bg.r(),
-        th.window_bg.g(),
-        th.window_bg.b(),
-        (a * 255.0) as u8,
-    )
 }
 
 /// 传给 `draw_piano_key` 的 `color`：底色 c_white，超范围染粉，
@@ -159,21 +145,27 @@ struct DrawOpts {
 pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
     let th = state.theme.clone();
     let bank = state.icons.bank();
+    // 端口自加（用户要求）：`u` = 琴键面板独立缩放，乘所有原版像素常量。
+    let u = state.prefs.piano_scale.max(0.1);
     let top = ui.cursor().min;
     let area = Rect::from_min_size(
         top,
-        Vec2::new(ui.available_width(), ui.available_height().max(ART_H)),
+        Vec2::new(ui.available_width(), ui.available_height().max(ART_H * u)),
     );
+    // 缩放快捷键按这块矩形判断指针是否悬停在琴键上（先记下来，再谈画不画得成）。
+    state.piano_rect = Some(area);
     // 黑键高出面板顶 7px，画在横向滚动条下方那段空档里；面板默认会把它裁掉。
     ui.set_clip_rect(Rect::from_min_max(
-        pos2(area.min.x, area.min.y - BLACK_LIFT),
+        pos2(area.min.x, area.min.y - BLACK_LIFT * u),
         area.max,
     ));
     ui.allocate_rect(area, Sense::hover());
 
     let rw = area.width();
-    let keysmax = state.prefs.keys_to_show.max(1) as usize;
-    let keysshow = (((rw - 32.0) / KEY_W).floor() as usize).min(keysmax).max(1);
+    // 偏离原版（用户要求）：琴键横向占满面板——去掉原版 `keysmax`（首选项
+    // 「同屏显示的琴键数」，20..50）的截短与 32px 内缩，显示到放不下为止，
+    // 上限 = 完整键盘 52 个白键槽（startkey 27-52/2=1，即 A0 起）。
+    let keysshow = 52usize.min(((rw) / (KEY_W * u)).floor() as usize).max(1);
     if state.piano_keys_shown as usize != keysshow {
         // 原版：窗口宽度变了就把键盘重新以 27 号键为中心。
         state.piano_start = 27usize.saturating_sub(keysshow / 2) as u8;
@@ -182,7 +174,7 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
     let startkey = state.piano_start as usize;
     // 原版 `sharpkeys`：startkey 之前有几个黑键（白键序号 mod 7 为 1、4 的没有右邻黑键）。
     let sharpkeys = (0..startkey).filter(|a| *a % 7 != 1 && *a % 7 != 4).count();
-    let x0 = area.min.x + ((rw - keysshow as f32 * KEY_W) / 2.0).floor();
+    let x0 = area.min.x + ((rw - keysshow as f32 * KEY_W * u) / 2.0).floor();
     let y0 = area.min.y;
 
     let pointer = ui.input(|i| i.pointer.hover_pos());
@@ -204,33 +196,41 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
     let keys_held = state.keys_held;
     let held = |k: u8| keys_held.get(k as usize).copied().unwrap_or(false);
     // 黑键命中区：`xx + 39a - 12`（`hit_x` 已经是这条线要用的绝对横坐标）。
-    let hit = |hit_x: f32| Rect::from_min_size(pos2(hit_x, y0 - BLACK_LIFT), Vec2::new(BLACK_HIT_W, BLACK_HIT_H));
+    let hit = |hit_x: f32| {
+        Rect::from_min_size(
+            pos2(hit_x, y0 - BLACK_LIFT * u),
+            Vec2::new(BLACK_HIT_W * u, BLACK_HIT_H * u),
+        )
+    };
 
     let p = ui.painter();
     let frames = FrameMap::new(&th);
     let mut picked: Option<u8> = None;
     let mut b = 0usize;
-    let mut alpha = (3 - startkey as i32).max(0);
     let mut edge = 0i8;
 
+    // 偏离原版（用户要求）：去掉 `draw_piano.gml:12/119-120` 的两侧渐隐
+    // （alpha 从 `3 - startkey` 起步、尾部递减），所有琴键恒全亮度——
+    // 原版播放器模式（isplayer）本来就不渐隐。
     for a in 0..keysshow {
         let c = (startkey + a) % 7;
-        let x = x0 + a as f32 * KEY_W;
+        let x = x0 + a as f32 * KEY_W * u;
         // 原版 `a > 0 && c != 2 && c != 5`：最左一根白键不画它左边的黑键。
         let with_black = a > 0 && c != 2 && c != 5;
         let white = startkey + sharpkeys + b + if with_black { 1 } else { 0 };
 
         if white <= KEY_MAX as usize {
             let key = white as u8;
-            let white_hit = Rect::from_min_size(pos2(x, y0), Vec2::new(KEY_W, WHITE_HIT_H));
+            let white_hit =
+                Rect::from_min_size(pos2(x, y0), Vec2::new(KEY_W * u, WHITE_HIT_H * u));
             // 原版：白键被左右黑键挡住的部分不算命中；最右一根、以及右边没有黑键的白键除外。
-            let left = with_black && inside(hit(x + BLACK_HIT_X));
+            let left = with_black && inside(hit(x + BLACK_HIT_X * u));
             let right_exists = a + 1 < keysshow && c != 1 && c != 4;
-            let right = right_exists && inside(hit(x + RIGHT_BLACK_HIT_X));
+            let right = right_exists && inside(hit(x + RIGHT_BLACK_HIT_X * u));
             let hovering = !left && !right && inside(white_hit);
             // 原版 `down = 0.75`：鼠标按住（key_click）或键盘绑定被按下（key_press）都算。
             let down = if (hovering && holding) || held(key) {
-                PRESS_DOWN
+                PRESS_DOWN * u
             } else {
                 0.0
             };
@@ -239,11 +239,22 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
             // `!isplayer` 恒真，C/F 分支少的那一个门可以合并。
             if hovering && show_chart && !opts.playing && white > 6 && white < 69 {
                 if let Some(bank) = bank.as_deref() {
-                    draw_notechart(ui, bank, &th, rw, x + 18.0, y0, (startkey + a) as i32, false, opts.flats);
+                    draw_notechart(
+                        ui,
+                        bank,
+                        &th,
+                        rw,
+                        x + 18.0 * u,
+                        y0,
+                        (startkey + a) as i32,
+                        false,
+                        opts.flats,
+                        u,
+                    );
                 }
             }
             if let Some(bank) = bank.as_deref() {
-                draw_white_key(bank, p, &th, &frames, pos2(x, y0 + down), key, alpha, &opts);
+                draw_white_key(bank, p, &th, &frames, pos2(x, y0 + down), key, &opts, u);
             }
             if hovering {
                 if a == 0 {
@@ -260,8 +271,12 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
 
         if with_black && white - 1 <= KEY_MAX as usize {
             let key = (white - 1) as u8;
-            let black_hit = hit(x + BLACK_HIT_X);
-            let down = if (inside(black_hit) && holding) || held(key) { PRESS_DOWN } else { 0.0 };
+            let black_hit = hit(x + BLACK_HIT_X * u);
+            let down = if (inside(black_hit) && holding) || held(key) {
+                PRESS_DOWN * u
+            } else {
+                0.0
+            };
             // 原版黑键五线谱：升号门 `c1 > 6 && c1 < 70`、降号门 `c1 > 5 && c1 < 69`，
             // 键号参数升号写 `startkey + a - 1`、降号写 `startkey + a`（同为列号空间）。
             if inside(black_hit) && show_chart && !opts.playing {
@@ -272,7 +287,18 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
                 };
                 if ok {
                     if let Some(bank) = bank.as_deref() {
-                        draw_notechart(ui, bank, &th, rw, x, y0, chart_key, true, opts.flats);
+                        draw_notechart(
+                            ui,
+                            bank,
+                            &th,
+                            rw,
+                            x,
+                            y0,
+                            chart_key,
+                            true,
+                            opts.flats,
+                            u,
+                        );
                     }
                 }
             }
@@ -283,11 +309,11 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
                     p,
                     &th,
                     &frames,
-                    pos2(x + BLACK_DRAW_X, y0 - BLACK_LIFT),
+                    pos2(x + BLACK_DRAW_X * u, y0 - BLACK_LIFT * u),
                     key,
                     down,
-                    alpha,
                     &opts,
+                    u,
                 );
             }
             if inside(black_hit) && pressing {
@@ -296,14 +322,6 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
             b += 2;
         } else {
             b += 1;
-        }
-
-        if a < 3 && alpha < 3 {
-            alpha += 1;
-        }
-        let tail = 5.min(FADE_LIMIT.saturating_sub(startkey + keysshow));
-        if a > keysshow.saturating_sub(tail) {
-            alpha -= 1;
         }
     }
 
@@ -379,50 +397,44 @@ fn draw_white_key(
     frames: &FrameMap,
     at: Pos2,
     key: u8,
-    alpha: i32,
     o: &DrawOpts,
+    u: f32,
 ) {
     let (col, out) = key_color(key, o, th);
-    bank.piano_key(p, at, frames.key(piano_frame::WHITE), col);
-    if alpha < 3 {
-        bank.piano_key(p, at, frames.fade(piano_frame::WHITE_FADE), fade_tint(th, alpha));
-    }
+    bank.piano_key(p, at, frames.key(piano_frame::WHITE), u, col);
 
     let kb = o.keyboard && keybind(key).is_some();
     let clicks = o.numbers && !out;
-    // 原版 `draw_set_alpha(alpha / 3)`，墨色在非 Fluent 深色下是 c_black。
-    let ink = tint_alpha(
-        if th.kind == ThemeKind::Fluent && th.fdark { col } else { Color32::BLACK },
-        alpha,
-    );
-    let x = at.x + 20.0;
+    // 原版墨色在非 Fluent 深色下是 c_black；Fluent 深色用键色反衬
+    // （渐隐去掉后不再套 alpha，恒全亮）。
+    let ink = if th.kind == ThemeKind::Fluent && th.fdark {
+        col
+    } else {
+        Color32::BLACK
+    };
+    let x = at.x + 20.0 * u;
+    let font = crate::fonts::scaled(main_font(), u);
     if o.names {
         p.text(
-            pos2(x, at.y + 85.0 - lift(kb, clicks)),
+            pos2(x, at.y + (85.0 - lift(kb, clicks)) * u),
             TEXT_AT,
             key_name(key, true, o.flats),
-            main_font(),
+            font.clone(),
             ink,
         );
     }
     if clicks {
         p.text(
-            pos2(x, at.y + 85.0 + 5.0 - 8.0 * kb as u8 as f32),
+            pos2(x, at.y + (85.0 + 5.0 - 8.0 * kb as u8 as f32) * u),
             TEXT_AT,
             (key as i32 - MC_KEY_MIN as i32).to_string(),
-            main_font(),
+            font.clone(),
             ink,
         );
     }
     if kb {
         if let Some(c) = keybind(key) {
-            p.text(
-                pos2(x, at.y + 95.0),
-                TEXT_AT,
-                c.to_string(),
-                main_font(),
-                ink,
-            );
+            p.text(pos2(x, at.y + 95.0 * u), TEXT_AT, c.to_string(), font, ink);
         }
     }
 }
@@ -436,54 +448,44 @@ fn draw_black_key(
     at: Pos2,
     key: u8,
     down: f32,
-    alpha: i32,
     o: &DrawOpts,
+    u: f32,
 ) {
     let (col, out) = key_color(key, o, th);
     let face = at + Vec2::new(0.0, down);
-    bank.piano_key(p, at, frames.key(piano_frame::BLACK_BACK), col);
-    if alpha < 3 {
-        bank.piano_key(p, at, frames.fade(piano_frame::BLACK_BACK_FADE), fade_tint(th, alpha));
-    }
-    bank.piano_key(p, face, frames.key(piano_frame::BLACK_FACE), col);
-    if alpha < 3 {
-        bank.piano_key(p, face, frames.fade(piano_frame::BLACK_FACE_FADE), fade_tint(th, alpha));
-    }
+    bank.piano_key(p, at, frames.key(piano_frame::BLACK_BACK), u, col);
+    bank.piano_key(p, face, frames.key(piano_frame::BLACK_FACE), u, col);
 
     let kb = o.keyboard && keybind(key).is_some();
     let clicks = o.numbers && !out;
-    let ink = tint_alpha(
-        if th.kind == ThemeKind::Fluent && th.fdark { col } else { Color32::WHITE },
-        alpha,
-    );
-    let x = at.x + 19.0;
+    let ink = if th.kind == ThemeKind::Fluent && th.fdark {
+        col
+    } else {
+        Color32::WHITE
+    };
+    let x = at.x + 19.0 * u;
+    let font = crate::fonts::scaled(bold_font(), u);
     if o.names {
         p.text(
-            pos2(x, face.y + 29.0 - lift(kb, clicks)),
+            pos2(x, face.y + (29.0 - lift(kb, clicks)) * u),
             TEXT_AT,
             key_name(key, true, o.flats),
-            bold_font(),
+            font.clone(),
             ink,
         );
     }
     if clicks {
         p.text(
-            pos2(x, face.y + 34.0 - 8.0 * kb as u8 as f32),
+            pos2(x, face.y + (34.0 - 8.0 * kb as u8 as f32) * u),
             TEXT_AT,
             (key as i32 - MC_KEY_MIN as i32).to_string(),
-            bold_font(),
+            font.clone(),
             ink,
         );
     }
     if kb {
         if let Some(c) = keybind(key) {
-            p.text(
-                pos2(x, face.y + 39.0),
-                TEXT_AT,
-                c.to_string(),
-                bold_font(),
-                ink,
-            );
+            p.text(pos2(x, face.y + 39.0 * u), TEXT_AT, c.to_string(), font, ink);
         }
     }
 }
@@ -503,64 +505,89 @@ fn draw_notechart(
     key: i32,
     accidental: bool,
     flats: bool,
+    u: f32,
 ) {
-    let yy = y0 - 32.0;
-    let xx = chart_left(x1, rw);
+    let yy = y0 - 32.0 * u;
+    let xx = chart_left(x1, rw, u);
     // 剪辑区向上扩到最高键位（startkey + keysshow ≤ 51）的上加线 / 音符顶，
     // 向下盖过白键命中区（越界部分会被之后画的琴键压住，与原版一致）。
     let p = Painter::new(
         ui.ctx().clone(),
         ui.layer_id(),
-        Rect::from_min_max(pos2(0.0, y0 - 660.0), pos2(rw, y0 + WHITE_HIT_H)),
+        Rect::from_min_max(pos2(0.0, y0 - 660.0 * u), pos2(rw, y0 + WHITE_HIT_H * u)),
     );
-    let right = x1 > rw - 250.0;
-    bank.notechart_panel(&p, pos2(xx, yy - 319.0), th.kind);
-    bank.notechart_pointer(&p, pos2(x1 - 16.0 * right as u8 as f32, yy), th.kind, right);
+    let right = x1 > rw - 250.0 * u;
+    bank.notechart_panel(&p, pos2(xx, yy - 319.0 * u), th.kind, u);
+    bank.notechart_pointer(
+        &p,
+        pos2(x1 - 16.0 * u * right as u8 as f32, yy),
+        th.kind,
+        right,
+        u,
+    );
 
     // 五线谱横线（跳过第 5 条给中加线留位）与左括号两条竖线。
-    let fade = Stroke::new(1.0_f32, Color32::from_black_alpha(64));
-    let solid = Stroke::new(1.0_f32, Color32::BLACK);
+    let fade = Stroke::new(1.0 * u, Color32::from_black_alpha(64));
+    let solid = Stroke::new(1.0 * u, Color32::BLACK);
     for a in 0..11i32 {
         if a != 5 {
-            let y = yy - 250.0 + 16.0 * a as f32;
-            p.line_segment([pos2(xx + 32.0, y), pos2(xx + 288.0, y)], fade);
+            let y = yy - 250.0 * u + 16.0 * a as f32 * u;
+            p.line_segment(
+                [pos2(xx + 32.0 * u, y), pos2(xx + 288.0 * u, y)],
+                fade,
+            );
         }
     }
     p.line_segment(
-        [pos2(xx + 32.0, yy - 250.0), pos2(xx + 32.0, yy - 250.0 + 64.0)],
+        [
+            pos2(xx + 32.0 * u, yy - 250.0 * u),
+            pos2(xx + 32.0 * u, yy - 250.0 * u + 64.0 * u),
+        ],
         solid,
     );
     p.line_segment(
-        [pos2(xx + 32.0, yy - 250.0 + 96.0), pos2(xx + 32.0, yy - 250.0 + 160.0)],
+        [
+            pos2(xx + 32.0 * u, yy - 250.0 * u + 96.0 * u),
+            pos2(xx + 32.0 * u, yy - 250.0 * u + 160.0 * u),
+        ],
         solid,
     );
-    bank.gclef(&p, pos2(xx + 58.0, yy - 250.0 + 48.0));
-    bank.fclef(&p, pos2(xx + 48.0, yy - 250.0 + 112.0));
+    bank.gclef(
+        &p,
+        pos2(xx + 58.0 * u, yy - 250.0 * u + 48.0 * u),
+        u,
+    );
+    bank.fclef(
+        &p,
+        pos2(xx + 48.0 * u, yy - 250.0 * u + 112.0 * u),
+        u,
+    );
     bank.note_accidental(
         &p,
-        pos2(xx + 152.0, yy - 250.0 - 8.0 * (key - 33) as f32),
+        pos2(xx + 152.0 * u, yy - 250.0 * u - 8.0 * (key - 33) as f32 * u),
         flats,
         accidental,
         key > 22,
+        u,
     );
     // 中加线（键 23/24 一条）与上 / 下加线，都是 0.25 黑线。
     if key > 22 && key < 25 {
-        let y = yy - 250.0 + 80.0;
-        p.line_segment([pos2(xx + 122.0, y), pos2(xx + 180.0, y)], fade);
+        let y = yy - 250.0 * u + 80.0 * u;
+        p.line_segment([pos2(xx + 122.0 * u, y), pos2(xx + 180.0 * u, y)], fade);
     }
     for a in 1..upper_ledger_bound(key) {
-        let y = yy - 250.0 - 16.0 * a as f32;
-        p.line_segment([pos2(xx + 122.0, y), pos2(xx + 180.0, y)], fade);
+        let y = yy - 250.0 * u - 16.0 * a as f32 * u;
+        p.line_segment([pos2(xx + 122.0 * u, y), pos2(xx + 180.0 * u, y)], fade);
     }
     for a in 0..lower_ledger_bound(key) {
-        let y = yy - 250.0 + 176.0 + 16.0 * a as f32;
-        p.line_segment([pos2(xx + 122.0, y), pos2(xx + 180.0, y)], fade);
+        let y = yy - 250.0 * u + 176.0 * u + 16.0 * a as f32 * u;
+        p.line_segment([pos2(xx + 122.0 * u, y), pos2(xx + 180.0 * u, y)], fade);
     }
 }
 
 /// 原版 `median(0, x1 - 32, rw - 320)`：三数取中，面板左缘。
-fn chart_left(x1: f32, rw: f32) -> f32 {
-    let mut v = [0.0, x1 - 32.0, rw - 320.0];
+fn chart_left(x1: f32, rw: f32, u: f32) -> f32 {
+    let mut v = [0.0, x1 - 32.0 * u, rw - 320.0 * u];
     v.sort_by(|a, b| a.total_cmp(b));
     v[1]
 }
@@ -580,11 +607,6 @@ fn lift(keybind: bool, clicks: bool) -> f32 {
     4.0 * keybind as u8 as f32
         + 4.0 * (keybind && clicks) as u8 as f32
         + 6.0 * clicks as u8 as f32
-}
-
-/// 原版 `draw_set_alpha(alpha / 3)`：文字按淡出档位整体变透明。
-fn tint_alpha(c: Color32, alpha: i32) -> Color32 {
-    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (255.0 * alpha.max(0) as f32 / 3.0) as u8)
 }
 
 #[cfg(test)]
@@ -607,28 +629,28 @@ mod tests {
         }
     }
 
-    /// 原版帧号：经典组 0..5，Fluent 浅色 6..11，Fluent 深色只有 12/13/14，蒙版仍用 9/10/11。
+    /// 原版帧号：经典组 0..5，Fluent 浅色 6..11，Fluent 深色只有 12/13/14。
     #[test]
     fn piano_frame_groups() {
         let classic = FrameMap::new(&Theme::new(ThemeKind::Aqua));
         assert_eq!(classic.key(piano_frame::WHITE), 0);
-        assert_eq!(classic.fade(piano_frame::WHITE_FADE), 3);
         let fluent = FrameMap::new(&Theme::new(ThemeKind::Fluent));
         assert_eq!(fluent.key(piano_frame::BLACK_BACK), 8);
-        assert_eq!(fluent.fade(piano_frame::BLACK_BACK_FADE), 11);
         let mut dark = Theme::new(ThemeKind::Fluent);
         dark.fdark = true;
         let fd = FrameMap::new(&dark);
         assert_eq!(fd.key(piano_frame::BLACK_BACK), 14);
-        assert_eq!(fd.fade(piano_frame::BLACK_BACK_FADE), 11);
     }
 
     /// 原版 `median(0, x1 - 32, rw - 320)` 与上 / 下加线循环上界。
     #[test]
     fn notechart_geometry() {
-        assert_eq!(chart_left(500.0, 800.0), 468.0);
-        assert_eq!(chart_left(10.0, 800.0), 0.0);
-        assert_eq!(chart_left(2000.0, 800.0), 480.0);
+        assert_eq!(chart_left(500.0, 800.0, 1.0), 468.0);
+        assert_eq!(chart_left(10.0, 800.0, 1.0), 0.0);
+        assert_eq!(chart_left(2000.0, 800.0, 1.0), 480.0);
+        // 缩放后 32/320 两个原版常量跟着 u 走。
+        assert_eq!(chart_left(500.0, 2000.0, 2.0), 436.0);
+        assert_eq!(chart_left(3000.0, 800.0, 2.0), 160.0);
         // 上加线：key ≤ 34 循环空转，35 起每 2 个键多一条。
         assert_eq!(upper_ledger_bound(33), 1);
         assert_eq!(upper_ledger_bound(34), 1);

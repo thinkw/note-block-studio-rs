@@ -224,21 +224,31 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
         // ---- 缩放快捷键：原版写在 `playing = 0` 里（control_draw.gml:732-751 在
         // :709 的总闸内），播放中按不动；按用户要求放开为播放中也可用（有意偏离）。
         // 原版把滚轮和 187/189（+ / -）写在同一个条件里：`mouse_wheel_up()` 也算放大。
+        // 端口自加（用户要求）：指针悬停在琴键面板上时，缩放键走琴键独立档位
+        // （piano_scale，不影响其他面板）；否则维持原版行为缩放整窗口。
+        let over_piano = state
+            .piano_rect
+            .is_some_and(|r| r.contains(i.pointer.latest_pos().unwrap_or_default()));
+        let (zoom_up, zoom_down) = if over_piano {
+            (Command::PianoScaleUp, Command::PianoScaleDown)
+        } else {
+            (Command::WindowScaleUp, Command::WindowScaleDown)
+        };
         if p(Key::Num0) {
             out.push(Command::WindowScaleReset);
         }
         if p(Key::Plus) || p(Key::Equals) {
-            out.push(Command::WindowScaleUp);
+            out.push(zoom_up.clone());
         }
         if p(Key::Minus) {
-            out.push(Command::WindowScaleDown);
+            out.push(zoom_down.clone());
         }
         if ctrl {
             let wheel = i.raw_scroll_delta.y;
             if wheel > 0.0 {
-                out.push(Command::WindowScaleUp);
+                out.push(zoom_up);
             } else if wheel < 0.0 {
-                out.push(Command::WindowScaleDown);
+                out.push(zoom_down);
             }
         }
 
@@ -623,6 +633,89 @@ mod tests {
     fn bare_key_does_not_match_a_ctrl_chord() {
         let got = cmds(vec![key(Key::P, true, egui::Modifiers::NONE)]);
         assert!(!got.iter().any(prefs_open_cmd), "裸 P 不该开首选项");
+    }
+
+    /// 端口自加（用户要求）：指针悬停在琴键面板矩形内时 ± 走琴键缩放档，
+    /// 悬停在外面仍缩放整窗；Ctrl+0 恒为窗口缩放重置，不受悬停位置影响。
+    #[test]
+    fn pointer_over_the_piano_routes_zoom_keys_to_the_piano_ladder() {
+        let over = |events: Vec<Event>, piano_on: bool| -> Vec<Command> {
+            let ctx = Context::default();
+            let mut state = fresh_state();
+            if piano_on {
+                state.piano_rect = Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 500.0),
+                    egui::vec2(800.0, 100.0),
+                ));
+            }
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                predicted_dt: 0.0,
+                events,
+                ..Default::default()
+            };
+            let mut out = Vec::new();
+            let _ = ctx.run(raw, |c| out = collect_shortcuts(&state, c));
+            out
+        };
+        let at_piano = Event::PointerMoved(egui::pos2(400.0, 550.0));
+        let off_piano = Event::PointerMoved(egui::pos2(400.0, 300.0));
+        let plus = || vec![key(Key::Equals, true, egui::Modifiers::NONE)];
+        let minus = || vec![key(Key::Minus, true, egui::Modifiers::NONE)];
+
+        // 悬停琴键：± 推琴键档。
+        let got = over([at_piano.clone()].into_iter().chain(plus()).collect(), true);
+        assert_eq!(
+            got,
+            vec![Command::PianoScaleUp],
+            "悬停琴键时 + 应推琴键档: {got:?}"
+        );
+        let got = over(
+            [at_piano.clone()].into_iter().chain(minus()).collect(),
+            true,
+        );
+        assert_eq!(
+            got,
+            vec![Command::PianoScaleDown],
+            "悬停琴键时 - 应推琴键档: {got:?}"
+        );
+
+        // 悬停在外面：± 仍是窗口缩放。
+        let got = over(
+            [off_piano.clone()].into_iter().chain(plus()).collect(),
+            true,
+        );
+        assert_eq!(
+            got,
+            vec![Command::WindowScaleUp],
+            "悬停在别处 + 应缩放整窗: {got:?}"
+        );
+
+        // 琴键面板关掉（矩形残留也当作不存在）：+ 必须回到窗口缩放。
+        let got = over(
+            [at_piano.clone()].into_iter().chain(plus()).collect(),
+            false,
+        );
+        assert_eq!(
+            got,
+            vec![Command::WindowScaleUp],
+            "琴键面板关掉后 + 应缩放整窗: {got:?}"
+        );
+
+        // Ctrl+0 无论如何都是窗口缩放重置。
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        let got = over(vec![at_piano, key(Key::Num0, true, ctrl)], true);
+        assert_eq!(
+            got,
+            vec![Command::WindowScaleReset],
+            "Ctrl+0 恒为窗口缩放重置: {got:?}"
+        );
     }
 
     /// 原版 `control_draw.gml:770-773`：Ctrl+Shift+I 先 `playing = 0` 再开速度测量器，

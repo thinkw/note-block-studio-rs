@@ -207,6 +207,11 @@ impl Strip {
     fn draw(&self, p: &egui::Painter, at: Pos2, index: usize, tint: Color32) {
         self.blit(p, at, index, Vec2::new(self.fw, self.fh), tint);
     }
+
+    /// 按 `u` 等比缩放绘制（琴键面板独立缩放用；贴图拉伸，与方块精灵缩放同法）。
+    fn draw_scaled(&self, p: &egui::Painter, at: Pos2, index: usize, u: f32, tint: Color32) {
+        self.blit(p, at, index, Vec2::new(self.fw * u, self.fh * u), tint);
+    }
 }
 
 /// 一次图标点击的结果。原版 `draw_icon` 对快进 / 快退返回「按住」，
@@ -907,9 +912,15 @@ impl Bank {
 
     /// 原版 `draw_piano_key` 的 `draw_sprite_ext(spr_piano, n, xx, yy, 1, 1, 0, col, a)`。
     /// `index` 是已经加上 `sprite_offset + dark` 的绝对帧号；淡出蒙版传
-    /// `window_background` 和 `0.8 - alpha / 3`。
-    pub fn piano_key(&self, p: &egui::Painter, at: Pos2, index: usize, tint: Color32) {
-        self.piano.blit(p, at, index, Vec2::new(self.piano.fw, self.piano.fh), tint);
+    /// `window_background` 和 `0.8 - alpha / 3`。`u` 是琴键面板独立缩放（端口自加）。
+    pub fn piano_key(&self, p: &egui::Painter, at: Pos2, index: usize, u: f32, tint: Color32) {
+        self.piano.blit(
+            p,
+            at,
+            index,
+            Vec2::new(self.piano.fw * u, self.piano.fh * u),
+            tint,
+        );
     }
 
 
@@ -1028,27 +1039,43 @@ impl Bank {
     /// 原版 `draw_sprite(spr_notechart, 0 + 3*theme, xx, yy-320+1)`：
     /// 五线谱面板，原点 (0,0)，`at` 就是面板左上角；导出只留了 4 个面板帧，
     /// 帧号 = 主题序号。
-    pub fn notechart_panel(&self, p: &egui::Painter, at: Pos2, kind: ThemeKind) {
-        self.notechart.draw(p, at, theme_index(kind), Color32::WHITE);
+    pub fn notechart_panel(&self, p: &egui::Painter, at: Pos2, kind: ThemeKind, u: f32) {
+        self.notechart
+            .draw_scaled(p, at, theme_index(kind), u, Color32::WHITE);
     }
 
     /// 原版 `draw_sprite(spr_notechart, 1 + (x1 > rw-250) + 3*theme, x1 - 16*(右缘), yy)`：
     /// 指针帧裁成 20x20（内容贴左上角，画法不变），帧 = 2 * 主题序号 + 右缘。
-    pub fn notechart_pointer(&self, p: &egui::Painter, at: Pos2, kind: ThemeKind, right: bool) {
-        self.notechart_pointer
-            .draw(p, at, 2 * theme_index(kind) + right as usize, Color32::WHITE);
+    pub fn notechart_pointer(&self, p: &egui::Painter, at: Pos2, kind: ThemeKind, right: bool, u: f32) {
+        self.notechart_pointer.draw_scaled(
+            p,
+            at,
+            2 * theme_index(kind) + right as usize,
+            u,
+            Color32::WHITE,
+        );
     }
 
     /// 原版 `draw_sprite(spr_Gclef, 0, xx+58, yy-250+48)`：原点 (18,50)。
-    pub fn gclef(&self, p: &egui::Painter, anchor: Pos2) {
-        self.gclef
-            .draw(p, pos2(anchor.x - 18.0, anchor.y - 50.0), 0, Color32::WHITE);
+    pub fn gclef(&self, p: &egui::Painter, anchor: Pos2, u: f32) {
+        self.gclef.draw_scaled(
+            p,
+            pos2(anchor.x - 18.0 * u, anchor.y - 50.0 * u),
+            0,
+            u,
+            Color32::WHITE,
+        );
     }
 
     /// 原版 `draw_sprite(spr_Fclef, 0, xx+48, yy-250+112)`：原点 (8,13)。
-    pub fn fclef(&self, p: &egui::Painter, anchor: Pos2) {
-        self.fclef
-            .draw(p, pos2(anchor.x - 8.0, anchor.y - 13.0), 0, Color32::WHITE);
+    pub fn fclef(&self, p: &egui::Painter, anchor: Pos2, u: f32) {
+        self.fclef.draw_scaled(
+            p,
+            pos2(anchor.x - 8.0 * u, anchor.y - 13.0 * u),
+            0,
+            u,
+            Color32::WHITE,
+        );
     }
 
     /// 原版 `draw_sprite(spr_note_sharp/flat, accidental + 2*(key>22), xx+152, yy-250-8*(key-33))`：
@@ -1061,13 +1088,15 @@ impl Bank {
         flat_sprite: bool,
         accidental: bool,
         upper: bool,
+        u: f32,
     ) {
         let index = if accidental { 1 } else { 0 } + if upper { 2 } else { 0 };
         let strip = if flat_sprite { &self.note_flat } else { &self.note_sharp };
-        strip.draw(
+        strip.draw_scaled(
             p,
-            pos2(anchor.x - 30.0, anchor.y - 74.0),
+            pos2(anchor.x - 30.0 * u, anchor.y - 74.0 * u),
             index,
+            u,
             Color32::WHITE,
         );
     }

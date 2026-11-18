@@ -69,8 +69,6 @@ pub struct Preferences {
     /// 原版 accent1/2/3（`settings.ini [preferences]` 持久化，出厂 0,120,212，
     /// `load/save_settings.gml:63-67`）：界面强调色基色。改色乐器 / 彩虹不写这里。
     pub accent: [u8; 3],
-    /// 原版 `keysmax` / `keys_to_show`：钢琴最多画几根白键，20..50。
-    pub keys_to_show: u8,
     pub show_incompatible: bool,
     /// 原版 `fade`（出厂 0，`control_create.gml:131`）：勾上 = 音符盒不透明，
     /// 力度不再参与透明度，鼠标压格 / 选区也不再 +0.5。原版在 ini 里的键名是反着的
@@ -92,6 +90,10 @@ pub struct Preferences {
     /// 原版 `window_scale`：界面缩放倍率。`None` = 跟随系统 DPI，
     /// 也就是原版的出厂值 `display_get_dpi_x() / 96`（`get_default_window_scale.gml`）。
     pub window_scale: Option<f32>,
+    /// 端口自加（用户要求）：琴键面板独立缩放倍率，出厂 1.0。原版钢琴恒 1:1，
+    /// 不跟随 `window_scale`（工具栏 / 钢琴栏不随界面缩放）——这里同样独立，
+    /// 只在鼠标悬停琴键面板时用 Ctrl+滚轮 / Ctrl+± 调整。
+    pub piano_scale: f32,
     /// 原版 `window_icon`（出厂 0，`control_create.gml:59`）：真 = 用老图标换掉程序自带的图标。
     pub window_icon: bool,
     pub sounds_dir: Option<String>,
@@ -256,7 +258,6 @@ impl Default for Preferences {
             show_outofrange: true,
             fdark: false,
             accent: [0, 120, 212],
-            keys_to_show: 30,
             show_incompatible: true,
             fade: false,
             show_grid_lines: true,
@@ -268,6 +269,7 @@ impl Default for Preferences {
             // 原版 `control_create.gml:130`：refreshrate = 0，即 30 帧。
             refresh_rate: 0,
             window_scale: None,
+            piano_scale: 1.0,
             // 原版 `control_create.gml:59`：window_icon = 0，即用程序自带的图标。
             window_icon: false,
             sounds_dir: None,

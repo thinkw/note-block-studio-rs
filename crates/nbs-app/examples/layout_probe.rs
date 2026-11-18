@@ -217,9 +217,10 @@ fn report(mode: &str) {
     if mode == "no_piano" {
         println!("SKIP 钢琴            原版 `if (show_piano)` 收起时整块不画");
     } else {
-        // 1440 宽：keysshow = min(30, floor((1440-32)/39)) = 30，左端 x = floor((1440-1170)/2) = 135，
-        // 面板顶 = 900 - 状态栏 24 - 钢琴 130 = 746；默认 startkey = 27 - 15 = 12。
-        let (keys, x0, key_y) = (30usize, 135.0f32, 746.0f32);
+        // 1440 宽：keysshow = min(52, floor(1440/39)) = 36（端口偏离：横向占满，无 keysmax），
+        // 左端 x = floor((1440-1404)/2) = 18，面板顶 = 900 - 状态栏 24 - 钢琴 130 = 746；
+        // 默认 startkey = 27 - 18 = 9。
+        let (keys, x0, key_y) = (36usize, 18.0f32, 746.0f32);
         let mut wx: Vec<f32> = items
             .iter()
             .filter(|i| i.kind == "矩形" && near(i.w, 39.0) && near(i.h, 121.0) && near(i.y, key_y))
@@ -242,10 +243,10 @@ fn report(mode: &str) {
         bx.sort_by(f32::total_cmp);
         bx.dedup();
         mark(
-            bx.len() == 21,
+            bx.len() == 25,
             "黑键",
             &format!("{} 根 顶 y={:.0}", bx.len(), key_y - 7.0),
-            "21 根 25×71 顶 y=739（startkey 12 时有 8 根白键左侧无黑键）",
+            "25 根 25×71 顶 y=739（startkey 9 时有 11 根白键左侧无黑键）",
         );
         let names: Vec<&str> = items
             .iter()
@@ -253,10 +254,10 @@ fn report(mode: &str) {
             .map(|i| i.label.as_str())
             .collect();
         mark(
-            names.first().copied() == Some("F2") && names.last().copied() == Some("G6"),
+            names.first().copied() == Some("C2") && names.last().copied() == Some("C7"),
             "琴键音名",
             &format!("{} .. {}（{} 个）", names.first().copied().unwrap_or("?"), names.last().copied().unwrap_or("?"), names.len()),
-            "F2 .. G6（startkey 12、keysshow 30 的最左 / 最右白键）",
+            "C2 .. C7（startkey 9、keysshow 36 的最左 / 最右白键）",
         );
         let arrows: Vec<&str> = items
             .iter()

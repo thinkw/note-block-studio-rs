@@ -1712,35 +1712,6 @@ fn prefs_appearance(state: &mut EditorState, pg: &mut Page) {
     ) {
         state.emit(Command::ToggleFlag(Flag::ShowPiano));
     }
-    // 「最多显示键数」：琴键隐藏时同样退化成灰色静态数字（原版 `if (!show_piano) draw_set_color(c_gray)`）。
-    let ink = if piano { pg.ink() } else { ggray(128) };
-    pg.text(
-        pg.row(70.0, 328.0),
-        tr("Keys to show:", "最多显示键数:"),
-        PREFS_FONT,
-        ink,
-    );
-    let tip = tr(
-        "The amount of keys to show. A high number may\nslow down the program on old computers.",
-        "同屏显示的琴键数。过多可能会在老电脑上造成卡顿。",
-    );
-    pg.tip_area(70.0, 328.0, 150.0, 21.0, tip);
-    let keys = state.prefs.keys_to_show as i32;
-    let drag = pg.drag(
-        150.0,
-        328.0,
-        keys,
-        2.0,
-        20,
-        50,
-        !piano,
-        tip,
-        &mut state.prefs_drag,
-    );
-    if let Some(keys) = drag {
-        state.prefs.keys_to_show = keys.clamp(20, 50) as u8;
-        state.emit(Command::SavePreferences);
-    }
     let keys_rows = [
         (350.0, Flag::ShowKeyNames, "Show key names", "显示键名", "If the names of the keys should be shown.", "显示琴键所对应音的名称。"),
         (370.0, Flag::ShowKeyNumbers, "Show key numbers", "显示音符序号", "Whether to show the amount of right-clicks required\non each key inside the 2 octave range.", "在 2 八度内的琴键上显示需要按右键次数。"),

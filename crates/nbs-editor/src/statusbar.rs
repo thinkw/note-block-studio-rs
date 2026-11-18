@@ -4,11 +4,12 @@
 //! 实时 MIDI 输入我们还没有，那一列整列不画；状态栏消息（「已复制 3 个音符」这类）
 //! 借用这个位置显示，这样左边每一格都还落在原版坐标上。
 
-use egui::{pos2, vec2, Align2, Color32, Painter, Rect, Ui};
+use egui::{pos2, vec2, Align2, Color32, Painter, Rect, Sense, Stroke, StrokeKind, Ui};
 
+use crate::commands::Command;
 use crate::fonts::main_font;
 use crate::icons::Bank;
-use crate::state::EditorState;
+use crate::state::{EditorState, Flag};
 use crate::theme::{Theme, ThemeKind};
 use crate::tr;
 
@@ -16,6 +17,9 @@ use crate::tr;
 const TEXT_Y: f32 = 6.0;
 /// 原版分隔线在 `rh - 20`、长 18 → 比文本再高 2px。
 const SEP_Y: f32 = 4.0;
+/// 端口自加（用户要求）：最右侧琴键开关的尺寸。
+const TOGGLE_W: f32 = 42.0;
+const TOGGLE_H: f32 = 18.0;
 
 /// 走动的 `xx`：一格文本 + 推进量 + 分隔线 + 4px 间距，和原版每格的写法一一对应。
 struct Fields<'a> {
@@ -50,7 +54,7 @@ impl<'a> Fields<'a> {
     }
 }
 
-pub fn show_status_bar(state: &EditorState, ui: &mut Ui) {
+pub fn show_status_bar(state: &mut EditorState, ui: &mut Ui) {
     let th = state.theme.clone();
     let area = ui.max_rect();
     let p = ui.painter();
@@ -121,9 +125,44 @@ pub fn show_status_bar(state: &EditorState, ui: &mut Ui) {
         }
     }
 
+    // 端口自加（用户要求）：最右侧琴键开关。原版右端是 MIDI 设备名列
+    // （实时 MIDI 未接，消息借用该位置显示），开关占最右一段、消息向左让位。
+    let btn = Rect::from_min_size(
+        pos2(
+            area.max.x - TOGGLE_W - 4.0,
+            area.min.y + (24.0 - TOGGLE_H) / 2.0,
+        ),
+        vec2(TOGGLE_W, TOGGLE_H),
+    );
+    let resp = ui.allocate_rect(btn, Sense::click());
+    if resp.clicked() {
+        state.emit(Command::ToggleFlag(Flag::ShowPiano));
+    }
+    let on = state.flags.show_piano;
+    let (bg, fg) = if resp.hovered() {
+        (th.button_hover, th.text)
+    } else {
+        (th.button, if on { th.accent } else { th.text_dim })
+    };
+    let p = ui.painter();
+    p.rect_filled(btn, 3.0, bg);
+    p.rect_stroke(
+        btn,
+        3.0,
+        Stroke::new(1.0_f32, Color32::from_gray(128)),
+        StrokeKind::Inside,
+    );
+    p.text(
+        btn.center(),
+        Align2::CENTER_CENTER,
+        tr("Keys", "琴键").to_string(),
+        main_font(),
+        fg,
+    );
+
     if let Some(msg) = state.active_message() {
         p.text(
-            pos2(area.max.x - 6.0, area.min.y + TEXT_Y),
+            pos2(area.max.x - TOGGLE_W - 12.0, area.min.y + TEXT_Y),
             Align2::RIGHT_TOP,
             msg.to_string(),
             main_font(),

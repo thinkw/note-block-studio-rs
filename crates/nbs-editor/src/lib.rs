@@ -153,12 +153,15 @@ impl EditorState {
         let mut s = Self::new();
         s.prefs.theme = 3;
         s.prefs.remove_effect = true;
-        s.prefs.keys_to_show = 30;
         // 原版绝对像素的断言（键宽 40、步进 39、y = 746）只有在 1:1 界面上成立；
         // 用户存过 150% 的话整帧等比放大，一根琴键都筛不出来。无头用例里 egui 拿不到
         // 系统倍率（`native_pixels_per_point` 是每帧从平台层喂进来的，测试没喂 = 1.0），
         // 所以缩放这一档只剩 prefs.json 里存的这个值要钉。
         s.prefs.window_scale = Some(1.0);
+        // 琴键缩放同理钉 1.0：键宽 39、面板顶 746 这类绝对像素断言只在 1:1 琴键上
+        // 成立；本机 prefs.json 里实测琴键缩放留下的档位会漏进来（startkey 撞到
+        // 52 键上限的 1 而不是 9）。
+        s.prefs.piano_scale = 1.0;
         // 强调色也按出厂钉死：本机改过主题色的话，accent_base 相关断言会拿到
         // 用户的值（和 #67 同款的本机 prefs 泄漏）。
         s.prefs.accent = [0, 120, 212];
@@ -558,6 +561,348 @@ mod gui_window_tests {
         crate::fonts::warm_up(ctx, state.prefs.language);
         let _lock = frame_lock();
         ctx.run(input, |ctx| crate::show(ctx, state))
+    }
+
+    /// 原版图层名是常驻 `draw_text_edit`（内容宽 72）：超框字符断行后被框高裁掉，
+    /// 视觉上只显示放得下的前缀。非编辑态裸画文本没有框，长名会溢出压到音量/声像
+    /// 图标（验收 #82）；截断实现见 layers_panel 的 `clip_label`。
+    #[test]
+    fn long_layer_names_clip_before_the_volume_glyph() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        let mut song = nbs_core::model::Song::new();
+        song.layers[0].name = "Distortion Guitar - 高声部1".into();
+        song.layers.push(nbs_core::model::Layer {
+            name: "String Ensemble 2 - 低声部1".into(),
+            ..Default::default()
+        });
+        state.doc.replace_song(song);
+        let out = frame_out(&mut state, &ctx, base_input());
+        let row_texts: Vec<String> = out
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => {
+                    (t.galley.rect.left() < 100.0).then(|| t.galley.text().to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            row_texts.iter().any(|t| t.starts_with("Distortion G")),
+            "图层行名称应当已绘制（截断前缀）: {row_texts:?}"
+        );
+        assert!(
+            row_texts.iter().all(|t| !t.contains("高声部1")),
+            "长名要按原版 draw_text_edit 的 72px 截断，不许画全名压到音量/声像图标: {row_texts:?}"
+        );
+    }
+
+    /// 原版框选拖拽中（`control_draw.gml:323-341`）没有矩形虚线框：框内音符是
+    /// 「c 提高不透明度 + spr_block_sel 叠层」，松手后在原位画 c=1 + sel 叠层
+    /// （`selection_draw.gml:79-104`）。验收 #83 反馈「没有框 / 外观不对」：
+    /// 整帧驱动一次框选，断言框内每个音符格恰好多一张精灵（Mesh quad）叠层。
+    #[test]
+    fn box_select_drag_adds_one_sel_sprite_per_note_in_the_rect() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.window = None;
+        let mut song = nbs_core::model::Song::new();
+        song.set(0, 1, nbs_core::model::Note::new(0, 45));
+        song.set(1, 1, nbs_core::model::Note::new(0, 47));
+        song.set(2, 1, nbs_core::model::Note::new(0, 48));
+        state.doc.replace_song(song);
+
+        // egui 0.31 的精灵是 4 顶点 Mesh quad：按顶点包围盒中心对上格子。
+        fn mesh_bboxes(shape: &egui::Shape, out: &mut Vec<egui::Rect>) {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| mesh_bboxes(s, out)),
+                egui::Shape::Mesh(m) => {
+                    let (mut mn, mut mx) =
+                        (egui::pos2(f32::MAX, f32::MAX), egui::pos2(f32::MIN, f32::MIN));
+                    for v in &m.vertices {
+                        mn.x = mn.x.min(v.pos.x);
+                        mn.y = mn.y.min(v.pos.y);
+                        mx.x = mx.x.max(v.pos.x);
+                        mx.y = mx.y.max(v.pos.y);
+                    }
+                    out.push(egui::Rect::from_min_max(mn, mx));
+                }
+                _ => {}
+            }
+        }
+        fn sprite_count(out: &egui::FullOutput, cell: egui::Rect) -> usize {
+            let mut boxes = Vec::new();
+            for cs in &out.shapes {
+                mesh_bboxes(&cs.shape, &mut boxes);
+            }
+            boxes
+                .iter()
+                .filter(|r| r.center().distance(cell.center()) < 2.0)
+                .count()
+        }
+        fn moved(p: egui::Pos2) -> egui::Event {
+            egui::Event::PointerMoved(p)
+        }
+        fn button(pos: egui::Pos2, pressed: bool) -> egui::Event {
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            }
+        }
+
+        // 第一帧让布局落定，格子矩形从 viewport 现读。
+        let out = frame_out(&mut state, &ctx, base_input());
+        assert!(!out.shapes.is_empty());
+        let start = state.viewport.cell_rect(0, 3).center(); // 空白格：框选锚点
+        let end = state.viewport.cell_rect(5, 1).center(); // 空白格：拖到这
+        let cells: Vec<egui::Rect> = [(0i64, 1i64), (1, 1), (2, 1)]
+            .iter()
+            .map(|&(t, l)| state.viewport.cell_rect(t, l))
+            .collect();
+
+        // 基线：三个音符格各画了 N 张精灵（本体方块）。
+        let mut input = base_input();
+        input.events.push(moved(start));
+        let base = frame_out(&mut state, &ctx, input);
+        let baseline: Vec<usize> = cells.iter().map(|&c| sprite_count(&base, c)).collect();
+        assert!(
+            baseline.iter().all(|&n| n > 0),
+            "音符本体精灵应当先画出来: {baseline:?}"
+        );
+
+        // 按下（还在锚点上，未拖开）：不该有叠层。
+        let mut input = base_input();
+        input.events.push(moved(start));
+        input.events.push(button(start, true));
+        let press = frame_out(&mut state, &ctx, input);
+        let press_counts: Vec<usize> = cells.iter().map(|&c| sprite_count(&press, c)).collect();
+        assert_eq!(press_counts, baseline, "还没拖开不该有选区叠层");
+
+        // 拖开：进入框选，框内每个音符格恰好多一张 spr_block_sel。
+        let mut input = base_input();
+        input.events.push(moved(end));
+        let drag = frame_out(&mut state, &ctx, input);
+        let drag_counts: Vec<usize> = cells.iter().map(|&c| sprite_count(&drag, c)).collect();
+        assert!(
+            drag_counts.len() == baseline.len()
+                && drag_counts.iter().zip(&baseline).all(|(d, b)| *d == b + 1),
+            "框内每个音符格应恰好多一张 sel 叠层: drag {drag_counts:?} vs base {baseline:?}"
+        );
+
+        // 松手：音符抬进浮动选区，下一帧在原位仍各多一张叠层（原版 c=1 + salpha）。
+        let mut input = base_input();
+        input.events.push(button(end, false));
+        let _ = frame_out(&mut state, &ctx, input);
+        assert_eq!(state.doc.selection.len(), 3, "松手应抬出整框音符");
+        assert!(
+            !state.doc.song.has(0, 1) && !state.doc.song.has(1, 1) && !state.doc.song.has(2, 1),
+            "音符应从谱面抬出"
+        );
+        let mut input = base_input();
+        input.events.push(moved(end));
+        let float = frame_out(&mut state, &ctx, input);
+        let float_counts: Vec<usize> = cells.iter().map(|&c| sprite_count(&float, c)).collect();
+        assert!(
+            float_counts.len() == baseline.len()
+                && float_counts.iter().zip(&baseline).all(|(f, b)| *f == b + 1),
+            "浮选区原位仍应各多一张叠层: float {float_counts:?} vs base {baseline:?}"
+        );
+    }
+
+    /// 原版 `control_draw.gml:903-922`：拖框时画半透明矩形——加选蓝（Fluent 主题
+    /// 是亮蓝 14120960=RGB(0,127,215)）、减选红，填充 α0.25 + 1px 描边；
+    /// 矩形从按下像素拉到当前鼠标，松手 / 未拖开不画。验收 #87 反馈「原版有选择框」。
+    #[test]
+    fn box_select_drag_draws_the_transparent_selection_rectangle() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.window = None;
+        let _ = frame_out(&mut state, &ctx, base_input());
+
+        let start = state.viewport.cell_rect(2, 4).center();
+        let end = state.viewport.cell_rect(9, 2).center();
+
+        fn moved(p: egui::Pos2) -> egui::Event {
+            egui::Event::PointerMoved(p)
+        }
+        fn press(p: egui::Pos2, secondary: bool) -> egui::Event {
+            egui::Event::PointerButton {
+                pos: p,
+                button: if secondary {
+                    egui::PointerButton::Secondary
+                } else {
+                    egui::PointerButton::Primary
+                },
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            }
+        }
+        fn rect_fills(out: &egui::FullOutput) -> Vec<(egui::Rect, egui::Color32)> {
+            fn walk(shape: &egui::Shape, out: &mut Vec<(egui::Rect, egui::Color32)>) {
+                match shape {
+                    egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                    egui::Shape::Rect(r) => out.push((r.rect, r.fill)),
+                    _ => {}
+                }
+            }
+            let mut v = Vec::new();
+            for cs in &out.shapes {
+                walk(&cs.shape, &mut v);
+            }
+            v
+        }
+        let blue = egui::Color32::from_rgba_unmultiplied(0, 127, 215, 64);
+        let red = egui::Color32::from_rgba_unmultiplied(255, 0, 0, 64);
+
+        // 按下未拖开：无矩形。
+        let mut input = base_input();
+        input.events.push(moved(start));
+        input.events.push(press(start, false));
+        let press_out = frame_out(&mut state, &ctx, input);
+        assert!(
+            !rect_fills(&press_out).iter().any(|&(_, c)| c == blue),
+            "按下未拖开不该有选择框"
+        );
+
+        // 左键拖开：蓝色半透明矩形，从按下像素拉到当前鼠标。
+        let mut input = base_input();
+        input.events.push(moved(end));
+        let drag = frame_out(&mut state, &ctx, input);
+        let fills = rect_fills(&drag);
+        let rect = fills
+            .iter()
+            .find(|&&(_, c)| c == blue)
+            .map(|&(r, _)| r)
+            .unwrap_or_else(|| panic!("拖动中应有蓝色选择框: {fills:?}"));
+        assert!(
+            rect.width() > 32.0 && rect.height() > 32.0,
+            "矩形应跨多格: {rect:?}"
+        );
+        assert!(
+            (rect.min.x - start.x.min(end.x)).abs() < 1.0
+                && (rect.max.x - start.x.max(end.x)).abs() < 1.0
+                && (rect.min.y - start.y.min(end.y)).abs() < 1.0
+                && (rect.max.y - start.y.max(end.y)).abs() < 1.0,
+            "矩形从按下像素拉到当前鼠标: {rect:?} vs {start:?}..{end:?}"
+        );
+
+        // 松开左键收掉加选框（egui 按键状态跨帧保留，不松手 mode 会一直占着
+        // BoxSelect，右键进不了框选——真机操作也是拖完必松手）。
+        let mut input = base_input();
+        input.events.push(egui::Event::PointerButton {
+            pos: end,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        });
+        let _ = frame_out(&mut state, &ctx, input);
+
+        // 右键拖开：红色减选框。
+        let mut input = base_input();
+        input.events.push(moved(start));
+        input.events.push(press(start, true));
+        let _ = frame_out(&mut state, &ctx, input);
+        let mut input = base_input();
+        input.events.push(moved(end));
+        let sub = frame_out(&mut state, &ctx, input);
+        assert!(
+            rect_fills(&sub).iter().any(|&(_, c)| c == red),
+            "右键拖动应有红色减选框: {:?}",
+            rect_fills(&sub)
+        );
+
+        // 松开右键收掉减选框。
+        let mut input = base_input();
+        input.events.push(egui::Event::PointerButton {
+            pos: end,
+            button: egui::PointerButton::Secondary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        });
+        let _ = frame_out(&mut state, &ctx, input);
+
+        // 两键都已松手：矩形消失。
+        let mut input = base_input();
+        input.events.push(moved(end));
+        let after = frame_out(&mut state, &ctx, input);
+        assert!(
+            !rect_fills(&after)
+                .iter()
+                .any(|&(_, c)| c == blue || c == red),
+            "松手后不再有选择框"
+        );
+    }
+
+    /// 端口自加（用户要求）：状态栏最右侧的「琴键」开关切换 `flags.show_piano`。
+    /// 顺带钉两条配套行为：琴键开着时每帧上报 `piano_rect`（快捷键悬停路由用），
+    /// 关掉后下一帧矩形清空（悬停原琴键位置不再走琴键缩放档）。
+    #[test]
+    fn status_bar_keys_toggle_flips_show_piano_and_reports_the_piano_rect() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.window = None;
+        assert!(state.flags.show_piano, "出厂应显示琴键");
+
+        // 第一帧布局落定：琴键面板上报矩形，且应紧贴最底那条状态栏的上方。
+        let _ = frame_out(&mut state, &ctx, base_input());
+        let piano = state.piano_rect.expect("琴键开着时每帧要有 piano_rect");
+        assert!(
+            piano.max.y < 900.0,
+            "琴键面板应在状态栏（最底条）上方，不该贴到窗口底: {piano:?}"
+        );
+
+        // 开关在状态栏最右：距右缘 4、宽 42，中点 x = 1440-46+21；y 取状态栏中点。
+        let at = egui::pos2(1440.0 - 42.0 - 4.0 + 21.0, piano.max.y + 12.0);
+        let press = |state: &mut EditorState| {
+            let mut input = base_input();
+            input.events.push(egui::Event::PointerMoved(at));
+            input.events.push(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            });
+            let _ = frame_out(state, &ctx, input);
+        };
+        let release = |state: &mut EditorState| {
+            let mut input = base_input();
+            input.events.push(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            });
+            let _ = frame_out(state, &ctx, input);
+        };
+
+        press(&mut state);
+        assert!(state.flags.show_piano, "只按下不该翻转");
+        release(&mut state);
+        assert!(!state.flags.show_piano, "松手应关掉琴键");
+        let _ = frame_out(&mut state, &ctx, base_input());
+        assert!(
+            state.piano_rect.is_none(),
+            "琴键关掉后 piano_rect 要清空，悬停原位置不能再走琴键缩放档"
+        );
+
+        press(&mut state);
+        release(&mut state);
+        assert!(state.flags.show_piano, "再点一次要开回来");
+        let _ = frame_out(&mut state, &ctx, base_input());
+        assert!(state.piano_rect.is_some(), "重新打开后矩形要恢复上报");
     }
 
     /// 帮助菜单倒数第二条（原版 `control_draw.gml:1783/1878` 的 `Changelist...` /
@@ -3278,7 +3623,7 @@ mod gui_piano_tests {
     }
 
     /// 这几条用例断言的是原版默认界面，用 `for_test()` 把界面档位钉回出厂值
-    /// （钢琴、琴键标注、30 根键、1:1 缩放），用户盘里存过什么都不影响。
+    /// （钢琴、琴键标注、1:1 缩放），用户盘里存过什么都不影响。
     fn piano_state() -> EditorState {
         let mut state = EditorState::for_test();
         // 开机流程会开欢迎窗；钢琴测试断言整帧的形状/贴图，欢迎窗和它最近的
@@ -3319,7 +3664,8 @@ mod gui_piano_tests {
     }
 
     /// 原版：白键步进 39、顶边在 `rh - 154`，整排居中；黑键画在左边 19px、上边 7px 处。
-    /// 1440 宽时 `keysshow = min(30, floor((1440-32)/39)) = 30`，左边留 (1440-1170)/2 = 135。
+    /// 端口偏离（用户要求）：琴键横向占满——keysshow = min(52, floor(1440/39)) = 36，
+    /// startkey = 27 - 18 = 9，左端 x0 = floor((1440-1404)/2) = 18。
     #[test]
     fn piano_uses_the_original_fixed_key_geometry() {
         let ctx = egui::Context::default();
@@ -3339,9 +3685,9 @@ mod gui_piano_tests {
             .collect();
         whites.sort_by(|a, b| a.total_cmp(b));
         whites.dedup();
-        assert_eq!(whites.len(), 30, "白键应当是 30 根，实际 {}", whites.len());
-        assert_eq!(whites.first().copied(), Some(135.0));
-        assert_eq!(whites.last().copied(), Some(135.0 + 29.0 * 39.0));
+        assert_eq!(whites.len(), 36, "白键应当是 36 根，实际 {}", whites.len());
+        assert_eq!(whites.first().copied(), Some(18.0));
+        assert_eq!(whites.last().copied(), Some(18.0 + 35.0 * 39.0));
 
         let mut blacks: Vec<f32> = quads
             .iter()
@@ -3354,21 +3700,57 @@ mod gui_piano_tests {
             .collect();
         blacks.sort_by(|a, b| a.total_cmp(b));
         blacks.dedup();
-        // 30 根白键里有 8 根的左边没有黑键（C、F 以及最左那根），所以是 21 根黑键。
-        assert_eq!(blacks.len(), 21, "黑键应当是 21 根，实际 {}", blacks.len());
+        // 36 根白键里有 11 根的左边没有黑键（C、F 以及最左那根），所以是 25 根黑键。
+        assert_eq!(blacks.len(), 25, "黑键应当是 25 根，实际 {}", blacks.len());
         // 黑键画在白键左缘再往左 19px 处。
-        assert_eq!(blacks.first().copied(), Some(135.0 + 39.0 - 19.0));
+        assert_eq!(blacks.first().copied(), Some(18.0 + 39.0 - 19.0));
 
         let t = texts(&out);
         assert!(
-            t.iter().any(|s| s == "F2"),
-            "最左白键是 20 号键 = F2，实际文本 {t:?}"
+            t.iter().any(|s| s == "C2"),
+            "最左白键是 16 号键 = C2，实际文本 {t:?}"
         );
-        assert!(t.iter().any(|s| s == "G6"), "最右白键是 70 号键 = G6");
+        assert!(t.iter().any(|s| s == "C7"), "最右白键是 76 号键 = C7");
         assert!(
             !t.iter().any(|s| s == "<" || s == ">"),
             "原版没有翻页按钮，界面上不该出现 < 或 >"
         );
+    }
+
+    /// 偏离原版（用户要求）：琴键横向占满——显示到放不下为止，不再有
+    /// 「同屏显示的琴键数」（原版 keysmax）上限。1000 宽：keysshow =
+    /// min(52, floor(1000/39)) = 25，startkey = 27 - 12 = 15，x0 = floor((1000-975)/2) = 12。
+    #[test]
+    fn the_piano_fills_the_panel_width_without_a_keys_to_show_cap() {
+        let ctx = egui::Context::default();
+        let mut state = piano_state();
+        run(&mut state, &ctx, input());
+        let mut input = input();
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(1000.0, 900.0),
+        ));
+        run(&mut state, &ctx, input.clone());
+        let out = run(&mut state, &ctx, input);
+        let quads = images(&out);
+        let mut whites: Vec<f32> = quads
+            .iter()
+            .filter(|r| {
+                (r.width() - 40.0).abs() < 0.6
+                    && (r.height() - 121.0).abs() < 0.6
+                    && (r.min.y - 746.0).abs() < 0.6
+            })
+            .map(|r| r.min.x)
+            .collect();
+        whites.sort_by(|a, b| a.total_cmp(b));
+        whites.dedup();
+        assert_eq!(
+            whites.len(),
+            25,
+            "1000 宽应显示 25 根白键，实际 {}",
+            whites.len()
+        );
+        assert_eq!(whites.first().copied(), Some(12.0));
     }
 
     /// 原版按下琴键即选中并把力度 / 平衡 / 音高偏移复位成 100 / 100 / 0。
@@ -3381,7 +3763,7 @@ mod gui_piano_tests {
         state.current.pitch = 30;
         run(&mut state, &ctx, input());
         let mut press = input();
-        let p = egui::pos2(150.0, 800.0);
+        let p = egui::pos2(30.0, 800.0);
         press.events.push(egui::Event::PointerMoved(p));
         press.events.push(egui::Event::PointerButton {
             pos: p,
@@ -3390,7 +3772,7 @@ mod gui_piano_tests {
             modifiers: Default::default(),
         });
         run(&mut state, &ctx, press);
-        assert_eq!(state.current.key, 20, "最左白键是 20 号键");
+        assert_eq!(state.current.key, 15, "最左白键是 15 号键（C2）");
         assert_eq!(state.current.velocity, 100);
         assert_eq!(state.current.panning, 100);
         assert_eq!(state.current.pitch, 0);
@@ -3403,12 +3785,12 @@ mod gui_piano_tests {
         let mut state = piano_state();
         run(&mut state, &ctx, input());
         let start = state.piano_start;
-        assert_eq!(start, 12, "默认 startkey = 27 - keysshow/2");
+        assert_eq!(start, 9, "默认 startkey = 27 - keysshow/2（keysshow=36）");
 
         let mut hover = input();
         hover
             .events
-            .push(egui::Event::PointerMoved(egui::pos2(150.0, 800.0)));
+            .push(egui::Event::PointerMoved(egui::pos2(30.0, 800.0)));
         for _ in 0..60 {
             run(&mut state, &ctx, hover.clone());
         }
@@ -3419,13 +3801,19 @@ mod gui_piano_tests {
         );
 
         let mut state = piano_state();
-        run(&mut state, &ctx, input());
+        // 同一个 Context 复用：上一阶段指针停在 (30,800)（最左白键），warm 帧
+        // 会接着左移一格，先把指针挪出琴键区再取基准值。
+        let mut warm = input();
+        warm
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(640.0, 200.0)));
+        run(&mut state, &ctx, warm);
         let start = state.piano_start;
         let mut hover = input();
-        // 最右一根白键：x = 135 + 29*39 = 1266，宽 39。
+        // 最右一根白键：x = 18 + 35×39 = 1383，宽 39（占满后的 36 键布局）。
         hover
             .events
-            .push(egui::Event::PointerMoved(egui::pos2(1280.0, 800.0)));
+            .push(egui::Event::PointerMoved(egui::pos2(1400.0, 800.0)));
         for _ in 0..60 {
             run(&mut state, &ctx, hover.clone());
         }
