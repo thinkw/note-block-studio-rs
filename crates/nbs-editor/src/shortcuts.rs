@@ -166,24 +166,6 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
                 if p(Key::P) {
                     out.push(Command::ShowWindow(WindowKind::Preferences));
                 }
-                if p(Key::Num0) {
-                    out.push(Command::WindowScaleReset);
-                }
-                if p(Key::Plus) || p(Key::Equals) {
-                    out.push(Command::WindowScaleUp);
-                }
-                if p(Key::Minus) {
-                    out.push(Command::WindowScaleDown);
-                }
-                // 原版把滚轮和 187/189（+ / -）写在同一个条件里：`mouse_wheel_up()` 也算放大。
-                if ctrl {
-                    let wheel = i.raw_scroll_delta.y;
-                    if wheel > 0.0 {
-                        out.push(Command::WindowScaleUp);
-                    } else if wheel < 0.0 {
-                        out.push(Command::WindowScaleDown);
-                    }
-                }
 
                 // `mode_action(1..4)`：E / D 走大步，R / F 走 ±1。音高模式的大步是一个
                 // 八度（12 半音），力度 / 声像 / 微调三种模式源码里都写的是 10。
@@ -236,6 +218,27 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
                         EditMode::Pitch => out.push(Command::BatchPitch(0)),
                     }
                 }
+            }
+        }
+
+        // ---- 缩放快捷键：原版写在 `playing = 0` 里（control_draw.gml:732-751 在
+        // :709 的总闸内），播放中按不动；按用户要求放开为播放中也可用（有意偏离）。
+        // 原版把滚轮和 187/189（+ / -）写在同一个条件里：`mouse_wheel_up()` 也算放大。
+        if p(Key::Num0) {
+            out.push(Command::WindowScaleReset);
+        }
+        if p(Key::Plus) || p(Key::Equals) {
+            out.push(Command::WindowScaleUp);
+        }
+        if p(Key::Minus) {
+            out.push(Command::WindowScaleDown);
+        }
+        if ctrl {
+            let wheel = i.raw_scroll_delta.y;
+            if wheel > 0.0 {
+                out.push(Command::WindowScaleUp);
+            } else if wheel < 0.0 {
+                out.push(Command::WindowScaleDown);
             }
         }
 

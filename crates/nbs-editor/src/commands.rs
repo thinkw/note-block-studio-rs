@@ -99,7 +99,8 @@ pub enum Command {
     SetPan(i32),
     SetPit(i32),
     /// 原版 `control_draw.gml:736-751`：Ctrl+滚轮 / Ctrl+± 沿固定档位改整窗口缩放
-    /// （`window_scale`），网格本身恒 32px。
+    /// （`window_scale`）。端口按用户要求只缩画布：倍率落到 `viewport.scale`
+    /// （每格 `32 × scale` px），菜单 / 工具栏 / 状态栏 / 钢琴栏不动。
     WindowScaleUp,
     WindowScaleDown,
     /// 原版 `control_draw.gml:732-735`：Ctrl+0 回到出厂缩放 `get_default_window_scale()`。
@@ -2956,22 +2957,28 @@ mod tests {
         }
     }
 
-    /// 原版 `control_draw.gml:11-12`：窗口物理尺寸不变、逻辑分辨率除以 `window_scale`，
-    /// 等价于 egui 的 `pixels_per_point`。`None`（出厂值 = 系统 DPI / 96）就是 1.0。
+    /// 缩放语义按用户要求改过（#80）：原版 `window_scale` 连 chrome 一起缩
+    /// （`control_draw.gml:11-12` 的 rw/rh 除以缩放），端口只缩画布 —— 倍率落到
+    /// `viewport.scale`（每格 `32 × scale` px），egui 的 `pixels_per_point` 不再被动。
     #[test]
-    fn window_scale_pref_drives_pixels_per_point() {
+    fn window_scale_pref_drives_viewport_scale_not_zoom() {
         let ctx = Context::default();
         let mut state = state_with(Song::new());
         state.prefs.window_scale = Some(2.0);
-        // 缩放要下一帧才生效（egui 在 begin_pass 里消费 new_zoom_factor），原版也是下一帧重算 rw/rh。
         let _ = ctx.run(raw_input(), |c| state.tick_transport(c));
         let out = ctx.run(raw_input(), |c| state.tick_transport(c));
-        assert_eq!(out.pixels_per_point, 2.0, "200% 就是每点 2 物理像素");
+        assert_eq!(
+            out.pixels_per_point, 1.0,
+            "chrome 保持系统原生尺寸，不动 zoom"
+        );
+        assert_eq!(state.viewport.scale, 2.0, "倍率落到画布");
+        assert_eq!(state.viewport.cell(), 64.0, "每格 32 × scale px");
         // 「重置」存回 None，必须真的退回系统倍率，不然按下去没反应。
         state.prefs.window_scale = None;
         let _ = ctx.run(raw_input(), |c| state.tick_transport(c));
         let out = ctx.run(raw_input(), |c| state.tick_transport(c));
-        assert_eq!(out.pixels_per_point, 1.0, "重置后要退回出厂缩放");
+        assert_eq!(out.pixels_per_point, 1.0);
+        assert_eq!(state.viewport.scale, 1.0, "重置后画布退回出厂缩放");
     }
 
     /// 原版 `control_draw.gml:736-751` 的那串 `else if`：Ctrl+滚轮 / Ctrl+± 只能停在

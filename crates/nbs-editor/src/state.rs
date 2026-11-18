@@ -1582,16 +1582,13 @@ impl EditorState {
         );
     }
 
-    /// 原版 `control_draw.gml:11-12`：`rw = 窗口物理宽 / window_scale` —— 窗口尺寸不动，
-    /// 逻辑分辨率变小，等于整块界面变大。egui 的 `pixels_per_point` 就是同一个数，
-    /// 而 `zoom_factor` 是「相对系统 DPI 的倍率」，所以出厂值（`None`）对应 1.0。
-    fn apply_ui_scale(&self, ctx: &Context) {
+    /// 缩放语义按用户要求改过：原版 `control_draw.gml:11-12` 的 `window_scale`
+    /// 连 chrome 一起缩（GM 画面整体放大），端口只缩画布 —— 倍率落到
+    /// `viewport.scale`（每格 `32 × scale` px），egui 的 zoom_factor 不再被动，
+    /// 菜单 / 工具栏 / 状态栏 / 钢琴栏保持系统原生尺寸。
+    fn apply_ui_scale(&mut self, ctx: &Context) {
         let native = ctx.native_pixels_per_point().unwrap_or(1.0);
-        let want = self.prefs.effective_scale(native) / native;
-        // 拖动落点是整数百分比，和系统倍率比对时留一点余量，避免每帧都重设。
-        if (ctx.zoom_factor() - want).abs() > 0.001 {
-            ctx.set_zoom_factor(want);
-        }
+        self.viewport.scale = self.prefs.effective_scale(native) / native;
     }
 
     /// 原版 `control_draw.gml:736-751`：Ctrl+滚轮 / Ctrl+± 把 `window_scale` 推到

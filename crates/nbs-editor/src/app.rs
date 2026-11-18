@@ -4,13 +4,15 @@
 use egui::{Context, Frame};
 
 use crate::grid::show_grid;
-use crate::layers_panel::{show_layers_panel, PANEL_WIDTH};
+use crate::layers_panel::show_layers_panel;
 use crate::piano::show_piano;
 use crate::shortcuts::collect_shortcuts;
 use crate::state::EditorState;
 use crate::statusbar::show_status_bar;
 use crate::toolbar::{show_menu_bar, show_toolbar};
-use crate::viewport::{MENU_HEIGHT, PIANO_HEIGHT, STATUS_HEIGHT, TOOLBAR_HEIGHT};
+use crate::viewport::{
+    LAYER_PANEL_WIDTH, MENU_HEIGHT, PIANO_HEIGHT, STATUS_HEIGHT, TOOLBAR_HEIGHT,
+};
 use crate::windows::show_windows;
 
 /// 原版界面全是绝对像素坐标，面板默认的 8×4 内边距会把每个按钮都推歪，
@@ -90,7 +92,7 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
     if state.flags.show_layers {
         egui::SidePanel::left("nbs_layers")
             .frame(tight())
-            .exact_width(PANEL_WIDTH)
+            .exact_width(LAYER_PANEL_WIDTH * state.viewport.scale)
             .show(ctx, |ui| show_layers_panel(state, ui));
     }
 

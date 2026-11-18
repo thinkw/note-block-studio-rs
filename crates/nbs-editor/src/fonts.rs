@@ -80,6 +80,12 @@ pub fn info_big_font() -> FontId {
     FontId::new(INFO_BIG_SIZE, bold_family())
 }
 
+/// 画布缩放下的字号：网格 / 图层面板里的字随 `Viewport::scale` 放大，
+/// chrome（工具栏、钢琴栏、窗口）保持原字号不缩放。
+pub fn scaled(id: FontId, scale: f32) -> FontId {
+    FontId::new(id.size * scale, id.family)
+}
+
 /// 与图标同一套搜索顺序：可执行文件旁 → 工作目录，按相对层级往上找 `assets/fonts`，
 /// 不把编译期绝对路径写进二进制。
 fn font_root() -> Option<PathBuf> {

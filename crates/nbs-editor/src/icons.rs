@@ -594,10 +594,11 @@ impl Bank {
         }
     }
 
-    /// 原版 `draw_layericon()`：图层行里的 16×16 按钮。
+    /// 原版 `draw_layericon()`：图层行里的 16×16 按钮（尺寸乘 `scale`）。
     /// `row` 用来给每行的同一个按钮生成不同的 widget id。
     /// 返回值对应原版的 `mouse_entered || (a && mouse_check_button_pressed)`：
     /// 按下那一刻、或按住左键从别的行划进来都算一次触发（原版靠这个跨行批量操作）。
+    #[allow(clippy::too_many_arguments)]
     pub fn layer_button(
         &self,
         ui: &mut egui::Ui,
@@ -607,8 +608,10 @@ impl Bank {
         tooltip: &str,
         pressed: bool,
         th: &Theme,
+        scale: f32,
     ) -> bool {
-        let rect = Rect::from_min_size(at, Vec2::splat(LAYER_ICON));
+        let size = Vec2::splat(LAYER_ICON * scale);
+        let rect = Rect::from_min_size(at, size);
         let id = Id::new(("layericon", index, row));
         let resp = ui.interact(rect, id, Sense::click_and_drag());
         let hovered = resp.hovered();
@@ -623,36 +626,53 @@ impl Bank {
         }
         let state = pointer_state(hovered, hovered && down);
         let p = ui.painter();
-        self.frame4.blit(p, at, Self::base(th.kind) + if pressed { 2 } else { state }, Vec2::splat(LAYER_ICON), Color32::WHITE);
-        let push = if state == 2 || pressed { Vec2::splat(1.0) } else { Vec2::ZERO };
+        self.frame4.blit(p, at, Self::base(th.kind) + if pressed { 2 } else { state }, size, Color32::WHITE);
+        let push = if state == 2 || pressed { Vec2::splat(scale) } else { Vec2::ZERO };
         let at = at + push;
         if th.kind == ThemeKind::Fluent {
-            self.layer_fluent.blit(p, at, index + 9, Vec2::splat(LAYER_ICON), Color32::WHITE);
-            self.layer_fluent.blit(p, at, index + 18, Vec2::splat(LAYER_ICON), th.accent);
+            self.layer_fluent.blit(p, at, index + 9, size, Color32::WHITE);
+            self.layer_fluent.blit(p, at, index + 18, size, th.accent);
         } else {
             // 原版：非 Fluent 用 c_black，暗黑主题用 c_white，透明度 0.7。
-            self.layer.blit(p, at, index, Vec2::splat(LAYER_ICON), glyph_tint(th, 0.7));
+            self.layer.blit(p, at, index, size, glyph_tint(th, 0.7));
         }
         resp.on_hover_text(tooltip);
         entered || (hovered && press_now)
     }
 
-    /// 原版 `draw_macroicon()`：宏条里的 16×16 按钮（间距 25）。
-    pub fn macro_button(&self, ui: &mut egui::Ui, at: Pos2, index: usize, tooltip: &str, th: &Theme) -> bool {
-        let rect = Rect::from_min_size(at, Vec2::splat(LAYER_ICON));
+    /// 原版 `draw_macroicon()`：宏条里的 16×16 按钮（间距 25，尺寸乘 `scale`）。
+    pub fn macro_button(
+        &self,
+        ui: &mut egui::Ui,
+        at: Pos2,
+        index: usize,
+        tooltip: &str,
+        th: &Theme,
+        scale: f32,
+    ) -> bool {
+        let size = Vec2::splat(LAYER_ICON * scale);
+        let rect = Rect::from_min_size(at, size);
         let (resp, holding) = Self::ptr(ui, rect, Id::new(("macroicon", index, tooltip)));
         let state = pointer_state(resp.hovered(), holding);
         let p = ui.painter();
-        self.frame4.blit(p, at, Self::base(th.kind) + state, Vec2::splat(LAYER_ICON), Color32::WHITE);
-        let push = if state == 2 { Vec2::splat(1.0) } else { Vec2::ZERO };
-        self.macro_ikon.blit(p, at + push, index, Vec2::splat(LAYER_ICON), glyph_tint(th, 0.7));
+        self.frame4.blit(p, at, Self::base(th.kind) + state, size, Color32::WHITE);
+        let push = if state == 2 { Vec2::splat(scale) } else { Vec2::ZERO };
+        self.macro_ikon.blit(p, at + push, index, size, glyph_tint(th, 0.7));
         resp.on_hover_text(tooltip).clicked()
     }
 
-    /// 原版 `spr_volume[a / 30]`（12×10），悬停时字形上移 5px。
-    pub fn volume_glyph(&self, p: &egui::Painter, at: Pos2, value: u8, hovered: bool, th: &Theme) {
-        let at = at - Vec2::new(0.0, if hovered { 5.0 } else { 0.0 });
-        let size = Vec2::new(GLYPH_W, GLYPH_H);
+    /// 原版 `spr_volume[a / 30]`（12×10），悬停时字形上移 5px；尺寸乘 `scale`。
+    pub fn volume_glyph(
+        &self,
+        p: &egui::Painter,
+        at: Pos2,
+        value: u8,
+        hovered: bool,
+        th: &Theme,
+        scale: f32,
+    ) {
+        let at = at - Vec2::new(0.0, if hovered { 5.0 * scale } else { 0.0 });
+        let size = Vec2::new(GLYPH_W * scale, GLYPH_H * scale);
         if th.kind == ThemeKind::Fluent {
             // 原版 Fluent 用 `!fdark` 那一帧当底，再叠一格强调色进度。
             self.volume_fluent.blit(p, at, if th.dark { 0 } else { 1 }, size, Color32::WHITE);
@@ -662,10 +682,18 @@ impl Bank {
         }
     }
 
-    /// 原版 `spr_stereo[a / 50]`（12×10），悬停时字形上移 5px。
-    pub fn stereo_glyph(&self, p: &egui::Painter, at: Pos2, value: u8, hovered: bool, th: &Theme) {
-        let at = at - Vec2::new(0.0, if hovered { 5.0 } else { 0.0 });
-        let size = Vec2::new(GLYPH_W, GLYPH_H);
+    /// 原版 `spr_stereo[a / 50]`（12×10），悬停时字形上移 5px；尺寸乘 `scale`。
+    pub fn stereo_glyph(
+        &self,
+        p: &egui::Painter,
+        at: Pos2,
+        value: u8,
+        hovered: bool,
+        th: &Theme,
+        scale: f32,
+    ) {
+        let at = at - Vec2::new(0.0, if hovered { 5.0 * scale } else { 0.0 });
+        let size = Vec2::new(GLYPH_W * scale, GLYPH_H * scale);
         if th.kind == ThemeKind::Fluent {
             self.stereo_fluent.blit(p, at, if th.dark { 0 } else { 1 }, size, Color32::WHITE);
             self.stereo_fluent.blit(p, at, (value / 50) as usize + 2, size, th.accent);
@@ -675,13 +703,19 @@ impl Bank {
     }
 
     /// 原版 `spr_tempobox`：0/1 = 经典 t/s / BPM，2/3 = Fluent t/s / BPM，4/5 = Fluent 暗黑。
-    /// 框体固定 74×22，不跟网格缩放。
-    pub fn tempo_box(&self, p: &egui::Painter, at: Pos2, bpm: bool, th: &Theme) {
+    /// 原生 74×22，尺寸乘 `scale`（缩放后跟图层栏其他内容一起放大）。
+    pub fn tempo_box(&self, p: &egui::Painter, at: Pos2, bpm: bool, th: &Theme, scale: f32) {
         let base = match th.kind {
             ThemeKind::Fluent => 2 + if th.dark { 2 } else { 0 },
             _ => 0,
         };
-        self.tempobox.draw(p, at, base + bpm as usize, Color32::WHITE);
+        self.tempobox.blit(
+            p,
+            at,
+            base + bpm as usize,
+            Vec2::new(self.tempobox.fw * scale, self.tempobox.fh * scale),
+            Color32::WHITE,
+        );
     }
 
     /// 原版 `spr_layerbox` 的行底：0 经典浅色、1 经典暗黑、2/3 Fluent 浅/深。
@@ -843,30 +877,47 @@ impl Bank {
     }
 
     /// 原版 `draw_sound_stopper_guide`：把 `spr_wall` 那一行渐变纵向拉成一条带子。
-    /// 精灵原点 x = 1，所以贴图横坐标是 `_x - 1 - 1`；原版手工裁 source 矩形来避开编辑器左边界，
-    /// 我们交给 egui 的图层裁剪，画出来的像素一样。
-    pub fn stopper_wall(&self, p: &egui::Painter, cell_left: f32, top: f32, height: f32, dark: bool) {
-        let at = pos2(cell_left - 2.0, top);
-        let size = Vec2::new(self.wall.fw, height);
+    /// 精灵原点 x = 1，所以贴图横坐标是 `_x - 1 - 1`（偏移乘 `scale`）；原版手工裁
+    /// source 矩形来避开编辑器左边界，我们交给 egui 的图层裁剪，画出来的像素一样。
+    pub fn stopper_wall(
+        &self,
+        p: &egui::Painter,
+        cell_left: f32,
+        top: f32,
+        height: f32,
+        dark: bool,
+        scale: f32,
+    ) {
+        let at = pos2(cell_left - 2.0 * scale, top);
+        let size = Vec2::new(self.wall.fw * scale, height);
         self.wall.blit(p, at, dark as usize, size, Color32::WHITE);
     }
 
     /// 原版 `draw_area(x1, y1, x2, y2)` 的非 hires 分支：`spr_interface1` 的
     /// 0/2/4/6 帧是四个角，1/3/5/7 是左/下/右/上边，每个主题占 8 帧（Fluent 深色再 +8）。
-    pub fn area(&self, p: &egui::Painter, r: Rect, th: &Theme) {
+    /// 角/边的 2px 随 `scale` 走（BPM 盒在缩放画面里整个等比放大）。
+    pub fn area(&self, p: &egui::Painter, r: Rect, th: &Theme, scale: f32) {
         let f = 8 * theme_index(th.kind)
             + 8 * (th.kind == ThemeKind::Fluent && th.fdark) as usize;
-        let corner = Vec2::splat(2.0);
+        let corner = Vec2::splat(2.0 * scale);
+        let c2 = 2.0 * scale;
         self.interface.blit(p, pos2(r.min.x, r.min.y), f, corner, Color32::WHITE);
-        self.interface.blit(p, pos2(r.min.x, r.max.y - 2.0), f + 2, corner, Color32::WHITE);
-        self.interface.blit(p, pos2(r.max.x - 2.0, r.max.y - 2.0), f + 4, corner, Color32::WHITE);
-        self.interface.blit(p, pos2(r.max.x - 2.0, r.min.y), f + 6, corner, Color32::WHITE);
-        let mid_v = Vec2::new(2.0, ((r.height() - 4.0).max(0.0)) / 2.0);
-        self.interface.blit(p, pos2(r.min.x, r.min.y + 2.0), f + 1, mid_v, Color32::WHITE);
-        self.interface.blit(p, pos2(r.max.x - 2.0, r.min.y + 2.0), f + 5, mid_v, Color32::WHITE);
-        let mid_h = Vec2::new(((r.width() - 4.0).max(0.0)) / 2.0, 2.0);
-        self.interface.blit(p, pos2(r.min.x + 2.0, r.max.y - 2.0), f + 3, mid_h, Color32::WHITE);
-        self.interface.blit(p, pos2(r.min.x + 2.0, r.min.y), f + 7, mid_h, Color32::WHITE);
+        self.interface
+            .blit(p, pos2(r.min.x, r.max.y - c2), f + 2, corner, Color32::WHITE);
+        self.interface
+            .blit(p, pos2(r.max.x - c2, r.max.y - c2), f + 4, corner, Color32::WHITE);
+        self.interface
+            .blit(p, pos2(r.max.x - c2, r.min.y), f + 6, corner, Color32::WHITE);
+        let mid_v = Vec2::new(c2, ((r.height() - 4.0 * scale).max(0.0)) / 2.0);
+        self.interface
+            .blit(p, pos2(r.min.x, r.min.y + c2), f + 1, mid_v, Color32::WHITE);
+        self.interface
+            .blit(p, pos2(r.max.x - c2, r.min.y + c2), f + 5, mid_v, Color32::WHITE);
+        let mid_h = Vec2::new(((r.width() - 4.0 * scale).max(0.0)) / 2.0, c2);
+        self.interface
+            .blit(p, pos2(r.min.x + c2, r.max.y - c2), f + 3, mid_h, Color32::WHITE);
+        self.interface
+            .blit(p, pos2(r.min.x + c2, r.min.y), f + 7, mid_h, Color32::WHITE);
     }
 
     /// 原版 `draw_sprite_ext(spr_marker, 0/1, x, y, 1, (totalrows + 1) * 32 / 15, …)`：
@@ -876,8 +927,10 @@ impl Bank {
     /// 是顶边中点（`xorig = 8`），贴图左上角要往左让这 8px，否则箭头和竖线整体
     /// 右移半格（16px 帧里的线在第 7-8 像素）。
     pub fn marker(&self, p: &egui::Painter, at: Pos2, index: usize, size: Vec2, tint: Color32) {
+        // 原点偏移 8px 是精灵空间里的量，跟着 size 等比走（size.x ÷ 原生帧宽 16）。
+        let s = size.x / 16.0;
         self.marker
-            .blit(p, at - Vec2::new(8.0, 0.0), index, size, tint);
+            .blit(p, at - Vec2::new(8.0 * s, 0.0), index, size, tint);
     }
 
     /// 原版 `draw_sprite(spr_notechart, 0 + 3*theme, xx, yy-320+1)`：

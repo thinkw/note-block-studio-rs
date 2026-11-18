@@ -6,8 +6,10 @@
 //! 右侧 7 个 `draw_layericon`，横坐标 `x1 + 126…234 - !realvolume - realstereo * 10`；
 //! 可视行底部再挂一条 15 个 `draw_macroicon` 的宏条（有选区且显示钢琴键盘时）。
 //!
-//! 列宽固定 264px（原版内容宽 256 + 左右各 4），只有行高跟着网格缩放走：
-//! 横向偏移和图标尺寸保持原版像素，纵向按 `(cell - 32) / 2` 居中。
+//! 原版整个画面按 window_scale 等比放大，图层列也在其中；缩放改造（#80）照抄这一
+//! 语义：面板宽 264×u，内部所有坐标、字号、精灵尺寸一律乘 `u = viewport.u()`。
+//! 拖拽增量同理：原版鼠标坐标在「除以缩放」的房间坐标系里（`control_draw.gml:15-16`），
+//! 这里的 `drag_delta`（屏幕点）先 `/u` 再参与数值。
 
 use egui::{
     pos2, vec2, Align, Align2, Color32, CursorIcon, Id, Key, Layout, PointerButton, Pos2, Rect,
@@ -21,7 +23,7 @@ use crate::icons::Bank;
 use crate::state::{ContextKind, ContextMenu, EditorState, LayerDrag, WindowKind};
 use crate::theme::{Theme, ThemeKind};
 use crate::tr;
-use crate::viewport::{BASE_CELL, LAYER_PANEL_WIDTH, SCROLLBAR_SIZE, TIMELINE_HEIGHT};
+use crate::viewport::{SCROLLBAR_SIZE, TIMELINE_HEIGHT};
 
 /// 原版图层列内容左边界 `x1`。
 const X1: f32 = 4.0;
@@ -37,21 +39,22 @@ pub fn show_layers_panel(state: &mut EditorState, ui: &mut Ui) {
     };
     let start = area.min;
     let cell = state.viewport.cell();
-    let yo = (cell - BASE_CELL) * 0.5;
+    let u = state.viewport.u();
     let band = start.y;
-    let rows_start = pos2(start.x, band + TIMELINE_HEIGHT);
+    let rows_start = pos2(start.x, band + TIMELINE_HEIGHT * u);
 
-    header(state, ui, &bank, &th, start, band, area.width());
+    header(state, ui, &bank, &th, start, band, area.width(), u);
 
     let l0 = {
         let (_, _, a, _) = state.viewport.visible_range();
         a
     };
     // 原版 `totalrows = floor((rh - rhval) / 32)`：只画整行，宏条占掉最后那点余量。
-    // 网格那边用同一条公式（`grid.rs` 里的 `h`），两边画行数、宏条位置才对得上。
+    // 网格那边用同一条公式（`grid.rs` 里的 `split`），两边画行数、宏条位置才对得上。
     // 行数只按本面板的区域算，不取 `viewport.rows()`：侧栏比网格先画，
     // 用视口那个值会慢一帧，第一帧少画几行、宏条也跟着错位。
-    let rows = (((area.height() - TIMELINE_HEIGHT - SCROLLBAR_SIZE) / cell).floor() as u32).max(1);
+    let rows =
+        (((area.height() - TIMELINE_HEIGHT * u - SCROLLBAR_SIZE * u) / cell).floor() as u32).max(1);
     let layers = state.doc.song.layers.clone();
     let idle = state.window.is_none() && state.context_menu.is_none();
     let shift = ui.input(|i| i.modifiers.shift);
@@ -66,7 +69,7 @@ pub fn show_layers_panel(state: &mut EditorState, ui: &mut Ui) {
         let blank = Layer::default();
         let layer = layers.get(idx as usize).unwrap_or(&blank);
         let exists = (idx as usize) < layers.len();
-        let y1 = rows_start.y + (idx - l0) as f32 * cell - ROW_LIFT;
+        let y1 = rows_start.y + (idx - l0) as f32 * cell - ROW_LIFT * u;
         row(
             state,
             ui,
@@ -74,7 +77,7 @@ pub fn show_layers_panel(state: &mut EditorState, ui: &mut Ui) {
             &th,
             pos2(start.x, y1),
             cell,
-            yo,
+            u,
             idx,
             layer,
             &editing,
@@ -87,8 +90,17 @@ pub fn show_layers_panel(state: &mut EditorState, ui: &mut Ui) {
     }
 
     // 宏条贴在整行区底（原版 `y1 + 32`，y1 是最后一行行顶）。
-    let bar_top = rows_start.y + rows as f32 * cell - ROW_LIFT;
-    macro_bar(state, ui, &bank, &th, pos2(start.x, bar_top), idle, false);
+    let bar_top = rows_start.y + rows as f32 * cell - ROW_LIFT * u;
+    macro_bar(
+        state,
+        ui,
+        &bank,
+        &th,
+        pos2(start.x, bar_top),
+        idle,
+        false,
+        u,
+    );
 }
 
 /// 图层栏收起时，原版照样在左下角画宏条：`control_draw.gml` 1298-1308 那个行循环并不看
@@ -103,12 +115,25 @@ pub(crate) fn macro_bar_over_grid(state: &mut EditorState, ui: &mut Ui, area: Re
     };
     let th = state.theme.clone();
     let cell = state.viewport.cell();
-    let full = (((area.height() - TIMELINE_HEIGHT - SCROLLBAR_SIZE) / cell).floor() as u32).max(1);
-    let bar_top = area.min.y + TIMELINE_HEIGHT + full as f32 * cell - ROW_LIFT + 20.0;
-    macro_bar(state, ui, &bank, &th, pos2(area.min.x, bar_top), idle, true);
+    let u = state.viewport.u();
+    let full =
+        (((area.height() - TIMELINE_HEIGHT * u - SCROLLBAR_SIZE * u) / cell).floor() as u32).max(1);
+    let bar_top = area.min.y + TIMELINE_HEIGHT * u + full as f32 * cell - ROW_LIFT * u + 20.0 * u;
+    macro_bar(
+        state,
+        ui,
+        &bank,
+        &th,
+        pos2(area.min.x, bar_top),
+        idle,
+        true,
+        u,
+    );
 }
 
-/// 顶部与时间轴对齐的 32px：已用时间 / 总时长 / 速度框 / 小节·拍·十六分。
+/// 顶部与时间轴对齐的一条：已用时间 / 总时长 / 速度框 / 小节·拍·十六分。
+/// 高度跟时间轴带一样是 `TIMELINE_HEIGHT × u`，内部坐标全部乘 u。
+#[allow(clippy::too_many_arguments)]
 fn header(
     state: &mut EditorState,
     ui: &mut Ui,
@@ -117,10 +142,11 @@ fn header(
     start: Pos2,
     band: f32,
     width: f32,
+    u: f32,
 ) {
     let p = ui.painter();
     p.rect_filled(
-        Rect::from_min_size(start, vec2(width, TIMELINE_HEIGHT)),
+        Rect::from_min_size(start, vec2(width, TIMELINE_HEIGHT * u)),
         0.0,
         th.panel,
     );
@@ -142,40 +168,40 @@ fn header(
     let length = format!("/ {}", time_str(total / shown));
     if fluent {
         p.text(
-            pos2(start.x + 9.0, band - 2.0),
+            pos2(start.x + 9.0 * u, band - 2.0 * u),
             Align2::LEFT_TOP,
             elapsed,
-            info_med_bold_font(),
+            crate::fonts::scaled(info_med_bold_font(), u),
             th.text,
         );
         p.text(
-            pos2(start.x + 26.0, band + 15.0),
+            pos2(start.x + 26.0 * u, band + 15.0 * u),
             Align2::LEFT_TOP,
             length,
-            small_font(),
+            crate::fonts::scaled(small_font(), u),
             th.text,
         );
     } else {
         p.text(
-            pos2(start.x + 93.0, band - 2.0),
+            pos2(start.x + 93.0 * u, band - 2.0 * u),
             Align2::RIGHT_TOP,
             elapsed,
-            info_med_bold_font(),
+            crate::fonts::scaled(info_med_bold_font(), u),
             th.text,
         );
         p.text(
-            pos2(start.x + 93.0, band + 15.0),
+            pos2(start.x + 93.0 * u, band + 15.0 * u),
             Align2::RIGHT_TOP,
             length,
-            small_font(),
+            crate::fonts::scaled(small_font(), u),
             th.text,
         );
     }
 
     // 小节·拍·十六分：原版只画，不给交互（悬停出说明）。
     let sig = song.meta.time_signature.max(1) as f64;
-    bank.tempo_box(p, pos2(start.x + 184.0, band + 3.0), false, th);
-    let digits = main_font();
+    bank.tempo_box(p, pos2(start.x + 184.0 * u, band + 3.0 * u), false, th, u);
+    let digits = crate::fonts::scaled(main_font(), u);
     for (x, t) in [
         (215.0, ".".to_string()),
         (230.0, ".".to_string()),
@@ -190,7 +216,7 @@ fn header(
         (240.0, ((marker % 4.0).floor() as i64 + 1).to_string()),
     ] {
         p.text(
-            pos2(start.x + x, band + 6.0),
+            pos2(start.x + x * u, band + 6.0 * u),
             Align2::RIGHT_TOP,
             t,
             digits.clone(),
@@ -203,7 +229,7 @@ fn header(
     // （`draw_window_set_tempo.gml:14-21`）；点击 / 拖拽的判定框固定 (108, 57, 64, 22)。
     let (box_x, box_w) = if bpm_on { (101.0, 74.0) } else { (108.0, 64.0) };
     let mult = if bpm_on { 15.0 } else { 1.0 };
-    bank.tempo_box(p, pos2(start.x + box_x, band + 3.0), bpm_on, th);
+    bank.tempo_box(p, pos2(start.x + box_x * u, band + 3.0 * u), bpm_on, th, u);
     if state.tempo_input.is_none() {
         // 原版把数值文字整段包在 `if (window != w_settempo)` 里（`control_draw.gml:2453`）：
         // 就地框开着时不画数值，输入框直接盖在同一格上。
@@ -213,7 +239,7 @@ fn header(
             format!("{:.2} t / s", shown)
         };
         p.text(
-            pos2(start.x + 136.0, band + 6.0),
+            pos2(start.x + 136.0 * u, band + 6.0 * u),
             Align2::CENTER_TOP,
             value,
             digits.clone(),
@@ -222,7 +248,10 @@ fn header(
     }
 
     let idle = state.window.is_none() && state.context_menu.is_none();
-    let bars_rect = Rect::from_min_size(pos2(start.x + 184.0, band + 3.0), vec2(64.0, 22.0));
+    let bars_rect = Rect::from_min_size(
+        pos2(start.x + 184.0 * u, band + 3.0 * u),
+        vec2(64.0 * u, 22.0 * u),
+    );
     ui.interact(bars_rect, Id::new("bars_box"), Sense::hover())
         .on_hover_text(tr(
             "Position of the marker in bars, beats and sixteenths.",
@@ -233,8 +262,8 @@ fn header(
     if let Some(mut text) = inline {
         // 原版 `draw_inputbox(64, xx, 57 + song_tab_offset, w, …)`：框体高 21，
         // 而「上一次按下 / 这次抬手在不在框里」用的是同一条高 22 的矩形。
-        let at = pos2(start.x + box_x, band + 3.0);
-        let gate = Rect::from_min_size(at, vec2(box_w, 22.0));
+        let at = pos2(start.x + box_x * u, band + 3.0 * u);
+        let gate = Rect::from_min_size(at, vec2(box_w * u, 22.0 * u));
         let (pressed, released, esc, hover) = ui.input(|i| {
             (
                 i.pointer.button_pressed(PointerButton::Primary),
@@ -256,13 +285,13 @@ fn header(
         let nested = ui.allocate_new_ui(
             UiBuilder::new()
                 .id_salt("tempo_input")
-                .max_rect(Rect::from_min_size(at, vec2(box_w, 21.0)))
+                .max_rect(Rect::from_min_size(at, vec2(box_w * u, 21.0 * u)))
                 .layout(Layout::left_to_right(Align::Min)),
             |ui| {
                 let re = ui.add(
                     TextEdit::singleline(&mut text)
-                        .desired_width(box_w - 6.0)
-                        .font(digits),
+                        .desired_width(box_w * u - 6.0 * u)
+                        .font(digits.clone()),
                 );
                 if !had_focus {
                     re.request_focus();
@@ -311,7 +340,10 @@ fn header(
         }
         return;
     }
-    let hit = Rect::from_min_size(pos2(start.x + 108.0, band + 3.0), vec2(64.0, 22.0));
+    let hit = Rect::from_min_size(
+        pos2(start.x + 108.0 * u, band + 3.0 * u),
+        vec2(64.0 * u, 22.0 * u),
+    );
     let resp = ui.interact(hit, Id::new("tempo_box"), Sense::click_and_drag());
     let clicked = idle && resp.clicked();
     let started = idle && resp.drag_started();
@@ -338,8 +370,9 @@ fn header(
     if dragged {
         if let Some(raw) = state.tempo_drag {
             // 原版 `tempodrag += 0.25 * (mouse_yprev - mouse_y) / 3`，夹在 0.25..180
-            // （`control_draw.gml:2531-2532`）。
-            state.tempo_drag = Some((raw - dy * 0.25 / 3.0).clamp(0.25, 180.0));
+            // （`control_draw.gml:2531-2532`）。原版鼠标增量在「除以缩放」的房间坐标系里，
+            // 屏幕 delta 先 `/u`。
+            state.tempo_drag = Some((raw - dy / u * 0.25 / 3.0).clamp(0.25, 180.0));
         }
     }
     if stopped {
@@ -403,7 +436,8 @@ fn commit_tempo_input(state: &mut EditorState, text: &str, mult: f32) {
     }
 }
 
-/// 一行图层。`at` 是原版行底左上角（已含 `ROW_LIFT`），`yo` 是行高变化后的纵向居中量。
+/// 一行图层。`at` 是原版行底左上角（已含 `ROW_LIFT`），内部坐标一律乘 `u`
+/// （`u = cell / BASE_CELL`，与原版「整个画面等比缩放」同构）。
 /// `exists` 为 false 表示原版那种「越界初始化出来的空白行」：框和图标照画，但没有图层可改。
 #[allow(clippy::too_many_arguments)]
 fn row(
@@ -413,7 +447,7 @@ fn row(
     th: &Theme,
     at: Pos2,
     cell: f32,
-    yo: f32,
+    u: f32,
     idx: u32,
     layer: &Layer,
     editing: &Option<(u32, String)>,
@@ -423,20 +457,26 @@ fn row(
     mono: bool,
     exists: bool,
 ) {
-    let x1 = at.x + X1;
+    let x1 = at.x + X1 * u;
     let y1 = at.y;
     // 原版 `draw_sprite(spr_layerbox, …, x1, y1)`，行框同样从 x1 = 4 起。
-    bank.layer_row(ui.painter(), pos2(x1, y1), vec2(256.0, cell + 2.0), th);
+    bank.layer_row(
+        ui.painter(),
+        pos2(x1, y1),
+        vec2(256.0 * u, cell + 2.0 * u),
+        th,
+    );
 
     // 原版 `x1 + 126 - !realvolume - realstereo * 10`：藏掉字形时按钮只左挪 1px / 10px。
     let bx = |base: f32| {
-        x1 + base - (if show_vol { 0.0 } else { 1.0 }) - (if mono { 10.0 } else { 0.0 })
+        x1 + base * u - (if show_vol { 0.0 } else { 1.0 * u }) - (if mono { 0.0 } else { 10.0 * u })
     };
 
     // ---- 名称：原版的常驻输入框 ----
     let fluent = th.kind == ThemeKind::Fluent;
-    let font = if fluent { main_font() } else { small_font() };
-    let name_rect = Rect::from_min_size(pos2(x1 + 10.0, y1 + 10.0 + yo), vec2(75.0, 13.0));
+    let font = crate::fonts::scaled(if fluent { main_font() } else { small_font() }, u);
+    let name_rect =
+        Rect::from_min_size(pos2(x1 + 10.0 * u, y1 + 10.0 * u), vec2(75.0 * u, 13.0 * u));
     let name_resp = ui.interact(name_rect, Id::new(("layername", idx)), Sense::click());
     let name_clicked = idle && name_resp.clicked();
     let name_right = idle && name_resp.secondary_clicked();
@@ -447,9 +487,9 @@ fn row(
         .map(|(_, s)| s.clone());
     if let Some(text) = buf {
         let (nx, ny, nw, nh) = if fluent {
-            (x1 + 9.0, y1 + 4.0 + yo, 72.0, 24.0)
+            (x1 + 9.0 * u, y1 + 4.0 * u, 72.0 * u, 24.0 * u)
         } else {
-            (x1 + 11.0, y1 + 10.0 + yo, 72.0, 14.0)
+            (x1 + 11.0 * u, y1 + 10.0 * u, 72.0 * u, 14.0 * u)
         };
         let focus_id = Id::new(("layername_focus", idx));
         let had_focus = ui
@@ -471,7 +511,7 @@ fn row(
                             tr(&format!("Layer {}", idx + 1), &format!("第 {} 层", idx + 1))
                         ))
                         .desired_width(nw)
-                        .font(font),
+                        .font(font.clone()),
                 );
                 if !had_focus {
                     re.request_focus();
@@ -512,7 +552,7 @@ fn row(
             (layer.name.clone(), th.text)
         };
         ui.painter().text(
-            pos2(x1 + 11.0, y1 + 10.0 + yo),
+            pos2(x1 + 11.0 * u, y1 + 10.0 * u),
             Align2::LEFT_TOP,
             label,
             font,
@@ -538,7 +578,7 @@ fn row(
         .map(|d| d.value)
         .unwrap_or(layer.volume);
     if show_vol {
-        let hit = Rect::from_min_size(pos2(x1 + 88.0, y1 + 5.0 + yo), vec2(16.0, 25.0));
+        let hit = Rect::from_min_size(pos2(x1 + 88.0 * u, y1 + 5.0 * u), vec2(16.0 * u, 25.0 * u));
         let resp = ui.interact(hit, Id::new(("layervol", idx)), Sense::drag());
         let active = resp.hovered() || resp.dragged();
         let (started, dragged, stopped, delta) = (
@@ -549,17 +589,18 @@ fn row(
         );
         bank.volume_glyph(
             ui.painter(),
-            pos2(x1 + 91.0, y1 + 11.0 + yo),
+            pos2(x1 + 91.0 * u, y1 + 11.0 * u),
             vol,
             active,
             th,
+            u,
         );
         if active {
             ui.painter().text(
-                pos2(x1 + 98.0, y1 + 18.0 + yo),
+                pos2(x1 + 98.0 * u, y1 + 18.0 * u),
                 Align2::CENTER_TOP,
                 format!("{vol}%"),
-                small_font(),
+                crate::fonts::scaled(small_font(), u),
                 th.text,
             );
         }
@@ -573,7 +614,8 @@ fn row(
         }
         if let Some(mut d) = state.layer_drag.filter(|d| d.index == idx && !d.stereo) {
             if dragged {
-                d.raw = (d.raw - delta).clamp(0.0, 100.0);
+                // 原版鼠标增量在「除以缩放」的房间坐标系里，屏幕 delta 先 `/u`。
+                d.raw = (d.raw - delta / u).clamp(0.0, 100.0);
                 d.value = if shift {
                     d.raw.round() as u8
                 } else {
@@ -601,7 +643,7 @@ fn row(
             .filter(|d| d.index == idx && d.stereo)
             .map(|d| d.value)
             .unwrap_or(layer.stereo);
-        let hit = Rect::from_min_size(pos2(x1 + 108.0, y1 + 5.0 + yo), vec2(16.0, 25.0));
+        let hit = Rect::from_min_size(pos2(x1 + 108.0 * u, y1 + 5.0 * u), vec2(16.0 * u, 25.0 * u));
         let resp = ui.interact(hit, Id::new(("layerpan", idx)), Sense::drag());
         let active = resp.hovered() || resp.dragged();
         let (started, dragged, stopped, delta) = (
@@ -612,18 +654,19 @@ fn row(
         );
         bank.stereo_glyph(
             ui.painter(),
-            pos2(x1 + 110.0, y1 + 11.0 + yo),
+            pos2(x1 + 110.0 * u, y1 + 11.0 * u),
             pan,
             active,
             th,
+            u,
         );
         let (tip, label) = pan_label(pan);
         if active {
             ui.painter().text(
-                pos2(x1 + 116.0, y1 + 18.0 + yo),
+                pos2(x1 + 116.0 * u, y1 + 18.0 * u),
                 Align2::CENTER_TOP,
                 label,
-                small_font(),
+                crate::fonts::scaled(small_font(), u),
                 th.text,
             );
         }
@@ -637,7 +680,7 @@ fn row(
         }
         if let Some(mut d) = state.layer_drag.filter(|d| d.index == idx && d.stereo) {
             if dragged {
-                d.raw = (d.raw - delta).clamp(0.0, 200.0);
+                d.raw = (d.raw - delta / u).clamp(0.0, 200.0);
                 d.value = if shift {
                     d.raw.round() as u8
                 } else {
@@ -660,7 +703,7 @@ fn row(
 
     // ---- 7 个功能按钮（原版下标 0..6）----
     // 原版在空白行上同样画全 7 个图标，点了却没有图层可改；只有「新建层」在空白行仍有意义。
-    let by = y1 + 8.0 + yo;
+    let by = y1 + 8.0 * u;
     if exists
         && idle
         && bank.layer_button(
@@ -671,6 +714,7 @@ fn row(
             tr("Lock this layer", "静音本层\n（拖拽可批量操作）"),
             layer.lock == LockMode::Locked,
             th,
+            u,
         )
     {
         let next = if layer.lock == LockMode::Locked {
@@ -690,6 +734,7 @@ fn row(
             tr("Solo this layer", "独奏本层\n（拖拽可批量操作）"),
             layer.lock == LockMode::Solo,
             th,
+            u,
         )
     {
         let next = if layer.lock == LockMode::Solo {
@@ -702,7 +747,7 @@ fn row(
     if exists && idle && bank.layer_button(ui, pos2(bx(162.0), by), 2, idx, tr(
         "Select all note blocks in this layer\n(Click and drag to select multiple; click again to deselect)",
         "选择本层所有方块\n（拖拽可批量选择，再次点选取消选择）",
-    ), false, th) {
+    ), false, th, u) {
         state.emit(Command::SelectLayer(idx));
     }
     if idle
@@ -717,6 +762,7 @@ fn row(
             ),
             false,
             th,
+            u,
         )
     {
         state.emit(Command::InsertLayer(idx));
@@ -734,6 +780,7 @@ fn row(
             ),
             false,
             th,
+            u,
         )
     {
         state.emit(Command::RemoveLayer(idx));
@@ -753,12 +800,13 @@ fn row(
             ),
             false,
             th,
+            u,
         )
     {
         state.emit(Command::MoveLayerUp(idx));
     }
     // 原版在最底层把下移按钮左挪 8px（少画的上移按钮位置就空在那儿）。
-    let down_x = bx(234.0) - if idx == 0 { 8.0 } else { 0.0 };
+    let down_x = bx(234.0) - if idx == 0 { 8.0 * u } else { 0.0 };
     if exists
         && idle
         && bank.layer_button(
@@ -772,6 +820,7 @@ fn row(
             ),
             false,
             th,
+            u,
         )
     {
         state.emit(Command::MoveLayerDown(idx));
@@ -791,6 +840,7 @@ fn pan_label(pan: u8) -> (String, String) {
 
 /// 原版宏条：`spr_iconbar`（经典）或灰色圆角矩形（Fluent）+ 15 个 `draw_macroicon`。
 /// `wide` = 图层栏收起时画在网格上的那种：矮一截、宽 380、按钮贴条顶 +3。
+#[allow(clippy::too_many_arguments)]
 fn macro_bar(
     state: &mut EditorState,
     ui: &mut Ui,
@@ -799,29 +849,30 @@ fn macro_bar(
     at: Pos2,
     idle: bool,
     wide: bool,
+    u: f32,
 ) {
     if !state.flags.show_piano || state.doc.selection.is_empty() {
         return;
     }
-    let x1 = at.x + X1;
+    let x1 = at.x + X1 * u;
     let p = ui.painter();
     let fluent = th.kind == ThemeKind::Fluent;
     // 原版 1497-1511：show_layers 时 `y1 + 32`、高 1.3 × 30；收起时 `y1 + 52`、高 0.75 × 30。
     // Fluent 那两个圆角矩形是 38 和 21。宽度按 Fluent 的 255 / 380 取。
     let (w, h, dy) = if wide {
-        (380.0, if fluent { 21.0 } else { 22.5 }, 3.0)
+        (380.0 * u, if fluent { 21.0 * u } else { 22.5 * u }, 3.0 * u)
     } else {
-        (255.0, if fluent { 38.0 } else { 39.0 }, 5.0)
+        (255.0 * u, if fluent { 38.0 * u } else { 39.0 * u }, 5.0 * u)
     };
     let bg = Rect::from_min_size(pos2(x1, at.y), vec2(w, h));
     if fluent {
-        p.rect_filled(bg, 2.0, Color32::from_gray(70));
+        p.rect_filled(bg, 2.0 * u, Color32::from_gray(70));
     } else {
         bank.icon_strip_bg(p, bg);
     }
-    let row1 = pos2(x1 + 6.0, at.y + dy);
-    let row2 = pos2(row1.x, row1.y + 16.0);
-    let step = 25.0;
+    let row1 = pos2(x1 + 6.0 * u, at.y + dy);
+    let row2 = pos2(row1.x, row1.y + 16.0 * u);
+    let step = 25.0 * u;
 
     for btn in MACRO_BTNS {
         let i = btn.index;
@@ -831,7 +882,7 @@ fn macro_bar(
         } else {
             pos2(row2.x + (i - 10) as f32 * step, row2.y)
         };
-        if idle && bank.macro_button(ui, at, i, tr(btn.tip_en, btn.tip_zh), th) {
+        if idle && bank.macro_button(ui, at, i, tr(btn.tip_en, btn.tip_zh), th, u) {
             emit_macro(state, &btn.action);
         }
     }
@@ -1163,8 +1214,6 @@ fn text_drag_value(
         }
     }
 }
-
-pub const PANEL_WIDTH: f32 = LAYER_PANEL_WIDTH;
 
 #[cfg(test)]
 mod tests {

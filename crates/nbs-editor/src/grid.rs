@@ -23,7 +23,7 @@ use crate::layers_panel::time_str;
 use crate::state::{ContextKind, ContextMenu, EditMode, EditorState};
 use crate::theme::{Theme, ThemeKind};
 use crate::tr;
-use crate::viewport::{Viewport, SCROLLBAR_SIZE, TIMELINE_HEIGHT};
+use crate::viewport::{Viewport, BASE_CELL, SCROLLBAR_SIZE, TIMELINE_HEIGHT};
 
 /// 原版标尺刻度线的 `draw_set_alpha(0.6)`。
 const RULER_A: u8 = 153;
@@ -43,24 +43,16 @@ const C_YELLOW: Color32 = Color32::from_rgb(255, 255, 0);
 /// （原版 `y1 + totalrows * 32 + 34`），而不是贴着窗口底边——这样图层栏的宏条
 /// （`y1 + 32`）和网格最后一行才会落在同一条线上。
 fn split(area: Rect, cell: f32) -> (Rect, Rect, Rect, Rect) {
-    let w = (area.width() - SCROLLBAR_SIZE).max(64.0);
-    let h = (((area.height() - TIMELINE_HEIGHT - SCROLLBAR_SIZE) / cell)
-        .floor()
-        .max(1.0))
-        * cell;
-    let timeline = Rect::from_min_size(area.min, Vec2::new(w, TIMELINE_HEIGHT));
-    let grid = Rect::from_min_size(
-        pos2(area.min.x, area.min.y + TIMELINE_HEIGHT),
-        Vec2::new(w, h),
-    );
-    let hbar = Rect::from_min_size(
-        pos2(area.min.x, area.min.y + TIMELINE_HEIGHT + h),
-        Vec2::new(w, SCROLLBAR_SIZE),
-    );
-    let vbar = Rect::from_min_size(
-        pos2(area.min.x + w, area.min.y + TIMELINE_HEIGHT),
-        Vec2::new(SCROLLBAR_SIZE, h),
-    );
+    // 画布缩放：标尺带 / 滚动条是画布的一部分，随格距一起放大。
+    let u = cell / BASE_CELL;
+    let band = TIMELINE_HEIGHT * u;
+    let bar = SCROLLBAR_SIZE * u;
+    let w = (area.width() - bar).max(64.0);
+    let h = (((area.height() - band - bar) / cell).floor().max(1.0)) * cell;
+    let timeline = Rect::from_min_size(area.min, Vec2::new(w, band));
+    let grid = Rect::from_min_size(pos2(area.min.x, area.min.y + band), Vec2::new(w, h));
+    let hbar = Rect::from_min_size(pos2(area.min.x, area.min.y + band + h), Vec2::new(w, bar));
+    let vbar = Rect::from_min_size(pos2(area.min.x + w, area.min.y + band), Vec2::new(bar, h));
     (timeline, grid, hbar, vbar)
 }
 
@@ -216,7 +208,7 @@ fn handle_timeline_input(state: &mut EditorState, input: &InputSnapshot, rect: R
         if i > 0 && !state.section_exists {
             continue;
         }
-        if (pos.x - x).abs() < 8.0 {
+        if (pos.x - x).abs() < 8.0 * state.viewport.u() {
             state.interaction.cursor = CursorIcon::ResizeHorizontal;
             // 原版 `:132/141/148` 的命中框只吃左键（按下即 `window = w_drag*`）；
             // 右键照样落到下面的区间菜单（`:156` 那道 `window = 0` 仍然成立）。
@@ -433,7 +425,7 @@ fn scroll_viewport(state: &mut EditorState, delta: f32, shift: bool) {
 /// 拖拽越过网格边界时自动滚动（原版 dragincxr/xl/yd/yu 的等价实现）。
 fn edge_scroll(state: &mut EditorState, input: &InputSnapshot, rect: Rect) {
     let Some(pos) = input.pointer else { return };
-    let edge = 28.0;
+    let edge = 28.0 * state.viewport.u();
     let dx = if pos.x < rect.min.x + edge {
         -1.0
     } else if pos.x > rect.max.x - edge {
@@ -595,11 +587,12 @@ fn finish_drag(state: &mut EditorState, input: &InputSnapshot, hover: Option<(i6
 // ---------------------------------------------------------------- 滚动条
 
 fn h_geometry(state: &EditorState, rect: Rect) -> (f32, f32, Rect) {
+    let u = state.viewport.u();
     let visible = state.viewport.columns().max(1) as f32;
     let max_units = (state.doc.song.enda.max(state.viewport.start_tick) as f32 + visible + 8.0)
         .max(visible * 2.0);
     let thumb_w = ((visible / max_units) * rect.width())
-        .max(24.0)
+        .max(24.0 * u)
         .min(rect.width());
     let thumb_x = rect.min.x
         + (state.viewport.start_tick as f32 / max_units.max(1.0)) * (rect.width() - thumb_w);
@@ -607,19 +600,20 @@ fn h_geometry(state: &EditorState, rect: Rect) -> (f32, f32, Rect) {
         max_units,
         thumb_w,
         Rect::from_min_size(
-            pos2(thumb_x, rect.min.y + 2.0),
-            Vec2::new(thumb_w, rect.height() - 4.0),
+            pos2(thumb_x, rect.min.y + 2.0 * u),
+            Vec2::new(thumb_w, rect.height() - 4.0 * u),
         ),
     )
 }
 
 fn v_geometry(state: &EditorState, rect: Rect) -> (f32, f32, Rect) {
+    let u = state.viewport.u();
     let visible = state.viewport.rows().max(1) as f32;
     let max_units =
         (state.doc.song.layer_count().max(state.viewport.start_layer) as f32 + visible + 4.0)
             .max(visible * 2.0);
     let thumb_h = ((visible / max_units) * rect.height())
-        .max(24.0)
+        .max(24.0 * u)
         .min(rect.height());
     let thumb_y = rect.min.y
         + (state.viewport.start_layer as f32 / max_units.max(1.0)) * (rect.height() - thumb_h);
@@ -627,8 +621,8 @@ fn v_geometry(state: &EditorState, rect: Rect) -> (f32, f32, Rect) {
         max_units,
         thumb_h,
         Rect::from_min_size(
-            pos2(rect.min.x + 2.0, thumb_y),
-            Vec2::new(rect.width() - 4.0, thumb_h),
+            pos2(rect.min.x + 2.0 * u, thumb_y),
+            Vec2::new(rect.width() - 4.0 * u, thumb_h),
         ),
     )
 }
@@ -685,23 +679,24 @@ fn handle_scrollbar_input(state: &mut EditorState, input: &InputSnapshot, hbar: 
 fn draw_scrollbars(state: &EditorState, ui: &Ui, hbar: Rect, vbar: Rect) {
     let p = ui.painter();
     let th = &state.theme;
+    let u = state.viewport.u();
     let mut shapes = Vec::new();
     shapes.push(Shape::rect_filled(hbar, 0.0, th.panel));
     shapes.push(Shape::rect_filled(vbar, 0.0, th.panel));
     let (_, _, ht) = h_geometry(state, hbar);
     let (_, _, vt) = v_geometry(state, vbar);
-    shapes.push(Shape::rect_filled(ht, 3.0, th.accent_soft));
+    shapes.push(Shape::rect_filled(ht, 3.0 * u, th.accent_soft));
     shapes.push(Shape::rect_stroke(
         ht,
-        3.0,
-        Stroke::new(1.0_f32, th.accent),
+        3.0 * u,
+        Stroke::new(1.0_f32 * u, th.accent),
         StrokeKind::Inside,
     ));
-    shapes.push(Shape::rect_filled(vt, 3.0, th.accent_soft));
+    shapes.push(Shape::rect_filled(vt, 3.0 * u, th.accent_soft));
     shapes.push(Shape::rect_stroke(
         vt,
-        3.0,
-        Stroke::new(1.0_f32, th.accent),
+        3.0 * u,
+        Stroke::new(1.0_f32 * u, th.accent),
         StrokeKind::Inside,
     ));
     p.extend(shapes);
@@ -717,6 +712,7 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
     let th = &state.theme;
     let vp = &state.viewport;
     let cell = vp.cell();
+    let u = vp.u();
     let meta = &state.doc.song.meta;
     let tempo = (meta.tempo.max(0.01)) as f64;
     let top = rect.min.y;
@@ -747,7 +743,7 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
     let mut sec = whole * c;
     let mut xx = (whole - starta / ticks_per_step) as f32 * px_per_step;
     let mut first = true;
-    while xx < rect.width() + 16.0 {
+    while xx < rect.width() + 16.0 * u {
         let x = x0 + xx;
         p.text(
             pos2(x, top),
@@ -757,12 +753,12 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
                 Align2::CENTER_TOP
             },
             time_str(sec),
-            small_font(),
+            crate::fonts::scaled(small_font(), u),
             th.text,
         );
         first = false;
         shapes.push(Shape::rect_filled(
-            Rect::from_min_size(pos2(x, top + 12.0), Vec2::new(1.0, 3.0)),
+            Rect::from_min_size(pos2(x, top + 12.0 * u), Vec2::new(1.0, 3.0 * u)),
             0.0,
             alpha(th.text, RULER_A),
         ));
@@ -778,22 +774,22 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
             continue;
         }
         let by4 = tick % 4 == 0;
-        let h = if by4 { 7.0 } else { 4.0 };
+        let h = if by4 { 7.0 * u } else { 4.0 * u };
         shapes.push(Shape::rect_filled(
-            Rect::from_min_size(pos2(x, top + 31.0 - h), Vec2::new(1.0, h)),
+            Rect::from_min_size(pos2(x, top + 31.0 * u - h), Vec2::new(1.0, h)),
             0.0,
             alpha(th.text, RULER_A),
         ));
         if by4 {
             p.text(
-                pos2(x, top + 15.0),
+                pos2(x, top + 15.0 * u),
                 if a == 0 {
                     Align2::LEFT_TOP
                 } else {
                     Align2::CENTER_TOP
                 },
                 tick.to_string(),
-                small_font(),
+                crate::fonts::scaled(small_font(), u),
                 th.text,
             );
         }
@@ -817,7 +813,11 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
                 continue;
             };
             let xx = vp.tick_x(tick as i64);
-            let galley = p.layout_no_wrap(format!("BPM = {}", n.pitch.abs()), main_font(), th.text);
+            let galley = p.layout_no_wrap(
+                format!("BPM = {}", n.pitch.abs()),
+                crate::fonts::scaled(main_font(), u),
+                th.text,
+            );
             let w = galley.size().x;
             let fill = if th.kind == ThemeKind::Dark {
                 Color32::from_gray(54)
@@ -832,8 +832,8 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
             };
             p.rect_filled(
                 Rect::from_min_max(
-                    pos2(xx + 10.0, rect.min.y + 4.0),
-                    pos2(xx + 10.0 + w, rect.min.y + 16.0),
+                    pos2(xx + 10.0 * u, rect.min.y + 4.0 * u),
+                    pos2(xx + 10.0 * u + w, rect.min.y + 16.0 * u),
                 ),
                 0.0,
                 fill,
@@ -841,33 +841,34 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
             bank.area(
                 &p,
                 Rect::from_min_max(
-                    pos2(xx + 9.0, rect.min.y + 3.0),
-                    pos2(xx + 11.0 + w, rect.min.y + 17.0),
+                    pos2(xx + 9.0 * u, rect.min.y + 3.0 * u),
+                    pos2(xx + 11.0 * u + w, rect.min.y + 17.0 * u),
                 ),
                 th,
+                u,
             );
             let dark_marker = th.kind == ThemeKind::Dark
                 || state.flags.blackout
                 || (th.kind == ThemeKind::Fluent && th.fdark);
             let f = 8 * dark_marker as usize;
-            let at = pos2(xx, rect.min.y + 2.0);
-            bank.marker(&p, at, f, Vec2::new(16.0, 15.0), Color32::WHITE);
+            let at = pos2(xx, rect.min.y + 2.0 * u);
+            bank.marker(&p, at, f, Vec2::new(16.0 * u, 15.0 * u), Color32::WHITE);
             bank.marker(
                 &p,
-                pos2(xx, rect.min.y + 17.0),
+                pos2(xx, rect.min.y + 17.0 * u),
                 f + 1,
-                Vec2::new(16.0, 15.0),
+                Vec2::new(16.0 * u, 15.0 * u),
                 Color32::WHITE,
             );
             // 原版 `draw_text(xx + 10, y1 + 2 + (theme != 3), …)`，对齐当时是 fa_left。
             p.galley(
                 pos2(
-                    xx + 10.0,
+                    xx + 10.0 * u,
                     rect.min.y
                         + if th.kind == ThemeKind::Fluent {
-                            2.0
+                            2.0 * u
                         } else {
-                            3.0
+                            3.0 * u
                         },
                 ),
                 galley,
@@ -884,18 +885,24 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
         let x0 = vp.tick_x(state.section_start);
         let x1 = vp.tick_x(state.section_end);
         p.rect_filled(
-            Rect::from_min_max(pos2(x0.min(x1), top), pos2(x0.max(x1), top + 31.0)),
+            Rect::from_min_max(pos2(x0.min(x1), top), pos2(x0.max(x1), top + 31.0 * u)),
             0.0,
             alpha(C_BLUE, 64),
         );
         if let Some(bank) = state.icons.bank() {
             for (x, cap) in [(x0, 2 + 2 * rev), (x1, 4 - 2 * rev)] {
-                bank.marker(&p, pos2(x, top), cap, Vec2::new(16.0, 15.0), Color32::WHITE);
+                bank.marker(
+                    &p,
+                    pos2(x, top),
+                    cap,
+                    Vec2::new(16.0 * u, 15.0 * u),
+                    Color32::WHITE,
+                );
                 bank.marker(
                     &p,
                     pos2(x, top),
                     cap + 1,
-                    Vec2::new(16.0, rect.max.y - top),
+                    Vec2::new(16.0 * u, rect.max.y - top),
                     Color32::WHITE,
                 );
             }
@@ -906,25 +913,25 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
     // （贴图原点在线上，见 `IconBank::marker`）。网格那半截见 draw_grid。
     let mx = marker_x(state);
     if let Some(bank) = state.icons.bank() {
-        if mx >= rect.min.x - 8.0 && mx <= rect.max.x + 8.0 {
+        if mx >= rect.min.x - 8.0 * u && mx <= rect.max.x + 8.0 * u {
             let tint = if th.kind == ThemeKind::Fluent {
                 th.accent(3)
             } else {
                 Color32::WHITE
             };
-            let at = pos2(mx, rect.min.y + 2.0);
+            let at = pos2(mx, rect.min.y + 2.0 * u);
             bank.marker(
                 &p,
                 at,
                 marker_frame(th, state.flags.blackout),
-                Vec2::new(16.0, 15.0),
+                Vec2::new(16.0 * u, 15.0 * u),
                 tint,
             );
             bank.marker(
                 &p,
                 at,
                 marker_frame(th, state.flags.blackout) + 1,
-                Vec2::new(16.0, rect.max.y - at.y),
+                Vec2::new(16.0 * u, rect.max.y - at.y),
                 tint,
             );
         }
@@ -936,6 +943,7 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
     let th = &state.theme;
     let vp = &state.viewport;
     let cell = vp.cell();
+    let u = vp.u();
     let (t0, t1, l0, l1) = vp.visible_range();
     let ts = state.doc.song.meta.ticks_per_bar().max(1);
     let locked = state.doc.song.locked_layers();
@@ -961,11 +969,11 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
             let is_bar = tick % ts == 0;
             let is_beat = tick % 4 == 0;
             let (w, c) = if is_bar {
-                (2.0, th.grid_bar)
+                (2.0 * u, th.grid_bar)
             } else if is_beat {
-                (1.0, th.grid_beat)
+                (1.0 * u, th.grid_beat)
             } else {
-                (1.0, th.grid_line)
+                (1.0 * u, th.grid_line)
             };
             shapes.push(Shape::rect_filled(
                 Rect::from_min_size(pos2(x, rect.min.y), Vec2::new(w, rect.height())),
@@ -1054,6 +1062,7 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
                         vp.layer_y(ds),
                         cell * (de - ds + 1) as f32,
                         dark,
+                        u,
                     );
                 }
             }
@@ -1120,7 +1129,7 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
                     &p,
                     pos2(x, rect.min.y),
                     cap + 1,
-                    Vec2::new(16.0, rect.height()),
+                    Vec2::new(16.0 * u, rect.height()),
                     Color32::WHITE,
                 );
             }
@@ -1159,12 +1168,18 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
             vp.origin.y + fx.rel.1 as f32 * cell,
         );
         let r = Rect::from_min_max(
-            pos2(base.x + 2.0 - e * 20.0, base.y + 2.0 - e * 20.0),
-            pos2(base.x + 30.0 + e * 18.0, base.y + 30.0 + e * 20.0),
+            pos2(
+                base.x + 2.0 * u - e * 20.0 * u,
+                base.y + 2.0 * u - e * 20.0 * u,
+            ),
+            pos2(
+                base.x + 30.0 * u + e * 18.0 * u,
+                base.y + 30.0 * u + e * 20.0 * u,
+            ),
         );
         let col = th.accent(if th.fdark { 6 } else { 0 });
-        let stroke = Stroke::new(1.0_f32, alpha(col, (a * 255.0) as u8));
-        let radius = CornerRadius::same((e * 20.0).round().max(0.0) as u8);
+        let stroke = Stroke::new(1.0_f32 * u, alpha(col, (a * 255.0) as u8));
+        let radius = CornerRadius::same((e * 20.0 * u).round().max(0.0) as u8);
         p.rect_stroke(r, radius, stroke, StrokeKind::Inside);
     }
 }
@@ -1198,6 +1213,7 @@ fn push_note(
     };
     let th = &state.theme;
     let flags = &state.flags;
+    let u = state.viewport.u();
     let size = Vec2::splat(state.viewport.cell());
     let index = note.instrument as usize;
     let first_custom = FIRST_CUSTOM_INDEX as usize;
@@ -1220,8 +1236,8 @@ fn push_note(
     bank.block(p, at, set, frame, size, block_alpha);
 
     if flags.use_icons {
-        let icon_at = pos2(at.x + 16.0, at.y + 16.0);
-        let icon_size = Vec2::splat(16.0);
+        let icon_at = pos2(at.x + 16.0 * u, at.y + 16.0 * u);
+        let icon_size = Vec2::splat(16.0 * u);
         if iscustom {
             bank.custom_block_glyph(
                 p,
@@ -1250,8 +1266,11 @@ fn push_note(
 
     // 不兼容：自定义乐器、或超出 MC 音域的键，画一圈红框（原版 draw_rectangle(..., 1)）。
     if flags.show_incompatible && note.is_out_of_range() {
-        let r = Rect::from_min_max(pos2(at.x + 1.0, at.y + 1.0), pos2(at.x + 32.0, at.y + 32.0));
-        p.rect_stroke(r, 0.0, Stroke::new(1.0_f32, C_RED), StrokeKind::Inside);
+        let r = Rect::from_min_max(
+            pos2(at.x + 1.0 * u, at.y + 1.0 * u),
+            pos2(at.x + 32.0 * u, at.y + 32.0 * u),
+        );
+        p.rect_stroke(r, 0.0, Stroke::new(1.0_f32 * u, C_RED), StrokeKind::Inside);
     }
 
     // 选中叠层用完后文字恢复不透明；否则文字比方块本身亮 0.25（原版 draw_set_alpha(alpha + 0.25)）。
@@ -1263,13 +1282,13 @@ fn push_note(
     } else {
         (block_alpha + 0.25).min(1.0)
     };
-    let font = main_font();
+    let font = crate::fonts::scaled(main_font(), u);
 
     if flags.show_numbers {
         // 原版 `xx + 16 - 8 * use_icons`：勾了图标位就把数值往左挪半格。
-        let x = at.x + (if flags.use_icons { 8.0 } else { 16.0 });
+        let x = at.x + (if flags.use_icons { 8.0 } else { 16.0 }) * u;
         p.text(
-            pos2(x, at.y + 16.0),
+            pos2(x, at.y + 16.0 * u),
             Align2::CENTER_TOP,
             note_label(state, note),
             font.clone(),
@@ -1283,7 +1302,7 @@ fn push_note(
         C_YELLOW
     };
     p.text(
-        pos2(at.x + 16.0, at.y + 4.0),
+        pos2(at.x + 16.0 * u, at.y + 4.0 * u),
         Align2::CENTER_TOP,
         key_name(note.key, flags.show_octaves, flags.flats),
         font,

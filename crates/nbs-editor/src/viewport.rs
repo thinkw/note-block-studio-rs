@@ -1,8 +1,10 @@
 //! 视口与坐标换算 —— 视口剔除（culling）的所在地。
 //!
 //! 原版每格固定 32px（`draw_block(x1 + 2 + 32 * a - note_offset, y1 + 34 + 32 * b, …)`），
-//! 没有网格缩放，只有整窗口的 `window_scale`。所有绘制只遍历
-//! `[start_tick, start_tick+cols)`，与歌曲总长度无关。
+//! 缩放靠整窗口的 `window_scale`（GM 画面整体放大，工具栏 / 钢琴栏跟着变大）。
+//! 端口按用户要求改成「只缩放画布」：`window_scale` 只落到 [`Viewport::scale`]，
+//! 每格 `32 × scale` px，菜单 / 工具栏 / 状态栏 / 钢琴栏保持系统原生尺寸不动。
+//! 所有绘制只遍历 `[start_tick, start_tick+cols)`，与歌曲总长度无关。
 
 use egui::{Pos2, Rect, Vec2};
 
@@ -10,9 +12,9 @@ use egui::{Pos2, Rect, Vec2};
 pub const BASE_CELL: f32 = 32.0;
 /// 原版图层栏：x1 = 4，`spr_layerbox` 宽 256 → 列宽 264。
 pub const LAYER_PANEL_WIDTH: f32 = 264.0;
-/// 原版时间轴带：y1+2 .. y1+34。
+/// 原版时间轴带：y1+2 .. y1+34（画布内，跟缩放走）。
 pub const TIMELINE_HEIGHT: f32 = 32.0;
-/// 原版滚动条厚度 32。
+/// 原版滚动条厚度 32（画布内，跟缩放走）。
 pub const SCROLLBAR_SIZE: f32 = 32.0;
 /// 原版白键高 128，上方留 2px。
 pub const PIANO_HEIGHT: f32 = 130.0;
@@ -39,6 +41,9 @@ pub struct Viewport {
     pub size: Vec2,
     /// 播放跟随时的亚 tick 平滑偏移（原版 `note_offset`）。
     pub note_offset: f32,
+    /// 网格缩放倍率：原版 `window_scale` 相对系统 DPI 的比值（出厂恒 1）。
+    /// 只作用于画布（格距、标尺带、图层面板），chrome 不缩放。
+    pub scale: f32,
 }
 
 impl Default for Viewport {
@@ -49,14 +54,21 @@ impl Default for Viewport {
             origin: Pos2::ZERO,
             size: egui::vec2(800.0, 400.0),
             note_offset: 0.0,
+            scale: 1.0,
         }
     }
 }
 
 impl Viewport {
-    /// 原版网格恒 32px，没有缩放。
+    /// 每格像素：原版 32 × 缩放。
     pub fn cell(&self) -> f32 {
-        BASE_CELL
+        BASE_CELL * self.scale
+    }
+
+    /// 画布内的原版像素 → 屏幕像素的换算系数（就是 [`Self::scale`] 的别名，
+    /// 让「带内装饰 16px」这类常量的换算点写起来短）。
+    pub fn u(&self) -> f32 {
+        self.scale
     }
 
     /// 可见列数（多算 1 列给平滑滚动留余量）。
@@ -167,6 +179,21 @@ mod tests {
         assert_eq!(v.y_layer(v.layer_y(9)), 9);
         assert_eq!(v.cell_at(Pos2::new(100.0, 60.0)), Some((37, 4)));
         assert_eq!(v.cell_at(Pos2::new(10.0, 10.0)), None);
+    }
+
+    /// 缩放只改格距，坐标换算必须两边都对得上（画布缩放的根基）。
+    #[test]
+    fn scale_multiplies_the_cell() {
+        let mut v = Viewport::default();
+        v.origin = Pos2::new(100.0, 60.0);
+        v.size = egui::vec2(640.0, 320.0);
+        v.scale = 2.0;
+        assert_eq!(v.cell(), 64.0);
+        assert_eq!(v.x_tick(v.tick_x(52)), 52);
+        assert_eq!(v.y_layer(v.layer_y(9)), 9);
+        // origin 右下 63.9px 还在第 0 格（格宽 64），跨过 64 就是下一格。
+        assert_eq!(v.cell_at(Pos2::new(163.9, 123.9)), Some((0, 0)));
+        assert_eq!(v.cell_at(Pos2::new(164.1, 60.0)), Some((1, 0)));
     }
 
     #[test]
