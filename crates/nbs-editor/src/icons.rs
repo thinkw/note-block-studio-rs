@@ -67,6 +67,8 @@ pub mod frame {
     pub const INFORMATION: usize = 44;
     pub const PROPERTIES: usize = 45;
     pub const INSTRUMENTS: usize = 46;
+    /// 原版 `icons_init.gml:53` 的 MIDI_INPUT（设备管理器按钮）。
+    pub const MIDI_INPUT: usize = 47;
     pub const HELP: usize = 48;
     pub const INTERNET: usize = 49;
 }

@@ -330,14 +330,18 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
 
 /// 原版 `draw_piano` 结尾那段 `for (a = 0; a <= 87)` 的键盘轮询：
 /// `key_press[a] = keyboard_check(piano_key[a])` 既用来触发（按下沿）也用来把琴键画成按下态。
+/// 实时 MIDI 在同一道闸门里逐键过 `midi_input_set_key`（draw_piano.gml:152），
+/// 帧尾清空按下/松开队列。
 fn collect_keybind_presses(state: &mut EditorState, ui: &mut Ui) {
-    let blocked = ui.ctx().memory(|m| m.focused().is_some());
-    let (held, pressed): (KeysHeld, KeysHeld) = if blocked {
-        (NO_KEYS, NO_KEYS)
-    } else {
+    // 原版 `window = 0 && text_focus = -1 && key_edit = -1 && !check_ctrl()`：
+    // 窗口开着 / 输入框有焦点 / 按 Ctrl 时整段轮询跳过，按住态保持原样。
+    let blocked = state.window.is_some() || ui.ctx().memory(|m| m.focused().is_some());
+    // 没被键盘覆盖的键保留现值：MIDI 按住的键也在 keys_held 里（原版只对
+    // `piano_key[a] > 0` 的键重写 `key_press[a]`）。
+    let mut held = state.keys_held;
+    let mut pressed: KeysHeld = NO_KEYS;
+    if !blocked {
         ui.input(|i| {
-            let mut held = NO_KEYS;
-            let mut pressed = NO_KEYS;
             if !crate::shortcuts::ctrl_chord(i) {
                 for (idx, c) in KEYBINDS.iter().enumerate() {
                     if let Some(k) = keybind_key(*c) {
@@ -347,15 +351,25 @@ fn collect_keybind_presses(state: &mut EditorState, ui: &mut Ui) {
                     }
                 }
             }
-            (held, pressed)
-        })
-    };
+        });
+    }
     state.keys_held = held;
+    if blocked {
+        return;
+    }
     for (key, hit) in pressed.iter().enumerate() {
         if *hit {
             state.emit(Command::KeyPress(key as u8));
         }
     }
+    // 原版 control_step 的泵 + `midi_input_set_key(a, totalcols)`：0..=87 逐键
+    // 过按下/松开队列，帧尾清空（draw_piano.gml:161-162）。
+    state.live_midi.pump();
+    for key in 0..=KEY_MAX {
+        state.midi_input_set_key(key);
+    }
+    state.live_midi.presses.clear();
+    state.live_midi.releases.clear();
 }
 
 /// 原版白键：整帧（含文字）一起按 `floor(7 * down)` 下沉，所以 `at` 已带位移。

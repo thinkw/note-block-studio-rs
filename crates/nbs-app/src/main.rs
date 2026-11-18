@@ -29,6 +29,8 @@ mod native_dialog;
 mod update;
 #[cfg(windows)]
 mod window_icon;
+#[cfg(windows)]
+mod midi_win;
 
 struct NbsApp {
     state: EditorState,
@@ -51,6 +53,11 @@ impl NbsApp {
         #[cfg(windows)]
         {
             state.picker = Some(std::sync::Arc::new(native_dialog::WinFileDialogPicker));
+            // 实时 MIDI：winmm 后端 + 开机枚举一遍设备（原版
+            // control_create.gml:398 的 midi_refresh_device()）。
+            let midi = std::sync::Arc::new(midi_win::WinMidiIn::new());
+            state.live_midi.backend = Some(midi);
+            state.live_midi.refresh_devices();
         }
         state.theme.apply(&cc.egui_ctx);
         // egui 自带字体没有中文字形，不装系统字体整个界面会是一排空框。

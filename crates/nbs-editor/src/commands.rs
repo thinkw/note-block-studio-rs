@@ -258,6 +258,13 @@ fn pressed_note(state: &EditorState, key: u8) -> Note {
 /// 从第 0 层往上找当前列的第一个**空格**（`add_block_manual` 只看格子里有没有音符，
 /// 不看图层锁定），全满就在最上面加一层。
 fn record_note(state: &mut EditorState, key: u8) {
+    let note = pressed_note(state, key);
+    record_note_at(state, note);
+}
+
+/// 录音写块的共用入口：PC 键盘（[`record_note`]）和实时 MIDI
+/// （[`crate::live_midi`]）都走 `add_block_manual` 的这一段。
+pub(crate) fn record_note_at(state: &mut EditorState, note: Note) {
     let tick = state.marker().ceil().max(0.0) as u32;
     let layers = state.doc.song.layer_count();
     let mut layer = 0u32;
@@ -267,7 +274,6 @@ fn record_note(state: &mut EditorState, key: u8) {
     if layer >= layers {
         state.doc.song.layers.push(Default::default());
     }
-    let note = pressed_note(state, key);
     state.doc.place_note(tick, layer, note);
     // 原版 add_block_manual 结尾 `if (ins.loaded) play_sound(...)`：写下去的同时出声。
     state.audio.preview_note(&note);

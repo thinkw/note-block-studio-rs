@@ -22,6 +22,7 @@ pub mod grid;
 pub mod icons;
 pub mod interaction;
 pub mod layers_panel;
+pub mod live_midi;
 pub mod piano;
 pub mod shortcuts;
 pub mod state;
@@ -157,6 +158,9 @@ impl EditorState {
         // 系统倍率（`native_pixels_per_point` 是每帧从平台层喂进来的，测试没喂 = 1.0），
         // 所以缩放这一档只剩 prefs.json 里存的这个值要钉。
         s.prefs.window_scale = Some(1.0);
+        // 强调色也按出厂钉死：本机改过主题色的话，accent_base 相关断言会拿到
+        // 用户的值（和 #67 同款的本机 prefs 泄漏）。
+        s.prefs.accent = [0, 120, 212];
         s.theme = Theme::new(ThemeKind::Fluent);
         s.theme.fdark = false;
         s.theme.set_accent_base(s.prefs.accent);

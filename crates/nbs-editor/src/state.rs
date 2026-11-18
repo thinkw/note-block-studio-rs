@@ -192,6 +192,9 @@ pub enum WindowKind {
     AudioSettings,
     DatapackExport,
     MidiImport,
+    /// 原版 `w_mididevices`（`draw_window_mididevices.gml`）：实时 MIDI 输入的
+    /// 设备管理器，500×350，设备名 + 指派音色两列。
+    MidiDevices,
     SchematicExport,
     PngExport,
     /// 原版 `w_arpeggio`（`draw_window_macro_arpeggio.gml`）：140×130，只有一个规律框。
@@ -263,6 +266,8 @@ impl WindowKind {
             Self::DatapackExport => tr("Data Pack Export", "导出数据包"),
             // 原版 `draw_window_midi_import.gml` 中文分支画的是 `"导入MIDI"`。
             Self::MidiImport => tr("MIDI Import", "导入MIDI"),
+            // 原版 draw_window_mididevices.gml:11-12：窗口标题就在框里。
+            Self::MidiDevices => tr("MIDI device manager", "MIDI 设备管理器"),
             // 原版 `draw_window_schematic_export.gml:14`：CN "导出结构"。
             Self::SchematicExport => tr("Schematic Export", "导出结构"),
             Self::PngExport => tr("Export PNG chart", "导出 PNG 谱面"),
@@ -1059,6 +1064,9 @@ pub struct EditorState {
     pub record_armed: bool,
     /// 原版 `key_press[a]`：当前按住的按键绑定，琴键要画成按下态。
     pub keys_held: crate::piano::KeysHeld,
+    /// 原版实时 MIDI 那一堆全局：设备表、指派、本帧按下/松开队列，见
+    /// [`crate::live_midi`]。
+    pub live_midi: crate::live_midi::LiveMidi,
     /// 原版 `tempodrag`：拖速度框时的未量化累加值。
     pub tempo_drag: Option<f32>,
     /// 原版 `window = w_settempo` + `text_value[64]`：标尺速度格上就地弹出的输入框，
@@ -1305,6 +1313,7 @@ impl EditorState {
             record: false,
             record_armed: false,
             keys_held: [false; nbs_core::model::KEY_MAX as usize + 1],
+            live_midi: crate::live_midi::LiveMidi::new(),
             tempo_drag: None,
             tempo_input: None,
             tempo_press_in: false,

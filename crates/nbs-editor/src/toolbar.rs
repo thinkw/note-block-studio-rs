@@ -6,8 +6,7 @@
 //! 右侧固定位置：主音量拖条（`xx += 8` 起，长 100）与 Minecraft 兼容性指示。
 //! 窗口太窄时按原版的 `if (xx > rw - 312) break` 逐个丢弃。
 //!
-//! 原版有、我们还没有的功能不画按钮，免得给出一个点了没反应的假图标：
-//! MIDI 设备管理器（`icons.MIDI_INPUT`）。因此这一段会比原版少 25px。
+//! 原版有、我们还没有的功能不画按钮，免得给出一个点了没反应的假图标。
 
 use std::sync::Arc;
 
@@ -350,6 +349,15 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                 .clicked()
             {
                 state.emit(Command::ShowWindow(WindowKind::AudioSettings));
+                ui.close_menu();
+            }
+            // 原版设置菜单（control_draw.gml:1779/1874）在这条分隔线后是
+            // 「MIDI 设备管理器」，再往后才是首选项。
+            if ui
+                .button(tr("MIDI device manager", "MIDI 设备管理器"))
+                .clicked()
+            {
+                state.emit(Command::ShowWindow(WindowKind::MidiDevices));
                 ui.close_menu();
             }
             if ui
@@ -762,6 +770,17 @@ fn sequence(state: &mut EditorState, ui: &mut Ui, bar: &mut Bar, rw: f32) {
     .clicked
     {
         state.emit(Command::ShowWindow(WindowKind::Instruments));
+    }
+    // 原版 control_draw.gml:2045/2066：`playing = 0 window = w_mididevices`。
+    if draw!(
+        frame::MIDI_INPUT,
+        tr("MIDI device manager", "MIDI 设备管理器"),
+        false,
+        false
+    )
+    .clicked
+    {
+        state.emit(Command::ShowWindow(WindowKind::MidiDevices));
     }
     bar.separator_gap(ui);
 

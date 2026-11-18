@@ -76,6 +76,8 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         WindowKind::MinecraftCompat => 490.0,
         // 原版 `draw_window(x1, y1, x1 + 600, y1 + 400 + navigation_space)`。
         WindowKind::MidiImport => 600.0,
+        // 原版 `draw_window(x1, y1, x1 + 500, y1 + 350)`。
+        WindowKind::MidiDevices => 500.0,
         // 原版 `draw_window(x1, y1, x1 + 140, y1 + 130/162/180)`。
         WindowKind::TempoTapper
         | WindowKind::SaveOptions
@@ -144,6 +146,7 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::AudioExport => audio_export_window(state, ui),
             WindowKind::AudioSettings => audio_settings_window(state, ui),
             WindowKind::MidiImport => midi_import_window(state, ui),
+            WindowKind::MidiDevices => midi_devices_window(state, ui),
             WindowKind::SchematicExport => schematic_export_window(state, ui),
             WindowKind::DatapackExport => datapack_export_window(state, ui),
             WindowKind::PngExport => png_export_window(state, ui),
@@ -5306,6 +5309,113 @@ impl MidiCtx<'_> {
         *self.menu = Some(m);
         *self.sub = None;
     }
+}
+
+/// 原版 `draw_window_mididevices.gml`：500×350，设备名 + 指派音色两列，
+/// 每行一枚指派下拉（禁用设备 / 无 / 使用选择的 / 音色表），底部
+/// OK + 刷新设备。下拉项和行间距照原版 `show_menu_ext` 的清单
+/// （`:76-84`）：三个固定项后一条分隔线接音色表，内置和自定义音色之间
+/// 还有一条分隔线；分隔线不占菜单序号。
+fn midi_devices_window(state: &mut EditorState, ui: &mut Ui) {
+    ui.label(tr(
+        "Here you can see and select the MIDI devices connected via USB.",
+        "你可以查看和选择通过 USB 连接的 MIDI 设备。",
+    ));
+    ui.add_space(4.0);
+    let devices = state.live_midi.devices.clone();
+    let rows = devices.len().min(crate::live_midi::DEVICE_SLOTS);
+    egui::Grid::new("midi_devices_grid")
+        .num_columns(2)
+        .min_col_width(325.0)
+        .spacing([8.0, 4.0])
+        .show(ui, |ui| {
+            // 原版两个 20px 高的表头格，鼠标悬停有说明（popup_set_window）。
+            ui.label(tr("Name", "名称"))
+                .on_hover_text(tr("The name of the device.", "该设备的名称。"));
+            ui.label(tr("Instrument", "音色")).on_hover_text(tr(
+                "The instrument that note block added by this device\nwhen recording should have.",
+                "为该 MIDI 设备指定的音色。",
+            ));
+            ui.end_row();
+            for d in 0..rows {
+                ui.label(&devices[d]);
+                let assignment = state.live_midi.assignments[d];
+                let list = state.instrument_list();
+                let current = midi_assignment_label(assignment, &list);
+                egui::ComboBox::from_id_salt(format!("midi_device_{d}"))
+                    .selected_text(current)
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        for (value, en, zh) in [
+                            (-3, "Disable device", "禁用设备"),
+                            (-2, "None", "无"),
+                            (-1, "Use selected", "使用选择的"),
+                        ] {
+                            if ui
+                                .selectable_label(assignment == value, tr(en, zh))
+                                .clicked()
+                            {
+                                assign_midi_device(state, d, value);
+                            }
+                        }
+                        ui.separator();
+                        for (i, (id, name)) in list.iter().enumerate() {
+                            if i as u8 == nbs_core::model::FIRST_CUSTOM_INDEX {
+                                ui.separator();
+                            }
+                            if ui
+                                .selectable_label(assignment == *id as i8, name)
+                                .clicked()
+                            {
+                                assign_midi_device(state, d, *id as i8);
+                            }
+                        }
+                    });
+                ui.end_row();
+            }
+        });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        // 原版两枚按钮：OK 在右（x+408），刷新设备在左（x+12）。
+        if ui.button(tr("OK", "确定")).clicked() {
+            state.emit(Command::CloseWindow);
+        }
+        if ui.button(tr("Refresh", "刷新设备")).clicked() {
+            state.live_midi.refresh_devices();
+        }
+    });
+}
+
+/// 设备行第二列的显示名：-3/-2/-1 三个固定文案，其余用音色名。
+fn midi_assignment_label(assignment: i8, list: &[(u8, String)]) -> String {
+    match assignment {
+        -3 => tr("Disable device", "禁用设备").to_string(),
+        -2 => tr("None", "无").to_string(),
+        -1 => tr("Use selected", "使用选择的").to_string(),
+        _ => list
+            .iter()
+            .find(|(id, _)| *id == assignment as u8)
+            .map(|(_, n)| n.clone())
+            .unwrap_or_else(|| {
+                let n = assignment as usize - nbs_core::model::FIRST_CUSTOM_INDEX as usize + 1;
+                tr(&format!("Custom instrument {n}"), &format!("自定义音色 {n}")).to_string()
+            }),
+    }
+}
+
+/// 原版 menu_click.gml:310-314：每次改指派都先 `midi_set_device`（重开设备口，
+/// 顺带把全部指派清成 -3）——所以给一台设备指派音色会抹掉其他设备的指派，
+/// 这是原版行为；设备口开不出就刷新设备表并提示。
+fn assign_midi_device(state: &mut EditorState, device: usize, value: i8) {
+    if !state.live_midi.set_device(device) {
+        state.live_midi.refresh_devices();
+        state.set_message(tr(
+            "That device no longer exists, refreshing...",
+            "所指定的设备不存在，刷新中……",
+        ));
+        return;
+    }
+    state.live_midi.assignments[device] = value;
 }
 
 fn midi_import_window(state: &mut EditorState, ui: &mut Ui) {
