@@ -83,7 +83,7 @@ pub fn show_grid(state: &mut EditorState, ui: &mut Ui, area: Rect) {
     let _response = ui.allocate_rect(area, Sense::click_and_drag());
     let input = InputSnapshot::read(ui);
 
-    handle_timeline_input(state, &input, timeline_rect);
+    handle_timeline_input(state, &input, timeline_rect, grid_rect);
     handle_grid_input(state, &input, grid_rect);
     handle_scrollbar_input(state, &input, hbar_rect, vbar_rect);
 
@@ -133,7 +133,7 @@ fn clamp_section(state: &mut EditorState) {
     }
 }
 
-fn handle_timeline_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect) {
+fn handle_timeline_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect, grid: Rect) {
     // 每帧先夹取，和鼠标在哪、开没开窗都无关（原版这一段在 `if (!isplayer)` 里、
     // 命中判定之外，`control_draw.gml:1122`）。
     clamp_section(state);
@@ -176,6 +176,7 @@ fn handle_timeline_input(state: &mut EditorState, input: &InputSnapshot, rect: R
                     } else {
                         state.section_end = t;
                     }
+                    state.interaction.cursor = CursorIcon::ResizeHorizontal;
                 } else {
                     // 原版 `:1105-1118`：松手时两端重合就删掉，否则把两端排好序。
                     if state.section_end == state.section_start {
@@ -193,15 +194,15 @@ fn handle_timeline_input(state: &mut EditorState, input: &InputSnapshot, rect: R
 
     // ---- 起手判定：原版 `:124` 的总闸 —— 播放中、有窗口、已有别的拖拽状态都不响应。
     // `window = 0` 在原版里同时管着「没开窗」和「没在拖别的」（`window` 一个变量两用）。
-    let Some(pos) = input.pointer.filter(|p| rect.contains(*p)) else {
+    // 三个手柄（`:132/141/148`）的命中框是 16px 宽 × **整列高** —— 标尺带之外，
+    // 音符区里贴着播放头/区间线同样能抓住拖，抓住后音符编辑让位。
+    let Some(pos) = input.pointer.filter(|p| rect.union(grid).contains(*p)) else {
         return;
     };
     if state.window.is_some() || state.is_playing() || state.interaction.mode != DragMode::None {
         return;
     }
     // 原版 `:132/141/148`：三个 16px 命中框，播放头优先、区间两端让位（`cursmarker`）。
-    // 原版的高度是整列（`totalrows * 32 + 32`），端口只做标尺带那 32px，
-    // 网格里的音符编辑因此不会被播放头/区间手柄抢走。
     let handles = [
         (marker_x(state), DragMode::DragMarker),
         (
@@ -230,10 +231,15 @@ fn handle_timeline_input(state: &mut EditorState, input: &InputSnapshot, rect: R
             break;
         }
     }
+    // 右键菜单和「按下记列」只认标尺带那 32px（原版 `:155/:166/:168` 的矩形高度都是 32）；
+    // 音符区里的右键与按下交给网格侧处理。
+    let Some(band) = input.pointer.filter(|p| rect.contains(*p)) else {
+        return;
+    };
     if input.secondary_pressed {
         state.context_menu = Some(ContextMenu {
-            pos,
-            cell: (state.viewport.x_tick(pos.x).max(0) as u32, 0),
+            pos: band,
+            cell: (state.viewport.x_tick(band.x).max(0) as u32, 0),
             kind: ContextKind::Timeline,
         });
         return;
@@ -241,7 +247,7 @@ fn handle_timeline_input(state: &mut EditorState, input: &InputSnapshot, rect: R
     if input.primary_pressed && !on_handle {
         // 原版 `:171`：按下只记下那一列（`timeline_pressa`），松手或拖开才有下文。
         state.interaction.mode = DragMode::PressTimeline {
-            pressa: ruler_tick(&state.viewport, pos.x).floor() as i64,
+            pressa: ruler_tick(&state.viewport, band.x).floor() as i64,
         };
     }
 }
@@ -260,8 +266,8 @@ fn handle_grid_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect)
     let pointer_in_grid = input.pointer.is_some_and(|p| rect.contains(p));
     // 光标只在指针真的进了网格时才收回默认：标尺上那三个 16px 手柄的
     // `cr_size_we` 是 `handle_timeline_input` 先设的（原版 `control_draw.gml:134/144/151`），
-    // 无条件重置会让手柄永远画不出拉伸光标。
-    if pointer_in_grid {
+    // 无条件重置会让手柄永远画不出拉伸光标。拖拽进行中同理，别覆盖标尺侧的光标。
+    if pointer_in_grid && state.interaction.mode == DragMode::None {
         state.interaction.cursor = CursorIcon::Default;
     }
 
@@ -394,12 +400,15 @@ fn handle_grid_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect)
             state.interaction.cursor = CursorIcon::Grabbing;
         }
         _ => {
-            if state.doc.selection.contains(t, l) {
-                state.interaction.cursor = CursorIcon::Grab;
-            } else if state.doc.song.has(cell.0, cell.1) {
-                state.interaction.cursor = CursorIcon::PointingHand;
-            } else {
-                state.interaction.cursor = CursorIcon::Crosshair;
+            // 播放头/区间/标尺按下进行中：光标由标尺侧定（`cr_size_we`），网格别抢。
+            if state.interaction.mode == DragMode::None {
+                if state.doc.selection.contains(t, l) {
+                    state.interaction.cursor = CursorIcon::Grab;
+                } else if state.doc.song.has(cell.0, cell.1) {
+                    state.interaction.cursor = CursorIcon::PointingHand;
+                } else {
+                    state.interaction.cursor = CursorIcon::Crosshair;
+                }
             }
         }
     }
@@ -1633,10 +1642,19 @@ mod tests {
         Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, TIMELINE_HEIGHT))
     }
 
+    /// 原版手柄命中框的「整列高」：标尺带 + 全部网格行。
+    fn grid_rect() -> Rect {
+        Rect::from_min_size(Pos2::new(0.0, TIMELINE_HEIGHT), Vec2::new(320.0, 128.0))
+    }
+
     /// 一帧鼠标，`y = 16` 恒在标尺带内；按键位由参数给（`pressed` 与 `down`
     /// 在同一帧是两件事，原版 `mouse_check_button(_pressed/_released)` 也是三个独立查询）。
     fn mouse(x: f32, pressed: bool, down: bool, released: bool) -> InputSnapshot {
-        let p = pos2(x, 16.0);
+        mouse_xy(x, 16.0, pressed, down, released)
+    }
+
+    fn mouse_xy(x: f32, y: f32, pressed: bool, down: bool, released: bool) -> InputSnapshot {
+        let p = pos2(x, y);
         InputSnapshot {
             hover: Some(p),
             pointer: Some(p),
@@ -1654,14 +1672,15 @@ mod tests {
         let _prefs = crate::isolate_prefs();
         let mut st = ruler_state();
         let r = ruler_rect();
-        handle_timeline_input(&mut st, &mouse(100.0, true, true, false), r);
+        let g = grid_rect();
+        handle_timeline_input(&mut st, &mouse(100.0, true, true, false), r, g);
         assert!(
             matches!(st.interaction.mode, DragMode::PressTimeline { pressa: 3 }),
             "按下只记列：{:?}",
             st.interaction.mode
         );
         assert_eq!(st.marker(), 0.0, "按下本身不该动播放头");
-        handle_timeline_input(&mut st, &mouse(100.0, false, false, true), r);
+        handle_timeline_input(&mut st, &mouse(100.0, false, false, true), r, g);
         assert_eq!(st.marker(), 3.125, "100px ÷ 32 = 3.125 刻，取整就错了");
         assert_eq!(st.interaction.mode, DragMode::None);
         assert!(!st.section_exists, "没横向拖开就不该有区间");
@@ -1674,12 +1693,13 @@ mod tests {
         let _prefs = crate::isolate_prefs();
         let mut st = ruler_state();
         let r = ruler_rect();
-        handle_timeline_input(&mut st, &mouse(100.0, true, true, false), r);
-        handle_timeline_input(&mut st, &mouse(260.0, false, true, false), r);
+        let g = grid_rect();
+        handle_timeline_input(&mut st, &mouse(100.0, true, true, false), r, g);
+        handle_timeline_input(&mut st, &mouse(260.0, false, true, false), r, g);
         assert!(st.section_exists);
         assert_eq!((st.section_start, st.section_end), (3, 8), "新建用 floor");
         assert_eq!(st.interaction.mode, DragMode::DragSectionEnd);
-        handle_timeline_input(&mut st, &mouse(260.0, false, false, true), r);
+        handle_timeline_input(&mut st, &mouse(260.0, false, false, true), r, g);
         assert_eq!(st.interaction.mode, DragMode::None, "松手要收掉拖拽状态");
         assert!(st.section_exists, "两端不重合，区间留下");
         assert_eq!((st.section_start, st.section_end), (3, 8));
@@ -1692,19 +1712,20 @@ mod tests {
         let _prefs = crate::isolate_prefs();
         let mut st = ruler_state();
         let r = ruler_rect();
+        let g = grid_rect();
         st.section_exists = true;
         st.section_start = 3;
         st.section_end = 8;
         // 右端手柄在 tick_x(8) = 256，命中框 ±8px。
-        handle_timeline_input(&mut st, &mouse(253.0, true, true, false), r);
+        handle_timeline_input(&mut st, &mouse(253.0, true, true, false), r, g);
         assert_eq!(st.interaction.mode, DragMode::DragSectionEnd);
-        handle_timeline_input(&mut st, &mouse(74.0, false, true, false), r);
+        handle_timeline_input(&mut st, &mouse(74.0, false, true, false), r, g);
         assert_eq!(
             (st.section_start, st.section_end),
             (3, 2),
             "2.3125 刻 round 成 2，且此时还不排序"
         );
-        handle_timeline_input(&mut st, &mouse(74.0, false, false, true), r);
+        handle_timeline_input(&mut st, &mouse(74.0, false, false, true), r, g);
         assert_eq!((st.section_start, st.section_end), (2, 3), "松手排序");
         assert!(st.section_exists);
     }
@@ -1715,13 +1736,14 @@ mod tests {
         let _prefs = crate::isolate_prefs();
         let mut st = ruler_state();
         let r = ruler_rect();
+        let g = grid_rect();
         st.section_exists = true;
         st.section_start = 3;
         st.section_end = 8;
-        handle_timeline_input(&mut st, &mouse(253.0, true, true, false), r);
-        handle_timeline_input(&mut st, &mouse(96.0, false, true, false), r);
+        handle_timeline_input(&mut st, &mouse(253.0, true, true, false), r, g);
+        handle_timeline_input(&mut st, &mouse(96.0, false, true, false), r, g);
         assert_eq!(st.section_end, 3);
-        handle_timeline_input(&mut st, &mouse(96.0, false, false, true), r);
+        handle_timeline_input(&mut st, &mouse(96.0, false, false, true), r, g);
         assert!(!st.section_exists, "两端重合就不该留一段零宽区间");
         assert_eq!(st.interaction.mode, DragMode::None);
     }
@@ -1733,11 +1755,12 @@ mod tests {
         let _prefs = crate::isolate_prefs();
         let mut st = ruler_state();
         let r = ruler_rect();
-        handle_timeline_input(&mut st, &mouse(36.0, true, true, false), r);
-        handle_timeline_input(&mut st, &mouse(964.0, false, true, false), r);
+        let g = grid_rect();
+        handle_timeline_input(&mut st, &mouse(36.0, true, true, false), r, g);
+        handle_timeline_input(&mut st, &mouse(964.0, false, true, false), r, g);
         assert_eq!(st.section_start, 1);
         assert_eq!(st.section_end, 30, "拖拽中按鼠标原值");
-        handle_timeline_input(&mut st, &mouse(964.0, false, false, true), r);
+        handle_timeline_input(&mut st, &mouse(964.0, false, false, true), r, g);
         assert_eq!(st.section_end, 10, "夹进 enda + totalcols");
         assert!(st.section_exists);
     }
@@ -1749,15 +1772,16 @@ mod tests {
         let _prefs = crate::isolate_prefs();
         let mut st = ruler_state();
         let r = ruler_rect();
+        let g = grid_rect();
         st.set_marker(5.0);
-        handle_timeline_input(&mut st, &mouse(164.0, true, true, false), r);
+        handle_timeline_input(&mut st, &mouse(164.0, true, true, false), r, g);
         assert_eq!(st.interaction.mode, DragMode::DragMarker);
         assert_eq!(st.marker(), 5.0, "按下本身不动播放头");
-        handle_timeline_input(&mut st, &mouse(430.0, false, true, false), r);
+        handle_timeline_input(&mut st, &mouse(430.0, false, true, false), r, g);
         assert_eq!(st.marker(), 13.4375, "出格也要跟手");
         assert_eq!(st.interaction.cursor, CursorIcon::ResizeHorizontal);
         assert!(!st.section_exists, "抢到手柄就不该变成拖区间");
-        handle_timeline_input(&mut st, &mouse(430.0, false, false, true), r);
+        handle_timeline_input(&mut st, &mouse(430.0, false, false, true), r, g);
         assert_eq!(st.interaction.mode, DragMode::None);
         assert_eq!(st.marker(), 13.4375);
     }
@@ -1768,10 +1792,11 @@ mod tests {
         let _prefs = crate::isolate_prefs();
         let mut st = ruler_state();
         let r = ruler_rect();
+        let g = grid_rect();
         st.set_marker(5.0);
         let mut snap = mouse(164.0, false, false, false);
         snap.secondary_pressed = true;
-        handle_timeline_input(&mut st, &snap, r);
+        handle_timeline_input(&mut st, &snap, r, g);
         let menu = st.context_menu.expect("手柄上的右键仍要开菜单");
         assert_eq!(menu.kind, ContextKind::Timeline);
         assert_eq!(st.interaction.mode, DragMode::None, "右键不进拖拽状态");
@@ -1784,13 +1809,87 @@ mod tests {
         let _prefs = crate::isolate_prefs();
         let mut st = ruler_state();
         let r = ruler_rect();
+        let g = grid_rect();
         st.audio.clock_mut().play();
-        handle_timeline_input(&mut st, &mouse(100.0, true, true, false), r);
-        handle_timeline_input(&mut st, &mouse(260.0, false, true, false), r);
-        handle_timeline_input(&mut st, &mouse(260.0, false, false, true), r);
+        handle_timeline_input(&mut st, &mouse(100.0, true, true, false), r, g);
+        handle_timeline_input(&mut st, &mouse(260.0, false, true, false), r, g);
+        handle_timeline_input(&mut st, &mouse(260.0, false, false, true), r, g);
         st.audio.clock_mut().pause();
         assert_eq!(st.marker(), 0.0);
         assert!(!st.section_exists);
         assert_eq!(st.interaction.mode, DragMode::None);
+    }
+
+    /// 原版 `:132`：播放头手柄的命中框是 16px 宽 × **整列高** —— 音符区里贴着
+    /// 播放头线同样能抓住拖，抓住后出标尺带也一直跟手（按住左键不失控）。
+    #[test]
+    fn the_playhead_handle_grabs_from_inside_the_grid() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = ruler_state();
+        let (r, g) = (ruler_rect(), grid_rect());
+        st.set_marker(5.0);
+        // 手柄中心 x = tick_x(5) = 160，y = 96 落在网格第 3 行 —— 标尺带之外。
+        handle_timeline_input(&mut st, &mouse_xy(160.0, 96.0, true, true, false), r, g);
+        assert!(
+            matches!(st.interaction.mode, DragMode::DragMarker),
+            "网格里贴线要抓到手柄：{:?}",
+            st.interaction.mode
+        );
+        assert_eq!(st.marker(), 5.0, "按下本身不动播放头");
+        handle_timeline_input(&mut st, &mouse_xy(240.0, 96.0, false, true, false), r, g);
+        assert_eq!(st.marker(), 7.5, "出标尺带也继续跟手");
+        assert_eq!(st.interaction.cursor, CursorIcon::ResizeHorizontal);
+        assert!(!st.section_exists, "抓住手柄不该变成拖区间");
+        handle_timeline_input(&mut st, &mouse_xy(240.0, 96.0, false, false, true), r, g);
+        assert_eq!(st.interaction.mode, DragMode::None);
+        assert_eq!(st.marker(), 7.5);
+    }
+
+    /// 「按下记列」只认标尺带那 32px（原版 `:166` 的矩形高度是 32）：
+    /// 音符区里的左键属于网格（放音符/框选），不得误开标尺状态机。
+    #[test]
+    fn the_timeline_press_stays_in_the_ruler_band() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = ruler_state();
+        let (r, g) = (ruler_rect(), grid_rect());
+        handle_timeline_input(&mut st, &mouse_xy(100.0, 96.0, true, true, false), r, g);
+        assert_eq!(
+            st.interaction.mode,
+            DragMode::None,
+            "网格里的按下不进标尺状态机"
+        );
+        assert_eq!(st.marker(), 0.0);
+        assert!(!st.section_exists);
+    }
+
+    /// 播放头拖拽经过网格时，网格侧不得抢光标、不得把按住中的左键当成框选起点。
+    #[test]
+    fn the_grid_defers_to_an_active_playhead_drag() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = ruler_state();
+        let (r, g) = (ruler_rect(), grid_rect());
+        st.set_marker(5.0);
+        handle_timeline_input(&mut st, &mouse(164.0, true, true, false), r, g);
+        assert!(matches!(st.interaction.mode, DragMode::DragMarker));
+        // 指针移到网格里：光标保持 cr_size_we，拖拽状态不被覆盖。
+        handle_grid_input(&mut st, &mouse_xy(170.0, 96.0, false, true, false), g);
+        assert!(
+            matches!(st.interaction.mode, DragMode::DragMarker),
+            "网格输入不得打断拖拽"
+        );
+        assert_eq!(
+            st.interaction.cursor,
+            CursorIcon::ResizeHorizontal,
+            "网格不得抢光标"
+        );
+        assert!(
+            st.interaction.pressed_cell.is_none(),
+            "网格不得把拖拽中的按下当成选音符的起点"
+        );
+        handle_timeline_input(&mut st, &mouse_xy(210.0, 96.0, false, true, false), r, g);
+        assert_eq!(st.marker(), 6.5625, "210 ÷ 32 = 6.5625");
+        handle_timeline_input(&mut st, &mouse_xy(210.0, 96.0, false, false, true), r, g);
+        assert_eq!(st.interaction.mode, DragMode::None);
+        assert_eq!(st.marker(), 6.5625, "松手不回跳");
     }
 }
