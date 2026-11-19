@@ -70,17 +70,29 @@ pub trait AudioEngine {
     fn wanted_output(&self) -> Option<&str> {
         None
     }
-    /// 换输出设备，`None` = 跟随系统默认。返回实际接上的设备名。
-    fn set_output(&mut self, _wanted: Option<String>) -> Result<String, String> {
+    /// 换输出设备，`None` = 跟随系统默认。请求派给后台线程后立即返回，
+    /// 真正接上了哪台由 [`Self::poll_output`] 带回来（拿指定设备的句柄要过一遍系统
+    /// 枚举，实测 0.5~1.3 秒，界面一秒都不能等）。`Err` 只表示这个引擎没有可切换的设备。
+    fn set_output(&mut self, _wanted: Option<String>) -> Result<(), String> {
         Err(nbs_core::tr(
             "this audio engine has no switchable output device",
             "当前音频引擎没有可切换的输出设备",
         )
         .to_string())
     }
+    /// 有一趟切换还在后台跑（点了到结果落地之间）。界面用它显示「正在连接」，
+    /// 别拿上一台的旧名字装作已经切好了。
+    fn output_connecting(&self) -> bool {
+        false
+    }
     /// 系统默认输出变了（插耳机、切蓝牙）就跟随过去。内部限流，每帧调用即可；
-    /// 返回换到的新设备名，没变化返回 `None`。
+    /// 也在这里取走后台建流的结果。返回换到的新设备名，没变化返回 `None`。
     fn poll_output(&mut self) -> Option<String> {
+        None
+    }
+    /// 取走一次「后台建流失败」的告示（同一趟只报一次）。切换不再当场有结果，
+    /// 失败原因只能这样延后交给状态栏。
+    fn take_output_error(&mut self) -> Option<String> {
         None
     }
     fn bank(&self) -> Arc<SoundBank>;
@@ -104,10 +116,12 @@ enum DeviceReport {
     },
     /// 降级为静音时钟的原因（cpal 的报错串，按技术原文显示）。
     Fallback(String),
+    /// 有一趟切换在后台跑。这时候上一台的流已经被放掉、新的还没建好，
+    /// 不能拿旧名字装作已经切过去了。
+    Connecting,
     /// 还没尝试建流。
     Uninitialised,
 }
-
 /// 一台可选的输出设备。cpal 0.15 不对外暴露稳定设备 ID，只能用设备名当标识
 /// （Windows 给的名字自带设备描述，如「耳机 (Realtek(R) Audio)」，实际重名概率极低；
 /// 真撞上同名就选枚举到的第一台）。
@@ -168,6 +182,225 @@ fn open_output_device(wanted: Option<&str>) -> Result<cpal::Device, String> {
     Err(format!("output device \"{wanted}\" is not available"))
 }
 
+/// 后台建流线程一趟做完后留下的结论。`cpal::Stream` 不在里面——它 !Send，
+/// 只能留在干活的那条线程上（见 [`StreamWorker::spawn`]）。
+pub struct StreamOutcome {
+    /// 这一趟回答的是哪个请求。界面拿它和当前 `wanted` 比对，过期的结果直接丢掉。
+    pub for_wanted: Option<String>,
+    /// 真正接上的设备（名 / 采样率 / 声道数）；`None` = 这趟没出声。
+    pub built: Option<(String, u32, usize)>,
+    /// 建流失败的原因（cpal 报错原文，按技术原文显示）。
+    pub error: Option<String>,
+    /// 点名的设备没拿到，后台已经回落成跟随系统默认：界面要跟着把偏好改回去，
+    /// 别存一个并没有生效的点名下标。
+    pub fell_back: bool,
+}
+
+/// 启动那趟建流最多等多久。超时就先按「还没初始化」把窗口开出来，晚一点由
+/// [`CpalEngine::poll_output`] 补上——宁可晚出声，不要打不开窗口。
+const STARTUP_STREAM_WAIT: Duration = Duration::from_secs(15);
+
+/// 建流干活的那条线程。为什么要搬到后台：实测在 Windows 上打开一台**非默认**输出设备
+/// 要先过一遍全量枚举再建流，约 0.64 秒（默认设备只要几毫秒）。这一步以前在界面线程上
+/// 同步跑完，点一下设备菜单整个窗口就僵在那里。
+struct StreamWorker {
+    request: mpsc::Sender<Option<String>>,
+    /// 结果队列。`Receiver` 是 Send 不是 Sync，包进 Mutex 才放得进结构体。
+    results: Mutex<mpsc::Receiver<StreamOutcome>>,
+}
+
+/// 建流那一步的注入点：收到「想要的设备名（`None` = 系统默认）」，返回这一趟的结论
+/// 加上要由后台线程持有的流。用例往里塞假替身，就不必真去碰音频硬件。
+type Connect =
+    dyn Fn(&Shared, Option<String>) -> (StreamOutcome, Option<cpal::Stream>) + Send + 'static;
+
+impl StreamWorker {
+    fn spawn(shared: Shared, connect: Box<Connect>) -> Self {
+        let (request, inbox) = mpsc::channel::<Option<String>>();
+        let (reporter, outcomes) = mpsc::channel::<StreamOutcome>();
+        std::thread::spawn(move || {
+            // Stream 只能活在这条线程的局部变量里。每趟先把旧流放掉（cpal 的 Stream
+            // 一 drop 就停声），否则重复建同一台设备时旧流还占着端点。
+            let mut current: Option<cpal::Stream> = None;
+            for wanted in inbox.iter() {
+                drop(current.take());
+                let (outcome, stream) = connect(&shared, wanted);
+                current = stream;
+                if reporter.send(outcome).is_err() {
+                    break; // 引擎已经不在了，没必要继续占着这台设备
+                }
+            }
+        });
+        Self {
+            request,
+            results: Mutex::new(outcomes),
+        }
+    }
+
+    /// 派一趟请求，立即返回。
+    fn dispatch(&self, wanted: Option<String>) -> Result<(), String> {
+        self.request
+            .send(wanted)
+            .map_err(|_| "audio stream worker stopped".to_string())
+    }
+
+    /// 取走已经回来的结果，只认最后一趟：请求按顺序处理，最后一条才是当前想要的状态。
+    fn harvest(&self) -> Option<StreamOutcome> {
+        let rx = slot_guard(&self.results);
+        let mut latest = None;
+        while let Ok(outcome) = rx.try_recv() {
+            latest = Some(outcome);
+        }
+        latest
+    }
+
+    /// 等第一趟结果。只在启动时用——那时等和以前在界面线程上同步建流没两样，窗口还没出来。
+    fn wait_first(&self) -> Option<StreamOutcome> {
+        slot_guard(&self.results)
+            .recv_timeout(STARTUP_STREAM_WAIT)
+            .ok()
+    }
+}
+
+/// 一趟建流：按 `wanted` 找设备、开流。点名的设备拿不到就回落到系统默认——宁可换设备
+/// 出声，也不要因为一次选择把声音整个丢掉；连默认都没有才降级成静音时钟。
+/// 真建出来的流不在这里保存，交给调用方（后台线程）持有。
+fn connect_output(
+    shared: &Shared,
+    wanted: Option<String>,
+) -> (StreamOutcome, Option<cpal::Stream>) {
+    let (device, fell_back) = match pick_output_device(wanted.as_deref()) {
+        Ok(picked) => picked,
+        Err(reason) => return stream_failed(wanted, reason),
+    };
+    let (mut outcome, stream) = open_stream_on(&device, shared, wanted);
+    outcome.fell_back = fell_back;
+    (outcome, stream)
+}
+
+/// 这趟要用哪台设备，顺带说明是不是从用户点名的那台回落下来的。
+fn pick_output_device(wanted: Option<&str>) -> Result<(cpal::Device, bool), String> {
+    match open_output_device(wanted) {
+        Ok(device) => Ok((device, false)),
+        Err(e) => {
+            if wanted.is_none() {
+                return Err(e);
+            }
+            match open_output_device(None) {
+                Ok(device) => Ok((device, true)),
+                Err(e2) => Err(if e == e2 { e } else { format!("{e}; {e2}") }),
+            }
+        }
+    }
+}
+
+fn stream_failed(
+    for_wanted: Option<String>,
+    error: String,
+) -> (StreamOutcome, Option<cpal::Stream>) {
+    (
+        StreamOutcome {
+            for_wanted,
+            built: None,
+            error: Some(error),
+            fell_back: false,
+        },
+        None,
+    )
+}
+
+/// 在一台具体设备上建输出流。**这里不留流**：`cpal::Stream` 不是 Send，只能由后台线程
+/// 自己拿着，这里只把它连同结论一起交出去（原来它存在引擎字段里，于是每次换设备都得
+/// 在界面线程上等这一趟跑完）。
+fn open_stream_on(
+    device: &cpal::Device,
+    shared: &Shared,
+    for_wanted: Option<String>,
+) -> (StreamOutcome, Option<cpal::Stream>) {
+    let name = device
+        .name()
+        .unwrap_or_else(|_| "unknown device".to_string());
+    let supported = match device.default_output_config() {
+        Ok(supported) => supported,
+        Err(e) => return stream_failed(for_wanted, format!("failed to read output config: {e}")),
+    };
+    let sample_format = supported.sample_format();
+    let config: cpal::StreamConfig = supported.config();
+    let rate = config.sample_rate.0;
+    let channels = config.channels as usize;
+
+    {
+        let mut st = shared.lock();
+        st.sample_rate = rate;
+        st.mixer.output_rate = rate;
+    }
+
+    let cb_shared = shared.clone();
+    let err_shared = shared.clone();
+    let built = match sample_format {
+        cpal::SampleFormat::F32 => device
+            .build_output_stream::<f32, _, _>(
+                &config,
+                move |data, _| {
+                    if let Some(mut st) = cb_shared.try_lock() {
+                        st.render_interleaved(data, channels);
+                    } else {
+                        data.fill(0.0);
+                    }
+                },
+                move |e| {
+                    eprintln!("[nbs-audio] output stream error: {e}");
+                    err_shared.lock().audio_active = false;
+                },
+                None,
+            )
+            .map_err(|e| format!("failed to build f32 output stream: {e}")),
+        cpal::SampleFormat::I16 => {
+            let mut scratch: Vec<f32> = Vec::new();
+            let render_shared = shared.clone();
+            device
+                .build_output_stream::<i16, _, _>(
+                    &config,
+                    move |data, _| {
+                        scratch.resize(data.len(), 0.0);
+                        if let Some(mut st) = render_shared.try_lock() {
+                            st.render_interleaved(&mut scratch, channels);
+                        } else {
+                            scratch.fill(0.0);
+                        }
+                        for (d, &s) in data.iter_mut().zip(scratch.iter()) {
+                            *d = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+                        }
+                    },
+                    move |e| {
+                        eprintln!("[nbs-audio] output stream error: {e}");
+                        err_shared.lock().audio_active = false;
+                    },
+                    None,
+                )
+                .map_err(|e| format!("failed to build i16 output stream: {e}"))
+        }
+        other => Err(format!("unsupported sample format {other:?}")),
+    };
+    let stream = match built {
+        Ok(stream) => stream,
+        Err(e) => return stream_failed(for_wanted, e),
+    };
+    if let Err(e) = stream.play() {
+        return stream_failed(for_wanted, format!("failed to start output stream: {e}"));
+    }
+    shared.lock().audio_active = true;
+    (
+        StreamOutcome {
+            for_wanted,
+            built: Some((name, rate, channels)),
+            error: None,
+            fell_back: false,
+        },
+        Some(stream),
+    )
+}
+
 /// 默认设备探测间隔：插耳机、切蓝牙到跟随切换的最大延迟。这一档只做便宜的事
 /// （读系统默认设备名，本机实测 0.4~1.5 毫秒），不碰全量枚举。
 const OUTPUT_PROBE: Duration = Duration::from_millis(1000);
@@ -190,18 +423,18 @@ struct ScanSlot {
 /// 实测 1.26~1.52 秒，Realtek 那两台各要 0.5~0.7 秒，虚拟声卡多的机器只会更慢。
 /// 这笔开销绝不能落在界面线程上：#94 头一版每秒枚举一次，实测每次 1.17~1.32 秒，
 /// 整个界面每隔一秒僵死一次 —— 就是用户反馈的「处处都卡」（2026-11-19）。
-/// 跨线程的只有设备名（`String`）；cpal 的设备句柄内部是 COM 指针，取句柄和建流
-/// 一律留在界面线程做，不往这条线上放。
+/// 跨这条线的只有设备名（`String`）：cpal 的句柄内部是线程亲和的 COM 指针，
+/// 拿句柄、建流都只能在真正要用它的那条线程上做（见 [`StreamWorker`]）。
 struct DeviceScanner {
     request: mpsc::Sender<()>,
     slot: Arc<Mutex<ScanSlot>>,
 }
 
-/// std 的锁在别的线程 panic 时会「毒化」，取不出值。设备表读不到的最坏结果只是
-/// 这一帧下拉里没有设备，不该把界面线程一起拖崩，所以一律取 `into_inner()` 接着用
-/// （与音色导入那条下载链 `sound_import::lock` 同一个做法）。
-fn slot_guard(slot: &Mutex<ScanSlot>) -> std::sync::MutexGuard<'_, ScanSlot> {
-    slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+/// std 的锁在别的线程 panic 时会「毒化」，取不出值。交接的那两份东西读不到的最坏
+/// 结果只是这一帧没有设备表 / 没有建流结果，不该把界面线程一起拖崩，所以一律取
+/// `into_inner()` 接着用（与音色导入那条下载链 `sound_import::lock` 同一个做法）。
+fn slot_guard<T>(lock: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl DeviceScanner {
@@ -258,8 +491,15 @@ pub struct CpalEngine {
     shared: Shared,
     clock: TransportClock,
     bank: Arc<SoundBank>,
-    stream: Option<cpal::Stream>,
+    /// 建流、以及那条约出声的流，都归这条后台线程管（见 [`StreamWorker`]）。
+    /// 界面这边只留最近一趟的结论，切设备时不等它。
+    streamer: StreamWorker,
     device: DeviceReport,
+    /// 有一趟建流请求在路上、结果还没回来：这段时间 `device` 是上一台的旧值，
+    /// 界面该显示「正在连接」，探测也不许再排第二趟。
+    connecting: bool,
+    /// 最近一趟建流失败的原因，等着界面取走（切换不再当场有结果，只能延后报）。
+    stream_error: Option<String>,
     /// 用户点名的输出设备；`None` = 跟随系统默认。原版没有这个概念
     /// （声音整个交给 GameMaker，只会落在系统默认设备上），端口自加 #94。
     wanted: Option<String>,
@@ -280,114 +520,52 @@ impl CpalEngine {
     }
 
     pub fn with_bank(bank: SoundBank) -> Self {
+        Self::start(bank, None, Box::new(connect_output))
+    }
+
+    /// 同上，但一开始就点名要哪台输出设备（首选项里存的上一台）。
+    /// 这一趟仍然同步等回来：那时窗口还没画起来，等和不等用户都看不见。
+    pub fn with_bank_output(bank: SoundBank, wanted: Option<String>) -> Self {
+        let wanted = wanted.filter(|w| !w.is_empty());
+        Self::start(bank, wanted, Box::new(connect_output))
+    }
+
+    /// `connect` 是建流那一步的注入点：真实引擎用 [`connect_output`]，用例换成假替身，
+    /// 于是不必真碰声卡也能验「派发不许等结果」「过期结果要丢掉」这几条。
+    fn start(bank: SoundBank, wanted: Option<String>, connect: Box<Connect>) -> Self {
         let bank = Arc::new(bank);
         let shared = make_shared((*bank).clone(), SAMPLE_RATE);
         let clock = TransportClock::with_shared(shared.clone());
+        let streamer = StreamWorker::spawn(shared.clone(), connect);
+        let seen_default = default_output_name();
         let mut engine = Self {
             shared,
             clock,
             bank,
-            stream: None,
+            streamer,
             device: DeviceReport::Uninitialised,
-            wanted: None,
+            connecting: true,
+            stream_error: None,
+            wanted,
             probe_at: Instant::now(),
-            seen_default: default_output_name(),
+            seen_default,
             tried_default: None,
             scanner: OnceLock::new(),
             last_song: None,
             export_options: ExportOptions::default(),
         };
-        match engine.try_start_stream() {
-            Ok(info) => engine.device = info,
-            Err(e) => {
-                engine.device = DeviceReport::Fallback(e);
-                engine.shared.lock().audio_active = false;
-            }
+        // 只有启动这一趟是同步等的，为的是把「接上了哪台」当场写进设备那一格。
+        let _ = engine.streamer.dispatch(engine.wanted.clone());
+        engine.tried_default = engine.seen_default.clone();
+        match engine.streamer.wait_first() {
+            Some(outcome) => engine.apply_stream(&outcome),
+            None => engine.device = DeviceReport::Fallback("audio stream worker stopped".into()),
         }
+        engine.connecting = false;
+        // 启动这一趟的成败不进状态栏：那会儿没人看得见，偏好里点名的设备拿不到也一样，
+        // 设备那一格会如实写，稍后探测自己补。
+        engine.stream_error = None;
         engine
-    }
-
-    fn try_start_stream(&mut self) -> Result<DeviceReport, String> {
-        let device = open_output_device(None)?;
-        self.open_stream(&device)
-    }
-
-    /// 在一台具体设备上建输出流。cpal 的 `Stream` 一 drop 就停声，
-    /// 换设备时必须先把旧流放掉（见 [`Self::reconnect`]）。
-    fn open_stream(&mut self, device: &cpal::Device) -> Result<DeviceReport, String> {
-        let name = device.name().unwrap_or_else(|_| "unknown device".into());
-        let supported = device
-            .default_output_config()
-            .map_err(|e| format!("failed to read output config: {e}"))?;
-        let sample_format = supported.sample_format();
-        let config: cpal::StreamConfig = supported.config();
-        let rate = config.sample_rate.0;
-        let channels = config.channels as usize;
-
-        {
-            let mut st = self.shared.lock();
-            st.sample_rate = rate;
-            st.mixer.output_rate = rate;
-        }
-
-        let shared = self.shared.clone();
-        let cb_shared = shared.clone();
-        let err_shared = shared.clone();
-        let stream = match sample_format {
-            cpal::SampleFormat::F32 => device
-                .build_output_stream::<f32, _, _>(
-                    &config,
-                    move |data, _| {
-                        if let Some(mut st) = cb_shared.try_lock() {
-                            st.render_interleaved(data, channels);
-                        } else {
-                            data.fill(0.0);
-                        }
-                    },
-                    move |e| {
-                        eprintln!("[nbs-audio] output stream error: {e}");
-                        err_shared.lock().audio_active = false;
-                    },
-                    None,
-                )
-                .map_err(|e| format!("failed to build f32 output stream: {e}"))?,
-            cpal::SampleFormat::I16 => {
-                let mut scratch: Vec<f32> = Vec::new();
-                device
-                    .build_output_stream::<i16, _, _>(
-                        &config,
-                        move |data, _| {
-                            scratch.resize(data.len(), 0.0);
-                            if let Some(mut st) = cb_shared.try_lock() {
-                                st.render_interleaved(&mut scratch, channels);
-                            } else {
-                                scratch.fill(0.0);
-                            }
-                            for (d, &s) in data.iter_mut().zip(scratch.iter()) {
-                                *d = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-                            }
-                        },
-                        move |e| {
-                            eprintln!("[nbs-audio] output stream error: {e}");
-                            err_shared.lock().audio_active = false;
-                        },
-                        None,
-                    )
-                    .map_err(|e| format!("failed to build i16 output stream: {e}"))?
-            }
-            other => return Err(format!("unsupported sample format {other:?}")),
-        };
-        stream
-            .play()
-            .map_err(|e| format!("failed to start output stream: {e}"))?;
-        // 必须把 Stream 保存到结构体：cpal 的 Stream 一旦 drop 就立刻停止输出。
-        self.stream = Some(stream);
-        self.shared.lock().audio_active = true;
-        Ok(DeviceReport::Streamed {
-            name,
-            rate,
-            channels,
-        })
     }
 
     pub fn shared(&self) -> &Shared {
@@ -409,10 +587,23 @@ impl CpalEngine {
         st.bank = self.bank.clone();
     }
 
-    /// 换输出设备：`None` = 跟随系统默认。成功返回真正接上的设备名。
-    pub fn set_output(&mut self, wanted: Option<String>) -> Result<String, String> {
+    /// 换输出设备：`None` = 跟随系统默认。请求派给后台线程后就返回，**不等结果**
+    /// （在非默认设备上建流实测 0.6 秒，以前在这儿把界面僵住）。接上了哪台由
+    /// [`Self::harvest_stream`] 带回来。
+    pub fn set_output(&mut self, wanted: Option<String>) -> Result<(), String> {
         self.wanted = wanted.filter(|w| !w.is_empty());
         self.reconnect()
+    }
+
+    /// 有一趟建流还在路上（点了设备到结果回来之间那一段）。界面用它显示「正在连接」，
+    /// 用例用它判断什么时候落定。
+    pub fn output_connecting(&self) -> bool {
+        self.connecting
+    }
+
+    /// 取走一句「这趟没成」的原因（同一趟只报一次）。
+    pub fn take_output_error(&mut self) -> Option<String> {
+        self.stream_error.take()
     }
 
     /// 用户点名的设备（`None` = 跟随系统默认）。
@@ -448,54 +639,89 @@ impl CpalEngine {
         self.scanner.get().is_some_and(DeviceScanner::pending)
     }
 
-    /// 按 `wanted` 重建输出流。指定的设备拿不到就回落到系统默认——宁可换设备出声，
-    /// 也不要因为一次选择把声音整个丢掉；默认也没了才降级成静音时钟。
-    fn reconnect(&mut self) -> Result<String, String> {
-        // 先停旧流：同设备重复建流时旧流还占着端点。
-        self.stream = None;
-        let device = match open_output_device(self.wanted.as_deref()) {
-            Ok(device) => device,
-            Err(e) => {
-                self.wanted = None;
-                match open_output_device(None) {
-                    Ok(device) => device,
-                    Err(e2) => {
-                        let reason = if e == e2 { e } else { format!("{e}; {e2}") };
-                        self.fail_stream(reason.clone());
-                        return Err(reason);
-                    }
-                }
-            }
-        };
-        self.tried_default = default_output_name();
-        match self.open_stream(&device) {
-            Ok(report) => {
-                let name = match &report {
-                    DeviceReport::Streamed { name, .. } => name.clone(),
-                    _ => String::new(),
-                };
-                self.device = report;
-                Ok(name)
-            }
-            Err(e) => {
-                self.fail_stream(e.clone());
-                Err(e)
-            }
+    /// 派一趟建流请求给后台线程，立即返回。真正接上了哪台由 [`Self::harvest_stream`]
+    /// 取回；指定的设备拿不到就回落到系统默认，这套策略在 [`connect_output`] 里。
+    fn reconnect(&mut self) -> Result<(), String> {
+        let sent = self.streamer.dispatch(self.wanted.clone());
+        if sent.is_ok() {
+            self.connecting = true;
+            self.device = DeviceReport::Connecting;
+            // 派发就算「这台默认试过了」：否则探测那一档看到下一帧还没结果，会每秒再排
+            // 一趟 0.6 秒的活，把后台淹掉。
+            self.tried_default = self.seen_default.clone();
         }
+        sent
     }
 
-    fn fail_stream(&mut self, reason: String) {
-        self.device = DeviceReport::Fallback(reason);
-        self.shared.lock().audio_active = false;
+    /// 到底有没有在出声？只认最近一趟落地的结论——`cpal::Stream` 不在这边，问不到它。
+    fn stream_live(&self) -> bool {
+        matches!(self.device, DeviceReport::Streamed { .. })
+    }
+
+    /// 取回已经落地的建流结果，返回要报给界面的新设备名。回落和失败不在这儿报，
+    /// 走 [`Self::take_output_error`]，一句话只报一次。
+    fn harvest_stream(&mut self) -> Option<String> {
+        let outcome = self.streamer.harvest()?;
+        if outcome.for_wanted != self.wanted {
+            // 过期结果：这趟跑完之前用户又点了一次，以最后一次为准，这一条直接丢掉。
+            return None;
+        }
+        self.connecting = false;
+        let announced = match &outcome.built {
+            Some((name, _, _)) if !outcome.fell_back => Some(name.clone()),
+            _ => None,
+        };
+        self.apply_stream(&outcome);
+        announced
+    }
+
+    /// 把一趟结论并进界面看得到那份设备快照，顺带处理「点名却拿不到」的回落。
+    fn apply_stream(&mut self, outcome: &StreamOutcome) {
+        match &outcome.built {
+            Some((name, rate, channels)) => {
+                self.device = DeviceReport::Streamed {
+                    name: name.clone(),
+                    rate: *rate,
+                    channels: *channels,
+                }
+            }
+            None => {
+                self.device = DeviceReport::Fallback(
+                    outcome
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "no audio output".to_string()),
+                );
+                // 旧流已经被后台放掉（drop 即停声），这里得把「有音频回调在驱动播放头」
+                // 这个前提一起撤掉，否则播放头冻着不动却装作还在出声。
+                self.shared.lock().audio_active = false;
+            }
+        }
+        if outcome.fell_back {
+            let requested = outcome.for_wanted.clone().unwrap_or_default();
+            let name = match &self.device {
+                DeviceReport::Streamed { name, .. } => name.clone(),
+                _ => String::new(),
+            };
+            // 点名的那台没拿到：`wanted` 跟着清空，界面据此把偏好改回「跟随系统默认」，
+            // 免得下次启动又去点一台已经不在的设备。
+            self.wanted = None;
+            self.stream_error = Some(format!(
+                "output device \"{requested}\" is not available, now on {name}"
+            ));
+        } else if let Some(e) = &outcome.error {
+            self.stream_error = Some(e.clone());
+        }
     }
 
     /// 系统默认输出换了（插耳机、切蓝牙）就跟随过去；用户点名的设备掉线也回落默认；
     /// 之前没建成流、现在系统又有可用设备了就补一次。约每秒探测一次，
     /// 而且只做便宜的那半：读默认设备名（实测 0.4~1.5 毫秒），全量枚举交给后台线程，
     /// 这里只读它扫回来的缓存（#94 治本 —— 以前在这儿每秒枚举一次，界面被拖死）。
-    fn poll_output_change(&mut self) -> Option<String> {
+    /// 建流同样是派给后台，不在这里等。
+    fn poll_output_change(&mut self) {
         if self.probe_at.elapsed() < OUTPUT_PROBE {
-            return None;
+            return;
         }
         self.probe_at = Instant::now();
         let seen = default_output_name();
@@ -535,19 +761,19 @@ impl CpalEngine {
             };
         }
         // 建流失败过（没流）+ 系统有可用默认 + 这台默认还没试过：再试一次。
+        // 已经有一趟在路上的就不许再排，否则每秒排一趟 0.6 秒的活。
         let dead_but_available =
-            self.stream.is_none() && seen.is_some() && seen != self.tried_default;
+            !self.stream_live() && !self.connecting && seen.is_some() && seen != self.tried_default;
         let follow_default = self.wanted.is_none() && default_changed;
-        if !(follow_default || wanted_gone || dead_but_available) {
-            return None;
+        if follow_default || wanted_gone || dead_but_available {
+            let _ = self.reconnect();
         }
-        self.reconnect().ok()
     }
 }
 
 impl AudioEngine for CpalEngine {
     fn name(&self) -> &str {
-        if self.stream.is_some() {
+        if self.stream_live() {
             nbs_core::tr("Sample audio engine", "原版采样音频引擎")
         } else {
             nbs_core::tr("Silent clock (no audio device)", "静音时钟（无音频设备）")
@@ -646,6 +872,11 @@ impl AudioEngine for CpalEngine {
                     format!("Silent clock ({reason})")
                 }
             }
+            DeviceReport::Connecting => nbs_core::tr(
+                "Silent clock (connecting output device)",
+                "静音时钟（正在连接输出设备）",
+            )
+            .to_string(),
             DeviceReport::Uninitialised => nbs_core::tr(
                 "Silent clock (audio device not initialised)",
                 "静音时钟（未初始化音频设备）",
@@ -668,11 +899,19 @@ impl AudioEngine for CpalEngine {
     fn wanted_output(&self) -> Option<&str> {
         CpalEngine::wanted_output(self)
     }
-    fn set_output(&mut self, wanted: Option<String>) -> Result<String, String> {
+    fn set_output(&mut self, wanted: Option<String>) -> Result<(), String> {
         CpalEngine::set_output(self, wanted)
     }
+    fn output_connecting(&self) -> bool {
+        CpalEngine::output_connecting(self)
+    }
     fn poll_output(&mut self) -> Option<String> {
-        self.poll_output_change()
+        let announced = self.harvest_stream();
+        self.poll_output_change();
+        announced
+    }
+    fn take_output_error(&mut self) -> Option<String> {
+        CpalEngine::take_output_error(self)
     }
     fn sample_status(&self) -> String {
         if self.bank.is_ready() {
@@ -1150,13 +1389,175 @@ mod tests {
     }
 
     /// #94：切换没成功时，引擎里不能留下这个没生效的点名下标——
-    /// 否则每次启动都会去点一台已经不存在的设备。
+    /// 否则每次启动都会去点一台已经不存在的设备。结果在后台线程上落，所以要轮询到落定。
     #[test]
     fn dead_output_choice_does_not_stick() {
         let mut engine = CpalEngine::new();
         let missing = "nbs-rust 这台机器上不存在的输出设备".to_string();
-        let _ = engine.set_output(Some(missing.clone()));
+        engine.set_output(Some(missing.clone())).unwrap();
+        for _ in 0..400 {
+            let _ = engine.poll_output();
+            if !engine.output_connecting() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert_ne!(engine.wanted_output(), Some(missing.as_str()));
+    }
+
+    fn built_outcome(
+        for_wanted: Option<String>,
+        name: &str,
+    ) -> (StreamOutcome, Option<cpal::Stream>) {
+        (
+            StreamOutcome {
+                for_wanted,
+                built: Some((name.to_string(), 44_100, 2)),
+                error: None,
+                fell_back: false,
+            },
+            None,
+        )
+    }
+
+    /// 假建流：只回结论，绝不碰真实声卡。跟随默认那趟（`wanted` 为空）当场答复，
+    /// 点名的那台卡在信道上等放行——真在这一趟上等 0.6 秒就是用户反馈的「一点设备菜单
+    /// 整个窗口僵住」，断言真实耗时是环境相关用例，所以拿信道当替身。
+    #[test]
+    fn a_stream_request_is_dispatched_but_never_waited_for() {
+        let (gate, wait) = mpsc::channel::<()>();
+        let connect = Box::new(
+            move |_shared: &Shared, wanted: Option<String>| match wanted {
+                None => built_outcome(None, "系统默认"),
+                Some(name) => {
+                    let _ = wait.recv();
+                    built_outcome(Some(name.clone()), &name)
+                }
+            },
+        );
+        let mut engine = CpalEngine::start(SoundBank::empty(), None, connect);
+        assert!(
+            !engine.output_connecting(),
+            "启动那趟已经落地，不该还挂着「正在连接」"
+        );
+
+        let t = Instant::now();
+        engine.set_output(Some("假设备".to_string())).unwrap();
+        assert!(
+            t.elapsed() < Duration::from_millis(50),
+            "切设备不许等结果，实际等了 {:?}",
+            t.elapsed()
+        );
+        assert!(engine.output_connecting(), "结果还没回来就该报「正在连接」");
+        assert_eq!(engine.poll_output(), None, "还没接上就不许报出新设备");
+
+        gate.send(()).unwrap();
+        for _ in 0..400 {
+            if engine.poll_output().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(engine.output_name().as_deref(), Some("假设备"));
+        assert!(!engine.output_connecting(), "落定后要报「已经接上」");
+    }
+
+    /// 连点两台：前一趟还在路上时用户又点了一次。旧结果必须丢掉，一切以最后一次点为准。
+    #[test]
+    fn a_superseded_stream_result_is_dropped() {
+        let (gate, wait) = mpsc::channel::<()>();
+        let connect =
+            Box::new(
+                move |_shared: &Shared, wanted: Option<String>| match wanted.as_deref() {
+                    None => built_outcome(None, "系统默认"),
+                    Some("慢的那台") => {
+                        let _ = wait.recv();
+                        built_outcome(wanted, "慢的那台")
+                    }
+                    other => built_outcome(other.map(str::to_string), "快的那台"),
+                },
+            );
+        let mut engine = CpalEngine::start(SoundBank::empty(), None, connect);
+        engine.set_output(Some("慢的那台".to_string())).unwrap();
+        engine.set_output(Some("快的那台".to_string())).unwrap();
+        gate.send(()).unwrap();
+        for _ in 0..400 {
+            let _ = engine.poll_output();
+            if !engine.output_connecting() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            engine.output_name().as_deref(),
+            Some("快的那台"),
+            "跑得更慢的那台不许翻盘"
+        );
+        assert_eq!(
+            engine.output_name().as_deref(),
+            Some("快的那台"),
+            "旧结果不许迟一步再翻一次"
+        );
+    }
+
+    /// 点名的设备拿不到：后台已经回落系统默认，这边要把 `wanted` 清空并留下一句原因，
+    /// 界面才能把偏好改回「跟随默认」，别存一个没生效的点名下标。
+    #[test]
+    fn a_missing_device_falls_back_with_a_reason() {
+        let connect = Box::new(|_shared: &Shared, wanted: Option<String>| {
+            let fell_back = wanted.is_some();
+            (
+                StreamOutcome {
+                    for_wanted: wanted,
+                    built: Some(("新的系统默认".to_string(), 48_000, 2)),
+                    error: None,
+                    fell_back,
+                },
+                None,
+            )
+        });
+        let mut engine = CpalEngine::start(SoundBank::empty(), None, connect);
+        engine.set_output(Some("拔掉的那台".to_string())).unwrap();
+        for _ in 0..400 {
+            let _ = engine.poll_output();
+            if !engine.output_connecting() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(engine.wanted_output(), None, "没生效的点名下标不能留下");
+        assert_eq!(engine.output_name().as_deref(), Some("新的系统默认"));
+        let reason = engine.take_output_error().unwrap_or_default();
+        assert!(
+            reason.contains("拔掉的那台"),
+            "原因里要点出是哪台没拿到：{reason}"
+        );
+        assert!(engine.take_output_error().is_none(), "同一趟只报一次");
+        assert!(
+            engine.poll_output().is_none(),
+            "回落这一趟不许再报一遍新设备名"
+        );
+    }
+
+    /// 启动那趟失败不往状态栏报（那会儿窗口还没画起来，没人看得见），只进设备那一格；
+    /// 但「有没有在出声」必须当场说清楚，不许装作还在播放。
+    #[test]
+    fn the_startup_pass_says_nothing_in_the_status_bar() {
+        let connect = Box::new(|_shared: &Shared, wanted: Option<String>| {
+            stream_failed(wanted, "no audio device at all".to_string())
+        });
+        let mut engine = CpalEngine::start(SoundBank::empty(), None, connect);
+        assert_eq!(
+            engine.take_output_error(),
+            None,
+            "启动那趟的失败不该报进状态栏"
+        );
+        assert!(!engine.output_connecting());
+        assert_eq!(engine.output_name(), None);
+        assert!(
+            !engine.shared().lock().audio_active,
+            "没建成流就不许还挂在「有音频回调驱动播放头」上"
+        );
     }
 
     /// #94 治本：列设备要 1.3 秒（慢在系统的 `EnumAudioEndpoints`，本机三台端点实测

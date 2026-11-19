@@ -1263,14 +1263,15 @@ impl EditorState {
         // 单测串台（其余状态串都是绘制时现翻的）。
         let song = nbs_core::model::Song::demo_in(prefs.language);
         let bank = SoundBank::load_auto(prefs.sounds_dir_path().as_deref());
-        let mut audio: Box<dyn AudioEngine> = Box::new(CpalEngine::with_bank(bank));
+        // 端口自加（用户要求 #94）：上次点名的输出设备直接交给引擎当起始设备。
+        // 拿不到就让它回落系统默认，启动阶段不弹提示（那会儿状态栏还没画起来）——
+        // 引擎在构造函数里同步等这一趟，结果只进设备那一格，不进状态栏。
+        let mut audio: Box<dyn AudioEngine> = Box::new(CpalEngine::with_bank_output(
+            bank,
+            Some(prefs.audio_output.clone()),
+        ));
         audio.prepare(&song);
         apply_audio_prefs(&mut *audio, &prefs);
-        // 端口自加（用户要求 #94）：接上上次点名的输出设备。拿不到就让它回落系统默认，
-        // 启动阶段不弹提示（那会儿状态栏还没画起来）。
-        if !prefs.audio_output.is_empty() {
-            let _ = audio.set_output(Some(prefs.audio_output.clone()));
-        }
 
         let mut theme = Theme::new(match prefs.theme {
             0 => ThemeKind::Aqua,
@@ -1753,19 +1754,10 @@ impl EditorState {
         self.apply_ui_scale(ctx);
         self.apply_window_icon(ctx);
         // 端口自加（用户要求 #94）：系统默认输出换了（插耳机、切蓝牙）就跟随过去，
-        // 点名的那台掉了则回落默认。引擎内部限流到约每秒一次，这里每帧调即可；
-        // 贵的全量枚举在引擎自己的后台线程上，这条每帧路径只读缓存（#94 治本）。
-        if let Some(name) = self.audio.poll_output() {
-            let wanted = self.audio.wanted_output().unwrap_or_default().to_string();
-            if self.prefs.audio_output != wanted {
-                self.prefs.audio_output = wanted;
-                self.save_prefs();
-            }
-            self.set_message(format!(
-                "{}{name}",
-                nbs_core::tr("Output device: ", "输出设备：")
-            ));
-        }
+        // 点名的那台掉了则回落默认；切出去的那趟结果也在这一趟取回来。
+        // 引擎内部限流到约每秒一次，这里每帧调即可；贵的全量枚举和建流都在引擎自己的
+        // 后台线程上，这条每帧路径只读缓存（#94 治本）。
+        self.poll_output_report();
         // 设备表是后台线程扫回来的，菜单开着时要定时重绘，否则扫完的那几台
         // 设备要等用户再动一下鼠标才出现（120ms 一次，只在这个瞬态里跑）。
         if self.output_menu || self.prefs_output_menu {
@@ -2134,9 +2126,13 @@ impl EditorState {
         }
     }
 
-    /// 「输出」那一格显示的字：正在出声的设备名。还没建成流时按偏好退回
-    /// 「系统默认」或「<点名设备>（不可用）」，绝不显示一个没在出声的设备糊弄人。
+    /// 「输出」那一格显示的字：正在出声的设备名。切换还在后台跑时先报「正在连接」，
+    /// 别拿上一台的名字装作已经切过去；还没建成流时按偏好退回「系统默认」或
+    /// 「<点名设备>（不可用）」，绝不显示一个根本没在出声的设备糊弄人。
     pub fn output_label(&self) -> String {
+        if self.audio.output_connecting() {
+            return nbs_core::tr("Connecting…", "正在连接…").to_string();
+        }
         if let Some(name) = self.audio.output_name() {
             return name;
         }
@@ -2151,24 +2147,50 @@ impl EditorState {
         }
     }
 
-    /// 端口自加 #94：切输出设备，`None` = 跟随系统默认。结果进状态栏消息，偏好落盘。
+    /// 端口自加 #94：切输出设备，`None` = 跟随系统默认。
+    /// 这里只把请求派下去就返回——在非默认设备上建流实测要 0.6 秒（全量枚举 + 建流），
+    /// 以前当场等完，点一下设备菜单整个窗口僵在那里。结果进 [`Self::poll_output_report`]。
     pub fn apply_output_choice(&mut self, wanted: Option<String>) {
-        let outcome = self.audio.set_output(wanted);
-        // 引擎可能把拿不到的那台回落成跟随默认，偏好照引擎的实情写，别存一个没生效的选择。
+        if let Err(e) = self.audio.set_output(wanted) {
+            self.set_message(format!(
+                "{}{e}",
+                nbs_core::tr("Failed to switch output device: ", "切换输出设备失败：")
+            ));
+            return;
+        }
+        // 偏好不在这里落盘：这会儿还没接上，落下去的可能是一个没生效的选择。
+        // 等结果落地那一趟照引擎的实情写（点名的拿不到会被退回「跟随系统默认」）。
+        self.set_message(nbs_core::tr(
+            "Connecting output device…",
+            "正在切换输出设备…",
+        ));
+    }
+
+    /// 取回后台建流的结果：接上了就报设备名，没接上就报原因，两种都把偏好按引擎的
+    /// 实情写回去。`tick_transport` 每帧调一次；引擎内部限流，贵的都在它自己的线程上。
+    pub fn poll_output_report(&mut self) {
+        let name = self.audio.poll_output();
+        let error = self.audio.take_output_error();
+        if name.is_none() && error.is_none() {
+            return;
+        }
+        // 落定了才动偏好：点名的那台没拿到时引擎已经把它退回「跟随系统默认」，
+        // 存一个没生效的选择，下次启动还要再撞一次。
         let wanted = self.audio.wanted_output().unwrap_or_default().to_string();
         if self.prefs.audio_output != wanted {
             self.prefs.audio_output = wanted;
+            self.save_prefs();
         }
-        self.save_prefs();
-        match outcome {
-            Ok(name) => self.set_message(format!(
-                "{}{name}",
-                nbs_core::tr("Output device: ", "输出设备：")
-            )),
-            Err(e) => self.set_message(format!(
+        if let Some(e) = error {
+            self.set_message(format!(
                 "{}{e}",
                 nbs_core::tr("Failed to switch output device: ", "切换输出设备失败：")
-            )),
+            ));
+        } else if let Some(name) = name {
+            self.set_message(format!(
+                "{}{name}",
+                nbs_core::tr("Output device: ", "输出设备：")
+            ));
         }
     }
 
@@ -2502,19 +2524,45 @@ mod tests {
         assert_eq!(EditorState::output_hint_row_at(false, 2), None);
     }
 
-    /// 端口自加 #94：偏好里只留引擎真正生效的那台。点一台不存在的设备，
-    /// 引擎回落系统默认，落盘的选择也必须跟着变空。
+    /// 端口自加 #94：切换是派给后台的，点下去只报「正在切换」，偏好要等结果落地才写；
+    /// 引擎把拿不到的那台退回系统默认后，落盘的选择也必须跟着变空。
     #[test]
     fn dead_output_choice_does_not_stick_in_prefs() {
         let _prefs = crate::isolate_prefs();
         let mut st = EditorState::for_test();
-        st.apply_output_choice(Some("nbs-rust 这台机器上不存在的输出设备".into()));
+        let missing = "nbs-rust 这台机器上不存在的输出设备".to_string();
+        st.apply_output_choice(Some(missing.clone()));
+        let started = st.active_message().unwrap_or_default().to_string();
+        assert!(
+            started.starts_with("正在切换输出设备")
+                || started.starts_with("Connecting output device"),
+            "点下去先报「正在切换」，实际消息 {started:?}"
+        );
+        assert!(
+            st.prefs.audio_output.is_empty(),
+            "结果没回来就不该把一个可能没生效的选择落盘：{}",
+            st.prefs.audio_output
+        );
+        for _ in 0..400 {
+            st.poll_output_report();
+            if !st.audio.output_connecting() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         assert!(
             st.prefs.audio_output.is_empty(),
             "没生效的点选不该留下：{}",
             st.prefs.audio_output
         );
         st.apply_output_choice(None);
+        for _ in 0..400 {
+            st.poll_output_report();
+            if !st.audio.output_connecting() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         assert!(st.prefs.audio_output.is_empty());
     }
 
