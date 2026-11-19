@@ -6,7 +6,8 @@
 //! 仅峰值超 1 时整轨归一），因此导出的 WAV 与原版「导出音频」一致。
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -51,8 +52,14 @@ pub trait AudioEngine {
     fn device_info(&self) -> String;
     /// 系统里可选的输出设备。原版把声音整个交给 GameMaker，只会走系统默认设备，
     /// 没有选择项；这一组方法是端口自加（用户要求 #94）。没有可枚举后端的实现返回空表。
+    /// 实现方**不许在这里等系统枚举**：界面每开一次下拉就调一次，慢的话整个界面跟着卡。
     fn output_devices(&self) -> Vec<OutputDevice> {
         Vec::new()
+    }
+    /// 设备表还在路上（还没扫完过，或正有一趟扫描在跑）：下拉要显示「正在扫描…」，
+    /// 别把「还不知道」画成「这台机器没有输出设备」。
+    fn output_scan_pending(&self) -> bool {
+        false
     }
     /// 当前真正在出声的设备名；降级成静音时钟时 `None`。
     fn output_name(&self) -> Option<String> {
@@ -161,8 +168,91 @@ fn open_output_device(wanted: Option<&str>) -> Result<cpal::Device, String> {
     Err(format!("output device \"{wanted}\" is not available"))
 }
 
-/// 默认设备探测间隔：插拔耳机到跟随切换的最大延迟。
+/// 默认设备探测间隔：插耳机、切蓝牙到跟随切换的最大延迟。这一档只做便宜的事
+/// （读系统默认设备名，本机实测 0.4~1.5 毫秒），不碰全量枚举。
 const OUTPUT_PROBE: Duration = Duration::from_millis(1000);
+/// 点名了某台设备时，保持设备表新鲜的下限间隔：把那台设备拔掉并不会改系统默认，
+/// 便宜的那个探测看不出来，只能靠后台按这个间隔补扫（本机实测一趟 1.3 秒，在后台线程上）。
+const OUTPUT_RESCAN: Duration = Duration::from_secs(20);
+
+/// 后台扫描线程和界面线程交接的那份设备表。
+#[derive(Default)]
+struct ScanSlot {
+    devices: Vec<OutputDevice>,
+    /// 最近一趟扫描完成的时刻；`None` = 还没扫完过 —— 这时候的空表是「还不知道」，
+    /// 不是「真的一台都没有」，不许拿它下结论。
+    finished: Option<Instant>,
+    /// 有一趟扫描正在路上：同一时间的重复请求并成一次。
+    scanning: bool,
+}
+
+/// 输出设备扫描线程。cpal 列设备要过一遍系统的 `EnumAudioEndpoints`，本机（3 台端点）
+/// 实测 1.26~1.52 秒，Realtek 那两台各要 0.5~0.7 秒，虚拟声卡多的机器只会更慢。
+/// 这笔开销绝不能落在界面线程上：#94 头一版每秒枚举一次，实测每次 1.17~1.32 秒，
+/// 整个界面每隔一秒僵死一次 —— 就是用户反馈的「处处都卡」（2026-11-19）。
+/// 跨线程的只有设备名（`String`）；cpal 的设备句柄内部是 COM 指针，取句柄和建流
+/// 一律留在界面线程做，不往这条线上放。
+struct DeviceScanner {
+    request: mpsc::Sender<()>,
+    slot: Arc<Mutex<ScanSlot>>,
+}
+
+/// std 的锁在别的线程 panic 时会「毒化」，取不出值。设备表读不到的最坏结果只是
+/// 这一帧下拉里没有设备，不该把界面线程一起拖崩，所以一律取 `into_inner()` 接着用
+/// （与音色导入那条下载链 `sound_import::lock` 同一个做法）。
+fn slot_guard(slot: &Mutex<ScanSlot>) -> std::sync::MutexGuard<'_, ScanSlot> {
+    slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+impl DeviceScanner {
+    /// 拉起扫描线程。`scan` 就是那笔昂贵的系统调用，用例里换成假替身
+    /// （真实耗时取决于本机声卡，断言它的快慢就是环境相关的用例）。
+    fn spawn(scan: impl Fn() -> Vec<OutputDevice> + Send + 'static) -> Self {
+        let slot = Arc::new(Mutex::new(ScanSlot::default()));
+        let (request, inbox) = mpsc::channel();
+        let shared = slot.clone();
+        // 引擎 drop 掉 `request` 后 `recv()` 返回 Err，线程自己收尾，不需要 join。
+        std::thread::spawn(move || {
+            while inbox.recv().is_ok() {
+                let devices = scan();
+                let mut s = slot_guard(&shared);
+                s.devices = devices;
+                s.finished = Some(Instant::now());
+                s.scanning = false;
+            }
+        });
+        Self { request, slot }
+    }
+
+    /// 请后台重列一次设备；已经在路上就不再排第二趟（点一下不该排几个 1.3 秒）。
+    fn request_scan(&self) {
+        {
+            let mut s = slot_guard(&self.slot);
+            if s.scanning {
+                return;
+            }
+            s.scanning = true;
+        }
+        let _ = self.request.send(());
+    }
+
+    /// 最近一趟扫完的设备表；还没扫完过时 `None`。
+    fn scanned(&self) -> Option<Vec<OutputDevice>> {
+        let s = slot_guard(&self.slot);
+        s.finished.map(|_| s.devices.clone())
+    }
+
+    /// 最近一趟扫描是什么时候完成的（还没扫过 = `None`）。
+    fn finished_at(&self) -> Option<Instant> {
+        slot_guard(&self.slot).finished
+    }
+
+    /// 设备表是否还在路上：正有一趟在扫，或者从来没扫完过。
+    fn pending(&self) -> bool {
+        let s = slot_guard(&self.slot);
+        s.scanning || s.finished.is_none()
+    }
+}
 
 pub struct CpalEngine {
     shared: Shared,
@@ -177,6 +267,8 @@ pub struct CpalEngine {
     probe_at: Instant,
     seen_default: Option<String>,
     tried_default: Option<String>,
+    /// 设备表由后台线程扫（见 [`DeviceScanner`]），第一次真要用的时候才把线程拉起来。
+    scanner: OnceLock<DeviceScanner>,
     last_song: Option<Song>,
     export_options: ExportOptions,
 }
@@ -201,6 +293,7 @@ impl CpalEngine {
             probe_at: Instant::now(),
             seen_default: default_output_name(),
             tried_default: None,
+            scanner: OnceLock::new(),
             last_song: None,
             export_options: ExportOptions::default(),
         };
@@ -335,6 +428,26 @@ impl CpalEngine {
         }
     }
 
+    /// 后台扫描线程（第一次调用时拉起）。
+    fn scanner(&self) -> &DeviceScanner {
+        self.scanner
+            .get_or_init(|| DeviceScanner::spawn(list_output_devices))
+    }
+
+    /// 已知的输出设备：先请后台重列一次，然后立刻返回手上这一份缓存。
+    /// **绝不等枚举结果** —— 那一趟要 1.3 秒（见 [`DeviceScanner`]）。
+    /// 缓存还没回来时返回空表，界面用 [`Self::output_scan_pending`] 区分
+    /// 「还不知道」和「真的一台都没有」。
+    pub fn output_devices(&self) -> Vec<OutputDevice> {
+        self.scanner().request_scan();
+        self.scanner().scanned().unwrap_or_default()
+    }
+
+    /// 设备表还在路上吗？线程还没拉起来时算「不在路上」（没人在等它）。
+    pub fn output_scan_pending(&self) -> bool {
+        self.scanner.get().is_some_and(DeviceScanner::pending)
+    }
+
     /// 按 `wanted` 重建输出流。指定的设备拿不到就回落到系统默认——宁可换设备出声，
     /// 也不要因为一次选择把声音整个丢掉；默认也没了才降级成静音时钟。
     fn reconnect(&mut self) -> Result<String, String> {
@@ -377,7 +490,9 @@ impl CpalEngine {
     }
 
     /// 系统默认输出换了（插耳机、切蓝牙）就跟随过去；用户点名的设备掉线也回落默认；
-    /// 之前没建成流、现在系统又有可用设备了就补一次。约每秒探测一次。
+    /// 之前没建成流、现在系统又有可用设备了就补一次。约每秒探测一次，
+    /// 而且只做便宜的那半：读默认设备名（实测 0.4~1.5 毫秒），全量枚举交给后台线程，
+    /// 这里只读它扫回来的缓存（#94 治本 —— 以前在这儿每秒枚举一次，界面被拖死）。
     fn poll_output_change(&mut self) -> Option<String> {
         if self.probe_at.elapsed() < OUTPUT_PROBE {
             return None;
@@ -386,10 +501,39 @@ impl CpalEngine {
         let seen = default_output_name();
         let default_changed = seen != self.seen_default;
         self.seen_default = seen.clone();
-        let wanted_gone = self
-            .wanted
-            .as_ref()
-            .is_some_and(|w| !list_output_devices().iter().any(|d| &d.name == w));
+        let wanted_gone;
+        {
+            let scanner = self.scanner();
+            if default_changed {
+                // 插拔设备一般也改了设备表本身，让后台补扫一次，下拉里才不会
+                // 列出一台已经不存在的设备。
+                scanner.request_scan();
+            }
+            // 点名的那台还在不在，只看后台扫回来的表；表还没回来就不下结论。
+            wanted_gone = match (self.wanted.as_ref(), scanner.scanned()) {
+                // 点名了设备却一次都没扫过（比如这份偏好是上次启动存的）：
+                // 不去扫就永远不知道它还在不在，声音可能一直出在一台已经不存在的设备上。
+                (Some(_), None) => {
+                    scanner.request_scan();
+                    false
+                }
+                (Some(wanted), Some(list)) => {
+                    if list.iter().any(|d| &d.name == wanted) {
+                        // 没人开下拉时也得让表保持新鲜，否则那台被拔掉就永远看不出来。
+                        if scanner
+                            .finished_at()
+                            .is_some_and(|at| at.elapsed() >= OUTPUT_RESCAN)
+                        {
+                            scanner.request_scan();
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                }
+                _ => false,
+            };
+        }
         // 建流失败过（没流）+ 系统有可用默认 + 这台默认还没试过：再试一次。
         let dead_but_available =
             self.stream.is_none() && seen.is_some() && seen != self.tried_default;
@@ -513,7 +657,10 @@ impl AudioEngine for CpalEngine {
         self.bank.clone()
     }
     fn output_devices(&self) -> Vec<OutputDevice> {
-        list_output_devices()
+        CpalEngine::output_devices(self)
+    }
+    fn output_scan_pending(&self) -> bool {
+        CpalEngine::output_scan_pending(self)
     }
     fn output_name(&self) -> Option<String> {
         CpalEngine::output_name(self).map(str::to_string)
@@ -1010,6 +1157,58 @@ mod tests {
         let missing = "nbs-rust 这台机器上不存在的输出设备".to_string();
         let _ = engine.set_output(Some(missing.clone()));
         assert_ne!(engine.wanted_output(), Some(missing.as_str()));
+    }
+
+    /// #94 治本：列设备要 1.3 秒（慢在系统的 `EnumAudioEndpoints`，本机三台端点实测
+    /// 1.26~1.52 秒），界面线程一次都不能等它。这里用假扫描（卡在信道上等放行）
+    /// 把「不许等」和「同时间的重复请求并成一趟」钉死 —— 断言真实耗时就成了环境相关用例。
+    #[test]
+    fn a_device_scan_is_requested_but_never_waited_for() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (gate, released) = mpsc::channel::<()>();
+        let scans = Arc::new(AtomicUsize::new(0));
+        let counted = scans.clone();
+        let scanner = DeviceScanner::spawn(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            let _ = released.recv();
+            vec![OutputDevice {
+                name: "假设备".to_string(),
+                is_default: true,
+            }]
+        });
+
+        let t = Instant::now();
+        scanner.request_scan();
+        scanner.request_scan();
+        assert!(
+            t.elapsed() < Duration::from_millis(50),
+            "请求扫描不许等结果，实际等了 {:?}",
+            t.elapsed()
+        );
+        assert!(scanner.pending(), "还没扫完就是「还不知道」");
+        assert_eq!(
+            scanner.scanned(),
+            None,
+            "没扫完不许交出一份看着像真的的空表"
+        );
+
+        gate.send(()).unwrap();
+        for _ in 0..200 {
+            if scanner.scanned().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            scans.load(Ordering::SeqCst),
+            1,
+            "两趟请求并成一趟，不许排第二份 1.3 秒"
+        );
+        assert_eq!(
+            scanner.scanned().map(|l| l[0].name.clone()),
+            Some("假设备".to_string())
+        );
+        assert!(!scanner.pending(), "扫完了就该报「知道了」");
     }
 
     #[test]

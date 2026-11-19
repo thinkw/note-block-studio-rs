@@ -2152,8 +2152,11 @@ fn output_menu(state: &mut EditorState, ui: &Ui, at: Pos2) {
         bank.as_deref(),
     );
     if let Some(i) = picked {
-        let wanted = state.output_choice(i);
-        state.emit(Command::SetOutput(wanted));
+        // 「正在扫描输出设备…」那一行不是设备：点它只关菜单，什么都不许改。
+        if Some(i) != state.output_hint_row() {
+            let wanted = state.output_choice(i);
+            state.emit(Command::SetOutput(wanted));
+        }
     }
     if picked.is_some() || dismissed {
         state.prefs_output_menu = false;

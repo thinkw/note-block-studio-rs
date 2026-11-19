@@ -1753,7 +1753,8 @@ impl EditorState {
         self.apply_ui_scale(ctx);
         self.apply_window_icon(ctx);
         // 端口自加（用户要求 #94）：系统默认输出换了（插耳机、切蓝牙）就跟随过去，
-        // 点名的那台掉了则回落默认。引擎内部限流到约每秒一次，这里每帧调即可。
+        // 点名的那台掉了则回落默认。引擎内部限流到约每秒一次，这里每帧调即可；
+        // 贵的全量枚举在引擎自己的后台线程上，这条每帧路径只读缓存（#94 治本）。
         if let Some(name) = self.audio.poll_output() {
             let wanted = self.audio.wanted_output().unwrap_or_default().to_string();
             if self.prefs.audio_output != wanted {
@@ -1764,6 +1765,11 @@ impl EditorState {
                 "{}{name}",
                 nbs_core::tr("Output device: ", "输出设备：")
             ));
+        }
+        // 设备表是后台线程扫回来的，菜单开着时要定时重绘，否则扫完的那几台
+        // 设备要等用户再动一下鼠标才出现（120ms 一次，只在这个瞬态里跑）。
+        if self.output_menu || self.prefs_output_menu {
+            ctx.request_repaint_after(std::time::Duration::from_millis(120));
         }
         // 原版 else-if 链里「改界面」的事件乐器副作用（control_step.gml:283-296）
         // 由音频调度发回来，这里统一落地。彩虹开/关都重置表且不发消息，照抄原版。
@@ -2060,15 +2066,33 @@ impl EditorState {
     }
 
     /// 把偏好推给音频引擎（主音量、速度、节拍器、voice 上限、单声道、锁定层）。
-    /// 端口自加（用户要求 #94）：重新枚举输出设备。cpal 每枚举一次都要过一遍系统，
-    /// 只在打开下拉时调，不能放进每帧路径。
+    /// 端口自加（用户要求 #94）：请引擎的后台线程重列一次输出设备，拿它手上已有的那份。
+    /// 界面线程等不起那次枚举（本机实测 1.3 秒，#94 头一版就是把它放在这里，
+    /// 结果整个界面每隔一秒僵死一次），所以「打开下拉」= 发起扫描 + 显示缓存。
     pub fn refresh_outputs(&mut self) {
         self.output_list = self.audio.output_devices();
     }
 
+    /// 设备表还在路上（还没扫完过，或正有一趟在扫）。
+    pub fn outputs_pending(&self) -> bool {
+        self.audio.output_scan_pending()
+    }
+
+    /// 「正在扫描输出设备…」那一行摆在哪：只有**还在扫**且**手上一台设备都还没有**时
+    /// 才占第 1 行（第 0 行永远是「跟随系统默认」）。那一行点不得 —— 点它什么都不许改。
+    /// 已有设备表时不摆：扫描中的旧列表照样能用，没必要闪一行字打扰。
+    fn output_hint_row_at(pending: bool, devices: usize) -> Option<usize> {
+        (pending && devices == 0).then_some(1)
+    }
+
+    /// 同 [`Self::output_hint_row_at`]，取当前状态。
+    pub fn output_hint_row(&self) -> Option<usize> {
+        Self::output_hint_row_at(self.outputs_pending(), self.output_list.len())
+    }
+
     /// 「输出」下拉的条目：第 0 项是跟随系统默认，其余按枚举顺序列出设备名。
     /// 设备名由系统给（Windows 会按系统语言给「耳机 (Realtek(R) Audio)」这类名字），
-    /// 不由我们翻译；只有后缀文案翻。
+    /// 不由我们翻译；只有后缀文案翻。设备表还没扫回来时末尾补一行「正在扫描…」。
     pub fn output_items(&self) -> Vec<String> {
         let mut items = vec![nbs_core::tr("Follow system default", "跟随系统默认").to_string()];
         items.extend(self.output_list.iter().map(|d| {
@@ -2082,6 +2106,11 @@ impl EditorState {
                 d.name.clone()
             }
         }));
+        if self.output_hint_row() == Some(items.len()) {
+            items.push(
+                nbs_core::tr("Scanning output devices...", "正在扫描输出设备...").to_string(),
+            );
+        }
         items
     }
 
@@ -2444,6 +2473,33 @@ mod tests {
         assert_eq!(st.output_selection(), 2);
         st.prefs.audio_output = "已经拔掉的声卡".into();
         assert_eq!(st.output_selection(), usize::MAX, "不在了就不打勾");
+        assert_eq!(
+            st.output_hint_row(),
+            None,
+            "静音引擎不扫描，且手上已经有设备表 → 不该有占位行"
+        );
+    }
+
+    /// #94 治本：设备表改由后台线程扫，扫回来之前下拉要老实说「正在扫描」，
+    /// 但那一行不许被当成一台设备（点它什么都不该改，见 toolbar/windows 的闸门）。
+    #[test]
+    fn the_scanning_hint_row_only_exists_while_nothing_is_known_yet() {
+        assert_eq!(
+            EditorState::output_hint_row_at(true, 0),
+            Some(1),
+            "还在扫且一台都还没有 → 占第 1 行（第 0 行是跟随系统默认）"
+        );
+        assert_eq!(
+            EditorState::output_hint_row_at(true, 3),
+            None,
+            "手上已经有表就别闪字打扰，旧表照用"
+        );
+        assert_eq!(
+            EditorState::output_hint_row_at(false, 0),
+            None,
+            "扫完发现真的一台都没有 → 那是实情，不是「还不知道」"
+        );
+        assert_eq!(EditorState::output_hint_row_at(false, 2), None);
     }
 
     /// 端口自加 #94：偏好里只留引擎真正生效的那台。点一台不存在的设备，

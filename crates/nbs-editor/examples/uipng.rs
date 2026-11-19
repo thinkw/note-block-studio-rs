@@ -283,8 +283,16 @@ fn main() -> Result<(), String> {
                 Ok("rate") => state.prefs_rate_menu = true,
                 Ok("theme") => state.prefs_theme_menu = true,
                 Ok("output") => {
-                    // 真打开菜单那一帧会刷设备表，摆状态也得刷，否则截图里只有一项。
-                    state.refresh_outputs();
+                    // 真打开菜单那一帧会刷设备表，摆状态也得刷。设备表是后台线程扫回来的
+                    // （#94 治本：枚举一次 1.3 秒，不许卡在界面上），截图要等它落地，
+                    // 否则画面里只剩「跟随系统默认」一项，看不出真实下拉长什么样。
+                    for _ in 0..80 {
+                        state.refresh_outputs();
+                        if !state.output_list.is_empty() {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
                     state.prefs_output_menu = true;
                 }
                 _ => {}
