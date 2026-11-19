@@ -34,10 +34,11 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
     // 界面语言每帧跟 prefs 对齐；原版 language 只在设置菜单和读档时赋值，
     // 下拉切换后下一帧生效，这里的语义相同。
     crate::set_language(state.prefs.language);
-    // 字体只在语言变化时装一次（原版换语言整张字体表重烘焙，这里重装 FontDefinitions）。
-    if state.installed_language != Some(state.prefs.language) {
-        crate::fonts::install(ctx, state.prefs.language);
-        state.installed_language = Some(state.prefs.language);
+    // 字体表与语言无关（#98 之后统一用默认字体 + 中文兜底），一个 Context 只装一次：
+    // `set_fonts` 内部会把整张表的 TTF 字节比对一遍，每帧装代价太大。
+    if !state.fonts_installed {
+        crate::fonts::install(ctx);
+        state.fonts_installed = true;
     }
     // egui 内置控件（菜单、下拉条目、tooltip）走 TextStyle，原版这些控件全用
     // `font_main` 12px / `font_small` 10.67px —— 把默认档钉到原版字号。
@@ -67,6 +68,11 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
     }
     flush_all(state, ctx);
 
+    // 原版把壁纸画在 `draw_clear` 之后、所有面板之前（control_draw.gml:48-67），
+    // 端口对应的位置是背景层最前面：菜单条 / 工具栏 / 状态栏 / 琴键 / 图层栏随后
+    // 各自盖上来，只有编辑区四周的空白会露出图片。
+    crate::background::paint(state, ctx);
+
     egui::TopBottomPanel::top("nbs_menu")
         .frame(tight())
         .exact_height(MENU_HEIGHT)
@@ -82,7 +88,8 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
         .exact_height(STATUS_HEIGHT)
         .show(ctx, |ui| show_status_bar(state, ui));
 
-    if state.flags.show_piano {
+    // 原版 `control_draw.gml:2549`：钢琴调用条件是 `show_piano && !isplayer`。
+    if state.flags.show_piano && !state.player {
         // 端口自加（用户要求）：琴键面板独立缩放，高度跟 `piano_scale`，
         // 不随 `window_scale`（与 #80「钢琴栏不随界面缩放」一致）。
         egui::TopBottomPanel::bottom("nbs_piano")
@@ -95,7 +102,10 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
         state.piano_rect = None;
     }
 
-    if state.flags.show_layers {
+    // 原版图层行绘制在 `control_draw.gml:308` 巨门内，播放器不画；但播放器中央
+    // 信息区包在 `!fullscreen && show_layers` 门里（:2341），所以 show_layers
+    // 开关本身仍要参与播放器分支的判定。
+    if state.flags.show_layers && !state.player {
         egui::SidePanel::left("nbs_layers")
             .frame(tight())
             .exact_width(LAYER_PANEL_WIDTH * state.viewport.scale)

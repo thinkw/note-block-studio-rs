@@ -22,8 +22,8 @@ pub mod samples;
 pub mod scheduler;
 
 pub use engine::{
-    export_wav, render_offline, write_wav_i16, AudioEngine, CpalEngine, ExportOptions,
-    ExportStats, SilentEngine,
+    export_wav, list_output_devices, render_offline, write_wav_i16, AudioEngine, CpalEngine,
+    ExportOptions, ExportStats, OutputDevice, SilentEngine,
 };
 pub use mixer::{Mixer, Voice, DEFAULT_MAX_VOICES, EXTENDED_MAX_VOICES};
 pub use samples::{

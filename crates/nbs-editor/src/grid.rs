@@ -16,17 +16,43 @@ use nbs_core::model::{
 };
 
 use crate::commands::Command;
-use crate::fonts::{main_font, small_font};
+use crate::fonts::{bold_font, info_big_font, info_med_font, main_font, small_font};
 use crate::icons::BlockSet;
 use crate::interaction::{DragMode, InputSnapshot};
 use crate::layers_panel::time_str;
 use crate::state::{ContextKind, ContextMenu, EditMode, EditorState};
 use crate::theme::{Theme, ThemeKind};
 use crate::tr;
-use crate::viewport::{Viewport, BASE_CELL, SCROLLBAR_SIZE, TIMELINE_HEIGHT};
+use crate::viewport::{bar_thickness, timeline_band, Viewport, BAR_SCALE, RULER_SCALE};
 
 /// 原版标尺刻度线的 `draw_set_alpha(0.6)`。
 const RULER_A: u8 = 153;
+
+/// 标尺秒标的候选档（秒）。原版 `c` 只按 tempo 在 0.25…30 里挑一档；端口把标签
+/// 尺寸钉死后（#90），格距变小时还要顺这张表往上挑到放得下的那一档。
+const SEC_STEPS: [f64; 11] = [
+    0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
+];
+
+/// 秒标跳到哪一档：从原版按 tempo 挑出的 `c` 起，顺着 [`SEC_STEPS`] 找第一档
+/// 「一格宽（`c × tempo × cell`）放得下一个标签」。跳到最大档仍放不下就用最大档。
+/// 端口自加（用户要求 #90）：标签尺寸钉死后才需要它，原版连字一起缩放不会挤。
+fn seconds_step(c: f64, tempo: f64, cell: f32, label_px: f64) -> f64 {
+    let mut step = c;
+    while step * tempo * (cell as f64) < label_px {
+        let Some(next) = SEC_STEPS.iter().find(|s| **s > step) else {
+            break;
+        };
+        step = *next;
+    }
+    step
+}
+
+/// tick 号的密度：原版每 4 格标一个，一格放不下就把步长按 4 的整数倍放宽。
+/// 端口自加（用户要求 #90），同 [`seconds_step`]。
+fn tick_label_step(label_px: f32, cell: f32) -> u32 {
+    ((label_px / (cell * 4.0)).ceil().max(1.0) as u32) * 4
+}
 
 fn alpha(c: Color32, a: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
@@ -37,22 +63,16 @@ const C_RED: Color32 = Color32::from_rgb(255, 0, 0);
 const C_BLUE: Color32 = Color32::from_rgb(0, 0, 255);
 const C_YELLOW: Color32 = Color32::from_rgb(255, 255, 0);
 
-/// 滚动条专用缩放：条宽、滑块最小宽、内边距、描边全部用这个，不跟窗口缩放
-/// （偏离原版，用户要求恒定为 67% 档的尺寸，缩小界面时也抓得住）。
-const BAR_SCALE: f32 = 0.67;
-
 /// 切分布局：时间轴 / 网格 / 水平滚动条 / 垂直滚动条。
 ///
 /// 行区只取整行（原版 `totalrows = floor((rh - rhval) / 32)`），水平滚动条紧贴行区底
 /// （原版 `y1 + totalrows * 32 + 34`），而不是贴着窗口底边——这样图层栏的宏条
 /// （`y1 + 32`）和网格最后一行才会落在同一条线上。
 fn split(area: Rect, cell: f32) -> (Rect, Rect, Rect, Rect) {
-    // 画布缩放：标尺带随格距一起放大。
-    // 偏离原版（用户要求）：滚动条不随缩放，恒定为 67% 档的尺寸——
-    // 缩到 10% 时条还在原尺寸，抓得住。
-    let u = cell / BASE_CELL;
-    let band = TIMELINE_HEIGHT * u;
-    let bar = SCROLLBAR_SIZE * BAR_SCALE;
+    // 缩放只作用于格距；标尺带和滚动条各自钉死（见 `viewport::{BAR_SCALE, RULER_SCALE}`，
+    // 偏离原版 #88 / #90：缩到 10% 时进度栏还是原来的高度、滚动条还抓得住）。
+    let band = timeline_band();
+    let bar = bar_thickness();
     let w = (area.width() - bar).max(64.0);
     let h = (((area.height() - band - bar) / cell).floor().max(1.0)) * cell;
     let timeline = Rect::from_min_size(area.min, Vec2::new(w, band));
@@ -63,6 +83,12 @@ fn split(area: Rect, cell: f32) -> (Rect, Rect, Rect, Rect) {
 }
 
 pub fn show_grid(state: &mut EditorState, ui: &mut Ui, area: Rect) {
+    // 原版 `control_draw.gml:308` 的巨型门：播放器（非下落模式）整块网格绘制与输入
+    // 都不跑，画布只剩中央歌曲信息区（:2338-2420）。
+    if state.player {
+        show_player_info(state, ui, area);
+        return;
+    }
     let cell = state.viewport.cell();
     let (timeline_rect, grid_rect, hbar_rect, vbar_rect) = split(area, cell);
 
@@ -78,6 +104,12 @@ pub fn show_grid(state: &mut EditorState, ui: &mut Ui, area: Rect) {
     let _response = ui.allocate_rect(area, Sense::click_and_drag());
     let input = InputSnapshot::read(ui);
     state.interaction.latest_pos = input.pointer;
+    // 原版 `control_draw.gml:31` 每帧先把光标收回默认，再由命中的区域重新指定。
+    // 少了这一步，上一帧网格给的光标会一直挂在整窗口上（#95）。拖拽中不收回：
+    // 标尺手柄那几段每帧重申 `cr_size_we`，收了就永远画不出拉伸光标。
+    if state.interaction.mode == DragMode::None {
+        state.interaction.cursor = CursorIcon::Default;
+    }
 
     handle_timeline_input(state, &input, timeline_rect, grid_rect);
     handle_grid_input(state, &input, grid_rect);
@@ -90,7 +122,238 @@ pub fn show_grid(state: &mut EditorState, ui: &mut Ui, area: Rect) {
     crate::layers_panel::macro_bar_over_grid(state, ui, area, idle);
     draw_context_menu(state, ui);
 
-    ui.output_mut(|o| o.cursor_icon = state.interaction.cursor);
+    // 只有指针真的落在中央画布上、且没有弹窗抢输入时，光标才归画布侧说。
+    // 工具栏、状态栏、琴键和各个窗口里的控件自己会指定光标，这里无条件覆盖
+    // 会把它们的手型全刷成画布那一个（#95）。
+    let on_canvas = input.pointer.is_some_and(|p| area.contains(p))
+        && state.window.is_none()
+        && state.context_menu.is_none();
+    if on_canvas {
+        ui.output_mut(|o| o.cursor_icon = state.interaction.cursor);
+    }
+}
+
+/// 原版 `get_seconds_from_tick`：沿变速点分段累计
+/// （`entry[2] + (tick - entry[0]) / entry[1]`）。`points` 升序 `(tick, pitch)`，
+/// 基速取歌曲 tempo；pitch≤0 的病态值按实时播放下限 0.25 t/s 兜底。
+fn player_seconds_at(points: &[(i64, i16)], base_tempo: f64, tick: f64) -> f64 {
+    let mut secs = 0.0;
+    let mut prev = 0.0;
+    let mut tps = base_tempo.max(0.01);
+    for &(t, pitch) in points {
+        if (t as f64) >= tick {
+            break;
+        }
+        secs += (t as f64 - prev) / tps;
+        prev = t as f64;
+        tps = if pitch > 0 { pitch as f64 / 15.0 } else { 0.25 };
+    }
+    secs + (tick - prev) / tps
+}
+
+/// 原版播放器（非下落模式）的画布：`control_draw.gml:2338-2420`，外层条件
+/// `!fullscreen && show_layers`。时间大字右对齐到 `centerx+70`（Fluent 左移 134）、
+/// "/ 总长" 右对齐到 `centerx+70`（Fluent 左移 91），标题区左对齐到 `centerx-200`，
+/// 进度拖条 `(centerx-200, centery+25)` 宽 400、上限 `enda + totalcols`。
+/// 拖完 tempo 跟到落点段（`get_tempo_from_tick`）：端口的 seek 语义统一，
+/// 播放推进遇到变速点自动改速，这里只挪播放头。
+/// 原版 blackout 时文字换白（:286 draw_clear + isplayer 分支）——端口无此开关，省略。
+fn show_player_info(state: &mut EditorState, ui: &mut Ui, area: Rect) {
+    ui.allocate_rect(area, Sense::hover());
+    if !state.flags.show_layers {
+        return;
+    }
+    let th = state.theme.clone();
+    let p = ui.painter().clone();
+    let center = area.center();
+    let fluent = th.kind == ThemeKind::Fluent;
+
+    let tempo_events: Vec<(i64, i16)> = nbs_audio::build_event_table(&state.doc.song, false)
+        .iter()
+        .filter_map(|ev| match ev.kind {
+            nbs_audio::EventKind::Tempo(pitch) => Some((ev.tick as i64, pitch)),
+            _ => None,
+        })
+        .collect();
+    let base = state.doc.song.meta.tempo as f64;
+    let marker = state.marker();
+    let enda = state.doc.song.enda as f64;
+    // 原版 `totalcols` = 画布可见列数；拖条上限 = `enda + totalcols`（:2374）。
+    let totalcols = (area.width() / state.viewport.cell()).floor() as f64;
+
+    let big_x = center.x + if fluent { -64.0 } else { 70.0 };
+    let med_x = center.x + if fluent { -21.0 } else { 70.0 };
+    p.text(
+        pos2(big_x, center.y - 50.0),
+        Align2::RIGHT_TOP,
+        time_str(player_seconds_at(&tempo_events, base, marker)),
+        info_big_font(),
+        th.text,
+    );
+    p.text(
+        pos2(med_x, center.y - 20.0),
+        Align2::RIGHT_TOP,
+        format!(
+            "/ {}",
+            time_str(player_seconds_at(&tempo_events, base, enda))
+        ),
+        info_med_font(),
+        th.text,
+    );
+
+    // 原版 title_str 链：歌名 → 下载名 → 文件名 → MIDI 名；端口只有歌名与文件名。
+    let (title, author, orauthor) = {
+        let song = &state.doc.song;
+        let title = if song.meta.name.is_empty() {
+            song.filename
+                .as_ref()
+                .and_then(|f| f.file_stem())
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        } else {
+            song.meta.name.clone()
+        };
+        (
+            title,
+            song.meta.author.clone(),
+            song.meta.original_author.clone(),
+        )
+    };
+    let mut offset = 0.0;
+    if !author.is_empty() {
+        offset += 20.0;
+    }
+    if !orauthor.is_empty() {
+        offset += 15.0;
+    }
+    if !title.is_empty() {
+        p.text(
+            pos2(center.x - 200.0, center.y - 80.0 - offset),
+            Align2::LEFT_TOP,
+            title,
+            info_med_font(),
+            th.text,
+        );
+    }
+    if !author.is_empty() {
+        p.text(
+            pos2(center.x - 200.0, center.y - 60.0 - offset),
+            Align2::LEFT_TOP,
+            author.clone(),
+            bold_font(),
+            th.text,
+        );
+    }
+    if !orauthor.is_empty() {
+        // 原版在画这一行前又对空作者补 15px（:2404）——间距 quirk，照抄。
+        if author.is_empty() {
+            offset += 15.0;
+        }
+        let prefix = tr("original by ", "原作者 ");
+        p.text(
+            pos2(center.x - 200.0, center.y - 45.0 - offset),
+            Align2::LEFT_TOP,
+            prefix,
+            main_font(),
+            Color32::from_gray(192),
+        );
+        let pw = p
+            .layout_no_wrap(prefix.to_string(), main_font(), Color32::from_gray(192))
+            .size()
+            .x;
+        p.text(
+            pos2(center.x - 200.0 + pw, center.y - 45.0 - offset),
+            Align2::LEFT_TOP,
+            orauthor,
+            bold_font(),
+            th.text,
+        );
+    }
+
+    player_dragbar(
+        state,
+        ui,
+        &p,
+        &th,
+        center.x - 200.0,
+        center.y + 25.0,
+        400.0,
+        marker,
+        enda + totalcols,
+        enda,
+        &tempo_events,
+        base,
+    );
+}
+
+/// 原版 `draw_dragbar`（`control_draw.gml:2374`）：经典档轨道 2px + DRAG_KNOB 手柄，
+/// Fluent 档轨道 3px + 圆点；按住拖动 seek，手柄热区 13×13。悬停提示
+/// 「Song Position/当前位置」；拖动中的时间提示按 `enda` 域现算（原版 :2376）。
+#[allow(clippy::too_many_arguments)]
+fn player_dragbar(
+    state: &mut EditorState,
+    ui: &Ui,
+    p: &Painter,
+    th: &Theme,
+    x: f32,
+    y: f32,
+    len: f32,
+    value: f64,
+    max: f64,
+    enda: f64,
+    tempo_events: &[(i64, i16)],
+    base_tempo: f64,
+) {
+    let fluent = th.kind == ThemeKind::Fluent;
+    let h = if fluent { 3.0 } else { 2.0 };
+    let gray = Color32::from_gray(154);
+    let progress = (value / max).clamp(0.0, 1.0);
+    let knob = pos2(x + (progress * f64::from(len)) as f32, y + 1.0);
+    p.rect_filled(
+        Rect::from_min_size(pos2(x, y), Vec2::new(len, h)),
+        0.0,
+        gray,
+    );
+    if fluent {
+        p.rect_filled(
+            Rect::from_min_size(pos2(x, y), Vec2::new((progress * f64::from(len)) as f32, h)),
+            0.0,
+            th.accent,
+        );
+        p.circle_filled(knob, 10.0, Color32::WHITE);
+        p.circle_filled(knob, 5.0, th.accent);
+    } else if let Some(bank) = state.icons.bank() {
+        // 经典主题的手柄是 `spr_icons` 第 9 帧（draw_dragbar 内 draw_sprite(..., 9, ...)）。
+        bank.icon_glyph(
+            p,
+            knob - Vec2::new(12.0, 11.0),
+            crate::icons::frame::DRAG_KNOB,
+        );
+    }
+    let track = Rect::from_min_size(pos2(x - 3.0, y - 2.0), Vec2::new(len + 6.0, 6.0 + h - 2.0));
+    let hot = Rect::from_center_size(knob, Vec2::splat(13.0));
+    let resp = ui.interact(
+        track.union(hot),
+        egui::Id::new("player_position"),
+        Sense::click_and_drag(),
+    );
+    if resp.dragged() || resp.clicked() {
+        if let Some(pt) = resp.interact_pointer_pos() {
+            // 原版出界直接钳到 0 / max。
+            let frac = ((pt.x - x) / len).clamp(0.0, 1.0);
+            state.set_marker(frac as f64 * max);
+        }
+    }
+    let tip = if resp.dragged() {
+        let t = resp
+            .interact_pointer_pos()
+            .map(|pt| f64::from(((pt.x - x) / len).clamp(0.0, 1.0)) * enda)
+            .unwrap_or(0.0);
+        time_str(player_seconds_at(tempo_events, base_tempo, t))
+    } else {
+        tr("Song Position", "当前位置").to_string()
+    };
+    resp.on_hover_text(tip);
 }
 
 // ---------------------------------------------------------------- 输入处理
@@ -215,7 +478,7 @@ fn handle_timeline_input(state: &mut EditorState, input: &InputSnapshot, rect: R
         if i > 0 && !state.section_exists {
             continue;
         }
-        if (pos.x - x).abs() < 8.0 * state.viewport.u() {
+        if (pos.x - x).abs() < 8.0 * RULER_SCALE {
             state.interaction.cursor = CursorIcon::ResizeHorizontal;
             // 原版 `:132/141/148` 的命中框只吃左键（按下即 `window = w_drag*`）；
             // 右键照样落到下面的区间菜单（`:156` 那道 `window = 0` 仍然成立）。
@@ -260,12 +523,6 @@ fn handle_grid_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect)
 
     let interactive = hover.is_some() && state.window.is_none() && state.context_menu.is_none();
     let pointer_in_grid = input.pointer.is_some_and(|p| rect.contains(p));
-    // 光标只在指针真的进了网格时才收回默认：标尺上那三个 16px 手柄的
-    // `cr_size_we` 是 `handle_timeline_input` 先设的（原版 `control_draw.gml:134/144/151`），
-    // 无条件重置会让手柄永远画不出拉伸光标。拖拽进行中同理，别覆盖标尺侧的光标。
-    if pointer_in_grid && state.interaction.mode == DragMode::None {
-        state.interaction.cursor = CursorIcon::Default;
-    }
 
     // 滚轮：悬停音符调属性 / 按 `mousewheel` 档位决定是平移、换音色还是换键。
     // Ctrl+滚轮不在这里处理——原版把它归在键盘快捷键段（`control_draw.gml:736-751`），
@@ -293,7 +550,7 @@ fn handle_grid_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect)
         } else if state.prefs.mousewheel == 2 {
             state.emit(Command::WheelKey(d));
         } else {
-            scroll_viewport(state, delta, input.shift);
+            scroll_bars(state, input, state.viewport.cell(), BarAxis::Both);
         }
     }
 
@@ -378,7 +635,8 @@ fn handle_grid_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect)
             edge_scroll(state, input, rect);
         }
         DragMode::BoxSelect { .. } => {
-            state.interaction.cursor = CursorIcon::Crosshair;
+            // 原版框选进行中是 `cr_handpoint`（`control_draw.gml:904`），不是十字。
+            state.interaction.cursor = CursorIcon::PointingHand;
             edge_scroll(state, input, rect);
         }
         DragMode::PanView {
@@ -398,12 +656,15 @@ fn handle_grid_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect)
         _ => {
             // 播放头/区间/标尺按下进行中：光标由标尺侧定（`cr_size_we`），网格别抢。
             if state.interaction.mode == DragMode::None {
+                // 原版 `cr_cross` 全文没用过，网格上是 `cr_handpoint`
+                // （`control_draw.gml:125-129`）；用户定案空格要箭头，
+                // 只有落在音符或选区上才换手型 / 抓取。
                 if state.doc.selection.contains(t, l) {
                     state.interaction.cursor = CursorIcon::Grab;
                 } else if state.doc.song.has(cell.0, cell.1) {
                     state.interaction.cursor = CursorIcon::PointingHand;
                 } else {
-                    state.interaction.cursor = CursorIcon::Crosshair;
+                    state.interaction.cursor = CursorIcon::Default;
                 }
             }
         }
@@ -411,22 +672,6 @@ fn handle_grid_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect)
 
     // ---- 松开 ----
     finish_drag(state, input, Some((t, l)));
-}
-
-/// 原版 `draw_scrollbar(…, mousewheel_scroll_speed)`：滚轮一格走 `speed` 个槽位，
-/// 横向一个槽 = 1 刻、纵向一个槽 = 1 层（`sb_val += 滚轮格数 * wheel_speed`）。
-/// Shift 走横向（原版把它当作「另一根滚动条」），此前这里硬编码 4 刻一格，
-/// 与原版 speed=1 时的一刻一格不符，改成走设置值。
-fn scroll_viewport(state: &mut EditorState, delta: f32, shift: bool) {
-    let step = if delta > 0.0 { 1 } else { -1 };
-    let speed = state.prefs.mousewheel_scroll_speed.clamp(1, 10) as i64;
-    if shift {
-        let s = state.viewport.start_tick as i64 + step * speed;
-        state.viewport.start_tick = s.max(0) as u32;
-    } else {
-        let s = state.viewport.start_layer as i64 + step * speed;
-        state.viewport.start_layer = s.max(0) as u32;
-    }
 }
 
 /// 拖拽越过网格边界时自动滚动（原版 dragincxr/xl/yd/yu 的等价实现）。
@@ -611,49 +856,163 @@ fn finish_drag(state: &mut EditorState, input: &InputSnapshot, hover: Option<(i6
 
 // ---------------------------------------------------------------- 滚动条
 
-fn h_geometry(state: &EditorState, rect: Rect) -> (f32, f32, Rect) {
-    let visible = state.viewport.columns().max(1) as f32;
-    let max_units = (state.doc.song.enda.max(state.viewport.start_tick) as f32 + visible + 8.0)
-        .max(visible * 2.0);
-    let thumb_w = ((visible / max_units) * rect.width())
+/// 原版 `draw_scrollbar.gml:14-17` 的三个量。`track` = 滑轨像素长（原版 `mwh = swh * s`），
+/// `visible` = 一屏可见槽数 `s`，`tail` = 最后一个含音符的槽号（原版第五参里多出来的那截，
+/// 即 `enda` / `endb`）：
+/// - 总槽 `ms = tail + visible`。原版调用点写的是 `enda + totalcols - 1` 配
+///   `s = totalcols - 1`，两边各减 1 抵消，化简后值域上限就是 `enda`；
+/// - 滑块长 `(visible / ms) * track`，下限用 #88 的恒定尺寸而不是原版的 10 像素；
+/// - 上限 `tail`，就是原版那句 `median(0, sb_val, ms - s)`。
+/// 返回 `(ms, 滑块长, 上限)`。
+fn bar_metrics(track: f32, visible: f32, tail: f32) -> (f32, f32, f32) {
+    let visible = visible.max(1.0);
+    let ms = (tail + visible).max(1.0);
+    let thumb = ((visible / ms) * track)
         .max(24.0 * BAR_SCALE)
-        .min(rect.width());
-    let thumb_x = rect.min.x
-        + (state.viewport.start_tick as f32 / max_units.max(1.0)) * (rect.width() - thumb_w);
+        .min(track.max(0.0));
+    (ms, thumb, tail)
+}
+
+/// 横向条几何，返回 `(ms, 上限, 滑块矩形)`。滑块位置用 `(val / ms) * 滑轨长`，
+/// 分母是整条滑轨而不是「滑轨减滑块」—— 原版同款（`bpos = (sb_val / ms) * mwh`）。
+/// 这两者必须一致，否则滑块每走一段就比指针少一点，从头拖到尾会偏出一截（#93.1）。
+fn h_geometry(state: &EditorState, rect: Rect) -> (f32, f32, Rect) {
+    let (ms, thumb_w, max_val) = bar_metrics(
+        rect.width(),
+        state.viewport.columns() as f32,
+        state.doc.song.enda as f32,
+    );
+    let val = (state.viewport.start_tick as f32).clamp(0.0, max_val);
     (
-        max_units,
-        thumb_w,
+        ms,
+        max_val,
         Rect::from_min_size(
-            pos2(thumb_x, rect.min.y + 2.0 * BAR_SCALE),
+            pos2(
+                rect.min.x + (val / ms) * rect.width(),
+                rect.min.y + 2.0 * BAR_SCALE,
+            ),
             Vec2::new(thumb_w, rect.height() - 4.0 * BAR_SCALE),
         ),
     )
 }
 
+/// 纵向条几何，同 `h_geometry`，只是轴换成上下、末尾槽号换成 `endb`。
+/// 方向与原版一致：滑块越往下 `startb` 越大，也就是层号往上走
+/// （`control_draw.gml:339` 的行号 `startb + b` 随屏幕 y 增大）。
 fn v_geometry(state: &EditorState, rect: Rect) -> (f32, f32, Rect) {
-    let visible = state.viewport.rows().max(1) as f32;
-    let max_units =
-        (state.doc.song.layer_count().max(state.viewport.start_layer) as f32 + visible + 4.0)
-            .max(visible * 2.0);
-    let thumb_h = ((visible / max_units) * rect.height())
-        .max(24.0 * BAR_SCALE)
-        .min(rect.height());
-    let thumb_y = rect.min.y
-        + (state.viewport.start_layer as f32 / max_units.max(1.0)) * (rect.height() - thumb_h);
+    let (ms, thumb_h, max_val) = bar_metrics(
+        rect.height(),
+        state.viewport.rows() as f32,
+        state.doc.song.endb as f32,
+    );
+    let val = (state.viewport.start_layer as f32).clamp(0.0, max_val);
     (
-        max_units,
-        thumb_h,
+        ms,
+        max_val,
         Rect::from_min_size(
-            pos2(rect.min.x + 2.0 * BAR_SCALE, thumb_y),
+            pos2(
+                rect.min.x + 2.0 * BAR_SCALE,
+                rect.min.y + (val / ms) * rect.height(),
+            ),
             Vec2::new(rect.width() - 4.0 * BAR_SCALE, thumb_h),
         ),
     )
 }
 
+/// 滑轨上的位置比例 → 槽号：与滑块定位同一条式子（`ratio * ms`），所以指针拖多少
+/// 滑块就走多少；再夹到原版的 `[0, ms - s]`，最后取整（原版 `starta` / `startb` 也是整数）。
+fn bar_value(ratio: f32, ms: f32, max_val: f32) -> u32 {
+    (ratio * ms).clamp(0.0, max_val).round() as u32
+}
+
+/// 这一帧的滚动归哪根条管。原版只有纵向滚轮（`sb_sel = i` 决定给哪根），
+/// 触控板的双轴是 macOS 分支独有的。
+#[derive(Clone, Copy, PartialEq)]
+enum BarAxis {
+    /// 网格区：x 给横向条、y 给纵向条。
+    Both,
+    Horizontal,
+    Vertical,
+}
+
+/// 滚轮 / 触控板平移视口，三件事都在这一个函数里（#93.2 / #93.3 / #93.4）：
+/// - **两轴各走各的条**：横向双指滑只动横向条，斜着滑两条一起动。原版
+///   `control_draw.gml:1212-1224` 的触控板段就是两个并列的 `if`，`dx` 归 `starta`、
+///   `dy` 归 `startb`。此前这里把 `x + y` 合成一个标量，横滑会顺带把纵向也推走。
+/// - **方向取负**：winit/egui 的正值是「内容往下走、看到更早的内容」
+///   （`winit/src/event.rs:957` 的 `LineDelta` 文档），而原版是
+///   `sb_val += (mouse_wheel_down - mouse_wheel_up) * wheel_speed`
+///   （向下滚 = 值增大，`draw_scrollbar.gml:24`），触控板段同样是 `start -= delta / 32`。
+///   原来直接把 delta 加到 `start` 上，竖向就是反的。
+/// - **夹到原版的 `enda` / `endb`**。若当前值已经越界（别的通路先推过去的），
+///   只许往回收、不许再往外推，免得一个滚轮格把视口猛拽回去。
+fn scroll_bars(state: &mut EditorState, input: &InputSnapshot, cell: f32, axis: BarAxis) {
+    let wheel = input.scroll;
+    let fine = input.scroll_fine;
+    let speed = state.prefs.mousewheel_scroll_speed.clamp(1, 10) as f32;
+    // egui 只把「Point 型、单事件不足 8px」的滚动填进 `smooth_scroll_delta`，
+    // 所以它非零就是触控板细滑（像素），否则是鼠标滚轮（整格）。
+    let (touch, src) = if fine == Vec2::ZERO {
+        (false, wheel)
+    } else {
+        (true, fine)
+    };
+    if src == Vec2::ZERO {
+        return;
+    }
+    // 触控板按原版的 `delta / 32` 换算成槽（这里的 32 就是当前格距），滚轮一格走
+    // `wheel_speed` 个槽。
+    let step = |d: f32| -> f32 {
+        if d == 0.0 {
+            0.0
+        } else if touch {
+            -d / cell.max(1.0)
+        } else {
+            -d.signum() * speed
+        }
+    };
+    let (hx, vy) = match axis {
+        // Shift + 滚轮让纵向那格去走横向条：端口既有约定，原版没有这一条。
+        BarAxis::Both if input.shift => (step(src.y), 0.0),
+        BarAxis::Both => (step(src.x), step(src.y)),
+        BarAxis::Horizontal => (step(if src.x != 0.0 { src.x } else { src.y }), 0.0),
+        BarAxis::Vertical => (0.0, step(if src.y != 0.0 { src.y } else { src.x })),
+    };
+    // 触控板一次几个像素、连一格都凑不满：原版用浮点累加器
+    // `macos_scroll_temp_starta/b` 攒着，端口同样先攒后动，否则慢速滑动会被取整成 0。
+    let carry = &mut state.interaction.scroll_carry;
+    let drain = |c: &mut f32, d: f32| -> i64 {
+        *c += d;
+        let whole = c.trunc();
+        *c -= whole;
+        whole as i64
+    };
+    let (dx, dy) = (drain(&mut carry.x, hx), drain(&mut carry.y, vy));
+    let cur = (
+        state.viewport.start_tick as i64,
+        state.viewport.start_layer as i64,
+    );
+    let hi = (
+        (state.doc.song.enda as i64).max(cur.0),
+        (state.doc.song.endb as i64).max(cur.1),
+    );
+    let got = (cur.0 + dx, cur.1 + dy);
+    let clamped = (got.0.max(0).min(hi.0), got.1.max(0).min(hi.1));
+    // 撞到边界就别再把小数攒着，否则反向时会先吐出一次超程。
+    if clamped.0 != got.0 {
+        carry.x = 0.0;
+    }
+    if clamped.1 != got.1 {
+        carry.y = 0.0;
+    }
+    state.viewport.start_tick = clamped.0 as u32;
+    state.viewport.start_layer = clamped.1 as u32;
+}
+
 fn handle_scrollbar_input(state: &mut EditorState, input: &InputSnapshot, hbar: Rect, vbar: Rect) {
     let Some(pos) = input.pointer else { return };
-    let (hm, _, ht) = h_geometry(state, hbar);
-    let (vm, _, vt) = v_geometry(state, vbar);
+    let (hm, hmax, ht) = h_geometry(state, hbar);
+    let (vm, vmax, vt) = v_geometry(state, vbar);
 
     if input.primary_pressed {
         if hbar.contains(pos) {
@@ -662,8 +1021,8 @@ fn handle_scrollbar_input(state: &mut EditorState, input: &InputSnapshot, hbar: 
                     grab: pos.x - ht.min.x,
                 };
             } else {
-                let ratio = ((pos.x - hbar.min.x) / hbar.width()).clamp(0.0, 1.0);
-                state.viewport.start_tick = (ratio * hm) as u32;
+                let ratio = (pos.x - hbar.min.x) / hbar.width();
+                state.viewport.start_tick = bar_value(ratio, hm, hmax);
             }
         } else if vbar.contains(pos) {
             if vt.contains(pos) {
@@ -671,20 +1030,20 @@ fn handle_scrollbar_input(state: &mut EditorState, input: &InputSnapshot, hbar: 
                     grab: pos.y - vt.min.y,
                 };
             } else {
-                let ratio = ((pos.y - vbar.min.y) / vbar.height()).clamp(0.0, 1.0);
-                state.viewport.start_layer = (ratio * vm) as u32;
+                let ratio = (pos.y - vbar.min.y) / vbar.height();
+                state.viewport.start_layer = bar_value(ratio, vm, vmax);
             }
         }
     }
     if input.primary_down {
         match state.interaction.mode.clone() {
             DragMode::DragScrollbarH { grab } => {
-                let ratio = ((pos.x - grab - hbar.min.x) / hbar.width()).clamp(0.0, 1.0);
-                state.viewport.start_tick = (ratio * hm) as u32;
+                let ratio = (pos.x - grab - hbar.min.x) / hbar.width();
+                state.viewport.start_tick = bar_value(ratio, hm, hmax);
             }
             DragMode::DragScrollbarV { grab } => {
-                let ratio = ((pos.y - grab - vbar.min.y) / vbar.height()).clamp(0.0, 1.0);
-                state.viewport.start_layer = (ratio * vm) as u32;
+                let ratio = (pos.y - grab - vbar.min.y) / vbar.height();
+                state.viewport.start_layer = bar_value(ratio, vm, vmax);
             }
             _ => {}
         }
@@ -696,6 +1055,18 @@ fn handle_scrollbar_input(state: &mut EditorState, input: &InputSnapshot, hbar: 
         )
     {
         state.interaction.reset();
+    }
+
+    // #93.3：指针停在哪根条上，这一帧的滚动就只走那一根。原版这个门是
+    // `draw_scrollbar.gml:22-27` 的 `sb_sel = i`（只有刚碰过这根条才吃滚轮）；
+    // Windows 侧本来没有横滚事件，端口把它做成「悬停横向条 = 横向条接住两轴」。
+    if !input.primary_down {
+        let cell = state.viewport.cell();
+        if hbar.contains(pos) {
+            scroll_bars(state, input, cell, BarAxis::Horizontal);
+        } else if vbar.contains(pos) {
+            scroll_bars(state, input, cell, BarAxis::Vertical);
+        }
     }
 }
 
@@ -734,11 +1105,17 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
     let th = &state.theme;
     let vp = &state.viewport;
     let cell = vp.cell();
-    let u = vp.u();
+    // 偏离原版（用户要求 #90）：带内的装饰尺寸——刻度数字、刻度线、区间帽、
+    // 播放头的箭头帽和竖线宽度——钉在 100% 档，只有横向的 tick 位置跟格距走。
+    // 原版整条标尺带连字一起乘 `window_scale`，缩到 10% 时指针不到 1px 就消失了。
+    let u = RULER_SCALE;
     let meta = &state.doc.song.meta;
     let tempo = (meta.tempo.max(0.01)) as f64;
     let top = rect.min.y;
-    let mut shapes = vec![Shape::rect_filled(rect, 0.0, th.ruler_bg)];
+    // 背景必须当场画：下面两类文字（秒标、刻数）是 `p.text` 直接落笔的，
+    // 留在 `shapes` 里到函数末尾才 `p.extend`，这块不透明背景就会把它们整个盖掉（#96）。
+    p.rect_filled(rect, 0.0, th.ruler_bg);
+    let mut shapes = Vec::new();
 
     // 原版 `c`：一秒一格，太慢就 5/10/30 秒一格，太快就半秒 / 四分之一秒一格。
     let mut c = 1.0f64;
@@ -757,6 +1134,18 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
     if tempo > 18.0 {
         c = 0.25;
     }
+    // 端口自加（用户要求 #90）：秒标的字尺寸钉死后，界面一缩小平铺的「一秒一格」
+    // 会把数字挤成一坨，所以按 `seconds_step` 把档位往上跳。
+    let sec_gap = p
+        .layout_no_wrap(
+            time_str(600.0),
+            crate::fonts::scaled(small_font(), u),
+            th.text,
+        )
+        .size()
+        .x as f64
+        + 8.0;
+    c = seconds_step(c, tempo, cell, sec_gap);
     let ticks_per_step = tempo * c;
     let px_per_step = (ticks_per_step * cell as f64) as f32;
     let starta = vp.start_tick as f64;
@@ -788,6 +1177,17 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
         sec += c;
     }
 
+    // 同上（#90）：tick 号原样是「每 4 格标一个」，标签尺寸钉死后按 4 的整数倍放宽，
+    // 免得数字在缩小的格距上叠成一团。刻度线本身跟格距走，密度不动。
+    let num_w =
+        p.layout_no_wrap(
+            "0000".to_string(),
+            crate::fonts::scaled(small_font(), u),
+            th.text,
+        )
+        .size()
+        .x + 4.0;
+    let num_every = tick_label_step(num_w, cell);
     // 原版 `for (a = 0; a <= totalcols)`：刻度线 + 每 4 tick 一个的 tick 号。
     for a in 0..=vp.columns() {
         let tick = vp.start_tick + a;
@@ -802,7 +1202,7 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
             0.0,
             alpha(th.text, RULER_A),
         ));
-        if by4 {
+        if tick % num_every == 0 {
             p.text(
                 pos2(x, top + 15.0 * u),
                 if a == 0 {
@@ -1192,7 +1592,7 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
                     &p,
                     pos2(x, rect.min.y),
                     cap + 1,
-                    Vec2::new(16.0 * u, rect.height()),
+                    Vec2::new(16.0 * RULER_SCALE, rect.height()),
                     Color32::WHITE,
                 );
             }
@@ -1213,7 +1613,9 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
                 &p,
                 pos2(mx, rect.min.y),
                 marker_frame(th, blackout) + 1,
-                Vec2::new(16.0 * cell / 32.0, rect.height()),
+                // 竖线宽度恒定（#90）：这帧是 16px 宽的贴图，中线 1px，
+                // 按 `cell` 缩放时缩到 10% 就成了 0.1px，指针整个看不见。
+                Vec2::new(16.0 * RULER_SCALE, rect.height()),
                 tint,
             );
         }
@@ -1345,6 +1747,11 @@ fn push_note(
     } else {
         (block_alpha + 0.25).min(1.0)
     };
+    // 端口自加（用户要求 #92）：界面缩放低于 `note_text_min_percent` 时，方块上的两行字
+    // 一起收掉，只留方块、图标和红框。原版没有这一档（它最低只到 50%，字照样画）。
+    if state.hide_note_text {
+        return;
+    }
     let font = crate::fonts::scaled(main_font(), u);
 
     if flags.show_numbers {
@@ -1667,44 +2074,286 @@ fn draw_context_menu(state: &mut EditorState, ui: &Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::viewport::{SCROLLBAR_SIZE, TIMELINE_HEIGHT};
 
-    /// 原版 `draw_scrollbar`：两根条每格都走 `wheel_speed` 个槽位，横向一个槽 = 1 刻、
-    /// 纵向一个槽 = 1 层。方向（哪个符号算前进）沿用端口既有约定，这里只核每格走多远。
+    /// 原版 `get_seconds_from_tick`：沿变速点分段累计。基速 10 t/s、tick 4 处
+    /// 一枚 pitch=600 的 Tempo Changer（= 40 t/s）——前 4 刻 0.4s，之后加速。
     #[test]
-    fn wheel_scroll_steps_by_the_preference() {
-        let _prefs = crate::isolate_prefs();
-        let mut st = EditorState::for_test();
-        let from = 20i64;
-        st.prefs.mousewheel_scroll_speed = 1;
+    fn player_seconds_accumulates_across_tempo_changes() {
+        let pts = vec![(4i64, 600i16)];
+        let secs = |t: f64| player_seconds_at(&pts, 10.0, t);
+        assert!((secs(0.0)).abs() < 1e-9);
+        assert!((secs(4.0) - 0.4).abs() < 1e-9, "{}", secs(4.0));
+        assert!((secs(8.0) - 0.5).abs() < 1e-9, "{}", secs(8.0));
+        // pitch<=0 的病态值按 0.25 t/s 兜底（与实时播放同款下限）。
+        let bad = vec![(2i64, 0i16)];
+        assert!((player_seconds_at(&bad, 10.0, 4.0) - (0.2 + 2.0 / 0.25)).abs() < 1e-9);
+    }
 
-        st.viewport.start_layer = from as u32;
-        scroll_viewport(&mut st, 1.0, false);
-        let layers = st.viewport.start_layer as i64 - from;
-        st.viewport.start_tick = from as u32;
-        scroll_viewport(&mut st, 1.0, true);
-        let ticks = st.viewport.start_tick as i64 - from;
-        assert_eq!(layers.abs(), 1, "出厂纵向一格一层");
+    /// 一帧滚轮（整格）：`scroll_fine` 为零 ⇒ 按鼠标滚轮处理。
+    fn wheel(x: f32, y: f32) -> InputSnapshot {
+        InputSnapshot {
+            scroll: Vec2::new(x, y),
+            ..Default::default()
+        }
+    }
+
+    /// Shift + 滚轮（只有纵向分量）。
+    fn wheel_shift(y: f32) -> InputSnapshot {
+        InputSnapshot {
+            scroll: Vec2::new(0.0, y),
+            shift: true,
+            ..Default::default()
+        }
+    }
+
+    /// 一帧触控板（像素）：egui 会同时填 `raw` 和 `smooth`，这里按同样的值给两轴。
+    fn pad(x: f32, y: f32) -> InputSnapshot {
+        InputSnapshot {
+            scroll: Vec2::new(x, y),
+            scroll_fine: Vec2::new(x, y),
+            ..Default::default()
+        }
+    }
+
+    /// 一根滚得动的条：320×128 的网格（11 列 × 5 行）配 200 刻 / 40 层的歌。
+    fn scroll_state() -> EditorState {
+        let mut st = EditorState::for_test();
+        st.doc.song.enda = 200;
+        st.doc.song.endb = 40;
+        st.viewport.origin = Pos2::ZERO;
+        st.viewport.size = Vec2::new(320.0, 128.0);
+        st.prefs.mousewheel_scroll_speed = 1;
+        st
+    }
+
+    /// 原版 `draw_scrollbar.gml:24` 的
+    /// `sb_val += (mouse_wheel_down - mouse_wheel_up) * wheel_speed`：一格走 `wheel_speed` 个槽，
+    /// 向下滚 = 看更晚的内容。egui 的正值方向相反（`winit/src/event.rs:957`），
+    /// 所以要取负，而且两轴不能再合成一个标量（#93.2）。
+    #[test]
+    fn wheel_steps_by_the_preference_in_the_original_direction() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = scroll_state();
+
+        st.viewport.start_layer = 20;
+        scroll_bars(&mut st, &wheel(0.0, -1.0), 32.0, BarAxis::Both);
+        assert_eq!(st.viewport.start_layer, 21, "滚轮向下 = 多看到一层");
+        assert_eq!(st.viewport.start_tick, 0, "纵向那一格不许带动横向条");
+
+        st.viewport.start_tick = 20;
+        scroll_bars(&mut st, &wheel(1.0, 0.0), 32.0, BarAxis::Both);
+        assert_eq!(st.viewport.start_tick, 19, "横向滚轮一格走一刻（原版槽位）");
+
+        st.viewport.start_tick = 20;
+        scroll_bars(&mut st, &wheel_shift(-1.0), 32.0, BarAxis::Both);
         assert_eq!(
-            ticks.abs(),
-            1,
-            "出厂横向一格一刻（原版槽位），不再是硬编码的 4"
+            st.viewport.start_tick, 21,
+            "Shift 把纵向那格交给横向条（端口约定）"
         );
 
         st.prefs.mousewheel_scroll_speed = 7;
-        st.viewport.start_layer = from as u32;
-        scroll_viewport(&mut st, 1.0, false);
-        assert_eq!(
-            (st.viewport.start_layer as i64 - from).abs(),
-            7,
-            "步长要按设置放大"
-        );
+        st.viewport.start_layer = 20;
+        scroll_bars(&mut st, &wheel(0.0, -1.0), 32.0, BarAxis::Both);
+        assert_eq!(st.viewport.start_layer, 27, "步长要按设置放大");
 
         // 配置里的脏值按原版 median(1, …, 10) 夹住，回退方向也不能退到负列。
-        let back = if layers > 0 { -1.0 } else { 1.0 };
         st.prefs.mousewheel_scroll_speed = 40;
         st.viewport.start_layer = 3;
-        scroll_viewport(&mut st, back, false);
+        scroll_bars(&mut st, &wheel(0.0, 1.0), 32.0, BarAxis::Both);
         assert_eq!(st.viewport.start_layer, 0, "越界夹到 0，脏值夹到上限 10");
+    }
+
+    /// #93.3：触控板的两个分量各走各的条，斜着滑两条一起动；不足一格的位移先进
+    /// 累加器，攒满一格才动（原版 `macos_scroll_temp_starta/b` 就是浮点累加）。
+    #[test]
+    fn trackpad_moves_each_axis_on_its_own_bar() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = scroll_state();
+
+        // 触控板正号 = 手指往右下走 = 内容跟着往右下 = 看到更早的东西（原版同款）。
+        st.viewport.start_tick = 10;
+        st.viewport.start_layer = 10;
+        scroll_bars(&mut st, &pad(-32.0, 0.0), 32.0, BarAxis::Both);
+        assert_eq!(
+            (st.viewport.start_tick, st.viewport.start_layer),
+            (11, 10),
+            "双指往左滑只动横向条"
+        );
+        scroll_bars(&mut st, &pad(0.0, -64.0), 32.0, BarAxis::Both);
+        assert_eq!(st.viewport.start_layer, 12, "双指往上滑 = 往高层走");
+
+        // 半格一次：第一帧不动、两帧凑满一格。
+        st.viewport.start_tick = 0;
+        st.viewport.start_layer = 0;
+        st.interaction.scroll_carry = Vec2::ZERO;
+        scroll_bars(&mut st, &pad(-16.0, -16.0), 32.0, BarAxis::Both);
+        assert_eq!(
+            (st.viewport.start_tick, st.viewport.start_layer),
+            (0, 0),
+            "半格先攒着，不许直接取整成 0 丢掉"
+        );
+        scroll_bars(&mut st, &pad(-16.0, -16.0), 32.0, BarAxis::Both);
+        assert_eq!(
+            (st.viewport.start_tick, st.viewport.start_layer),
+            (1, 1),
+            "两帧凑满一格，两轴同时动"
+        );
+
+        // 悬停在哪根条上就只走那一根（原版 `sb_sel = i` 的门）。
+        st.viewport.start_tick = 10;
+        st.viewport.start_layer = 10;
+        scroll_bars(&mut st, &pad(0.0, -32.0), 32.0, BarAxis::Horizontal);
+        assert_eq!(
+            (st.viewport.start_tick, st.viewport.start_layer),
+            (11, 10),
+            "指针在横向条上时，纵向滚动也归横向条"
+        );
+
+        // 撞到上限后不许继续攒小数，否则反向时会先吐一次超程。
+        st.viewport.start_tick = st.doc.song.enda;
+        st.interaction.scroll_carry = Vec2::ZERO;
+        for _ in 0..20 {
+            scroll_bars(&mut st, &pad(-8.0, 0.0), 32.0, BarAxis::Horizontal);
+        }
+        assert_eq!(st.viewport.start_tick, 200, "顶到上限就不再前进");
+        assert_eq!(
+            st.interaction.scroll_carry.x, 0.0,
+            "每次被上限夹住都要清空累加器，20 帧攒不下 5 格"
+        );
+        for _ in 0..4 {
+            scroll_bars(&mut st, &pad(8.0, 0.0), 32.0, BarAxis::Horizontal);
+        }
+        assert_eq!(
+            st.viewport.start_tick,
+            st.doc.song.enda - 1,
+            "反向四帧（每帧 1/4 格）= 退一格，不能把攒着的 20 帧一次退光"
+        );
+    }
+
+    /// #93.1 + #93.4：滑块按住哪儿就贴在哪儿（指针位移 = 滑块位移，一像素不差），
+    /// 拖到尽头夹在 `enda`，此时滑块右边缘正好贴住滑轨末端。
+    #[test]
+    fn dragging_a_thumb_tracks_the_pointer_and_stops_at_the_song_end() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = scroll_state();
+        let hbar = Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 16.0));
+        let vbar = Rect::from_min_size(pos2(320.0, 0.0), Vec2::new(16.0, 128.0));
+
+        let (_, max_val, thumb) = h_geometry(&st, hbar);
+        assert_eq!(max_val, 200.0, "横向上限 = 原版 enda");
+        // 一格 = 滑轨像素 / 总槽。`start_tick` 是整数，取整后滑块最多落后半格；
+        // 要核的是这半格不随拖拽距离累积 —— 原先定位用「滑轨减滑块」、反解用「整条滑轨」，
+        // 两个分母不一致，一路拖下来才会越偏越多（#93.1）。
+        let tick_px = 320.0 / (200.0 + 11.0);
+        let layer_px = 128.0 / (40.0 + 5.0);
+        let start_center = thumb.center().x;
+        handle_scrollbar_input(
+            &mut st,
+            &mouse_xy(start_center, 8.0, true, true, false),
+            hbar,
+            vbar,
+        );
+        // 拖 100 像素。
+        handle_scrollbar_input(
+            &mut st,
+            &mouse_xy(start_center + 100.0, 8.0, false, true, false),
+            hbar,
+            vbar,
+        );
+        let dragged = h_geometry(&st, hbar).2;
+        assert!(
+            (dragged.center().x - (start_center + 100.0)).abs() <= tick_px / 2.0 + 0.01,
+            "跟手：期望 {}，实测 {}（一格 {}）",
+            start_center + 100.0,
+            dragged.center().x,
+            tick_px
+        );
+        // 再往界外拖：值停死在 enda，滑块右边缘贴住滑轨末端。
+        handle_scrollbar_input(
+            &mut st,
+            &mouse_xy(start_center + 4000.0, 8.0, false, true, false),
+            hbar,
+            vbar,
+        );
+        assert_eq!(st.viewport.start_tick, 200, "拖不出歌曲末尾");
+        let end = h_geometry(&st, hbar).2;
+        assert!(
+            (end.max.x - 320.0).abs() < 1.0,
+            "到头时滑块右边缘贴住滑轨，实测 {}",
+            end.max.x
+        );
+
+        // 纵向同理：往下拖 = `startb` 增大（原版行号 `startb + b` 随屏幕 y 增大）。
+        st.viewport.start_layer = 0;
+        let (_, vmax, vt) = v_geometry(&st, vbar);
+        assert_eq!(vmax, 40.0, "纵向上限 = 原版 endb");
+        handle_scrollbar_input(
+            &mut st,
+            &mouse_xy(328.0, vt.center().y, true, true, false),
+            hbar,
+            vbar,
+        );
+        handle_scrollbar_input(
+            &mut st,
+            &mouse_xy(328.0, vt.center().y + 64.0, false, true, false),
+            hbar,
+            vbar,
+        );
+        assert!(st.viewport.start_layer > 0, "往下拖 = 往高层走");
+        let moved = v_geometry(&st, vbar).2;
+        assert!(
+            (moved.center().y - (vt.center().y + 64.0)).abs() <= layer_px / 2.0 + 0.01,
+            "纵向也跟手：期望 {}，实测 {}（一层 {}）",
+            vt.center().y + 64.0,
+            moved.center().y,
+            layer_px
+        );
+        handle_scrollbar_input(
+            &mut st,
+            &mouse_xy(328.0, vt.center().y + 9000.0, false, true, false),
+            hbar,
+            vbar,
+        );
+        assert_eq!(st.viewport.start_layer, 40, "拖不出最后一个含音符的层");
+
+        // 点滑轨空白处（非滑块）也要夹在上限内。
+        handle_scrollbar_input(
+            &mut st,
+            &mouse_xy(319.0, 8.0, true, true, false),
+            hbar,
+            vbar,
+        );
+        assert_eq!(st.viewport.start_tick, 200, "点最右边也点不出末尾");
+    }
+
+    /// #93 换过分母之后，滑块必须始终待在滑轨里，而且尺寸不随位置变
+    /// （#88 定的恒定尺寸）。
+    #[test]
+    fn thumbs_stay_inside_their_track_at_every_scroll_position() {
+        let hbar = Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 16.0));
+        let vbar = Rect::from_min_size(pos2(320.0, 0.0), Vec2::new(16.0, 128.0));
+        let mut st = scroll_state();
+        let mut widths = Vec::new();
+        let mut heights = Vec::new();
+        for tick in (0..=201).step_by(17) {
+            st.viewport.start_tick = tick as u32;
+            st.viewport.start_layer = (tick / 5) as u32;
+            let h = h_geometry(&st, hbar).2;
+            let v = v_geometry(&st, vbar).2;
+            assert!(hbar.contains_rect(h), "横向滑块 {h:?} 跑出滑轨 {hbar:?}");
+            assert!(vbar.contains_rect(v), "纵向滑块 {v:?} 跑出滑轨 {vbar:?}");
+            widths.push(h.width());
+            heights.push(v.height());
+        }
+        assert!(
+            widths.windows(2).all(|w| (w[0] - w[1]).abs() < 0.001),
+            "横向滑块长随位置变了：{widths:?}"
+        );
+        assert!(
+            heights.windows(2).all(|w| (w[0] - w[1]).abs() < 0.001),
+            "纵向滑块长随位置变了：{heights:?}"
+        );
     }
 
     // ---- 标尺状态机（区间 / 播放头手柄）------------------------------------
@@ -2023,6 +2672,72 @@ mod tests {
         );
     }
 
+    /// #96：标尺背景是不透明矩形，必须排在秒标 / 刻数之前。端口原来把背景塞进
+    /// `shapes` 到函数末尾才 `p.extend`，而两类文字是中途 `p.text` 直接落笔的，
+    /// 结果背景压在文字上 —— 实测就是「标尺只剩刻度线，时间没了」。
+    #[test]
+    fn the_ruler_background_is_painted_before_its_labels() {
+        let _prefs = crate::isolate_prefs();
+        let st = ruler_state();
+        let bg = st.theme.ruler_bg;
+        let out = {
+            let ctx = egui::Context::default();
+            crate::fonts::install(&ctx);
+            ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    draw_timeline(&st, ui, ruler_rect());
+                });
+            })
+        };
+        let idx = out
+            .shapes
+            .iter()
+            .position(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.fill == bg))
+            .expect("标尺背景矩形");
+        let txt = out
+            .shapes
+            .iter()
+            .position(|s| matches!(&s.shape, egui::Shape::Text(_)))
+            .expect("标尺文字");
+        assert!(idx < txt, "背景矩形 #{idx} 必须排在文字 #{txt} 之前");
+    }
+
+    /// #95：网格里空格是箭头（原版 `cr_cross` 全文没用过，`control_draw.gml:125-129`
+    /// 是 `cr_handpoint`，用户定案要箭头），落在音符上换手型，框选拖拽中按 `:904`
+    /// 也是手型。上一帧留下的十字必须被收回，否则整窗口都挂着一个十字。
+    #[test]
+    fn the_grid_cursor_is_an_arrow_except_over_notes_and_while_selecting() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = ruler_state();
+        st.doc.song.set(0, 1, nbs_core::model::Note::new(0, 45));
+        let g = grid_rect();
+
+        st.interaction.cursor = CursorIcon::Crosshair;
+        handle_grid_input(&mut st, &mouse_xy(16.0, 112.0, false, false, false), g);
+        assert_eq!(st.interaction.cursor, CursorIcon::Default, "空格是箭头");
+
+        st.interaction.cursor = CursorIcon::Crosshair;
+        handle_grid_input(&mut st, &mouse_xy(16.0, 48.0, false, false, false), g);
+        assert_eq!(
+            st.interaction.cursor,
+            CursorIcon::PointingHand,
+            "音符上是手型"
+        );
+
+        st.interaction.mode = DragMode::BoxSelect {
+            anchor: (0, 3),
+            subtract: false,
+            alt_copy: false,
+        };
+        st.interaction.cursor = CursorIcon::Crosshair;
+        handle_grid_input(&mut st, &mouse_xy(170.0, 50.0, false, true, false), g);
+        assert_eq!(
+            st.interaction.cursor,
+            CursorIcon::PointingHand,
+            "框选拖拽中是手型（原版 cr_handpoint）"
+        );
+    }
+
     /// 偏离原版（用户要求）：滚动条不随窗口缩放，恒定为 BAR_SCALE（0.67）档尺寸。
     /// 两种格距下 split() 分出的条带、h/v_geometry 的滑块几何必须一致，
     /// 内边距钉在 `4 × BAR_SCALE`、最小滑块钉在 `24 × BAR_SCALE`。
@@ -2055,6 +2770,49 @@ mod tests {
             "最小滑块宽 = 24 × BAR_SCALE，实际 {}",
             t3.width()
         );
+    }
+
+    /// 偏离原版（用户要求 #90）：时间轴带和播放指针都不随界面缩放。
+    /// 带高恒为 `TIMELINE_HEIGHT`（100% 档），网格顶因此也不动；
+    /// 指针竖线的贴图宽度按 `RULER_SCALE` 展开，缩到 10% 仍然是整 1px，不会消失。
+    #[test]
+    fn the_timeline_band_does_not_scale_with_the_window() {
+        let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let (t1, g1, _, _) = split(area, 32.0);
+        let (t2, g2, _, _) = split(area, 32.0 * 0.1);
+        assert!(
+            (t1.height() - TIMELINE_HEIGHT).abs() < 0.01,
+            "标尺带恒为 100% 档"
+        );
+        assert!((t1.height() - t2.height()).abs() < 0.01, "带高不随缩放");
+        assert_eq!(g1.min.y, g2.min.y, "网格顶不随缩放");
+
+        // `IconBank::marker` 把 16px 宽的帧拉成 `size.x`，贴图里的中线是 1px，
+        // 所以屏幕上的线宽 = size.x ÷ 16。宽度钉死后线宽恒 1px。
+        let line_w = (16.0 * RULER_SCALE) / 16.0;
+        assert!((line_w - 1.0).abs() < 1e-6, "指针竖线恒 1px，实际 {line_w}");
+        // 图层栏那边取的是同一个带高，两边算出的行数才对得上。
+        assert!((timeline_band() - TIMELINE_HEIGHT).abs() < 0.01);
+    }
+
+    /// 偏离原版（用户要求 #90）：标尺标签尺寸钉死，格距变小时靠跳档避免数字叠在一起。
+    /// 一格宽 = `c × tempo × cell`（原版 `c` 是「几秒一格」）。
+    #[test]
+    fn ruler_labels_hop_to_a_wider_step_when_the_cells_get_narrow() {
+        // 100%（cell 32）、tempo 15、0.5 秒一格 = 240px，早放得下 → 原样不动。
+        assert!((seconds_step(0.5, 15.0, 32.0, 20.0) - 0.5).abs() < 1e-9);
+        // 同样 tempo 缩到 10%（cell 3.2）：0.25 秒只有 12px，跳到 0.5 秒 = 24px。
+        assert!((seconds_step(0.25, 15.0, 3.2, 20.0) - 0.5).abs() < 1e-9);
+        // 慢速 + 小格距要连跳几档：0.5 t/s、cell 3.2 → 1 秒才 1.6px，一路跳到 30 秒（48px）。
+        assert!((seconds_step(1.0, 0.5, 3.2, 20.0) - 30.0).abs() < 1e-9);
+        // 最大档也放不下时停在最大档，不能越过 600 秒。
+        assert!((seconds_step(1.0, 0.1, 0.1, 1e6) - 600.0).abs() < 1e-9);
+
+        // tick 号：100% 时 4 格 = 128px，放得下 28px 的字 → 维持原版的每 4 格一个。
+        assert_eq!(tick_label_step(28.0, 32.0), 4);
+        // 缩到 10%：4 格只剩 12.8px，放宽到 3 个「4 格」= 12 格。
+        assert_eq!(tick_label_step(28.0, 3.2), 12);
+        assert_eq!(tick_label_step(28.0, 3.2) % 4, 0, "放宽后仍落在 4 的倍数上");
     }
 
     /// 原版 `control_draw.gml:1092-1095`：拖框期间边缘自动滚动推动视口时，

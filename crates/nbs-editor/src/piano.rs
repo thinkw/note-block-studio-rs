@@ -32,8 +32,15 @@ const BLACK_HIT_W: f32 = 25.0;
 const BLACK_HIT_H: f32 = 71.0;
 /// 右边相邻黑键的命中区左缘（`xx + 39a + 27`，挡住本白键的右半边）。
 const RIGHT_BLACK_HIT_X: f32 = 27.0;
-/// 原版 `floor(7 * 0.75)`：按住时的下沉像素。
-const PRESS_DOWN: f32 = 5.0;
+/// 原版 `if (key_midipress || key_press || key_click) down = 0.75`：实时按下时的下沉
+/// 倍率，画出来是 `floor(7 * 0.75)` = 5px。
+const PRESS_RATIO: f32 = 0.75;
+/// 原版 `floor(7 * ispressed)` 里的 7：下沉倍率换成像素的系数。
+const PRESS_PX: f32 = 7.0;
+/// 原版 `key_played[c]` 的窗口：被演奏后 300 毫秒内染黄并弹一下。
+const PLAYED_WINDOW: f64 = 0.3;
+/// 原版 `c_yellow`（$00FFFF 按 BGR 存 = RGB(255,255,0)）。
+const YELLOW: Color32 = Color32::from_rgb(255, 255, 0);
 /// 原版右移上限 `startkey + k < 52`。
 const RIGHT_LIMIT: usize = 52;
 /// 原版 8224255 = RGB(255,126,125)，超出 MC 音域的键。
@@ -54,6 +61,35 @@ pub const KEYBINDS: [char; 25] = [
 pub type KeysHeld = [bool; KEY_MAX as usize + 1];
 /// 一个键都没按住。
 const NO_KEYS: KeysHeld = [false; KEY_MAX as usize + 1];
+/// 原版 `key_played[0..=87]`：键号 → 最近一次被演奏的时刻（秒，`i.time`）。
+/// 用 `NEG_INFINITY` 表示「从没响过」：原版默认 0 是靠 `current_time` 一直往后涨来
+/// 保证过期的，而无头渲染里 `i.time` 恒为 0，写 0.0 会让整排键第一帧全亮。
+pub type KeysPlayed = [f64; KEY_MAX as usize + 1];
+/// 一个键都没被演奏过。
+pub const NO_KEYS_PLAYED: KeysPlayed = [f64::NEG_INFINITY; KEY_MAX as usize + 1];
+
+/// 原版 `draw_piano.gml:67/80/114` 那一段：`elapsed` 是该键被奏响后过了多少秒。
+/// 窗口内返回 `(染黄比例, 下沉倍率)`，过期返回 `None`。
+/// - 染黄 = `merge_color(col, c_yellow, 1 - elapsed/0.3)`：刚响完最黄，线性退回本色。
+/// - 下沉 = `t*2` 超过 1 就折返成 `2-t*2`，再量化成 `floor(d*3)/3` —— 只有 0、1/3、
+///   2/3、1 四档，配 `floor(7*d)` 就是 0、2、4、7 像素：键弹下去再回上来。
+pub fn played_key(elapsed: f64) -> Option<(f32, f32)> {
+    if !(0.0..PLAYED_WINDOW).contains(&elapsed) {
+        return None;
+    }
+    let t = (elapsed / PLAYED_WINDOW) as f32;
+    let mut down = t * 2.0;
+    if down > 1.0 {
+        down = 2.0 - down;
+    }
+    Some((1.0 - t, (down * 3.0).floor() / 3.0))
+}
+
+/// 原版 `merge_color(c1, c2, ratio)`：逐通道线性插值，ratio 0 取 c1、1 取 c2。
+fn merge_color(a: Color32, b: Color32, ratio: f32) -> Color32 {
+    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * ratio).round() as u8;
+    Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
+}
 pub fn keybind(key: u8) -> Option<char> {    if key < MC_KEY_MIN || key > MC_KEY_MAX {
         return None;
     }
@@ -116,7 +152,9 @@ impl FrameMap {
 
 /// 传给 `draw_piano_key` 的 `color`：底色 c_white，超范围染粉，
 /// 选中染淡紫（Fluent 用 `accent[7]`）。
-fn key_color(key: u8, o: &DrawOpts, th: &Theme) -> (Color32, bool) {
+/// `tint` 是 [`played_key`] 给的染黄比例（0 = 不在窗口内）：原版在超范围/选中之后
+/// 才 `merge_color(col, c_yellow, ratio)`，所以刚演奏的键即便在音域外也是往黄里走。
+fn key_color(key: u8, o: &DrawOpts, th: &Theme, tint: f32) -> (Color32, bool) {
     let out = key < MC_KEY_MIN || key > MC_KEY_MAX;
     let mut col = Color32::WHITE;
     if o.out_of_range && out {
@@ -128,6 +166,9 @@ fn key_color(key: u8, o: &DrawOpts, th: &Theme) -> (Color32, bool) {
         } else {
             SELECTED
         };
+    }
+    if tint > 0.0 {
+        col = merge_color(col, YELLOW, tint);
     }
     (col, out)
 }
@@ -195,6 +236,17 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
     // 键盘绑定当前按住的键（`collect_keybind_presses` 每帧刷新）。
     let keys_held = state.keys_held;
     let held = |k: u8| keys_held.get(k as usize).copied().unwrap_or(false);
+    // 原版 `key_played[]` + 300ms 窗口：这一帧该键还在「刚被演奏」的窗口里就返回
+    // (染黄比例, 下沉倍率)。时间戳由音频派发回传、UI 排空时盖章（见 state.rs）。
+    let key_played = state.key_played;
+    let now = ui.input(|i| i.time);
+    let glow = |k: u8| {
+        let at = key_played
+            .get(k as usize)
+            .copied()
+            .unwrap_or(f64::NEG_INFINITY);
+        played_key(now - at)
+    };
     // 黑键命中区：`xx + 39a - 12`（`hit_x` 已经是这条线要用的绝对横坐标）。
     let hit = |hit_x: f32| {
         Rect::from_min_size(
@@ -228,12 +280,14 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
             let right_exists = a + 1 < keysshow && c != 1 && c != 4;
             let right = right_exists && inside(hit(x + RIGHT_BLACK_HIT_X * u));
             let hovering = !left && !right && inside(white_hit);
-            // 原版 `down = 0.75`：鼠标按住（key_click）或键盘绑定被按下（key_press）都算。
-            let down = if (hovering && holding) || held(key) {
-                PRESS_DOWN * u
-            } else {
-                0.0
-            };
+            // 原版 `draw_piano.gml:66-67`：先看 key_played 的 300ms 窗口（染黄 + 弹下），
+            // 再被实时按下覆盖 —— 鼠标按住白键（key_click）或键盘绑定按住（key_press）
+            // 把下沉倍率改成 0.75，但覆盖只动 down，染黄留着。像素数 = `floor(7 * down)`。
+            let (tint, mut drop) = glow(key).unwrap_or((0.0, 0.0));
+            if (hovering && holding) || held(key) {
+                drop = PRESS_RATIO;
+            }
+            let down = (PRESS_PX * drop).floor() * u;
             // 原版在画这根键之前先画五线谱：门是 `c2 > 6 && c2 < 69 && playing = 0`
             // （C/F 分支用 c1，值相同），键号参数是列号 `startkey + a`。没有播放器模式，
             // `!isplayer` 恒真，C/F 分支少的那一个门可以合并。
@@ -254,7 +308,17 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
                 }
             }
             if let Some(bank) = bank.as_deref() {
-                draw_white_key(bank, p, &th, &frames, pos2(x, y0 + down), key, &opts, u);
+                draw_white_key(
+                    bank,
+                    p,
+                    &th,
+                    &frames,
+                    pos2(x, y0 + down),
+                    key,
+                    tint,
+                    &opts,
+                    u,
+                );
             }
             if hovering {
                 if a == 0 {
@@ -272,11 +336,12 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
         if with_black && white - 1 <= KEY_MAX as usize {
             let key = (white - 1) as u8;
             let black_hit = hit(x + BLACK_HIT_X * u);
-            let down = if (inside(black_hit) && holding) || held(key) {
-                PRESS_DOWN * u
-            } else {
-                0.0
-            };
+            let (tint, mut drop) = glow(key).unwrap_or((0.0, 0.0));
+            if (inside(black_hit) && holding) || held(key) {
+                drop = PRESS_RATIO;
+            }
+            // 原版黑键：背面sprite 固定在 `yy - 7`，正面sprite 随 `floor(7 * down)` 下沉。
+            let down = (PRESS_PX * drop).floor() * u;
             // 原版黑键五线谱：升号门 `c1 > 6 && c1 < 70`、降号门 `c1 > 5 && c1 < 69`，
             // 键号参数升号写 `startkey + a - 1`、降号写 `startkey + a`（同为列号空间）。
             if inside(black_hit) && show_chart && !opts.playing {
@@ -312,6 +377,7 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
                     pos2(x + BLACK_DRAW_X * u, y0 - BLACK_LIFT * u),
                     key,
                     down,
+                    tint,
                     &opts,
                     u,
                 );
@@ -397,10 +463,11 @@ fn draw_white_key(
     frames: &FrameMap,
     at: Pos2,
     key: u8,
+    tint: f32,
     o: &DrawOpts,
     u: f32,
 ) {
-    let (col, out) = key_color(key, o, th);
+    let (col, out) = key_color(key, o, th, tint);
     bank.piano_key(p, at, frames.key(piano_frame::WHITE), u, col);
 
     let kb = o.keyboard && keybind(key).is_some();
@@ -448,10 +515,11 @@ fn draw_black_key(
     at: Pos2,
     key: u8,
     down: f32,
+    tint: f32,
     o: &DrawOpts,
     u: f32,
 ) {
-    let (col, out) = key_color(key, o, th);
+    let (col, out) = key_color(key, o, th, tint);
     let face = at + Vec2::new(0.0, down);
     bank.piano_key(p, at, frames.key(piano_frame::BLACK_BACK), u, col);
     bank.piano_key(p, face, frames.key(piano_frame::BLACK_FACE), u, col);
@@ -627,6 +695,70 @@ mod tests {
         for c in KEYBINDS {
             assert!(keybind_key(c).is_some(), "按键 {c} 没有映射");
         }
+    }
+
+    /// 原版 `draw_piano.gml:67/80/114` 的 300ms 窗口：染黄从满线性退到本色，
+    /// 下沉走「按下去再回上来」的三角波，而且量化成 `floor(d*3)/3` 四档。
+    #[test]
+    fn played_key_window_and_bounce() {
+        assert_eq!(played_key(-0.01), None, "时间戳在未来不算刚演奏");
+        assert_eq!(played_key(0.3), None, "正好 300ms 已过期（原版是 <300）");
+        assert_eq!(played_key(f64::NEG_INFINITY), None, "从没响过的键");
+        // 刚响完：最黄，但还没开始下沉
+        let (tint, down) = played_key(0.0).unwrap();
+        assert_eq!((tint, down), (1.0, 0.0));
+        // 四档下沉：0 → 1/3 → 1（中点按到底）→ 1/3 → 0
+        for (elapsed, want) in [
+            (0.02_f64, 0.0_f32),
+            (0.075, 1.0 / 3.0),
+            (0.15, 1.0),
+            (0.225, 1.0 / 3.0),
+            (0.29, 0.0),
+        ] {
+            let got = played_key(elapsed).unwrap().1;
+            assert!(
+                (got - want).abs() < 1e-6,
+                "{elapsed}s 的下沉应是 {want}，实测 {got}"
+            );
+        }
+        // 染黄比例 = 1 - elapsed/0.3，单调退色
+        let mut prev = 1.0_f32;
+        for e in [0.05, 0.1, 0.15, 0.2, 0.25] {
+            let tint = played_key(e).unwrap().0;
+            assert!(tint < prev, "{e}s 要比上一帧更淡");
+            prev = tint;
+        }
+        assert!(
+            (played_key(0.15).unwrap().0 - 0.5).abs() < 1e-6,
+            "150ms 染一半"
+        );
+        // `floor(7 * down)` 的四档位移
+        for (down, px) in [
+            (0.0f32, 0.0f32),
+            (1.0 / 3.0, 2.0),
+            (2.0 / 3.0, 4.0),
+            (1.0, 7.0),
+        ] {
+            assert_eq!((7.0 * down).floor(), px);
+        }
+        // 实时按下覆盖成 0.75 → floor(7*0.75) = 5px
+        assert_eq!((7.0 * PRESS_RATIO).floor(), 5.0);
+    }
+
+    /// 原版 `merge_color(c1, c2, ratio)`：逐通道线性插值，ratio=0 取 c1、1 取 c2。
+    /// `c_yellow` 在 GameMaker 里按 BGR 存 $00FFFF，也就是 RGB(255,255,0)。
+    #[test]
+    fn merge_color_matches_game_maker() {
+        assert_eq!(merge_color(Color32::WHITE, YELLOW, 0.0), Color32::WHITE);
+        assert_eq!(merge_color(Color32::WHITE, YELLOW, 1.0), YELLOW);
+        assert_eq!(
+            merge_color(Color32::WHITE, YELLOW, 0.5),
+            Color32::from_rgb(255, 255, 128)
+        );
+        assert_eq!(
+            merge_color(Color32::BLACK, YELLOW, 0.5),
+            Color32::from_rgb(128, 128, 0)
+        );
     }
 
     /// 原版帧号：经典组 0..5，Fluent 浅色 6..11，Fluent 深色只有 12/13/14。

@@ -75,10 +75,13 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
         let shift = shift_chord(i);
         let p = |k: Key| i.key_pressed(k);
 
-        // 系统剪贴板粘贴（可能来自其它程序的 OpenNBS selection_code 文本）
-        for e in &i.events {
-            if let Event::Paste(text) = e {
-                out.push(Command::PasteText(text.clone()));
+        // 系统剪贴板粘贴（可能来自其它程序的 OpenNBS selection_code 文本）。
+        // 播放器是只读档位，不接粘贴（原版也没有这条路径）。
+        if !state.player {
+            for e in &i.events {
+                if let Event::Paste(text) = e {
+                    out.push(Command::PasteText(text.clone()));
+                }
             }
         }
 
@@ -114,53 +117,55 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
         }
 
         // ---- 以下要求停止播放（原版 709 行 `if (playing = 0)`）----
+        // 播放器档位：Delete / Home / End / PageUp / PageDown 与下面 Ctrl 族里
+        // 除 O/P/W 之外的全部按键都带 `&& !isplayer`（control_draw.gml:628-700）。
         if !state.is_playing() {
-            if p(Key::Delete) || p(Key::Backspace) {
+            if !state.player && (p(Key::Delete) || p(Key::Backspace)) {
                 out.push(Command::Delete);
             }
-            if p(Key::Home) {
+            if !state.player && p(Key::Home) {
                 out.push(Command::SeekHome);
             }
-            if p(Key::End) {
+            if !state.player && p(Key::End) {
                 out.push(Command::SeekEnd);
             }
-            if p(Key::PageUp) {
+            if !state.player && p(Key::PageUp) {
                 out.push(Command::PageHorizontal(-1));
                 out.push(Command::PageVertical(-1));
             }
-            if p(Key::PageDown) {
+            if !state.player && p(Key::PageDown) {
                 out.push(Command::PageHorizontal(1));
                 out.push(Command::PageVertical(1));
             }
             if ctrl && !shift {
-                if p(Key::N) {
+                if !state.player && p(Key::N) {
                     out.push(Command::New);
                 }
                 if p(Key::O) {
                     out.push(Command::Open);
                 }
-                if p(Key::S) {
+                if !state.player && p(Key::S) {
                     out.push(Command::Save);
                 }
-                if p(Key::A) {
+                if !state.player && p(Key::A) {
                     out.push(Command::SelectAll);
                 }
-                if p(Key::I) {
+                if !state.player && p(Key::I) {
                     out.push(Command::InvertSelection);
                 }
-                if p(Key::C) {
+                if !state.player && p(Key::C) {
                     out.push(Command::Copy);
                 }
-                if p(Key::X) {
+                if !state.player && p(Key::X) {
                     out.push(Command::Cut);
                 }
-                if p(Key::V) {
+                if !state.player && p(Key::V) {
                     out.push(Command::Paste);
                 }
-                if p(Key::Z) {
+                if !state.player && p(Key::Z) {
                     out.push(Command::Undo);
                 }
-                if p(Key::Y) {
+                if !state.player && p(Key::Y) {
                     out.push(Command::Redo);
                 }
                 if p(Key::P) {
@@ -181,16 +186,16 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
                         EditMode::Pitch => Command::SetPit(delta),
                     }
                 };
-                if p(Key::E) {
+                if !state.player && p(Key::E) {
                     out.push(step_cmd(big));
                 }
-                if p(Key::D) {
+                if !state.player && p(Key::D) {
                     out.push(step_cmd(-big));
                 }
-                if p(Key::R) {
+                if !state.player && p(Key::R) {
                     out.push(step_cmd(small));
                 }
-                if p(Key::F) {
+                if !state.player && p(Key::F) {
                     out.push(step_cmd(-small));
                 }
                 // `mode_action(5)`：按当前模式打开批量设置窗口。原版调用点写死
@@ -202,7 +207,7 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
                     EditMode::Panning => Some(WindowKind::SetPanning),
                     EditMode::Pitch => Some(WindowKind::SetPitch),
                 };
-                if p(Key::T) {
+                if !state.player && p(Key::T) {
                     if let Some(kind) = batch_window {
                         out.push(Command::ShowWindow(kind));
                     }
@@ -210,7 +215,7 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
                 // `mode_action(6)`：把当前模式的属性恢复默认（力度 / 声像 100、微调 0）。
                 // 空选区时 selection_change 直接 return，这里靠 batch_change 的
                 // 空选区早退对齐。
-                if p(Key::G) {
+                if !state.player && p(Key::G) {
                     match state.tool {
                         EditMode::Key => {}
                         EditMode::Velocity => out.push(Command::BatchVelocity(100)),
@@ -253,7 +258,9 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
         }
 
         // ---- Ctrl + 数字 / Ctrl + Shift + 字母：原版不在 `playing = 0` 里 ----
-        if ctrl {
+        // 原版 `control_draw.gml:725` 的 `if (!isplayer)` 把数字选音色、
+        // 片段编辑器 / 速度测量器和整个宏族都包在里面：播放器档位全部门掉。
+        if ctrl && !state.player {
             let digits = [
                 Key::Num1,
                 Key::Num2,
@@ -585,6 +592,59 @@ mod tests {
 
     fn prefs_open_cmd(c: &Command) -> bool {
         matches!(c, Command::ShowWindow(WindowKind::Preferences))
+    }
+
+    /// 原版 `control_draw.gml:628-700` 的 `&& !isplayer` 门：播放器档编辑快捷键
+    /// 全部失效（Delete/Home/End/PgUp/PgDn、N/S/A/I/C/X/V/Z/Y/E/D/R/F/T/G、
+    /// Ctrl+数字与整个 Ctrl+Shift 宏族）；但空格（:594-600）与 O/P/W/±/滚轮不受门。
+    #[test]
+    fn player_mode_mutes_editing_shortcuts_but_not_space() {
+        let player = || {
+            let mut s = fresh_state();
+            s.player = true;
+            s
+        };
+        let run = |state: &EditorState, events: Vec<Event>| -> Vec<Command> {
+            let ctx = Context::default();
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                predicted_dt: 0.0,
+                events,
+                ..Default::default()
+            };
+            let mut out = Vec::new();
+            let _ = ctx.run(raw, |c| out = collect_shortcuts(state, c));
+            out
+        };
+        let none = egui::Modifiers::NONE;
+        for (label, events) in [
+            ("N", vec![key(Key::N, true, none)]),
+            ("Delete", vec![key(Key::Delete, true, none)]),
+            ("S", vec![key(Key::S, true, none)]),
+            (
+                "Ctrl+Shift+P",
+                vec![key(
+                    Key::P,
+                    true,
+                    egui::Modifiers {
+                        ctrl: true,
+                        shift: true,
+                        ..Default::default()
+                    },
+                )],
+            ),
+        ] {
+            let got = run(&player(), events);
+            assert!(got.is_empty(), "播放器档按 {label} 还出了命令: {got:?}");
+        }
+        let got = run(&player(), vec![key(Key::Space, true, none)]);
+        assert!(
+            got.iter().any(|c| matches!(c, Command::PlayPause)),
+            "空格在播放器档应仍可控播放: {got:?}"
+        );
     }
 
     /// 出厂开机流程会打开欢迎窗，而窗口开着快捷键全被门槛拦掉；

@@ -14,7 +14,11 @@
 //! `NBS_UIPNG_POINTER=x,y` 每帧往该逻辑坐标发一次鼠标移动，用来渲染悬停态；
 //! `NBS_UIPNG_FDARK=1` 打开 Fluent 的暗色模式；
 //! `NBS_UIPNG_SCROLL=<tick>:<layer>` 把网格左上角滚到指定位置，验证可视区外的内容；
-//! `NBS_UIPNG_PREFS_MENU=theme|rate` 把首选项「界面」页的某个下拉摆成打开状态。
+//! `NBS_UIPNG_KEY_PLAYED=<键号>:<秒>` 给某个琴键盖上「演奏后过了这么多秒」的时间戳，
+//! 用来截图验证播放时琴键跟着弹下（染黄 + `floor(7*down)` 位移）。
+//! `NBS_UIPNG_PREFS_MENU=theme|rate|output` 把首选项页里的某个下拉摆成打开状态
+//! （前两个在「界面」页，`output` 在「播放」页）。
+//! `NBS_UIPNG_WALLPAPER=<图片路径>` 先导入这张背景图片再渲染（原版「导入背景图片」那条路）。
 //! ```
 //!
 //! 走的是和 GUI 完全相同的一条路：`Context::run` → `tessellate` → 三角形。
@@ -93,7 +97,9 @@ fn blend(dst: &mut Color32, src: Color32) {
     if a <= 0.0 {
         return;
     }
-    let m = |d: u8, s: u8| (s as f32 * a + d as f32 * (1.0 - a)).round().clamp(0.0, 255.0) as u8;
+    // `Color32` 的 rgb 通道存的就是预乘过 alpha 的值，所以「半透明盖在不透明上」
+    // 是 `src + dst * (1 - a)`；再乘一次 a 会把所有半透明图元系统性画暗。
+    let m = |d: u8, s: u8| (s as f32 + d as f32 * (1.0 - a)).round().clamp(0.0, 255.0) as u8;
     *dst = Color32::from_rgb(m(dst.r(), src.r()), m(dst.g(), src.g()), m(dst.b(), src.b()));
 }
 
@@ -125,7 +131,10 @@ fn shade(v: &[egui::epaint::Vertex; 3], tex: Option<&Tex>, w: [f32; 3]) -> Color
     });
     // 四舍五入而不是截断：截断会让所有纯色填充系统性偏暗一格。
     let ch = |s: f32| (s.round().clamp(0.0, 255.0)) as u8;
-    Color32::from_rgba_unmultiplied(
+    // 顶点色和贴图的 rgb 都已经是预乘 alpha 的（`Color32` 的存法），逐通道相乘
+    // 得到的还是预乘值，所以这里必须用 `from_rgba_premultiplied` 原样存下，
+    // 用 `from_rgba_unmultiplied` 会再乘一次 alpha。
+    Color32::from_rgba_premultiplied(
         ch(t.r() as f32 * col[0] / 255.0),
         ch(t.g() as f32 * col[1] / 255.0),
         ch(t.b() as f32 * col[2] / 255.0),
@@ -163,6 +172,16 @@ fn main() -> Result<(), String> {
         state.viewport.start_tick = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
         state.viewport.start_layer = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     }
+
+    // `NBS_UIPNG_KEY_PLAYED=<键号>:<过了多少秒>`：给某个琴键盖「演奏后过了这么多秒」的
+    // 时间戳。渲染循环每帧的 `input.time` 是自己给的（0.05s 递增），所以这里只解析，
+    // 真正盖章要等到帧里知道 time 之后再做（见下面的循环）。
+    let key_played = std::env::var("NBS_UIPNG_KEY_PLAYED").ok().and_then(|s| {
+        let mut it = s.split(':');
+        let key: usize = it.next()?.parse().ok()?;
+        let elapsed: f64 = it.next().unwrap_or("0").parse().ok()?;
+        Some((key, elapsed))
+    });
 
     // NBS_UIPNG_WINDOW=preferences:2 —— 直接把某个对话框摆开渲染，用来逐像素对照原版窗口。
     // 冒号后面是页签序号（只有带页签的窗口用它）。
@@ -258,11 +277,16 @@ fn main() -> Result<(), String> {
                 });
             }
         }
-        // `NBS_UIPNG_PREFS_MENU=theme|rate`：把首选项「界面」页的某个下拉摆成打开状态。
+        // `NBS_UIPNG_PREFS_MENU=theme|rate|output`：把首选项页里的某个下拉摆成打开状态。
         if matches!(k, WindowKind::Preferences) {
             match std::env::var("NBS_UIPNG_PREFS_MENU").as_deref() {
                 Ok("rate") => state.prefs_rate_menu = true,
                 Ok("theme") => state.prefs_theme_menu = true,
+                Ok("output") => {
+                    // 真打开菜单那一帧会刷设备表，摆状态也得刷，否则截图里只有一项。
+                    state.refresh_outputs();
+                    state.prefs_output_menu = true;
+                }
                 _ => {}
             }
         }
@@ -291,8 +315,13 @@ fn main() -> Result<(), String> {
 
     let ctx = egui::Context::default();
     state.theme.apply(&ctx);
-    if nbs_editor::fonts::install(&ctx, state.prefs.language).is_none() {
-        eprintln!("提示: 找不到 assets/fonts，界面会退回 egui 默认字体");
+    if !nbs_editor::fonts::install(&ctx) {
+        eprintln!("提示: 本机找不到中文字体，截图里的中文会是空框");
+    }
+    // `NBS_UIPNG_WALLPAPER=<图片路径>`：走一遍和菜单「导入背景图片」完全相同的烘焙
+    // （预缩放 → 降采样 → 虚化 → 上传贴图），用来看编辑区四周是否糊成渐变、暗化层盖了多少。
+    if let Ok(path) = std::env::var("NBS_UIPNG_WALLPAPER") {
+        state.wallpaper = Some(nbs_editor::background::bake(&ctx, Path::new(&path))?);
     }
 
     let mut texs: HashMap<TextureId, Tex> = HashMap::new();
@@ -322,6 +351,12 @@ fn main() -> Result<(), String> {
                 .unwrap_or_default(),
             ..Default::default()
         };
+        // 时间戳按本帧的虚拟时间倒推，绘制侧 `played_key(本帧 time - 时间戳)` 才落在窗口里。
+        if let Some((k, e)) = key_played {
+            if let Some(slot) = state.key_played.get_mut(k) {
+                *slot = input.time.unwrap_or(0.0) - e;
+            }
+        }
         let out = ctx.run(input, |c| nbs_editor::show(c, &mut state));
         ppp = out.pixels_per_point;
         for (id, delta) in &out.textures_delta.set {

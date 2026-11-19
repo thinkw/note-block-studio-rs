@@ -116,7 +116,13 @@ impl MidiInBackend for WinMidiIn {
         let instance = Box::into_raw(Box::new(Arc::clone(&self.inbox))) as usize;
         let mut handle = 0usize;
         let rc = unsafe {
-            midiInOpen(&mut handle, index, on_message as extern "system" fn(usize, u32, usize, u32, u32) as usize, instance, CALLBACK_FUNCTION)
+            midiInOpen(
+                &mut handle,
+                index,
+                on_message as extern "system" fn(usize, u32, usize, u32, u32) as usize,
+                instance,
+                CALLBACK_FUNCTION,
+            )
         };
         if rc != 0 {
             drop(unsafe { Box::from_raw(instance as *mut Arc<Mutex<Vec<RawMidiMsg>>>) });

@@ -7,6 +7,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use nbs_core::model::{Note, Song, PAN_CENTER};
@@ -48,6 +49,33 @@ pub trait AudioEngine {
     fn clock(&self) -> &TransportClock;
     fn clock_mut(&mut self) -> &mut TransportClock;
     fn device_info(&self) -> String;
+    /// 系统里可选的输出设备。原版把声音整个交给 GameMaker，只会走系统默认设备，
+    /// 没有选择项；这一组方法是端口自加（用户要求 #94）。没有可枚举后端的实现返回空表。
+    fn output_devices(&self) -> Vec<OutputDevice> {
+        Vec::new()
+    }
+    /// 当前真正在出声的设备名；降级成静音时钟时 `None`。
+    fn output_name(&self) -> Option<String> {
+        None
+    }
+    /// 用户点名的设备（`None` = 跟随系统默认）。切换失败被回落后会跟着变回 `None`，
+    /// 界面用它把偏好写成和引擎一致，免得下次启动又去点那台已经不存在的设备。
+    fn wanted_output(&self) -> Option<&str> {
+        None
+    }
+    /// 换输出设备，`None` = 跟随系统默认。返回实际接上的设备名。
+    fn set_output(&mut self, _wanted: Option<String>) -> Result<String, String> {
+        Err(nbs_core::tr(
+            "this audio engine has no switchable output device",
+            "当前音频引擎没有可切换的输出设备",
+        )
+        .to_string())
+    }
+    /// 系统默认输出变了（插耳机、切蓝牙）就跟随过去。内部限流，每帧调用即可；
+    /// 返回换到的新设备名，没变化返回 `None`。
+    fn poll_output(&mut self) -> Option<String> {
+        None
+    }
     fn bank(&self) -> Arc<SoundBank>;
     fn sample_status(&self) -> String;
     /// 取走改界面的事件乐器副作用（彩虹 / 改色 / 存档弹窗 / 背景强调）。
@@ -73,12 +101,82 @@ enum DeviceReport {
     Uninitialised,
 }
 
+/// 一台可选的输出设备。cpal 0.15 不对外暴露稳定设备 ID，只能用设备名当标识
+/// （Windows 给的名字自带设备描述，如「耳机 (Realtek(R) Audio)」，实际重名概率极低；
+/// 真撞上同名就选枚举到的第一台）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputDevice {
+    pub name: String,
+    pub is_default: bool,
+}
+
+/// 枚举系统里的输出设备。拿不到后端时返回空表（不报错：没设备只是没得选）。
+pub fn list_output_devices() -> Vec<OutputDevice> {
+    let host = cpal::default_host();
+    let default_name = host.default_output_device().and_then(|d| d.name().ok());
+    let Ok(devices) = host.output_devices() else {
+        return Vec::new();
+    };
+    let mut out: Vec<OutputDevice> = Vec::new();
+    for device in devices {
+        let Ok(name) = device.name() else { continue };
+        if out.iter().any(|o| o.name == name) {
+            continue;
+        }
+        out.push(OutputDevice {
+            is_default: Some(&name) == default_name.as_ref(),
+            name,
+        });
+    }
+    out
+}
+
+/// 系统当前的默认输出设备名（一台设备都没有时 `None`）。
+fn default_output_name() -> Option<String> {
+    cpal::default_host()
+        .default_output_device()
+        .and_then(|d| d.name().ok())
+}
+
+/// 取一台输出设备：`wanted` 为空就拿系统默认；指定名字时先比对默认（省一次枚举），
+/// 再全表按名字找。找不到报错，由调用方决定回落策略。
+fn open_output_device(wanted: Option<&str>) -> Result<cpal::Device, String> {
+    let host = cpal::default_host();
+    if let Some(device) = host.default_output_device() {
+        if wanted.is_none() || device.name().ok().as_deref() == wanted {
+            return Ok(device);
+        }
+    } else if wanted.is_none() {
+        return Err("no default output device".to_string());
+    }
+    let wanted = wanted.unwrap_or_default();
+    let devices = host
+        .output_devices()
+        .map_err(|e| format!("failed to enumerate output devices: {e}"))?;
+    for device in devices {
+        if device.name().ok().as_deref() == Some(wanted) {
+            return Ok(device);
+        }
+    }
+    Err(format!("output device \"{wanted}\" is not available"))
+}
+
+/// 默认设备探测间隔：插拔耳机到跟随切换的最大延迟。
+const OUTPUT_PROBE: Duration = Duration::from_millis(1000);
+
 pub struct CpalEngine {
     shared: Shared,
     clock: TransportClock,
     bank: Arc<SoundBank>,
     stream: Option<cpal::Stream>,
     device: DeviceReport,
+    /// 用户点名的输出设备；`None` = 跟随系统默认。原版没有这个概念
+    /// （声音整个交给 GameMaker，只会落在系统默认设备上），端口自加 #94。
+    wanted: Option<String>,
+    /// 默认设备探测的限流时戳，和最近看到 / 最近尝试建流时系统默认设备的名字。
+    probe_at: Instant,
+    seen_default: Option<String>,
+    tried_default: Option<String>,
     last_song: Option<Song>,
     export_options: ExportOptions,
 }
@@ -99,6 +197,10 @@ impl CpalEngine {
             bank,
             stream: None,
             device: DeviceReport::Uninitialised,
+            wanted: None,
+            probe_at: Instant::now(),
+            seen_default: default_output_name(),
+            tried_default: None,
             last_song: None,
             export_options: ExportOptions::default(),
         };
@@ -113,10 +215,13 @@ impl CpalEngine {
     }
 
     fn try_start_stream(&mut self) -> Result<DeviceReport, String> {
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or_else(|| "no default output device".to_string())?;
+        let device = open_output_device(None)?;
+        self.open_stream(&device)
+    }
+
+    /// 在一台具体设备上建输出流。cpal 的 `Stream` 一 drop 就停声，
+    /// 换设备时必须先把旧流放掉（见 [`Self::reconnect`]）。
+    fn open_stream(&mut self, device: &cpal::Device) -> Result<DeviceReport, String> {
         let name = device.name().unwrap_or_else(|_| "unknown device".into());
         let supported = device
             .default_output_config()
@@ -209,6 +314,90 @@ impl CpalEngine {
         self.bank = Arc::new(bank);
         let mut st = self.shared.lock();
         st.bank = self.bank.clone();
+    }
+
+    /// 换输出设备：`None` = 跟随系统默认。成功返回真正接上的设备名。
+    pub fn set_output(&mut self, wanted: Option<String>) -> Result<String, String> {
+        self.wanted = wanted.filter(|w| !w.is_empty());
+        self.reconnect()
+    }
+
+    /// 用户点名的设备（`None` = 跟随系统默认）。
+    pub fn wanted_output(&self) -> Option<&str> {
+        self.wanted.as_deref()
+    }
+
+    /// 当前正在出声的设备名。
+    pub fn output_name(&self) -> Option<&str> {
+        match &self.device {
+            DeviceReport::Streamed { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+
+    /// 按 `wanted` 重建输出流。指定的设备拿不到就回落到系统默认——宁可换设备出声，
+    /// 也不要因为一次选择把声音整个丢掉；默认也没了才降级成静音时钟。
+    fn reconnect(&mut self) -> Result<String, String> {
+        // 先停旧流：同设备重复建流时旧流还占着端点。
+        self.stream = None;
+        let device = match open_output_device(self.wanted.as_deref()) {
+            Ok(device) => device,
+            Err(e) => {
+                self.wanted = None;
+                match open_output_device(None) {
+                    Ok(device) => device,
+                    Err(e2) => {
+                        let reason = if e == e2 { e } else { format!("{e}; {e2}") };
+                        self.fail_stream(reason.clone());
+                        return Err(reason);
+                    }
+                }
+            }
+        };
+        self.tried_default = default_output_name();
+        match self.open_stream(&device) {
+            Ok(report) => {
+                let name = match &report {
+                    DeviceReport::Streamed { name, .. } => name.clone(),
+                    _ => String::new(),
+                };
+                self.device = report;
+                Ok(name)
+            }
+            Err(e) => {
+                self.fail_stream(e.clone());
+                Err(e)
+            }
+        }
+    }
+
+    fn fail_stream(&mut self, reason: String) {
+        self.device = DeviceReport::Fallback(reason);
+        self.shared.lock().audio_active = false;
+    }
+
+    /// 系统默认输出换了（插耳机、切蓝牙）就跟随过去；用户点名的设备掉线也回落默认；
+    /// 之前没建成流、现在系统又有可用设备了就补一次。约每秒探测一次。
+    fn poll_output_change(&mut self) -> Option<String> {
+        if self.probe_at.elapsed() < OUTPUT_PROBE {
+            return None;
+        }
+        self.probe_at = Instant::now();
+        let seen = default_output_name();
+        let default_changed = seen != self.seen_default;
+        self.seen_default = seen.clone();
+        let wanted_gone = self
+            .wanted
+            .as_ref()
+            .is_some_and(|w| !list_output_devices().iter().any(|d| &d.name == w));
+        // 建流失败过（没流）+ 系统有可用默认 + 这台默认还没试过：再试一次。
+        let dead_but_available =
+            self.stream.is_none() && seen.is_some() && seen != self.tried_default;
+        let follow_default = self.wanted.is_none() && default_changed;
+        if !(follow_default || wanted_gone || dead_but_available) {
+            return None;
+        }
+        self.reconnect().ok()
     }
 }
 
@@ -323,6 +512,21 @@ impl AudioEngine for CpalEngine {
     fn bank(&self) -> Arc<SoundBank> {
         self.bank.clone()
     }
+    fn output_devices(&self) -> Vec<OutputDevice> {
+        list_output_devices()
+    }
+    fn output_name(&self) -> Option<String> {
+        CpalEngine::output_name(self).map(str::to_string)
+    }
+    fn wanted_output(&self) -> Option<&str> {
+        CpalEngine::wanted_output(self)
+    }
+    fn set_output(&mut self, wanted: Option<String>) -> Result<String, String> {
+        CpalEngine::set_output(self, wanted)
+    }
+    fn poll_output(&mut self) -> Option<String> {
+        self.poll_output_change()
+    }
     fn sample_status(&self) -> String {
         if self.bank.is_ready() {
             let (count, total) = (self.bank.loaded_count(), BUILTIN_FILES.len());
@@ -374,7 +578,8 @@ impl SilentEngine {
         &mut self.clock
     }
     /// [from, to] 列内改界面的事件乐器入队；时钟速度同步取 ≤to 的最后一个
-    /// 变速点（原版 get_tempo_from_tick 语义）。发声/消音没有混音器可去，跳过。
+    /// 变速点（原版 get_tempo_from_tick 语义）。发声/消音没有混音器可去，跳过，
+    /// 但琴键时间戳不依赖混音器（原版 key_played 与 play_sound 是两条独立闸门）。
     fn dispatch_visual_columns(&mut self, from: i64, to: i64) {
         if to < from {
             return;
@@ -403,6 +608,10 @@ impl SilentEngine {
                 EventKind::BackgroundAccent => {
                     self.visual.push(VisualEvent::BackgroundAccentToggle)
                 }
+                EventKind::Note if ev.press => {
+                    self.visual.push(VisualEvent::KeyPlayed(ev.note.key))
+                }
+                // Tempo / Stopper：一个已在上面的循环里同步过时钟，一个要靠混音器。
                 _ => {}
             }
         }
@@ -782,6 +991,25 @@ mod tests {
         assert_eq!(&b[36..40], b"data");
         assert_eq!(u32::from_le_bytes(b[40..44].try_into().unwrap()), 8);
         let _ = std::fs::remove_file(dir);
+    }
+
+    /// #94：点名一台不存在的设备必须报错。「回落成跟随默认」是 `reconnect` 里显式
+    /// 做的动作，不能混在取设备的步骤里悄悄发生。
+    #[test]
+    fn unknown_output_device_is_rejected() {
+        let missing = "nbs-rust 这台机器上不存在的输出设备";
+        assert!(open_output_device(Some(missing)).is_err());
+        assert!(list_output_devices().iter().all(|d| d.name != missing));
+    }
+
+    /// #94：切换没成功时，引擎里不能留下这个没生效的点名下标——
+    /// 否则每次启动都会去点一台已经不存在的设备。
+    #[test]
+    fn dead_output_choice_does_not_stick() {
+        let mut engine = CpalEngine::new();
+        let missing = "nbs-rust 这台机器上不存在的输出设备".to_string();
+        let _ = engine.set_output(Some(missing.clone()));
+        assert_ne!(engine.wanted_output(), Some(missing.as_str()));
     }
 
     #[test]

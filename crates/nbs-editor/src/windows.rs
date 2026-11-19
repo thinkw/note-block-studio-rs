@@ -692,34 +692,37 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
         false,
     );
 
-    // :152-175 创建歌曲。
+    // :152-175 创建歌曲。整块包在 `if (!isplayer)` 里，播放器档不画，
+    // 打开歌曲块顶到原创建位（c 不再 +44）。
     let mut c = 48.0;
-    {
-        let at = egui::pos2(x(300.0), y(c));
-        let (resp, m) = greet_hit(
-            ui,
-            Rect::from_min_size(at, Vec2::new(224.0, 32.0)),
-            Id::new("greet-create"),
-        );
-        let pressed = m == 2;
-        if let Some(bk) = &bank {
-            bk.frame2_button(&p, at, &th, m);
-            bk.big_icon(&p, at, &th, 0, pressed);
+    if !state.player {
+        {
+            let at = egui::pos2(x(300.0), y(c));
+            let (resp, m) = greet_hit(
+                ui,
+                Rect::from_min_size(at, Vec2::new(224.0, 32.0)),
+                Id::new("greet-create"),
+            );
+            let pressed = m == 2;
+            if let Some(bk) = &bank {
+                bk.frame2_button(&p, at, &th, m);
+                bk.big_icon(&p, at, &th, 0, pressed);
+            }
+            let push = if pressed { 1.0 } else { 0.0 };
+            greet_text_left(
+                &p,
+                at + Vec2::new(48.0 + push, 9.0 + push),
+                tr("Create a new song", "创建歌曲"),
+                PREFS_FONT,
+                th.text,
+                false,
+            );
+            if resp.clicked() {
+                state.emit(Command::CloseWindow);
+            }
         }
-        let push = if pressed { 1.0 } else { 0.0 };
-        greet_text_left(
-            &p,
-            at + Vec2::new(48.0 + push, 9.0 + push),
-            tr("Create a new song", "创建歌曲"),
-            PREFS_FONT,
-            th.text,
-            false,
-        );
-        if resp.clicked() {
-            state.emit(Command::CloseWindow);
-        }
+        c += 44.0;
     }
-    c += 44.0;
     // :178-203 打开歌曲（load_song("", 0, 1) = 系统选框）。
     {
         let at = egui::pos2(x(300.0), y(c));
@@ -899,6 +902,28 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
         );
         if resp.clicked() {
             state.emit(Command::OpenDialog(DialogAction::ImportMidi));
+        }
+    }
+    // :323-331 播放器模式按钮：只在非播放器档显示（右下角内侧 40px），点击置位
+    // isplayer 并关欢迎窗。原版还会销毁单实例转发 socket、恢复正常窗口尺寸——
+    // 端口无 nbs:// 协议注册，省略（记录偏离）。
+    if !state.player {
+        if let Some(bk) = &bank {
+            if bk
+                .icon(
+                    ui,
+                    egui::pos2(x(660.0), y(390.0)),
+                    crate::icons::frame::PLAY,
+                    tr("Player Mode", "播放器模式"),
+                    false,
+                    false,
+                    &th,
+                )
+                .clicked
+            {
+                state.player = true;
+                state.emit(Command::CloseWindow);
+            }
         }
     }
     // Escape 关窗（原版 windowclose 默认值）。
@@ -1219,6 +1244,7 @@ fn preferences(state: &mut EditorState, ui: &mut Ui) {
     let mut menu_at = Pos2::ZERO;
     let mut rate_at = Pos2::ZERO;
     let mut lang_at = Pos2::ZERO;
+    let mut out_at = Pos2::ZERO;
     {
         let mut pg = Page {
             ui: &mut *ui,
@@ -1244,7 +1270,7 @@ fn preferences(state: &mut EditorState, ui: &mut Ui) {
             1 => prefs_interface(state, &mut pg, &mut menu_at, &mut rate_at, &mut lang_at),
             2 => prefs_appearance(state, &mut pg),
             3 => prefs_usability(state, &mut pg),
-            _ => prefs_playback(state, &mut pg),
+            _ => prefs_playback(state, &mut pg, &mut out_at),
         }
         // 原版 `draw_button2(x1 + 420, y1 + 478, 72, "确定")`：确定 / Escape / Ctrl+P 都关窗。
         // 这一行的 y 没有 `(theme = 3) * 22`，所以 Fluent 要把那 22 减回去，
@@ -1275,6 +1301,9 @@ fn preferences(state: &mut EditorState, ui: &mut Ui) {
     }
     if state.prefs_language_menu {
         language_menu(state, ui, lang_at);
+    }
+    if state.prefs_output_menu {
+        output_menu(state, ui, out_at);
     }
 }
 
@@ -1620,6 +1649,33 @@ fn prefs_interface(
         state.emit(Command::SavePreferences);
     }
 
+    // 端口自加（用户要求 #92）：原版这个框里只有「缩放」和「重置」两样，下面这行是自加的。
+    // 判据用上面「缩放」显示的那个百分数（含系统 DPI），正好等于阈值时文字照画。
+    // 位置选在框内 y=190：框是 150..214，不动任何原版坐标。
+    let hide_label = tr("Hide note text:", "隐藏音符文字:");
+    let hide_x = pg.text(pg.row(276.0, 190.0), hide_label, PREFS_FONT, pg.ink()) + 276.0 + 12.0;
+    let hide_tip = tr(
+        "When the window scale drops below this percentage, note blocks stop drawing\nany text on themselves. 0 = always draw the text.",
+        "界面缩放降到这个百分比以下时，音符方块上不再画任何文字（序号和键名）。\n填 0 表示永远照画。",
+    );
+    let hide = state.prefs.note_text_min_percent as i32;
+    if let Some(v) = pg.drag(
+        hide_x,
+        190.0,
+        hide,
+        2.0,
+        0,
+        100,
+        false,
+        hide_tip,
+        &mut state.prefs_drag,
+    ) {
+        state.prefs.note_text_min_percent = v.clamp(0, 100) as u8;
+        state.emit(Command::SavePreferences);
+    }
+    let percent_x = hide_x + pg.measure("100", PREFS_FONT) + 4.0;
+    pg.text(pg.row(percent_x, 190.0), "%", PREFS_FONT, pg.ink());
+
     // 原版 `draw_areaheader(x1 + 258, y1 + 239, 220, 65, "图标")` +
     // `draw_checkbox(x1 + 276, y1 + 239 + 16 + 5 + 4, window_icon, "旧图标", …, false, true)`。
     // 开关本身只改设置，真正换图标由 `EditorState::apply_window_icon` 在下一帧发给窗口。
@@ -1875,7 +1931,8 @@ fn prefs_usability(state: &mut EditorState, pg: &mut Page) {
 
 /// 原版页 4「播放」：进度条跟随、区间起播/停播、播放开关、速度单位。
 /// 原版 `taskbar`（任务栏进度）那一行在上游自己就被注释掉了（`:612`），两边一致。
-fn prefs_playback(state: &mut EditorState, pg: &mut Page) {
+/// 末尾的「输出」设备下拉是端口自加（用户要求 #94）：原版声音只会落在系统默认设备上。
+fn prefs_playback(state: &mut EditorState, pg: &mut Page, out_at: &mut Pos2) {
     pg.header(22.0, 74.0, 456.0, 145.0, tr("Marker", "进度条"));
     if pg.check(
         40.0,
@@ -2052,6 +2109,55 @@ fn prefs_playback(state: &mut EditorState, pg: &mut Page) {
         state.prefs.use_bpm = true;
         state.emit(Command::SavePreferences);
     }
+
+    // 端口自加（用户要求 #94）：输出设备。原版没有这一格——声音整个交给 GameMaker，
+    // 只会落在系统默认设备上。坐标照本页其它分组的间距排，没有原版行号可对。
+    pg.header(22.0, 374.0, 456.0, 46.0, tr("Output", "输出"));
+    pg.frame_box(40.0, 392.0, 340.0, 412.0);
+    let label = state.output_label();
+    let shown = pg.truncate(&label, 275.0);
+    pg.text(pg.row(43.0, 395.0), &shown, PREFS_FONT, pg.ink());
+    let opened = pg
+        .hit(
+            pg.row_rect(40.0, 392.0, 340.0, 412.0),
+            Id::new("prefs_output_box"),
+            false,
+        )
+        .0
+        .clicked()
+        || pg.arrow(&state.icons, 320.0, 393.0);
+    if opened {
+        state.prefs_output_menu = true;
+        // cpal 每枚举一次都要过一遍系统，只在开菜单这一帧刷。
+        state.refresh_outputs();
+    }
+    *out_at = pg.row(40.0, 413.0);
+}
+
+/// 端口自加（用户要求 #94）：输出设备下拉。第 0 项跟随系统默认，其余是枚举到的设备
+/// （名字系统给的，不翻）；点名的设备已经不在了时当前项不打勾，菜单里看得见实情。
+fn output_menu(state: &mut EditorState, ui: &Ui, at: Pos2) {
+    let items = state.output_items();
+    let refs: Vec<&str> = items.iter().map(String::as_str).collect();
+    let sel = state.output_selection();
+    let th = state.theme.clone();
+    let bank = state.icons.bank();
+    let (picked, dismissed) = popup_list(
+        ui,
+        "prefs_output_menu",
+        at,
+        &refs,
+        sel,
+        &th,
+        bank.as_deref(),
+    );
+    if let Some(i) = picked {
+        let wanted = state.output_choice(i);
+        state.emit(Command::SetOutput(wanted));
+    }
+    if picked.is_some() || dismissed {
+        state.prefs_output_menu = false;
+    }
 }
 
 /// 原版 `show_menu_ext("theme", …)`：主题下拉展开的那四个条目，
@@ -2066,7 +2172,7 @@ const THEME_MENU_ORDER: [ThemeKind; 4] = [
 /// 原版 `show_menu_ext` + `obj_menu`：首选项「主题 / 帧率限制」那两个下拉和 MIDI 导入
 /// 窗口用的是同一个菜单对象，所以直接复用 `midi_popup` 的板子、勾和屏幕内收边。
 /// 返回（选中的下标，是否被点掉）。
-fn popup_list(
+pub(crate) fn popup_list(
     ui: &Ui,
     id: &str,
     at: Pos2,

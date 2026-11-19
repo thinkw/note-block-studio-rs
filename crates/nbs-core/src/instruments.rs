@@ -99,6 +99,14 @@ pub const INSTRUMENTS: [Instrument; 20] = [
     },
 ];
 
+/// 原版 `song_ins[..].press`：内置 20 种里有 3 种建表时没传第四个参数
+/// （`control_create.gml:279-281` 的 Bass Drum / Snare Drum / Click，
+/// `new_instrument.gml:15-18` 缺省即 false），其余都是 true。
+/// 它决定播放到这一列时琴键是否跟着弹下（`control_step.gml:295`）。
+pub const fn builtin_press(index: u8) -> bool {
+    !matches!(index, 2 | 3 | 4)
+}
+
 pub fn instrument(index: u8) -> Option<&'static Instrument> {
     INSTRUMENTS.get(index as usize)
 }

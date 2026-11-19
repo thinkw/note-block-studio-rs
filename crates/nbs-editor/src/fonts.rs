@@ -1,49 +1,38 @@
-//! 界面字体 —— 按语言装入原版同款字体。
+//! 界面字体 —— 用 egui 自带字体，只补一层中文字形。
 //!
 //! 原版 `font_table`（`control_create.gml:115-135`）每类字体三列：EN / wslui（仅 Fluent
-//! 主题）/ CJK。端口不用 Fluent 列，只装 EN 与 CJK 两列：
-//!   EN  → Open Sans（`fnt_main*` 9pt）+ Liberation Sans（`fnt_small*` 8pt、`fnt_info_*`
-//!         11/18pt），与原版 datafiles 同源的 ttf；
-//!   CJK → 思源黑体 CN（`fnt_src*`），Normal/Medium 对应常规/粗体，即原版
-//!         `datafiles/Data/Fonts` 自带的两个 otf。
+//! 主题）/ CJK。端口一度把 EN 列的 Open Sans / Liberation Sans 和 CJK 列的思源黑体原样
+//! 搬进来，按 GM 的磅→px（1pt = 4/3 px）换算字号，想逐字对上原版（#74/#79）。
+//! **#98 用户定案：放弃这条对齐路线，界面改用默认字体**，打包字体不再进入字体表。
 //!
-//! GM 的字号单位是磅，运行时 1pt = 4/3 px（`fnt_main` 9pt 的 'A' 步宽 8px ≈ 0.658em×12px）。
-//! 端口此前把磅数直接当 px 用（9→9px），字比原版小 25%，再叠加 egui 默认的
-//! Hack/Ubuntu-Light 细体，就是「字显示比原版糊」的两个根因。
+//! 唯一必须补的是中文：epaint 内置字体表（`text/fonts.rs` 的 `FontDefinitions::default()`
+//! = Ubuntu-Light / Hack / 两套 emoji）一个 CJK 字形都没有，中文界面会整屏画成空框。
+//! 所以优先用系统里现成的黑体/等线/思源（`NBS_FONT` 可以直接指定字体文件），本机一个都
+//! 找不到时才退回仓库自带的 `assets/fonts/SourceHanSansSC-Normal.otf`。
 //!
-//! epaint 没有字重概念（`epaint fonts.rs` 里 `TODO(emilk): weight (bold)`），粗体走独立族：
-//! `font_main_bold`/`font_info_med_bold`/`font_info_big` → [`bold_family`]，
-//! `font_small`/`font_info_med` → [`small_family`]。每个族把另一套语言的字体垫尾兜底，
-//! egui 自带四款垫底，最后是系统字体查找（部署时丢了 assets 目录的保险）。
+//! epaint 没有字重概念（`TODO(emilk): weight (bold)`），[`bold_family`]/[`small_family`]
+//! 两个自定义族仍要绑进字体表 —— 绑空了画到就 panic（当年 release 闪退，commit 5aa9279）。
+//! 字号沿用现状不随字体回退：网格/窗口的对齐实测都是按这几档量出来的。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use egui::{Context, FontData, FontDefinitions, FontFamily, FontId};
 
-/// `fnt_main` / `fnt_mainbold`：Open Sans 9pt。
+/// `fnt_main` 9pt（GM 里 1pt = 4/3 px）：网格标签、控制栏数字、状态栏、菜单栏。
 pub const MAIN_SIZE: f32 = 12.0;
-/// `fnt_small` / `fnt_smallbold`：Liberation Sans 8pt。
-pub const SMALL_SIZE: f32 = 32.0 / 3.0;
-/// `fnt_info_med` / `fnt_info_med_bold`：Liberation Sans 11pt。
-pub const INFO_MED_SIZE: f32 = 44.0 / 3.0;
-/// `fnt_info_big`：Liberation Sans 18pt。
+/// `fnt_small` 8pt（×4/3 = 10.67px，圆整成 11）：分数 em 现栅格化会把笔画压在分数像素上
+/// 发虚，字宽差 ~0.3px/字，肉眼不可见。标尺数字、层名、页签、歌曲时长。
+pub const SMALL_SIZE: f32 = 11.0;
+/// `fnt_info_med` 11pt（×4/3 = 14.67px，圆整理由同上）。
+pub const INFO_MED_SIZE: f32 = 15.0;
+/// `fnt_info_big` 18pt。
 pub const INFO_BIG_SIZE: f32 = 24.0;
 
-const MAIN_KEY: &str = "nbs-opensans";
-const MAIN_BOLD_KEY: &str = "nbs-opensans-bold";
-const SMALL_KEY: &str = "nbs-liberation";
-const SMALL_BOLD_KEY: &str = "nbs-liberation-bold";
 const CJK_KEY: &str = "nbs-hansans-normal";
-const CJK_BOLD_KEY: &str = "nbs-hansans-medium";
 const SYS_CJK_KEY: &str = "nbs-cjk";
 
-const MAIN_FILE: &str = "OpenSans-Regular.ttf";
-const MAIN_BOLD_FILE: &str = "OpenSans-Bold.ttf";
-const SMALL_FILE: &str = "LiberationSans-Regular.ttf";
-const SMALL_BOLD_FILE: &str = "LiberationSans-Bold.ttf";
 const CJK_FILE: &str = "SourceHanSansSC-Normal.otf";
-const CJK_BOLD_FILE: &str = "SourceHanSansSC-Medium.otf";
 
 /// `font_main_bold` 一族：黑键标签、Compatible 徽标、控制栏时间、播放器标题。
 pub fn bold_family() -> FontFamily {
@@ -86,6 +75,7 @@ pub fn scaled(id: FontId, scale: f32) -> FontId {
     FontId::new(id.size * scale, id.family)
 }
 
+/// 打包字体所在目录，只在系统里找不到中文字体时才会用到。
 /// 与图标同一套搜索顺序：可执行文件旁 → 工作目录，按相对层级往上找 `assets/fonts`，
 /// 不把编译期绝对路径写进二进制。
 fn font_root() -> Option<PathBuf> {
@@ -102,11 +92,11 @@ fn font_root() -> Option<PathBuf> {
             candidates.push(cwd.join(up).join("assets/fonts"));
         }
     }
-    candidates.into_iter().find(|p| p.join(MAIN_FILE).is_file())
+    candidates.into_iter().find(|p| p.join(CJK_FILE).is_file())
 }
 
 /// 找一个含中文字形的系统字体文件；`NBS_FONT` 可以直接指定字体文件路径。
-/// 只在打包字体缺字时才有意义（比如部署时丢了 assets 目录）。
+/// 这是中文的主力来源（#98 之后界面主体用 egui 自带字体，中文靠这里补）。
 fn find_system_cjk() -> Option<PathBuf> {
     const FILE_NAMES: &[&str] = &[
         "simhei.ttf", // Windows 黑体
@@ -149,122 +139,57 @@ fn find_system_cjk() -> Option<PathBuf> {
     })
 }
 
-fn load_into(fonts: &mut FontDefinitions, dir: &Path, key: &str, file: &str) -> Option<()> {
-    let bytes = std::fs::read(dir.join(file)).ok()?;
-    fonts
-        .font_data
-        .insert(key.to_owned(), Arc::new(FontData::from_owned(bytes)));
-    Some(())
+fn load_into(fonts: &mut FontDefinitions, dir: &Path, key: &str, file: &str) -> bool {
+    match std::fs::read(dir.join(file)) {
+        Ok(bytes) => {
+            fonts
+                .font_data
+                .insert(key.to_owned(), Arc::new(FontData::from_owned(bytes)));
+            true
+        }
+        Err(_) => false,
+    }
 }
 
-/// 按语言构建字体表：主字体插到族首（原版中文界面连数字都用思源的拉丁字形），
-/// 另一套语言的字体垫尾兜底，egui 自带四款垫底，最后是系统字体查找。
-fn build(language: u8, dir: &Path, sys: Option<&Path>) -> FontDefinitions {
+/// 构建字体表：egui 默认那套打底，中文字形垫在族尾。
+///
+/// 中文排在默认字体**后面**（不是像之前那样按语言排到族首）：拉丁字形继续由
+/// Ubuntu-Light 出，只有它缺的字才落到思源/系统黑体，界面不会整屏换成黑体。
+/// 返回的 `bool` = 中文有没有字形来源；`false` 时中文是空框，调用方要提示用户。
+/// 无论有没有中文字体，两个自定义族都会绑好，画到就 panic 的老问题不会回来。
+fn build(bundled: Option<&Path>, sys: Option<&Path>) -> (FontDefinitions, bool) {
     let mut fonts = FontDefinitions::default();
+    let mut cjk: Vec<String> = Vec::new();
 
-    let mut have = |key: &str, file: &str| load_into(&mut fonts, dir, key, file).is_some();
-    let main = have(MAIN_KEY, MAIN_FILE).then(|| MAIN_KEY.to_owned());
-    let bold = have(MAIN_BOLD_KEY, MAIN_BOLD_FILE).then(|| MAIN_BOLD_KEY.to_owned());
-    let small = have(SMALL_KEY, SMALL_FILE).then(|| SMALL_KEY.to_owned());
-    let small_bold = have(SMALL_BOLD_KEY, SMALL_BOLD_FILE).then(|| SMALL_BOLD_KEY.to_owned());
-    let cjk = have(CJK_KEY, CJK_FILE).then(|| CJK_KEY.to_owned());
-    let cjk_bold = have(CJK_BOLD_KEY, CJK_BOLD_FILE).then(|| CJK_BOLD_KEY.to_owned());
-    let sys_key = sys.and_then(|p| {
-        std::fs::read(p).ok().map(|bytes| {
+    if let Some(path) = sys {
+        if let Ok(bytes) = std::fs::read(path) {
             fonts.font_data.insert(
                 SYS_CJK_KEY.to_owned(),
                 Arc::new(FontData::from_owned(bytes)),
             );
-            SYS_CJK_KEY.to_owned()
-        })
-    });
+            cjk.push(SYS_CJK_KEY.to_owned());
+        }
+    }
+    // 本机一个中文字体都没有（干净虚拟机）才用仓库自带的那款 otf。
+    // 只补常规字重：这一层的目标是「不缺字」，不再管字重。
+    if cjk.is_empty() {
+        if let Some(dir) = bundled {
+            if load_into(&mut fonts, dir, CJK_KEY, CJK_FILE) {
+                cjk.push(CJK_KEY.to_owned());
+            }
+        }
+    }
 
-    let cjk = cjk.clone().or_else(|| sys_key.clone());
-    let cjk_bold = cjk_bold.clone().or_else(|| sys_key.clone());
-    let (head, tail, small_head, small_tail, bold_head, bold_tail, sys_key) = if language == 1 {
-        (
-            cjk.clone(),
-            main,
-            cjk.clone(),
-            small,
-            cjk_bold.clone(),
-            bold,
-            sys_key.clone(),
-        )
-    } else {
-        (
-            main,
-            cjk.clone(),
-            small,
-            cjk.clone(),
-            bold,
-            cjk_bold.clone(),
-            sys_key.clone(),
-        )
-    };
-
-    let mut prop: Vec<String> = Vec::new();
-    prop.extend(head);
-    prop.extend(tail);
-    prop.extend(sys_key.iter().cloned());
-    fonts
-        .families
-        .entry(FontFamily::Proportional)
-        .or_default()
-        .splice(0..0, prop);
-
+    let has_cjk = !cjk.is_empty();
     // 端口自己的文本都走 Proportional，但 egui 内置控件（tooltip、debug 覆盖层）
-    // 会用到 Monospace —— 把中文字形同样垫进去，缺字不至于变空框。
-    fonts
-        .families
-        .entry(FontFamily::Monospace)
-        .or_default()
-        .extend(cjk.clone());
-    fonts
-        .families
-        .entry(FontFamily::Monospace)
-        .or_default()
-        .extend(sys_key.clone());
-
-    let mut bold_fam: Vec<String> = Vec::new();
-    bold_fam.extend(bold_head);
-    bold_fam.extend(bold_tail);
-    // font_small_bold（属性窗的 [!] 警告标记）：Liberation Bold 挂在 bold 族尾，
-    // 用 `FontId::new(SMALL_SIZE, bold_family())` 就能取到。
-    bold_fam.extend(small_bold);
-    bold_fam.extend(sys_key.iter().cloned());
-    fonts.families.insert(bold_family(), bold_fam);
-
-    let mut small_fam: Vec<String> = Vec::new();
-    small_fam.extend(small_head);
-    small_fam.extend(small_tail);
-    small_fam.extend(sys_key);
-    fonts.families.insert(small_family(), small_fam);
-
-    fonts
-}
-
-/// 构建并缓存两套语言的字体表：`FontData` 内部是 `Arc`，克隆只复制两棵小映射。
-/// 首次调用读盘，之后（测试反复新建 `Context`）零 IO。
-fn cached(language: u8) -> Option<FontDefinitions> {
-    static CACHE: OnceLock<Option<[FontDefinitions; 2]>> = OnceLock::new();
-    let pair = CACHE.get_or_init(|| {
-        let dir = font_root()?;
-        let sys = find_system_cjk();
-        Some([
-            build(0, &dir, sys.as_deref()),
-            build(1, &dir, sys.as_deref()),
-        ])
-    });
-    let pair = pair.as_ref()?;
-    Some(pair[usize::from(language == 1)].clone())
-}
-
-/// 找不到打包字体时的最后兜底：把端口自己的两个自定义族绑到 egui 默认字体上。
-/// epaint 遇到未绑定的族名会直接 panic（部署时丢了 assets 目录就是闪退），
-/// 宁可字不好看也不能炸。
-fn fallback() -> FontDefinitions {
-    let mut fonts = FontDefinitions::default();
+    // 会用到 Monospace —— 两边都垫上，缺字不至于变空框。
+    for family in [FontFamily::Proportional, FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .extend(cjk.iter().cloned());
+    }
     let prop = fonts
         .families
         .get(&FontFamily::Proportional)
@@ -272,23 +197,35 @@ fn fallback() -> FontDefinitions {
         .unwrap_or_default();
     fonts.families.insert(bold_family(), prop.clone());
     fonts.families.insert(small_family(), prop);
-    fonts
+
+    (fonts, has_cjk)
 }
 
-/// 把界面字体装进 `ctx`，返回资产目录。找不到 `assets/fonts` 时装 [`fallback`]
-/// 并返回 `None`（界面退回 egui 默认字体）。
+/// 构建并缓存字体表：`FontData` 内部是 `Arc`，克隆只复制那几棵小映射。
+/// 首次调用读盘（系统中文字体可能十几 MB），之后（每帧 `warm_up`、测试反复新建
+/// `Context`）零 IO。第二个返回值 = 中文有没有字形来源。
+fn cached() -> (FontDefinitions, bool) {
+    static CACHE: OnceLock<(FontDefinitions, bool)> = OnceLock::new();
+    let pair = CACHE.get_or_init(|| build(font_root().as_deref(), find_system_cjk().as_deref()));
+    (pair.0.clone(), pair.1)
+}
+
+/// 把字体表装进 `ctx`，返回界面里的中文是否真有字形来源：`false` 表示本机既没有
+/// 现成的中文字体、也找不到打包的思源 otf，中文会画成空框（调用方据此提示用户）。
 /// `set_fonts` 要到下一次 pass 开头才生效，所以必须在**首帧渲染前**调用
 /// （eframe 的 creator / 测试的第一次 `ctx.run` 之前），否则首帧画到
 /// [`bold_family`] 就会 panic。
-pub fn install(ctx: &Context, language: u8) -> Option<PathBuf> {
-    ctx.set_fonts(cached(language).unwrap_or_else(fallback));
-    font_root()
+pub fn install(ctx: &Context) -> bool {
+    let (fonts, has_cjk) = cached();
+    ctx.set_fonts(fonts);
+    has_cjk
 }
 
-/// 同 [`install`]，但只装字体不找目录：给测试 helper 在每次 `ctx.run` 前调用，
+/// 同 [`install`]，但只装字体不返回结果：给测试 helper 在每次 `ctx.run` 前调用，
 /// 幂等（epaint 用 TTF 等值比较跳过重复重建）。
-pub fn warm_up(ctx: &Context, language: u8) {
-    ctx.set_fonts(cached(language).unwrap_or_else(fallback));
+pub fn warm_up(ctx: &Context) {
+    let (fonts, _) = cached();
+    ctx.set_fonts(fonts);
 }
 
 #[cfg(test)]
@@ -299,47 +236,82 @@ mod tests {
         let _ = ctx.run(egui::RawInput::default(), |_| {});
     }
 
-    /// 族首必须按语言排：EN 界面的数字是 Open Sans 的字形，中文界面是思源的
-    /// （原版中文界面全部走 `fnt_src*`）。粗体、small 档各自独立成族。
+    /// 默认字体打头，中文只垫尾兜底 —— 这是 #98「改用默认字体」的契约：
+    /// 字体表里不许再出现打包的 Open Sans / Liberation Sans。
     #[test]
-    fn family_order_follows_language() {
+    fn default_faces_lead_and_cjk_is_only_a_fallback() {
+        // 一个中文字体都找不到时的下限：中文缺字，但族表必须完整。
+        let (none, has_cjk) = build(None, None);
+        assert_eq!(
+            none.families[&FontFamily::Proportional][0],
+            "Ubuntu-Light",
+            "主字体是 egui 自带的 Ubuntu-Light，不是打包字体"
+        );
+        assert!(
+            none.families[&FontFamily::Proportional]
+                .iter()
+                .all(|f| !f.starts_with("nbs-")),
+            "打包字体不该进字体表"
+        );
+        assert!(!has_cjk, "没有来源时不该谎报有中文");
+        // 部署环境丢字体曾经直接闪退：族必须绑好，哪怕绑的是默认字体。
+        for fam in [bold_family(), small_family()] {
+            assert!(
+                !none.families[&fam].is_empty(),
+                "{fam:?} 没绑字体，画到就 panic"
+            );
+        }
+
+        // 系统里找到中文字体：垫在 Ubuntu-Light 之后，拉丁字形不受影响。
+        let sys = match find_system_cjk() {
+            Some(p) => p,
+            None => {
+                eprintln!("跳过：本机找不到系统中文字体");
+                return;
+            }
+        };
+        let (fonts, has_cjk) = build(None, Some(&sys));
+        assert!(has_cjk, "本机有中文字体却说没有");
+        let prop = &fonts.families[&FontFamily::Proportional];
+        assert_eq!(prop[0], "Ubuntu-Light", "中文不许抢在主字体前面");
+        assert_eq!(prop.last().map(String::as_str), Some(SYS_CJK_KEY));
+        assert!(
+            fonts.families[&FontFamily::Monospace]
+                .iter()
+                .any(|f| f == SYS_CJK_KEY),
+            "egui 内置控件走 Monospace，中文也得兜住"
+        );
+        assert_eq!(
+            fonts.families[&bold_family()].last().map(String::as_str),
+            Some(SYS_CJK_KEY),
+            "粗体族也得有中文兜底"
+        );
+    }
+
+    /// 系统里没有中文字体时才轮到打包的思源 otf（干净虚拟机的场景）。
+    #[test]
+    fn the_bundled_face_is_the_last_resort_for_cjk() {
         let Some(dir) = font_root() else {
             eprintln!("跳过：本机找不到 assets/fonts（测试需在仓库里跑）");
             return;
         };
-        let en = build(0, &dir, None);
-        assert_eq!(en.families[&FontFamily::Proportional][0], MAIN_KEY);
-        assert_eq!(en.families[&small_family()][0], SMALL_KEY);
+        let (fonts, has_cjk) = build(Some(&dir), None);
+        assert!(has_cjk, "仓库自带的思源应能兜住中文");
         assert_eq!(
-            en.families[&bold_family()][0],
-            MAIN_BOLD_KEY,
-            "EN 的粗体是 Open Sans Bold"
+            fonts.families[&FontFamily::Proportional].last(),
+            Some(&CJK_KEY.to_owned())
         );
-
-        let cjk = build(1, &dir, None);
-        assert_eq!(
-            cjk.families[&FontFamily::Proportional][0],
-            CJK_KEY,
-            "中文界面连主字体都是思源"
-        );
-        assert_eq!(
-            cjk.families[&small_family()][0],
-            CJK_KEY,
-            "fnt_small 的 CJK 列也是思源"
-        );
-        assert_eq!(
-            cjk.families[&bold_family()][0],
-            CJK_BOLD_KEY,
-            "CJK 的粗体是思源 Medium"
+        assert!(
+            fonts.font_data.contains_key(CJK_KEY),
+            "兜底字体必须真读进内存"
         );
     }
 
-    /// 装入后 egui 必须真能画出原版的三档字号：主字体、思源中文、粗体族。
+    /// 装入后 egui 必须真能画出三档字号的拉丁与中文字形。
     /// `set_fonts` 下一帧生效，所以中间隔一次 `ctx.run`。
     #[test]
     fn installing_makes_all_three_families_render() {
         let id_main = FontId::new(MAIN_SIZE, FontFamily::Proportional);
-        let id_cjk = FontId::new(MAIN_SIZE, FontFamily::Proportional);
         let id_bold = FontId::new(MAIN_SIZE, bold_family());
         let id_small = FontId::new(SMALL_SIZE, small_family());
         let ctx = Context::default();
@@ -349,18 +321,11 @@ mod tests {
             "默认字体不该全有这些字形，否则这个用例证明不了什么"
         );
 
-        let Some(_dir) = install(&ctx, 1) else {
-            eprintln!("跳过：本机找不到 assets/fonts，无法验证打包字体");
-            return;
-        };
+        let has_cjk = install(&ctx);
         pass(&ctx);
         assert!(
             ctx.fonts(|f| f.has_glyphs(&id_main, "BPM = 123")),
-            "主字体拉丁字形缺失"
-        );
-        assert!(
-            ctx.fonts(|f| f.has_glyphs(&id_cjk, "音符速度")),
-            "思源中文字形缺失"
+            "默认字体的拉丁字形缺失"
         );
         assert!(
             ctx.fonts(|f| f.has_glyphs(&id_bold, "13:37")),
@@ -370,5 +335,13 @@ mod tests {
             ctx.fonts(|f| f.has_glyphs(&id_small, "12:34/ 56:78")),
             "small 族没有字形"
         );
+        if has_cjk {
+            assert!(
+                ctx.fonts(|f| f.has_glyphs(&id_main, "音符速度")),
+                "字体表说有中文来源，画出来却是空框"
+            );
+        } else {
+            eprintln!("提示：本机既无系统中文字体也无 assets/fonts，跳过中文断言");
+        }
     }
 }

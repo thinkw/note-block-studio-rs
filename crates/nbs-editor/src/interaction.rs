@@ -54,6 +54,9 @@ pub struct Interaction {
     pub hover: Option<(i64, i64)>,
     /// 拖拽越过网格边界时的自动滚动增量（每帧累加，上限 4 格）。
     pub edge_scroll: Vec2,
+    /// 触控板滚动的浮点余量（原版 `macos_scroll_temp_starta/b`）：x 管刻、y 管层，
+    /// 不足一格的滑动先进这里，攒够一整格才动 `start_tick` / `start_layer`。
+    pub scroll_carry: Vec2,
     pub cursor: CursorIcon,
     /// 本帧点击是否发生在网格区域（阻止弹窗误吞输入）。
     pub click_in_grid: bool,
@@ -75,6 +78,7 @@ impl Default for Interaction {
             latest_pos: None,
             hover: None,
             edge_scroll: Vec2::ZERO,
+            scroll_carry: Vec2::ZERO,
             cursor: CursorIcon::Default,
             click_in_grid: false,
             suppress_next_click: false,
@@ -130,6 +134,10 @@ pub struct InputSnapshot {
     pub shift: bool,
     pub alt: bool,
     pub scroll: Vec2,
+    /// `smooth_scroll_delta`：egui 只把「Point 型、单事件不足 8px」的滚动放进这里
+    /// （`input_state/mod.rs:340` 的 `is_smooth_scroll`），所以它非零就等于触控板细滑，
+    /// 用它和 `raw_scroll_delta` 是否相同来区分鼠标滚轮。
+    pub scroll_fine: Vec2,
 }
 
 impl InputSnapshot {
@@ -150,6 +158,7 @@ impl InputSnapshot {
             shift: i.modifiers.shift,
             alt: i.modifiers.alt,
             scroll: i.raw_scroll_delta,
+            scroll_fine: i.smooth_scroll_delta,
         })
     }
 }

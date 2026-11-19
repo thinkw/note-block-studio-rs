@@ -28,7 +28,10 @@ pub fn apply(icon: &egui::IconData, made: &mut [Option<usize>; 2]) -> bool {
     // 顺序有讲究：先大后小。eframe 的注释说明只设 ICON_BIG 的话，
     // Windows 会自己去缩放小图标，效果很差。
     let mut handles = [0usize; 2];
-    for (i, metric) in [winuser::SM_CXICON, winuser::SM_CXSMICON].iter().enumerate() {
+    for (i, metric) in [winuser::SM_CXICON, winuser::SM_CXSMICON]
+        .iter()
+        .enumerate()
+    {
         // SAFETY: 只读系统度量。
         let size = unsafe { winuser::GetSystemMetrics(*metric) }.max(1);
         // 原版两张源图都是 256x256，自己按目标尺寸 Lanczos 缩一遍再编码成 PNG，
@@ -67,7 +70,11 @@ pub fn apply(icon: &egui::IconData, made: &mut [Option<usize>; 2]) -> bool {
             winuser::SendMessageW(
                 hwnd,
                 winuser::WM_SETICON,
-                if i == 0 { winuser::ICON_BIG as usize } else { winuser::ICON_SMALL as usize },
+                if i == 0 {
+                    winuser::ICON_BIG as usize
+                } else {
+                    winuser::ICON_SMALL as usize
+                },
                 hicon as isize,
             )
         };

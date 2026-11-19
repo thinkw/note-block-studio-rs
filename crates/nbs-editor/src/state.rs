@@ -496,6 +496,8 @@ pub enum DialogAction {
     ImportMidi,
     ImportPattern,
     ImportSchematic,
+    /// 原版「导入背景图片」：`menu_click.gml:57-58` / `:367-368`，选完直接 `wallpaper_init(temppath)`。
+    ImportBackground,
     /// 原版 `datapack_getextranotes()`：保存随程序那份「更多音符盒」资源包。
     SaveExtraNotes,
     /// 原版「修改」按钮：`get_save_filename_ext("", "选择歌曲文件夹", songfolder, "歌曲文件夹")`。
@@ -534,6 +536,9 @@ impl DialogAction {
             // 对话框打开前的默认名已按模式选好扩展名（commands.rs 的 ExportTrack 分支）。
             Self::ExportTrack => "nbt",
             Self::ExportPattern | Self::ImportPattern => "nbp",
+            // 原版背景图对话框一次放行 png/jpg/jpeg（`menu_click.gml:57`）；
+            // 这里的单扩展名只用于兜底列表和默认名，多个扩展名在 `accepts` 里放行。
+            Self::ImportBackground => "png",
             // 原版：get_save_filename_ext("Resource pack (*.zip)|*.zip", "更多音符盒", "", …)。
             Self::SaveExtraNotes => "zip",
             // 原版这两个对话框的过滤器是空字符串：不做过滤，选的是目录。
@@ -634,6 +639,9 @@ impl FileDialog {
 
     pub fn refresh(&mut self) {
         let ext = self.ext;
+        // 原版背景图那条过滤器一次放行三个扩展名（`Image Files (*.png, *.jpg, *.jpeg)`），
+        // 端口其余对话框都是单扩展名，所以只在这一条上放宽。
+        let image_exts = matches!(self.action, DialogAction::ImportBackground);
         self.entries = std::fs::read_dir(&self.dir)
             .ok()
             .into_iter()
@@ -641,8 +649,12 @@ impl FileDialog {
             .filter_map(|e| e.ok())
             .filter(|e| {
                 let p = e.path();
+                let got = p.extension().and_then(|s| s.to_str()).unwrap_or("");
                 // 空扩展名 = 原版导出目录时的空过滤器：什么都列出来，名字当作目录。
-                ext.is_empty() || p.is_dir() || p.extension().and_then(|s| s.to_str()) == Some(ext)
+                ext.is_empty()
+                    || p.is_dir()
+                    || got == ext
+                    || (image_exts && matches!(got, "png" | "jpg" | "jpeg"))
             })
             .map(|e| e.path())
             .collect();
@@ -758,6 +770,14 @@ impl FileDialog {
             DialogAction::ImportSchematic => (
                 "Import from Schematic",
                 vec![filter("Minecraft Schematics (*.schematic)", "*.schematic")],
+            ),
+            // 原版 `menu_click.gml:57/367`：过滤器和标题都是照抄的这一句。
+            DialogAction::ImportBackground => (
+                tr("Open background image", "打开背景图片"),
+                vec![filter(
+                    "Image Files (*.png, *.jpg, *.jpeg)",
+                    "*.png;*.jpg;*.jpeg",
+                )],
             ),
             // 原版 `datapack_getextranotes.gml:6`：过滤器名和标题都是照抄的这一句。
             DialogAction::SaveExtraNotes => (
@@ -932,6 +952,10 @@ pub struct EditorState {
     /// 原版 `hires`（`control_create.gml:110`：`window_scale > 1.25`，绝对倍率含
     /// DPI）：Fluent 主题的画布精灵换 4 倍源图。每帧随 `apply_ui_scale` 更新。
     pub canvas_hires: bool,
+    /// 端口自加（用户要求 #92）：界面缩放低于 `prefs.note_text_min_percent` 时，
+    /// 音符方块上的字（序号 / 键名）整批不画。和 `canvas_hires` 一样每帧随
+    /// `apply_ui_scale` 更新，渲染侧只读这个现成的布尔，不参与换算。
+    pub hide_note_text: bool,
     pub interaction: Interaction,
     pub tool: EditMode,
     /// 当前画笔（放置音符时的 instrument/key/vel/pan/pit）。
@@ -948,13 +972,17 @@ pub struct EditorState {
     pub dialog_return: Option<WindowKind>,
     /// 原版的全屏开关（F11）。
     pub fullscreen: bool,
+    /// 原版 `isplayer`（`control_create.gml:28-32`）：`-player` / `--protocol-launcher`
+    /// 启动或欢迎窗按钮进入的只读播放档位。运行时标志不进 prefs。
+    pub player: bool,
     pub context_menu: Option<ContextMenu>,
     pub message: Option<(String, Instant)>,
     /// 真实音频引擎（无音频设备时自动降级为静音时钟）。
     pub audio: Box<dyn AudioEngine>,
     pub prefs: Preferences,
-    /// 已装入字体的语言（`fonts::install` 只在切换语言时重跑一次）。
-    pub installed_language: Option<u8>,
+    /// 字体表是否已装进本窗口的 `Context`（`fonts::install` 里 `set_fonts` 会整张
+    /// 表做字节比较，代价不小，只装一次）。
+    pub fonts_installed: bool,
     pub marker_follow: bool,
     /// 原版 `marker_pagebypage`：1 = 按页，0 = 按刻，2 = 按帧。
     pub follow_mode: u8,
@@ -1101,6 +1129,12 @@ pub struct EditorState {
     pub prefs_rate_menu: bool,
     /// 同上，页 1「语言」的下拉框（draw_window_preferences.gml:412-421）。
     pub prefs_language_menu: bool,
+    /// 端口自加（用户要求 #94）：首选项「播放」页输出设备下拉是否开着。
+    pub prefs_output_menu: bool,
+    /// 端口自加 #94：顶栏音量条右侧那个「输出」下拉是否开着。
+    pub output_menu: bool,
+    /// 端口自加 #94：输出设备表。cpal 每次枚举都要过一遍系统，只在打开下拉时刷新。
+    pub output_list: Vec<nbs_audio::OutputDevice>,
     /// 原版 `w_dragvalue`：`draw_dragvalue` 的亚步进累加器。
     pub prefs_drag: f32,
     pub png_options: ImageOptions,
@@ -1135,6 +1169,9 @@ pub struct EditorState {
     pub record_armed: bool,
     /// 原版 `key_press[a]`：当前按住的按键绑定，琴键要画成按下态。
     pub keys_held: crate::piano::KeysHeld,
+    /// 原版 `key_played[a]`：每个键最近一次被演奏的时刻（当帧的 `i.time`，秒）。
+    /// 琴键在它之后 300 毫秒内染黄并弹下（`draw_piano.gml:67/80/114`）。
+    pub key_played: crate::piano::KeysPlayed,
     /// 原版实时 MIDI 那一堆全局：设备表、指派、本帧按下/松开队列，见
     /// [`crate::live_midi`]。
     pub live_midi: crate::live_midi::LiveMidi,
@@ -1163,6 +1200,9 @@ pub struct EditorState {
     /// 原版 `backgroundaccent`：Fluent 主题把整窗先铺一层 `accent[3]`
     /// （`control_draw.gml:69`），只有事件乐器能切，原版没有快捷键也不持久化。
     pub background_accent: bool,
+    /// 原版 `wpaper` + `wpaperexist`：导入的背景图（糊好的贴图）。
+    /// 原版既不写进 .nbs 也不写进 settings.ini，重启即失，端口一致。
+    pub wallpaper: Option<crate::background::Wallpaper>,
 }
 
 impl Default for EditorState {
@@ -1226,6 +1266,11 @@ impl EditorState {
         let mut audio: Box<dyn AudioEngine> = Box::new(CpalEngine::with_bank(bank));
         audio.prepare(&song);
         apply_audio_prefs(&mut *audio, &prefs);
+        // 端口自加（用户要求 #94）：接上上次点名的输出设备。拿不到就让它回落系统默认，
+        // 启动阶段不弹提示（那会儿状态栏还没画起来）。
+        if !prefs.audio_output.is_empty() {
+            let _ = audio.set_output(Some(prefs.audio_output.clone()));
+        }
 
         let mut theme = Theme::new(match prefs.theme {
             0 => ThemeKind::Aqua,
@@ -1288,12 +1333,14 @@ impl EditorState {
             doc: Document::with_song(song),
             viewport,
             canvas_hires: false,
+            hide_note_text: false,
             interaction: Interaction::default(),
             tool: EditMode::Key,
             current: Note::default(),
             flags,
             theme,
             fullscreen: false,
+            player: false,
             window: None,
             window_prev: None,
             dialog_return: None,
@@ -1301,7 +1348,7 @@ impl EditorState {
             message: None,
             audio,
             prefs,
-            installed_language: None,
+            fonts_installed: false,
             marker_follow: follow_marker,
             follow_mode,
             section_exists: false,
@@ -1372,6 +1419,9 @@ impl EditorState {
             prefs_theme_menu: false,
             prefs_rate_menu: false,
             prefs_language_menu: false,
+            prefs_output_menu: false,
+            output_menu: false,
+            output_list: Vec::new(),
             prefs_drag: 0.0,
             png_options: ImageOptions {
                 dark: png_dark,
@@ -1393,6 +1443,7 @@ impl EditorState {
             record: false,
             record_armed: false,
             keys_held: [false; nbs_core::model::KEY_MAX as usize + 1],
+            key_played: crate::piano::NO_KEYS_PLAYED,
             live_midi: crate::live_midi::LiveMidi::new(),
             sound_import: crate::sound_import::SoundImport::default(),
             tempo_drag: None,
@@ -1405,6 +1456,7 @@ impl EditorState {
             rainbow: false,
             rainbow_hue: 0.0,
             background_accent: false,
+            wallpaper: None,
         };
         state.enter_startup();
         state
@@ -1599,6 +1651,7 @@ impl EditorState {
         let effective = self.prefs.effective_scale(native);
         self.viewport.scale = effective / native;
         self.canvas_hires = effective > 1.25;
+        self.hide_note_text = self.prefs.hides_note_text(effective);
     }
 
     /// 原版 `control_draw.gml:736-751`：Ctrl+滚轮 / Ctrl+± 把 `window_scale` 推到
@@ -1699,11 +1752,31 @@ impl EditorState {
     pub fn tick_transport(&mut self, ctx: &Context) {
         self.apply_ui_scale(ctx);
         self.apply_window_icon(ctx);
+        // 端口自加（用户要求 #94）：系统默认输出换了（插耳机、切蓝牙）就跟随过去，
+        // 点名的那台掉了则回落默认。引擎内部限流到约每秒一次，这里每帧调即可。
+        if let Some(name) = self.audio.poll_output() {
+            let wanted = self.audio.wanted_output().unwrap_or_default().to_string();
+            if self.prefs.audio_output != wanted {
+                self.prefs.audio_output = wanted;
+                self.save_prefs();
+            }
+            self.set_message(format!(
+                "{}{name}",
+                nbs_core::tr("Output device: ", "输出设备：")
+            ));
+        }
         // 原版 else-if 链里「改界面」的事件乐器副作用（control_step.gml:283-296）
         // 由音频调度发回来，这里统一落地。彩虹开/关都重置表且不发消息，照抄原版。
         let mut accent_changed = false;
+        // 原版在派发那一列的当下盖 `current_time`；这里是 UI 排空时才盖，最多差一帧。
+        let now = ctx.input(|i| i.time);
         for ev in self.audio.take_visual_events() {
             match ev {
+                nbs_audio::VisualEvent::KeyPlayed(key) => {
+                    if let Some(slot) = self.key_played.get_mut(key as usize) {
+                        *slot = now;
+                    }
+                }
                 nbs_audio::VisualEvent::RainbowToggle => {
                     self.rainbow = !self.rainbow;
                     self.theme.accent_init();
@@ -1733,7 +1806,8 @@ impl EditorState {
             self.record = false;
         }
         let position = self.audio.clock().position();
-        if playing && self.marker_follow {
+        // 原版 `control_draw.gml:1037`：`marker_follow = 1 || isplayer`，播放器强制跟随。
+        if playing && (self.marker_follow || self.player) {
             self.viewport
                 .follow_marker(position, self.follow_mode, self.scrub < 0);
         }
@@ -1789,9 +1863,14 @@ impl EditorState {
                 1.0 / self.prefs.refresh_limit(),
             ));
         }
-        // 定时自动保存（只写备份，不改动当前文件名与脏标记）
+        // 定时自动保存（只写备份，不改动当前文件名与脏标记）。
+        // 播放器档位是只读的（原版备份链在 save_song/backup_save 里被 isplayer 挡住）。
         let mins = self.prefs.autosave_interval() as u64;
-        if mins > 0 && self.doc.song.dirty && self.last_autosave.elapsed().as_secs() >= mins * 60 {
+        if !self.player
+            && mins > 0
+            && self.doc.song.dirty
+            && self.last_autosave.elapsed().as_secs() >= mins * 60
+        {
             self.last_autosave = Instant::now();
             if let Ok(p) = nbs_io::prefs::autosave(&self.doc.song, &self.prefs) {
                 let name = p
@@ -1981,6 +2060,89 @@ impl EditorState {
     }
 
     /// 把偏好推给音频引擎（主音量、速度、节拍器、voice 上限、单声道、锁定层）。
+    /// 端口自加（用户要求 #94）：重新枚举输出设备。cpal 每枚举一次都要过一遍系统，
+    /// 只在打开下拉时调，不能放进每帧路径。
+    pub fn refresh_outputs(&mut self) {
+        self.output_list = self.audio.output_devices();
+    }
+
+    /// 「输出」下拉的条目：第 0 项是跟随系统默认，其余按枚举顺序列出设备名。
+    /// 设备名由系统给（Windows 会按系统语言给「耳机 (Realtek(R) Audio)」这类名字），
+    /// 不由我们翻译；只有后缀文案翻。
+    pub fn output_items(&self) -> Vec<String> {
+        let mut items = vec![nbs_core::tr("Follow system default", "跟随系统默认").to_string()];
+        items.extend(self.output_list.iter().map(|d| {
+            if d.is_default {
+                format!(
+                    "{} {}",
+                    d.name,
+                    nbs_core::tr("(system default)", "（系统默认）")
+                )
+            } else {
+                d.name.clone()
+            }
+        }));
+        items
+    }
+
+    /// 当前选择落在下拉的第几项；点名的设备已经不在了返回 `usize::MAX`（菜单里不打勾）。
+    pub fn output_selection(&self) -> usize {
+        if self.prefs.audio_output.is_empty() {
+            return 0;
+        }
+        self.output_list
+            .iter()
+            .position(|d| d.name == self.prefs.audio_output)
+            .map_or(usize::MAX, |i| i + 1)
+    }
+
+    /// 下拉里选中第 `i` 项（0 = 跟随系统默认）。
+    pub fn output_choice(&self, i: usize) -> Option<String> {
+        if i == 0 {
+            None
+        } else {
+            self.output_list.get(i - 1).map(|d| d.name.clone())
+        }
+    }
+
+    /// 「输出」那一格显示的字：正在出声的设备名。还没建成流时按偏好退回
+    /// 「系统默认」或「<点名设备>（不可用）」，绝不显示一个没在出声的设备糊弄人。
+    pub fn output_label(&self) -> String {
+        if let Some(name) = self.audio.output_name() {
+            return name;
+        }
+        if self.prefs.audio_output.is_empty() {
+            nbs_core::tr("System default", "系统默认").to_string()
+        } else {
+            format!(
+                "{}{}",
+                self.prefs.audio_output,
+                nbs_core::tr(" (unavailable)", "（不可用）")
+            )
+        }
+    }
+
+    /// 端口自加 #94：切输出设备，`None` = 跟随系统默认。结果进状态栏消息，偏好落盘。
+    pub fn apply_output_choice(&mut self, wanted: Option<String>) {
+        let outcome = self.audio.set_output(wanted);
+        // 引擎可能把拿不到的那台回落成跟随默认，偏好照引擎的实情写，别存一个没生效的选择。
+        let wanted = self.audio.wanted_output().unwrap_or_default().to_string();
+        if self.prefs.audio_output != wanted {
+            self.prefs.audio_output = wanted;
+        }
+        self.save_prefs();
+        match outcome {
+            Ok(name) => self.set_message(format!(
+                "{}{name}",
+                nbs_core::tr("Output device: ", "输出设备：")
+            )),
+            Err(e) => self.set_message(format!(
+                "{}{e}",
+                nbs_core::tr("Failed to switch output device: ", "切换输出设备失败：")
+            )),
+        }
+    }
+
     pub fn apply_audio_prefs(&mut self) {
         apply_audio_prefs(&mut *self.audio, &self.prefs);
         // 实时播放此前从不遵守"包含锁定层"，只有导出遵守；这里补齐。
@@ -2150,6 +2312,22 @@ impl EditorState {
     }
 
     pub fn song_title(&self) -> String {
+        // 原版 `update_window_caption.gml`：播放器只显示歌名加 " - Player Mode" 后缀
+        // （不能编辑，也没有脏标记）。
+        if self.player {
+            let name = if self.doc.song.meta.name.is_empty() {
+                self.doc
+                    .song
+                    .filename
+                    .as_ref()
+                    .and_then(|p| p.file_stem())
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| tr("Untitled song", "无名歌曲").to_string())
+            } else {
+                self.doc.song.meta.name.clone()
+            };
+            return format!("{name} - Player Mode");
+        }
         let name = if self.doc.song.meta.name.is_empty() {
             self.doc
                 .song
@@ -2197,6 +2375,36 @@ fn apply_audio_prefs(audio: &mut dyn AudioEngine, p: &Preferences) {
 mod tests {
     use super::*;
 
+    /// 原版 `update_window_caption.gml`：播放器标题 = 歌名 + " - Player Mode"，
+    /// 无歌名退回文件名主干。
+    #[test]
+    fn player_mode_title_carries_the_suffix() {
+        let mut st = EditorState::for_test();
+        st.player = true;
+        st.doc.song.meta.name = "Demo".into();
+        assert_eq!(st.song_title(), "Demo - Player Mode");
+        st.doc.song.meta.name.clear();
+        st.doc.song.filename = Some(std::path::PathBuf::from("C:/songs/my song.nbs"));
+        assert_eq!(st.song_title(), "my song - Player Mode");
+    }
+
+    /// 播放器档 autosave 门：脏歌 + 备份间隔到了也不刷新计时器（不写备份）。
+    #[test]
+    fn player_mode_skips_autosave() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = EditorState::for_test();
+        st.player = true;
+        st.doc.song.dirty = true;
+        st.prefs.auto_save_minutes = 1;
+        st.last_autosave = Instant::now() - std::time::Duration::from_secs(3600);
+        let ctx = Context::default();
+        st.tick_transport(&ctx);
+        assert!(
+            st.last_autosave.elapsed().as_secs() >= 3600,
+            "播放器档不该重置自动备份计时"
+        );
+    }
+
     /// 音频导出的文件类型必须跟着所选格式走（原版 `get_save_filename_ext`）。
     #[test]
     fn audio_dialog_ext_follows_chosen_format() {
@@ -2209,6 +2417,61 @@ mod tests {
         // 其它动作用默认扩展名，且 set_ext 只对当前对话框生效
         let song = FileDialog::for_action(DialogAction::SaveSong, None, None);
         assert_eq!(song.ext, "nbs");
+    }
+
+    /// 端口自加 #94：「输出」下拉第 0 项固定是跟随系统默认，设备从第 1 项开始；
+    /// 点名设备掉线后不再打勾，也不能凭空造出一个选择。
+    #[test]
+    fn output_menu_items_map_back_to_a_device_name() {
+        let mut st = EditorState::for_test();
+        st.output_list = vec![
+            nbs_audio::OutputDevice {
+                name: "扬声器".into(),
+                is_default: true,
+            },
+            nbs_audio::OutputDevice {
+                name: "耳机".into(),
+                is_default: false,
+            },
+        ];
+        assert_eq!(st.output_items().len(), 3, "1 个跟随默认 + 2 台设备");
+        assert_eq!(st.output_selection(), 0, "出厂跟随系统默认 → 勾第 0 项");
+        assert_eq!(st.output_choice(0), None);
+        assert_eq!(st.output_choice(1).as_deref(), Some("扬声器"));
+        assert_eq!(st.output_choice(2).as_deref(), Some("耳机"));
+        assert_eq!(st.output_choice(3), None, "越界不编造设备名");
+        st.prefs.audio_output = "耳机".into();
+        assert_eq!(st.output_selection(), 2);
+        st.prefs.audio_output = "已经拔掉的声卡".into();
+        assert_eq!(st.output_selection(), usize::MAX, "不在了就不打勾");
+    }
+
+    /// 端口自加 #94：偏好里只留引擎真正生效的那台。点一台不存在的设备，
+    /// 引擎回落系统默认，落盘的选择也必须跟着变空。
+    #[test]
+    fn dead_output_choice_does_not_stick_in_prefs() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = EditorState::for_test();
+        st.apply_output_choice(Some("nbs-rust 这台机器上不存在的输出设备".into()));
+        assert!(
+            st.prefs.audio_output.is_empty(),
+            "没生效的点选不该留下：{}",
+            st.prefs.audio_output
+        );
+        st.apply_output_choice(None);
+        assert!(st.prefs.audio_output.is_empty());
+    }
+
+    /// 端口自加 #94：还没建成流时，那一格显示的是「按偏好的退回文案」，
+    /// 不能显示一个根本没在出声的设备名。
+    #[test]
+    fn output_label_falls_back_without_a_stream() {
+        let _cn = crate::LangGuard::set(1);
+        let mut st = EditorState::for_test();
+        st.audio = Box::new(nbs_audio::SilentEngine::new());
+        assert_eq!(st.output_label(), "系统默认");
+        st.prefs.audio_output = "拔掉的耳机".into();
+        assert_eq!(st.output_label(), "拔掉的耳机（不可用）");
     }
 
     /// 原生选择器的文案必须和原版传给 `get_*_filename_ext` 的参数一致。

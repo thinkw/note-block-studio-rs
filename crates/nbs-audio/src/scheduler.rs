@@ -45,6 +45,20 @@ pub struct NoteEvent {
     pub layer_volume: u8,
     pub layer_stereo: u8,
     pub kind: EventKind,
+    /// 原版 `song_ins[xx, b].press`：该列音符的乐器是否带「按下琴键」效果。
+    pub press: bool,
+}
+
+/// 原版 `song_ins[xx, b].press`：内置乐器看建表时缺没缺第四个参数
+/// （`control_create.gml:277-296`），自定义乐器用 .nbs 里那一字节。
+fn instrument_press(song: &Song, index: u8) -> bool {
+    match index.checked_sub(FIRST_CUSTOM_INDEX) {
+        None => nbs_core::instruments::builtin_press(index),
+        Some(i) => song
+            .custom_instruments
+            .get(i as usize)
+            .is_some_and(|ci| ci.press),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -149,20 +163,27 @@ fn accent_change_rgb(name: &str) -> Option<[u8; 3]> {
     }
     let chars: Vec<char> = name.chars().collect();
     let hex = |at: usize| -> u8 {
-        let s: String = chars.get(at..at + 2).map(|c| c.iter().collect()).unwrap_or_default();
+        let s: String = chars
+            .get(at..at + 2)
+            .map(|c| c.iter().collect())
+            .unwrap_or_default();
         u8::from_str_radix(&s, 16).unwrap_or(0)
     };
     Some([hex(17), hex(19), hex(21)])
 }
 
-/// 事件乐器里「不改声部、只改界面」的四种：原版在游戏进程里直接改全局变量，
-/// 这里由音频调度发回 UI 线程转成消息（见 [`SharedState::take_visual_events`]）。
+/// 调度侧「只改界面、不改声部」的副作用：事件乐器里那四种（原版在游戏进程里
+/// 直接改全局变量），外加演奏到带 press 的音符时对琴键打的那一下时间戳。
+/// 见 [`SharedState::take_visual_events`]。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VisualEvent {
     RainbowToggle,
     SavePopup,
     AccentColor([u8; 3]),
     BackgroundAccentToggle,
+    /// 原版 `key_played[key] = current_time`（control_step.gml:295）：这枚音符的乐器
+    /// 带 press，UI 侧据此让对应琴键在 300ms 内染黄并弹下。
+    KeyPlayed(u8),
 }
 
 /// 防爆队列上限：正常人手写不出一秒几千枚事件乐器，超了就丢弃最旧的副作用。
@@ -188,7 +209,16 @@ pub fn build_event_table(song: &Song, include_locked: bool) -> Vec<NoteEvent> {
                 .map(|l| (l.volume, l.stereo))
                 .unwrap_or((100, 100));
             let kind = event_kind(song, &note);
-            NoteEvent { tick, layer, note, layer_volume, layer_stereo, kind }
+            let press = instrument_press(song, note.instrument);
+            NoteEvent {
+                tick,
+                layer,
+                note,
+                layer_volume,
+                layer_stereo,
+                press,
+                kind,
+            }
         })
         .collect();
     events.sort_by_key(|e| (e.tick, e.layer));
@@ -223,8 +253,7 @@ impl SharedState {
             position: 0.0,
             // 实时状态自带原版后端的不精确起点对齐；导出路径不走 Mixer，
             // 保持 nbswave 的精确时间轴。
-            mixer: Mixer::new(sample_rate)
-                .with_tick_jitter(crate::mixer::REALTIME_TICK_JITTER_MS),
+            mixer: Mixer::new(sample_rate).with_tick_jitter(crate::mixer::REALTIME_TICK_JITTER_MS),
             bank,
             sample_rate,
             audio_active: false,
@@ -332,6 +361,14 @@ impl SharedState {
                     ev.layer + 1,
                     ev.tick as i64,
                 );
+                // 原版 control_step.gml:295：`if (song_ins.press || isplayer)
+                // key_played[song_key] = current_time`。它和 play_sound 是两条独立
+                // 的闸门——采样没加载、力度为 0 也照样给琴键打时间戳，所以这里不看
+                // mixer 有没有真的出声。播放器模式（isplayer，#74）端口未接线，
+                // 那个 `|| isplayer` 分支没有对应实现。
+                if ev.press {
+                    self.push_visual(VisualEvent::KeyPlayed(ev.note.key));
+                }
             }
         }
     }
@@ -413,9 +450,9 @@ impl SharedState {
     pub fn render_frame(&mut self) -> (f32, f32) {
         if self.params.playing {
             let prev = self.position;
-            let tick_per_sample =
-                self.params.tempo as f64 / self.params.speed.max(0.01) as f64
-                    / self.sample_rate.max(1) as f64;
+            let tick_per_sample = self.params.tempo as f64
+                / self.params.speed.max(0.01) as f64
+                / self.sample_rate.max(1) as f64;
             self.position += tick_per_sample;
 
             let from = prev.floor() as i64 + 1;
@@ -634,7 +671,11 @@ impl TransportClock {
         }
     }
     pub fn toggle(&mut self) {
-        if self.playing { self.pause() } else { self.play() }
+        if self.playing {
+            self.pause()
+        } else {
+            self.play()
+        }
     }
     pub fn stop_and_rewind(&mut self) {
         self.playing = false;
@@ -704,7 +745,13 @@ mod tests {
             song.set(
                 t,
                 0,
-                Note { instrument: 0, key: 45, velocity: 80, panning: 100, pitch: 0 },
+                Note {
+                    instrument: 0,
+                    key: 45,
+                    velocity: 80,
+                    panning: 100,
+                    pitch: 0,
+                },
             );
         }
         song.recalculate();
@@ -826,17 +873,24 @@ mod tests {
     fn song_with_tempo_changer() -> Song {
         let mut song = Song::new();
         song.meta.tempo = 41.33;
-        song.custom_instruments.push(nbs_core::model::CustomInstrument {
-            name: "Tempo Changer".into(),
-            filename: String::new(),
-            key: 45,
-            press: false,
-        });
+        song.custom_instruments
+            .push(nbs_core::model::CustomInstrument {
+                name: "Tempo Changer".into(),
+                filename: String::new(),
+                key: 45,
+                press: false,
+            });
         for (t, ins) in [(0u32, 0u8), (1, 6), (2, 16), (3, 17), (4, 19), (5, 20)] {
             song.set(
                 t,
                 0,
-                Note { instrument: ins, key: 45, velocity: 80, panning: 100, pitch: if ins == 20 { 600 } else { 0 } },
+                Note {
+                    instrument: ins,
+                    key: 45,
+                    velocity: 80,
+                    panning: 100,
+                    pitch: if ins == 20 { 600 } else { 0 },
+                },
             );
         }
         song.recalculate();
@@ -851,7 +905,11 @@ mod tests {
             .filter(|e| e.kind == EventKind::Tempo(600))
             .map(|e| e.tick)
             .collect();
-        assert_eq!(tc, vec![5], "只有索引 20 起的自定义 0 号才是 Tempo Changer，实测 {tc:?}");
+        assert_eq!(
+            tc,
+            vec![5],
+            "只有索引 20 起的自定义 0 号才是 Tempo Changer，实测 {tc:?}"
+        );
     }
 
     /// 「Sound Stopper」自定义乐器：pitch/pan/vel 解码成层区间。
@@ -859,38 +917,78 @@ mod tests {
     #[test]
     fn sound_stopper_notes_decode_to_layer_range() {
         let mut song = Song::new();
-        song.custom_instruments.push(nbs_core::model::CustomInstrument {
-            name: "Sound Stopper".into(),
-            filename: String::new(),
-            key: 45,
-            press: false,
-        });
+        song.custom_instruments
+            .push(nbs_core::model::CustomInstrument {
+                name: "Sound Stopper".into(),
+                filename: String::new(),
+                key: 45,
+                press: false,
+            });
         // start=39（pitch），end=57（pan/vel 编码）
-        song.set(10, 3, Note { instrument: 20, key: 45, velocity: 100, panning: 157, pitch: 39 });
-        song.set(20, 4, Note { instrument: 20, key: 45, velocity: 100, panning: 100, pitch: -1 });
+        song.set(
+            10,
+            3,
+            Note {
+                instrument: 20,
+                key: 45,
+                velocity: 100,
+                panning: 157,
+                pitch: 39,
+            },
+        );
+        song.set(
+            20,
+            4,
+            Note {
+                instrument: 20,
+                key: 45,
+                velocity: 100,
+                panning: 100,
+                pitch: -1,
+            },
+        );
         song.recalculate();
         let events = build_event_table(&song, false);
         assert_eq!(events[0].kind, EventKind::Stopper(39, 57));
-        assert_eq!(events[1].kind, EventKind::Stopper(-1, 0), "负 pitch → layerid<0 → 全消音");
+        assert_eq!(
+            events[1].kind,
+            EventKind::Stopper(-1, 0),
+            "负 pitch → layerid<0 → 全消音"
+        );
     }
 
     /// 原版只有 play_sound 被 a 闸住：锁定层上的消音器/变速器照样进事件表。
     #[test]
     fn locked_layer_event_instruments_still_fire() {
         let mut song = Song::new();
-        song.custom_instruments.push(nbs_core::model::CustomInstrument {
-            name: "Sound Stopper".into(),
-            filename: String::new(),
-            key: 45,
-            press: false,
-        });
+        song.custom_instruments
+            .push(nbs_core::model::CustomInstrument {
+                name: "Sound Stopper".into(),
+                filename: String::new(),
+                key: 45,
+                press: false,
+            });
         song.set(10, 0, Note::new(0, 45));
-        song.set(20, 0, Note { instrument: 20, key: 45, velocity: 100, panning: 157, pitch: 39 });
+        song.set(
+            20,
+            0,
+            Note {
+                instrument: 20,
+                key: 45,
+                velocity: 100,
+                panning: 157,
+                pitch: 39,
+            },
+        );
         song.recalculate();
         song.layers[0].lock = nbs_core::model::LockMode::Locked;
         let events = build_event_table(&song, false);
         assert_eq!(events.len(), 1, "锁定层普通音符被剔除");
-        assert_eq!(events[0].kind, EventKind::Stopper(39, 57), "锁定层消音器保留");
+        assert_eq!(
+            events[0].kind,
+            EventKind::Stopper(39, 57),
+            "锁定层消音器保留"
+        );
         // include_locked 时全部保留
         assert_eq!(build_event_table(&song, true).len(), 2);
     }
@@ -906,18 +1004,29 @@ mod tests {
             name: "test".into(),
         });
         let mut song = Song::new();
-        song.custom_instruments.push(nbs_core::model::CustomInstrument {
-            name: "Sound Stopper".into(),
-            filename: String::new(),
-            key: 45,
-            press: false,
-        });
+        song.custom_instruments
+            .push(nbs_core::model::CustomInstrument {
+                name: "Sound Stopper".into(),
+                filename: String::new(),
+                key: 45,
+                press: false,
+            });
         // 层 0/1/2 在 tick 1 发声（voice 层号 1/2/3），tick 5 层 1 上消音器掐 [2,57]。
         // 注：调度窗口从 floor(prev)+1 起，tick 0 不会派发（起始列偏差，另案）。
         song.set(1, 0, Note::new(0, 45));
         song.set(1, 1, Note::new(0, 45));
         song.set(1, 2, Note::new(0, 45));
-        song.set(5, 1, Note { instrument: 20, key: 45, velocity: 100, panning: 157, pitch: 2 });
+        song.set(
+            5,
+            1,
+            Note {
+                instrument: 20,
+                key: 45,
+                velocity: 100,
+                panning: 157,
+                pitch: 2,
+            },
+        );
         song.recalculate();
         let mut st = SharedState::new(Arc::new(bank.clone()), 44100);
         st.prepare(&song, Arc::new(bank));
@@ -927,7 +1036,11 @@ mod tests {
         st.params.tempo = 44100.0;
         drive(&mut st, 6);
         let alive: Vec<u32> = st.mixer.voices.iter().map(|v| v.layer).collect();
-        assert_eq!(alive, vec![1], "消音器只掐 voice 层 2/3，层 1 保留，实测 {alive:?}");
+        assert_eq!(
+            alive,
+            vec![1],
+            "消音器只掐 voice 层 2/3，层 1 保留，实测 {alive:?}"
+        );
     }
 
     /// 原版 toggle_playing：按播放键取落点列速度并整列派发——落点列的
@@ -941,13 +1054,24 @@ mod tests {
             name: "test".into(),
         });
         let mut song = Song::new();
-        song.custom_instruments.push(nbs_core::model::CustomInstrument {
-            name: "Tempo Changer".into(),
-            filename: String::new(),
-            key: 45,
-            press: false,
-        });
-        song.set(3, 0, Note { instrument: 20, key: 45, velocity: 100, panning: 100, pitch: 600 });
+        song.custom_instruments
+            .push(nbs_core::model::CustomInstrument {
+                name: "Tempo Changer".into(),
+                filename: String::new(),
+                key: 45,
+                press: false,
+            });
+        song.set(
+            3,
+            0,
+            Note {
+                instrument: 20,
+                key: 45,
+                velocity: 100,
+                panning: 100,
+                pitch: 600,
+            },
+        );
         song.set(3, 1, Note::new(0, 45));
         song.set(4, 0, Note::new(0, 45));
         song.recalculate();
@@ -972,27 +1096,70 @@ mod tests {
     fn tempo_at_tick_walks_the_changer_table() {
         let mut song = Song::new();
         song.meta.tempo = 41.33;
-        song.custom_instruments.push(nbs_core::model::CustomInstrument {
-            name: "Tempo Changer".into(),
-            filename: String::new(),
-            key: 45,
-            press: false,
-        });
-        song.set(2, 0, Note { instrument: 20, key: 45, velocity: 100, panning: 100, pitch: 600 });
-        song.set(5, 0, Note { instrument: 20, key: 45, velocity: 100, panning: 100, pitch: 300 });
+        song.custom_instruments
+            .push(nbs_core::model::CustomInstrument {
+                name: "Tempo Changer".into(),
+                filename: String::new(),
+                key: 45,
+                press: false,
+            });
+        song.set(
+            2,
+            0,
+            Note {
+                instrument: 20,
+                key: 45,
+                velocity: 100,
+                panning: 100,
+                pitch: 600,
+            },
+        );
+        song.set(
+            5,
+            0,
+            Note {
+                instrument: 20,
+                key: 45,
+                velocity: 100,
+                panning: 100,
+                pitch: 300,
+            },
+        );
         song.layers.push(nbs_core::model::Layer::default());
-        song.set(7, 1, Note { instrument: 20, key: 45, velocity: 100, panning: 100, pitch: 150 });
+        song.set(
+            7,
+            1,
+            Note {
+                instrument: 20,
+                key: 45,
+                velocity: 100,
+                panning: 100,
+                pitch: 150,
+            },
+        );
         song.recalculate();
         song.layers[1].lock = nbs_core::model::LockMode::Locked;
         let mut st = SharedState::new(Arc::new(SoundBank::default()), 44100);
         st.prepare(&song, Arc::new(SoundBank::default()));
         let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
-        assert!(near(st.tempo_at_tick(1), 41.33), "初始速度，实测 {}", st.tempo_at_tick(1));
+        assert!(
+            near(st.tempo_at_tick(1), 41.33),
+            "初始速度，实测 {}",
+            st.tempo_at_tick(1)
+        );
         assert!(near(st.tempo_at_tick(2), 40.0), "{}", st.tempo_at_tick(2));
         assert!(near(st.tempo_at_tick(4), 40.0), "{}", st.tempo_at_tick(4));
         assert!(near(st.tempo_at_tick(5), 20.0), "{}", st.tempo_at_tick(5));
-        assert!(near(st.tempo_at_tick(7), 10.0), "锁定层变速器也进表，实测 {}", st.tempo_at_tick(7));
-        assert!(near(st.tempo_at_tick(100), 10.0), "{}", st.tempo_at_tick(100));
+        assert!(
+            near(st.tempo_at_tick(7), 10.0),
+            "锁定层变速器也进表，实测 {}",
+            st.tempo_at_tick(7)
+        );
+        assert!(
+            near(st.tempo_at_tick(100), 10.0),
+            "{}",
+            st.tempo_at_tick(100)
+        );
     }
 
     /// 循环回绕后 control_step 的 diff<0 分支补播落点列：回绕列上的
@@ -1006,13 +1173,24 @@ mod tests {
             name: "test".into(),
         });
         let mut song = Song::new();
-        song.custom_instruments.push(nbs_core::model::CustomInstrument {
-            name: "Sound Stopper".into(),
-            filename: String::new(),
-            key: 45,
-            press: false,
-        });
-        song.set(0, 0, Note { instrument: 20, key: 45, velocity: 100, panning: 157, pitch: 1 });
+        song.custom_instruments
+            .push(nbs_core::model::CustomInstrument {
+                name: "Sound Stopper".into(),
+                filename: String::new(),
+                key: 45,
+                press: false,
+            });
+        song.set(
+            0,
+            0,
+            Note {
+                instrument: 20,
+                key: 45,
+                velocity: 100,
+                panning: 157,
+                pitch: 1,
+            },
+        );
         song.set(1, 0, Note::new(0, 45));
         song.set(1, 1, Note::new(0, 45));
         song.recalculate();
@@ -1045,7 +1223,11 @@ mod tests {
         st.params.song_length = 100_000.0;
         // 一秒音频 = 44100 个采样，播放头应走到约 41.33 tick。
         drive(&mut st, 44100);
-        assert!(st.position > 40.0, "一秒该走 ~41 tick，实测 {:.2}", st.position);
+        assert!(
+            st.position > 40.0,
+            "一秒该走 ~41 tick，实测 {:.2}",
+            st.position
+        );
         assert!(
             (st.params.tempo - 40.0).abs() < 1e-3,
             "只允许 tick 5 那枚真正的 Tempo Changer 把 tempo 从 41.33 改成 600/15=40，实测 {:.2}",
@@ -1065,18 +1247,69 @@ mod tests {
             "TOGGLE RAINBOW",
             "Toggle Background Accent",
         ] {
-            song.custom_instruments.push(nbs_core::model::CustomInstrument {
-                name: name.into(),
-                filename: String::new(),
-                key: 45,
-                press: false,
-            });
+            song.custom_instruments
+                .push(nbs_core::model::CustomInstrument {
+                    name: name.into(),
+                    filename: String::new(),
+                    key: 45,
+                    press: false,
+                });
         }
-        song.set(0, 0, Note { instrument: 20, key: 45, velocity: 100, panning: 100, pitch: 0 });
-        song.set(1, 1, Note { instrument: 21, key: 45, velocity: 100, panning: 100, pitch: 0 });
-        song.set(2, 2, Note { instrument: 22, key: 45, velocity: 100, panning: 100, pitch: 0 });
-        song.set(3, 3, Note { instrument: 23, key: 45, velocity: 100, panning: 100, pitch: 0 });
-        song.set(4, 4, Note { instrument: 24, key: 45, velocity: 100, panning: 100, pitch: 0 });
+        song.set(
+            0,
+            0,
+            Note {
+                instrument: 20,
+                key: 45,
+                velocity: 100,
+                panning: 100,
+                pitch: 0,
+            },
+        );
+        song.set(
+            1,
+            1,
+            Note {
+                instrument: 21,
+                key: 45,
+                velocity: 100,
+                panning: 100,
+                pitch: 0,
+            },
+        );
+        song.set(
+            2,
+            2,
+            Note {
+                instrument: 22,
+                key: 45,
+                velocity: 100,
+                panning: 100,
+                pitch: 0,
+            },
+        );
+        song.set(
+            3,
+            3,
+            Note {
+                instrument: 23,
+                key: 45,
+                velocity: 100,
+                panning: 100,
+                pitch: 0,
+            },
+        );
+        song.set(
+            4,
+            4,
+            Note {
+                instrument: 24,
+                key: 45,
+                velocity: 100,
+                panning: 100,
+                pitch: 0,
+            },
+        );
         while song.layers.len() < 5 {
             song.layers.push(nbs_core::model::Layer::default());
         }
@@ -1086,7 +1319,11 @@ mod tests {
         song.layers[3].lock = nbs_core::model::LockMode::Locked;
         song.recalculate();
         let events = build_event_table(&song, false);
-        assert_eq!(events.len(), 4, "锁定层上的视觉事件乐器保留，锁定层的普通音符滤掉");
+        assert_eq!(
+            events.len(),
+            4,
+            "锁定层上的视觉事件乐器保留，锁定层的普通音符滤掉"
+        );
         assert_eq!(events[0].kind, EventKind::Rainbow);
         assert_eq!(events[1].kind, EventKind::SavePopup);
         assert_eq!(events[2].kind, EventKind::AccentColor([255, 128, 0]));
@@ -1101,17 +1338,30 @@ mod tests {
     /// 第 18/20/22 个字符起各取两位（string_copy 不看前缀在哪）；非法或缺位按 0。
     #[test]
     fn accent_change_rgb_parsing_rules() {
-        assert_eq!(accent_change_rgb("Change Color to #FF8000"), Some([255, 128, 0]));
+        assert_eq!(
+            accent_change_rgb("Change Color to #FF8000"),
+            Some([255, 128, 0])
+        );
         // 前缀不在开头时照旧取固定位置——「please CHANGE…」的 18..24 字符是
         // 「OR TO 」，原版 real() 会报错，这里按 0 兜底。
-        assert_eq!(accent_change_rgb("please CHANGE COLOR TO #ab12 now"), Some([0, 0, 0]));
+        assert_eq!(
+            accent_change_rgb("please CHANGE COLOR TO #ab12 now"),
+            Some([0, 0, 0])
+        );
         assert_eq!(
             accent_change_rgb("Change Color to #FF8000 and Change Color to #000000"),
             None,
             "包含两次不算"
         );
-        assert_eq!(accent_change_rgb("Change Color to #zzzzzz"), Some([0, 0, 0]));
-        assert_eq!(accent_change_rgb("Change Color to #"), Some([0, 0, 0]), "缺位按 0");
+        assert_eq!(
+            accent_change_rgb("Change Color to #zzzzzz"),
+            Some([0, 0, 0])
+        );
+        assert_eq!(
+            accent_change_rgb("Change Color to #"),
+            Some([0, 0, 0]),
+            "缺位按 0"
+        );
         assert_eq!(accent_change_rgb("Toggle Rainbow"), None);
     }
 
@@ -1119,20 +1369,42 @@ mod tests {
     #[test]
     fn visual_events_reach_the_queue_when_crossed() {
         let mut song = Song::new();
-        song.custom_instruments.push(nbs_core::model::CustomInstrument {
-            name: "Show Save Popup".into(),
-            filename: String::new(),
-            key: 45,
-            press: false,
-        });
-        song.custom_instruments.push(nbs_core::model::CustomInstrument {
-            name: "Toggle Rainbow".into(),
-            filename: String::new(),
-            key: 45,
-            press: false,
-        });
-        song.set(0, 0, Note { instrument: 20, key: 45, velocity: 100, panning: 100, pitch: 0 });
-        song.set(10, 0, Note { instrument: 21, key: 45, velocity: 100, panning: 100, pitch: 0 });
+        song.custom_instruments
+            .push(nbs_core::model::CustomInstrument {
+                name: "Show Save Popup".into(),
+                filename: String::new(),
+                key: 45,
+                press: false,
+            });
+        song.custom_instruments
+            .push(nbs_core::model::CustomInstrument {
+                name: "Toggle Rainbow".into(),
+                filename: String::new(),
+                key: 45,
+                press: false,
+            });
+        song.set(
+            0,
+            0,
+            Note {
+                instrument: 20,
+                key: 45,
+                velocity: 100,
+                panning: 100,
+                pitch: 0,
+            },
+        );
+        song.set(
+            10,
+            0,
+            Note {
+                instrument: 21,
+                key: 45,
+                velocity: 100,
+                panning: 100,
+                pitch: 0,
+            },
+        );
         song.recalculate();
         let mut st = SharedState::new(Arc::new(SoundBank::default()), 44100);
         st.prepare(&song, Arc::new(SoundBank::default()));
@@ -1144,13 +1416,73 @@ mod tests {
         drive(&mut st, 15);
         assert_eq!(
             st.take_visual_events(),
-            vec![
-                VisualEvent::SavePopup,
-                VisualEvent::RainbowToggle,
-            ],
+            vec![VisualEvent::SavePopup, VisualEvent::RainbowToggle,],
             "跨过 tick 0 与 tick 10 各发一次"
         );
         assert!(st.take_visual_events().is_empty(), "take 之后必须清空");
+    }
+
+    /// 原版 `new_instrument` 的第四个参数：内置 20 种里只有 Bass Drum(2)、
+    /// Snare Drum(3)、Click(4) 没传（`control_create.gml:279-281`），其余都是 true；
+    /// 自定义乐器用 .nbs 里那一字节。只有带 press 的音符才让琴键跟着弹
+    /// （`control_step.gml:295`）。
+    #[test]
+    fn press_flag_comes_from_the_instrument() {
+        let mut song = Song::new();
+        // 竖琴(0) 与长笛(6) 带 press；底鼓(2)、军鼓(3)、锤击(4) 不带。
+        for (t, ins) in [(0u32, 0u8), (1, 2), (2, 3), (3, 4), (4, 6)] {
+            song.set(
+                t,
+                0,
+                Note {
+                    instrument: ins,
+                    key: 45 + t as u8,
+                    velocity: 100,
+                    panning: 100,
+                    pitch: 0,
+                },
+            );
+        }
+        song.custom_instruments
+            .push(nbs_core::model::CustomInstrument {
+                name: "My Synth".into(),
+                filename: String::new(),
+                key: 45,
+                press: true,
+            });
+        song.set(
+            5,
+            0,
+            Note {
+                instrument: FIRST_CUSTOM_INDEX,
+                key: 50,
+                velocity: 100,
+                panning: 100,
+                pitch: 0,
+            },
+        );
+        song.recalculate();
+        let table = build_event_table(&song, false);
+        let press: Vec<bool> = table.iter().map(|e| e.press).collect();
+        assert_eq!(press, vec![true, false, false, false, true, true]);
+
+        let mut st = SharedState::new(Arc::new(SoundBank::default()), 44100);
+        st.prepare(&song, Arc::new(SoundBank::default()));
+        st.params.song_length = 100_000.0;
+        st.params.tempo = 44100.0;
+        st.params.playing = true;
+        st.dispatch_landing_column(0.0);
+        drive(&mut st, 8);
+        // 落点列 + 跨过的 tick 1..=5：只有 0、4、5 这三列的键进队列。
+        assert_eq!(
+            st.take_visual_events(),
+            vec![
+                VisualEvent::KeyPlayed(45),
+                VisualEvent::KeyPlayed(49),
+                VisualEvent::KeyPlayed(50),
+            ],
+            "不带 press 的乐器不该让琴键动"
+        );
     }
 
     /// 落点列（按播放键 / 循环回绕）的视觉事件乐器也要派发——原版 PLAY COL
@@ -1158,27 +1490,44 @@ mod tests {
     #[test]
     fn landing_column_dispatches_visual_events() {
         let mut song = Song::new();
-        song.custom_instruments.push(nbs_core::model::CustomInstrument {
-            name: "Change Color to #0A0B0C".into(),
-            filename: String::new(),
-            key: 45,
-            press: false,
-        });
-        song.set(7, 0, Note { instrument: 20, key: 45, velocity: 100, panning: 100, pitch: 0 });
+        song.custom_instruments
+            .push(nbs_core::model::CustomInstrument {
+                name: "Change Color to #0A0B0C".into(),
+                filename: String::new(),
+                key: 45,
+                press: false,
+            });
+        song.set(
+            7,
+            0,
+            Note {
+                instrument: 20,
+                key: 45,
+                velocity: 100,
+                panning: 100,
+                pitch: 0,
+            },
+        );
         song.recalculate();
         let mut st = SharedState::new(Arc::new(SoundBank::default()), 44100);
         st.prepare(&song, Arc::new(SoundBank::default()));
         st.seek(7.0);
         st.dispatch_landing_column(7.0);
-        assert_eq!(st.take_visual_events(), vec![VisualEvent::AccentColor([0x0a, 0x0b, 0x0c])]);
+        assert_eq!(
+            st.take_visual_events(),
+            vec![VisualEvent::AccentColor([0x0a, 0x0b, 0x0c])]
+        );
     }
 
     /// 原版节拍器两个采样是独立声音资产（`control_create.gml:316-327`），
     /// 两条采样给不同长度，好把「这一拍用了哪一个」读出来。
     fn metronome_bank() -> SoundBank {
         let mut bank = SoundBank::default();
-        bank.samples
-            .push(Sample { pcm: vec![0.0; 8], base_key: 45, name: "harp".into() });
+        bank.samples.push(Sample {
+            pcm: vec![0.0; 8],
+            base_key: 45,
+            name: "harp".into(),
+        });
         bank.metronome = Some(Sample {
             pcm: vec![0.0; 16],
             base_key: 45,
@@ -1206,20 +1555,24 @@ mod tests {
     fn metronome_uses_its_own_samples_and_accents_the_bar_head() {
         let mut st = metronome_state(metronome_bank());
         st.trigger_metronome(0.5);
-        assert_eq!(
-            st.mixer.voices.len(),
-            1,
-            "第 0 列是整小节，应有一记重音"
-        );
+        assert_eq!(st.mixer.voices.len(), 1, "第 0 列是整小节，应有一记重音");
         let v = &st.mixer.voices[0];
         assert_eq!(v.source, SampleSource::MetronomeClick, "小节头用重音采样");
         // 力度 100、声道 100、master 1.0 → 左右各 0.5（旧的 60 力度会是 0.3）。
-        assert_eq!((v.gain_l, v.gain_r), (0.5, 0.5), "原版 play_sound 力度写死 100");
+        assert_eq!(
+            (v.gain_l, v.gain_r),
+            (0.5, 0.5),
+            "原版 play_sound 力度写死 100"
+        );
         assert_eq!(v.layer, 0, "节拍器不带层号，消音器掐不到它");
         assert_eq!(v.pre, 0.0, "tick -1：不参与整列抖动");
 
         st.trigger_metronome(2.0);
-        assert_eq!(st.mixer.voices.len(), 1, "metronome_played 已推进，同一拍不双响");
+        assert_eq!(
+            st.mixer.voices.len(),
+            1,
+            "metronome_played 已推进，同一拍不双响"
+        );
 
         st.trigger_metronome(4.5);
         assert_eq!(st.mixer.voices.len(), 2, "第 4 列该再响一记");

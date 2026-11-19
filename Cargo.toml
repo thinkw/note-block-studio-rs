@@ -30,7 +30,8 @@ lewton = "0.10"
 cpal = "0.15"
 flate2 = "1"
 crc32fast = "1"
-image = { version = "0.25", default-features = false, features = ["png"] }
+# jpeg 是「导入背景图片」要的（原版过滤器 *.png;*.jpg;*.jpeg），其余解码路径只用 png。
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 parking_lot = "0.12"
 # 与 eframe 自己那条依赖同版本同特性，共用一份编译产物；nbs-app 里只在 Windows 目标下引用。
 winapi = { version = "0.3.9", features = ["winuser"] }

@@ -67,8 +67,8 @@ impl NbsApp {
         // 必须在首帧渲染前装入：set_fonts 下一帧生效，而首帧就会画到粗体族
         // （黑键标签），默认字体表没有这个族，epaint 会直接 panic。
         // creator 在第一次 pass 之前运行，这里调用正好赶上首帧。
-        if nbs_editor::fonts::install(&cc.egui_ctx, state.prefs.language).is_none() {
-            eprintln!("警告: 未找到 assets/fonts，界面退回 egui 默认字体");
+        if !nbs_editor::fonts::install(&cc.egui_ctx) {
+            eprintln!("警告: 本机找不到中文字体，界面里的中文会显示成空框");
         }
 
         // 原版 create 事件的更新检查（control_create.gml:593-616）：开关开着才发请求，
@@ -181,7 +181,12 @@ impl eframe::App for NbsApp {
 
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().is_some_and(|a| a.starts_with("--")) {
+    // 原版 `control_create.gml:28-34`：任意位置的 `-player` / `--protocol-launcher`
+    // 都置位 isplayer。后者以 `--` 开头，必须先排除出 CLI 分支。
+    let is_player = args
+        .iter()
+        .any(|a| a == "-player" || a == "--protocol-launcher");
+    if !is_player && args.first().is_some_and(|a| a.starts_with("--")) {
         if let Err(e) = run_cli(&args) {
             // 前缀跟着语言走；`{e}` 本身（NbsError 的 Display）在 run_cli 里已经钉过语言了。
             let msg = if nbs_core::lang() == 1 {
@@ -200,10 +205,19 @@ fn main() -> eframe::Result<()> {
     // 启动走 `NativeOptions`（eframe 自己会同时设大小图标），运行中切换走帧首的
     // `window_icon::apply` + `EditorState` 发的 egui 窗口命令，两条路都要按当前设置选图。
     let prefs = nbs_io::prefs::Preferences::load();
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1440.0, 900.0])
-        .with_min_inner_size([960.0, 620.0])
-        .with_title("nbs-rust");
+    let mut viewport = egui::ViewportBuilder::default().with_title("nbs-rust");
+    // 原版 `control_create.gml:707-720`：播放器档窗口 800×500×window_scale，
+    // 最小尺寸相同；编辑器档 min 也是 800×500×scale，端口沿用自定的 960×620。
+    // 端口 `window_scale` 只缩画布不缩窗口（#80 定案），这里取基准尺寸。
+    if is_player {
+        viewport = viewport
+            .with_inner_size([800.0, 500.0])
+            .with_min_inner_size([800.0, 500.0]);
+    } else {
+        viewport = viewport
+            .with_inner_size([1440.0, 900.0])
+            .with_min_inner_size([960.0, 620.0]);
+    }
     if let Some(icon) =
         nbs_editor::icons::load_window_icon(if prefs.window_icon { "old" } else { "new" })
     {
@@ -216,7 +230,11 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "nbs-rust",
         options,
-        Box::new(|cc| Ok(Box::new(NbsApp::new(cc)))),
+        Box::new(move |cc| {
+            let mut app = NbsApp::new(cc);
+            app.state.player = is_player;
+            Ok(Box::new(app))
+        }),
     )
 }
 

@@ -16,6 +16,7 @@
 //! 只依赖 `egui`（不依赖 eframe），渲染后端由入口 crate 决定。
 
 pub mod app;
+pub mod background;
 pub mod commands;
 pub mod fonts;
 pub mod grid;
@@ -191,7 +192,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
-        crate::fonts::warm_up(&ctx, state.prefs.language);
+        crate::fonts::warm_up(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::pos2(0.0, 0.0),
@@ -224,7 +225,7 @@ mod tests {
         let mut state = EditorState::for_test();
         state.doc.replace_song(song);
         state.theme.apply(&ctx);
-        crate::fonts::warm_up(&ctx, state.prefs.language);
+        crate::fonts::warm_up(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::pos2(0.0, 0.0),
@@ -426,7 +427,7 @@ mod gui_export_tests {
     use super::*;
 
     fn frame(state: &mut EditorState, ctx: &egui::Context) {
-        crate::fonts::warm_up(ctx, state.prefs.language);
+        crate::fonts::warm_up(ctx);
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::pos2(0.0, 0.0),
@@ -558,7 +559,7 @@ mod gui_window_tests {
         ctx: &egui::Context,
         input: egui::RawInput,
     ) -> egui::FullOutput {
-        crate::fonts::warm_up(ctx, state.prefs.language);
+        crate::fonts::warm_up(ctx);
         let _lock = frame_lock();
         ctx.run(input, |ctx| crate::show(ctx, state))
     }
@@ -600,6 +601,122 @@ mod gui_window_tests {
             row_texts.iter().all(|t| !t.contains("高声部1")),
             "长名要按原版 draw_text_edit 的 72px 截断，不许画全名压到音量/声像图标: {row_texts:?}"
         );
+    }
+
+    /// 验收 #97：音量条右侧的「输出」格子必须真的画出来、并且真的点得开设备表。
+    /// 之前布局把它挤成 0 宽（旧早退条件 `rect.max.x > area.max.x - 210` 恒成立），
+    /// 代码在、界面上永远看不见——正是「代码里有 ≠ 上屏」的那类缺口。
+    #[test]
+    fn the_output_box_is_painted_and_opens_the_device_list() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.window = None;
+        state.output_menu = false;
+        // 用宽屏档位：格子能拿到 150 宽，里面写的就是当前出声的设备名。
+        let mut wide = base_input();
+        wide.screen_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(1810.0, 980.0),
+        ));
+        let find = |out: &egui::FullOutput| -> Option<egui::Rect> {
+            out.shapes.iter().find_map(|cs| match &cs.shape {
+                egui::Shape::Rect(r)
+                    if r.stroke.color == egui::Color32::from_gray(128)
+                        && r.rect.height() == 20.0
+                        && r.rect.top() < 60.0 =>
+                {
+                    Some(r.rect)
+                }
+                _ => None,
+            })
+        };
+        // 文字图元的 `galley.rect` 不带屏幕位置，落笔点看 `pos`。
+        let texts_at = |out: &egui::FullOutput, box_rect: egui::Rect| -> Vec<String> {
+            out.shapes
+                .iter()
+                .filter_map(|cs| match &cs.shape {
+                    egui::Shape::Text(t)
+                        if t.pos.x >= box_rect.min.x
+                            && t.pos.x <= box_rect.max.x
+                            && t.pos.y >= box_rect.min.y
+                            && t.pos.y <= box_rect.max.y =>
+                    {
+                        Some(t.galley.text().to_string())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let click = |state: &mut EditorState, p: egui::Pos2| {
+            for pressed in [true, false] {
+                let mut raw = wide.clone();
+                raw.events.push(egui::Event::PointerMoved(p));
+                raw.events.push(egui::Event::PointerButton {
+                    pos: p,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                });
+                frame_out(state, &ctx, raw);
+            }
+        };
+        let out = frame_out(&mut state, &ctx, wide.clone());
+        let rect = find(&out).expect("音量条右侧的「输出」格子");
+        // 格子里写的必须是当前真正出声的设备名；放不下时 `clip_width` 截成前缀 + 省略号。
+        let label = state.output_label();
+        let inside = texts_at(&out, rect);
+        assert!(
+            inside
+                .iter()
+                .any(|t| !t.is_empty() && label.starts_with(t.trim_end_matches('.'))),
+            "格子里应写当前出声的设备名 {label:?}，实际画了 {inside:?}（格子 {rect:?}）"
+        );
+        click(&mut state, rect.center());
+        assert!(state.output_menu, "点格子应当展开设备列表");
+        // 弹层 Area 首帧只做 sizing，命中框要到下一帧才登记（`click_at` 同款前置）。
+        frame_out(&mut state, &ctx, wide.clone());
+        let menu = frame_out(&mut state, &ctx, wide.clone());
+        let after = texts_at(&menu, egui::Rect::EVERYTHING);
+        assert!(
+            after
+                .iter()
+                .any(|t| t.contains("Follow system default") || t.contains("跟随系统默认")),
+            "展开的列表里应有「跟随系统默认」这一项"
+        );
+        // 列表不能只是看得见：点第 0 项要真的派发切输出设备的命令。
+        // 行文字落笔在 `(org.x + 36, 行顶 + 5)`，命中框是 `(org.x + 3, 行顶, wid - 5, 22)`，
+        // 所以从文字左上角往右下走 (5, 8) 一定落在同一行里。
+        let row = menu
+            .shapes
+            .iter()
+            .find_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => {
+                    let s = t.galley.text();
+                    (s.contains("Follow system default") || s.contains("跟随系统默认"))
+                        .then(|| t.pos + egui::vec2(5.0, 8.0))
+                }
+                _ => None,
+            })
+            .expect("设备列表第 0 项");
+        click(&mut state, row);
+        // 工具栏产生的命令在同一帧的 `flush_all` 里就落地了，所以这里断言落地的结果：
+        // `apply_output_choice` 调引擎、把成败写进状态栏。这台机器能不能真的建成那条流
+        // 是环境实情，两种结果都说明点击已经打到命令总线。
+        let m = msg(&state);
+        assert!(
+            [
+                "Output device: ",
+                "输出设备：",
+                "Failed to switch output device: ",
+                "切换输出设备失败："
+            ]
+            .iter()
+            .any(|p| m.starts_with(p)),
+            "点「跟随系统默认」应打到 apply_output_choice，实际消息 {m:?}"
+        );
+        assert!(!state.output_menu, "选完应当收起列表");
     }
 
     /// 原版框选拖拽中（`control_draw.gml:323-341`）没有矩形虚线框：框内音符是
@@ -1644,6 +1761,93 @@ mod gui_window_tests {
         frame(&mut s2, &ctx);
         click_text(&mut s2, &ctx, "确定");
         assert!(s2.modals.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 文件 → 导入 → 背景图片……：真造一张 PNG，选完当场烘焙成贴图并真的画出来；
+    /// 坏文件按原版语义清掉背景，只留状态栏一行说明。
+    #[test]
+    fn gui_imports_a_background_image_and_paints_it() {
+        let ctx = egui::Context::default();
+        let _prefs = isolate_prefs();
+        let dir = scratch("background-import");
+        let file = dir.join("wall.png");
+        image::RgbaImage::from_fn(640, 480, |x, y| {
+            image::Rgba([(x % 251) as u8, (y % 199) as u8, 90, 255])
+        })
+        .save(&file)
+        .unwrap();
+
+        // 整幅宽的贴图网格只可能是背景图：精灵图都是几十像素的方块。
+        // 同时带回它在整帧里的序号 —— 背景图必须排在最前，各面板才盖得住它。
+        let full_width_meshes =
+            |state: &mut EditorState, ctx: &egui::Context| -> Vec<(usize, egui::TextureId, f32)> {
+                frame_out(state, ctx, base_input())
+                    .shapes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, cs)| match &cs.shape {
+                        egui::Shape::Mesh(m) => {
+                            let b = m.calc_bounds();
+                            (b.width() >= 1439.5).then(|| (i, m.texture_id, b.height()))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            };
+
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        assert!(
+            full_width_meshes(&mut state, &ctx).is_empty(),
+            "没导入时不该有整窗贴图"
+        );
+
+        click_text(&mut state, &ctx, "文件");
+        click_text(&mut state, &ctx, "导入");
+        click_text(&mut state, &ctx, "背景图片……");
+        let d = state
+            .file_dialog
+            .as_ref()
+            .expect("导入背景图片要弹文件对话框");
+        assert!(!d.save, "导入用的是打开式对话框");
+        let spec = d.picker_spec();
+        assert_eq!(spec.title, "打开背景图片", "原版 condstr 的中文标题");
+        assert_eq!(spec.filters[0].name, "Image Files (*.png, *.jpg, *.jpeg)");
+        assert_eq!(spec.filters[0].patterns, "*.png;*.jpg;*.jpeg");
+        assert_eq!(state.window, Some(WindowKind::FileOpen));
+
+        dispatch(&mut state, commands::Command::DialogConfirm(file), &ctx);
+        assert_eq!(state.window, None, "原版选完直接生效，不开任何窗口");
+        let wp = state.wallpaper.as_ref().expect("背景图已烘焙");
+        // 640×480 预缩放 1.5 ⇒ 960×720，再按 2% 降采样 ⇒ 20×15。
+        assert_eq!(wp.size, egui::vec2(20.0, 15.0));
+        let tex = wp.texture.id();
+        let h = full_width_meshes(&mut state, &ctx);
+        assert_eq!(h.len(), 1, "整窗贴图只有一张");
+        assert_eq!(h[0].1, tex, "画出来的就是刚导入的那张贴图");
+        assert!(h[0].2 > 900.0, "cover 要溢出窗口高度，实测 {h:?}");
+        // 层序：原版把壁纸画在所有面板之前（control_draw.gml:48-67），端口必须压在
+        // 整帧最底下——画在面板之后会把琴键顶部那几像素盖成图片色（实测踩过）。
+        assert_eq!(h[0].0, 0, "背景图是整帧第一个图元，各面板都在它之后盖上来");
+
+        // 坏文件：原版先 `sprite_delete` 再 `sprite_add`，读失败就没有背景了，
+        // 端口同样整体覆盖；原版这里是静默的，端口在状态栏给一句。
+        let bad = dir.join("bad.png");
+        std::fs::write(&bad, b"not an image").unwrap();
+        click_text(&mut state, &ctx, "文件");
+        click_text(&mut state, &ctx, "导入");
+        click_text(&mut state, &ctx, "背景图片……");
+        let _lock = crate::frame_lock();
+        dispatch(&mut state, commands::Command::DialogConfirm(bad), &ctx);
+        assert!(
+            state.wallpaper.is_none(),
+            "读失败不留旧背景（原版 sprite_delete 在前）"
+        );
+        assert!(msg(&state).contains("背景图片"), "{}", msg(&state));
+        drop(_lock);
+        assert!(full_width_meshes(&mut state, &ctx).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3617,7 +3821,7 @@ mod gui_piano_tests {
     }
 
     fn run(state: &mut EditorState, ctx: &egui::Context, inp: egui::RawInput) -> egui::FullOutput {
-        crate::fonts::warm_up(ctx, state.prefs.language);
+        crate::fonts::warm_up(ctx);
         let _lock = frame_lock();
         ctx.run(inp, |ctx| crate::show(ctx, state))
     }

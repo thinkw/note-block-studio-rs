@@ -16,6 +16,12 @@ pub const LAYER_PANEL_WIDTH: f32 = 264.0;
 pub const TIMELINE_HEIGHT: f32 = 32.0;
 /// 原版滚动条厚度 32（画布内，跟缩放走）。
 pub const SCROLLBAR_SIZE: f32 = 32.0;
+/// 滚动条专用的固定缩放（偏离原版，用户要求 #88）：原版把 `window_scale` 整体乘到
+/// 画布上，缩到 10% 时 32px 的条只剩 3px，抓不住。钉在 67% 档的尺寸。
+pub const BAR_SCALE: f32 = 0.67;
+/// 时间轴带专用的固定缩放（偏离原版，用户要求 #90）：同样钉死，指针的箭头帽、
+/// 竖线、刻度数字和进度栏保持 100% 档大小，缩小界面时指针不会细到看不见。
+pub const RULER_SCALE: f32 = 1.0;
 /// 原版白键高 128，上方留 2px。
 pub const PIANO_HEIGHT: f32 = 130.0;
 /// 原版状态栏分隔线在 `rh - 24`。
@@ -28,6 +34,17 @@ pub const MENU_HEIGHT: f32 = 20.0;
 pub const TOOLBAR_HEIGHT: f32 = 34.0;
 /// 原版图标条自身的可见高度。
 pub const TOOLBAR_STRIP_HEIGHT: f32 = 30.0;
+
+/// 时间轴带的屏幕高度。网格的 `split()` 和图层栏都用它——两边算出的行数、
+/// 宏条位置才对得上，所以只允许从这一处取。
+pub fn timeline_band() -> f32 {
+    TIMELINE_HEIGHT * RULER_SCALE
+}
+
+/// 滚动条的屏幕厚度。同上，网格和图层栏共用一个数。
+pub fn bar_thickness() -> f32 {
+    SCROLLBAR_SIZE * BAR_SCALE
+}
 
 #[derive(Clone, Debug)]
 pub struct Viewport {

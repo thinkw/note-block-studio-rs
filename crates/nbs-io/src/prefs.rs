@@ -17,6 +17,10 @@ pub struct Preferences {
     pub play_speed: f32,
     pub metronome: bool,
     pub mono: bool,
+    /// 端口自加（用户要求 #94）：点名的输出设备名，空 = 跟随系统默认。
+    /// 原版把声音整个交给 GameMaker，只会落在系统默认设备上，没有这一项。
+    /// 存的是设备名而不是 ID：cpal 0.15 不对外暴露稳定设备 ID。
+    pub audio_output: String,
     /// 原版 `realvolume`：图层行里画不画音量小图标。
     pub show_layer_volumes: bool,
     /// 原版 `use_bpm`：速度框用 BPM 还是红石刻/秒。
@@ -94,6 +98,11 @@ pub struct Preferences {
     /// 不跟随 `window_scale`（工具栏 / 钢琴栏不随界面缩放）——这里同样独立，
     /// 只在鼠标悬停琴键面板时用 Ctrl+滚轮 / Ctrl+± 调整。
     pub piano_scale: f32,
+    /// 端口自加（用户要求 #92）：界面缩放低于这个百分比时，音符方块上的字（序号和键名）
+    /// 一律不画。原版没有这一项 —— 原版缩放最低只到 50%，字挤成一坨也照样画；
+    /// 我们把下限放开到 10% 后，用户要求低缩放时把字收掉只留方块。
+    /// 默认 50：正好等于原版的最低档，所以在原版可达的缩放范围内行为和原版逐像素一致。
+    pub note_text_min_percent: u8,
     /// 原版 `window_icon`（出厂 0，`control_create.gml:59`）：真 = 用老图标换掉程序自带的图标。
     pub window_icon: bool,
     pub sounds_dir: Option<String>,
@@ -227,6 +236,7 @@ impl Default for Preferences {
             play_speed: 1.0,
             metronome: false,
             mono: false,
+            audio_output: String::new(),
             show_layer_volumes: true,
             use_bpm: false,
             tapdouble: false,
@@ -270,6 +280,7 @@ impl Default for Preferences {
             refresh_rate: 0,
             window_scale: None,
             piano_scale: 1.0,
+            note_text_min_percent: 50,
             // 原版 `control_create.gml:59`：window_icon = 0，即用程序自带的图标。
             window_icon: false,
             sounds_dir: None,
@@ -358,6 +369,14 @@ impl Preferences {
     /// 拖动只能落在整数百分比上，落在系统倍率上时和出厂值等价，按钮照样变灰。
     pub fn scale_is_default(&self, native: f32) -> bool {
         (self.effective_scale(native) - native).abs() < 0.005
+    }
+
+    /// 端口自加 #92：某个生效缩放倍率（1.0 = 100%）下，格内文字是否收掉。
+    /// 判据用的是首选项里显示的那个数（含系统 DPI），不是画布内部的倍率 ——
+    /// 用户拖的是这个数，看到的字消失也必须发生在这个数上。
+    /// 阈值本身是「低于」，所以正好等于阈值时文字照画（默认 50 ⇒ 50% 有字、49% 没字）。
+    pub fn hides_note_text(&self, effective: f32) -> bool {
+        (effective * 100.0).round() < self.note_text_min_percent as f32
     }
 
     pub fn config_dir() -> PathBuf {
@@ -561,6 +580,8 @@ mod tests {
         p.check_prerelease = true;
         p.donate_banner_time = 1760000000;
         p.last_version = Some("0.1.0".into());
+        p.audio_output = "耳机 (Realtek(R) Audio)".into();
+        p.note_text_min_percent = 35;
         p.recent_files.push(crate::prefs::RecentFile {
             path: "C:/songs/demo.nbs".into(),
             time: 1760000001,
@@ -586,11 +607,17 @@ mod tests {
         assert!(back.check_prerelease, "开发版检查要落盘");
         assert_eq!(back.donate_banner_time, 1760000000, "横幅静音到期日要落盘");
         assert_eq!(back.last_version.as_deref(), Some("0.1.0"), "上次版本号要落盘");
+        assert_eq!(back.audio_output, "耳机 (Realtek(R) Audio)", "点名的输出设备要落盘");
+        assert_eq!(back.note_text_min_percent, 35, "格内文字的隐藏阈值要落盘");
         // 旧配置文件里没有这几项时必须退回默认值，不能整个文件读不出来。
         let old = r#"{"version":1,"theme":3}"#;
         let back: Preferences = serde_json::from_str(old).unwrap();
         assert_eq!(back.refresh_rate, 0, "出厂就是 30 帧");
         assert_eq!(back.window_scale, None, "出厂跟随系统 DPI");
+        assert_eq!(
+            back.note_text_min_percent, 50,
+            "旧配置缺键时阈值退回出厂 50%（端口自加 #92）"
+        );
         assert!(!back.window_icon, "出厂用程序自带的图标");
         assert_eq!(back.accent, [0, 120, 212], "强调色基色出厂 0,120,212");
         assert!(back.remove_effect, "旧配置缺键时退回出厂打开");
@@ -603,6 +630,7 @@ mod tests {
             (back.selection_alpha - 0.8).abs() < 1e-6,
             "旧配置缺键时选区强度退回 0.8"
         );
+        assert!(back.audio_output.is_empty(), "旧配置缺键时跟随系统默认");
         // 启动组出厂值（control_create.gml:172-175）。
         let fresh = Preferences::default();
         assert!(fresh.show_welcome, "出厂显示欢迎窗");
@@ -835,5 +863,32 @@ mod tests {
         p.window_scale = Some(2.0);
         assert_eq!(p.effective_scale(1.25), 2.0);
         assert!(!p.scale_is_default(1.25));
+    }
+
+    /// 端口自加 #92：格内文字的隐藏阈值。判据是首选项里显示的那个百分数
+    /// （`effective_scale` 含系统 DPI），四舍五入和界面显示用的是同一个式子，
+    /// 所以「显示的数低于阈值」和「字消失」必须同时发生。
+    #[test]
+    fn note_text_threshold_uses_the_percent_the_user_sees() {
+        let mut p = Preferences::default();
+        assert_eq!(
+            p.note_text_min_percent, 50,
+            "出厂阈值 50% = 原版缩放的最低档"
+        );
+        assert!(!p.hides_note_text(0.50), "正好等于阈值时文字照画");
+        assert!(p.hides_note_text(0.49), "低于阈值才收");
+        assert!(!p.hides_note_text(1.0));
+        assert!(!p.hides_note_text(4.0));
+        p.note_text_min_percent = 0;
+        assert!(!p.hides_note_text(0.10), "0 = 永不收字");
+        p.note_text_min_percent = 100;
+        assert!(p.hides_note_text(0.99), "100 = 只要往小拖就收");
+        assert!(!p.hides_note_text(1.0), "但 100% 本身照画");
+        p.note_text_min_percent = 50;
+        p.window_scale = Some(0.5);
+        assert!(
+            !p.hides_note_text(p.effective_scale(1.25)),
+            "系统 125% 下拖到 50%：显示的是 50，不该收字"
+        );
     }
 }

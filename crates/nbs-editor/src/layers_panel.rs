@@ -23,7 +23,7 @@ use crate::icons::Bank;
 use crate::state::{ContextKind, ContextMenu, EditorState, LayerDrag, WindowKind};
 use crate::theme::{Theme, ThemeKind};
 use crate::tr;
-use crate::viewport::{SCROLLBAR_SIZE, TIMELINE_HEIGHT};
+use crate::viewport::{bar_thickness, timeline_band, RULER_SCALE};
 
 /// 原版图层列内容左边界 `x1`。
 const X1: f32 = 4.0;
@@ -41,9 +41,11 @@ pub fn show_layers_panel(state: &mut EditorState, ui: &mut Ui) {
     let cell = state.viewport.cell();
     let u = state.viewport.u();
     let band = start.y;
-    let rows_start = pos2(start.x, band + TIMELINE_HEIGHT * u);
+    // 时间轴带和滚动条的厚度都不随缩放（#88 / #90），和网格的 `split()` 取同一个数，
+    // 两边算出的行数、宏条位置才对得上。
+    let rows_start = pos2(start.x, band + timeline_band());
 
-    header(state, ui, &bank, &th, start, band, area.width(), u);
+    header(state, ui, &bank, &th, start, band, area.width());
 
     let l0 = {
         let (_, _, a, _) = state.viewport.visible_range();
@@ -53,8 +55,7 @@ pub fn show_layers_panel(state: &mut EditorState, ui: &mut Ui) {
     // 网格那边用同一条公式（`grid.rs` 里的 `split`），两边画行数、宏条位置才对得上。
     // 行数只按本面板的区域算，不取 `viewport.rows()`：侧栏比网格先画，
     // 用视口那个值会慢一帧，第一帧少画几行、宏条也跟着错位。
-    let rows =
-        (((area.height() - TIMELINE_HEIGHT * u - SCROLLBAR_SIZE * u) / cell).floor() as u32).max(1);
+    let rows = (((area.height() - timeline_band() - bar_thickness()) / cell).floor() as u32).max(1);
     let layers = state.doc.song.layers.clone();
     let idle = state.window.is_none() && state.context_menu.is_none();
     let shift = ui.input(|i| i.modifiers.shift);
@@ -116,9 +117,8 @@ pub(crate) fn macro_bar_over_grid(state: &mut EditorState, ui: &mut Ui, area: Re
     let th = state.theme.clone();
     let cell = state.viewport.cell();
     let u = state.viewport.u();
-    let full =
-        (((area.height() - TIMELINE_HEIGHT * u - SCROLLBAR_SIZE * u) / cell).floor() as u32).max(1);
-    let bar_top = area.min.y + TIMELINE_HEIGHT * u + full as f32 * cell - ROW_LIFT * u + 20.0 * u;
+    let full = (((area.height() - timeline_band() - bar_thickness()) / cell).floor() as u32).max(1);
+    let bar_top = area.min.y + timeline_band() + full as f32 * cell - ROW_LIFT * u + 20.0 * u;
     macro_bar(
         state,
         ui,
@@ -132,8 +132,8 @@ pub(crate) fn macro_bar_over_grid(state: &mut EditorState, ui: &mut Ui, area: Re
 }
 
 /// 顶部与时间轴对齐的一条：已用时间 / 总时长 / 速度框 / 小节·拍·十六分。
-/// 高度跟时间轴带一样是 `TIMELINE_HEIGHT × u`，内部坐标全部乘 u。
-#[allow(clippy::too_many_arguments)]
+/// 高度跟时间轴带一样（`timeline_band()`，不随缩放，见 viewport::RULER_SCALE），
+/// 内部坐标统一按 `RULER_SCALE` 换算，和带内的刻度、指针保持同一档尺寸。
 fn header(
     state: &mut EditorState,
     ui: &mut Ui,
@@ -142,11 +142,11 @@ fn header(
     start: Pos2,
     band: f32,
     width: f32,
-    u: f32,
 ) {
+    let u = RULER_SCALE;
     let p = ui.painter();
     p.rect_filled(
-        Rect::from_min_size(start, vec2(width, TIMELINE_HEIGHT * u)),
+        Rect::from_min_size(start, vec2(width, timeline_band())),
         0.0,
         th.panel,
     );

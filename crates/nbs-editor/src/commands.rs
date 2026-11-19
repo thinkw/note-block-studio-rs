@@ -227,6 +227,8 @@ pub enum Command {
         place: bool,
     },
     SetMasterVolume(f32),
+    /// 端口自加（用户要求 #94）：切换输出设备，`None` = 跟随系统默认。
+    SetOutput(Option<String>),
     SetPlaySpeed(f32),
     ToggleMetronome,
     ToggleExtendedVoices,
@@ -265,6 +267,12 @@ pub enum Command {
     SoundImportOpenSoundsFolder,
     /// 向导「确定」：`sound_import_status = 0` + 关窗（下载中按钮是锁着的，不会带线程走）。
     SoundImportOk,
+    /// 原版文件菜单「Clear recent songs」（file 菜单与播放器 `filep` 都有，
+    /// `control_draw.gml:1698/1715`）：清空最近打开列表。
+    ClearRecent,
+    /// 原版播放器菜单的 Exit（`control_draw.gml` 的 `game_end()`）。egui/eframe
+    /// 没有直接退出 API，走 `ViewportCommand::Close`。
+    Exit,
 }
 
 /// 原版 `selection_delete.gml:24-28`：删除选区前按当前视口收集格子，
@@ -345,10 +353,17 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             dispatch(state, Command::OpenDialog(DialogAction::OpenSong), ctx);
         }
         Command::SaveAs => {
+            // 原版 `save_song.gml:20`：播放器档位保存直接 `return 0`。
+            if state.player {
+                return;
+            }
             // 原版 `save_song.gml:13-14`：目录同样是 `songfolder`，默认名是 `fsave + ".nbs"`。
             dispatch(state, Command::OpenDialog(DialogAction::SaveSong), ctx);
         }
         Command::Save => {
+            if state.player {
+                return;
+            }
             if let Some(path) = state.doc.song.filename.clone() {
                 dispatch(state, Command::SavePath(path), ctx);
             } else {
@@ -394,6 +409,9 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             }),
         },
         Command::SavePath(path) => {
+            if state.player {
+                return;
+            }
             let version = state.doc.song.meta.save_version;
             match nbs_core::nbs::save(&path, &state.doc.song, version) {
                 Ok(()) => {
@@ -815,6 +833,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.sync_loop_params();
         }
         Command::ToggleFollow => state.marker_follow = !state.marker_follow,
+        Command::Exit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
         Command::ShowWindow(kind) => {
             // 原版 `anim_window_open`：`window != window_last` 时窗口重新做打开动画，
             // 所有页签回到第一页；重复打开同一个窗口不重置。
@@ -1178,6 +1197,9 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 },
             );
             dispatch(state, Command::CloseWindow, ctx);
+        }
+        Command::ClearRecent => {
+            state.recent_files.clear();
         }
         Command::ClearSong => {
             state.doc.clear_all_notes();
@@ -1769,6 +1791,23 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                         }),
                     }
                 }
+                DialogAction::ImportBackground => {
+                    // 原版 `menu_click.gml:57-58` → `wallpaper_init(temppath)`：读完下一次
+                    // Draw 烘焙生效，不写最近列表、不进 .nbs、不落配置。
+                    let baked = crate::background::bake(ctx, &path);
+                    if let Err(e) = &baked {
+                        // 原版读失败是静默的（`sprite_exists` 为假就什么都不画），
+                        // 端口把原因写进状态栏，免得只剩「点了没反应」。
+                        state.set_message(if crate::lang() == 1 {
+                            format!("导入背景图片失败: {e}")
+                        } else {
+                            format!("Background image import failed: {e}")
+                        });
+                    }
+                    // 原版是先删旧精灵再 `sprite_add`，读失败时旧背景也一起没了，这里同样整体覆盖。
+                    state.wallpaper = baked.ok();
+                    state.window = None;
+                }
                 DialogAction::SaveExtraNotes => {
                     // 原版 `datapack_getextranotes()`：复制完 `message("资源包保存成功！", "保存")`，
                     // 调用它的那个窗口原样留着（原生组件只是叠在上面）。走自绘兜底框时
@@ -1814,6 +1853,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.prefs.master_volume = v.clamp(0.0, 2.0);
             state.apply_audio_prefs();
         }
+        Command::SetOutput(wanted) => state.apply_output_choice(wanted),
         Command::SetPlaySpeed(v) => {
             state.prefs.play_speed = v.clamp(0.25, 4.0);
             state.apply_audio_prefs();
@@ -2332,6 +2372,25 @@ mod tests {
 
     /// 打开导出窗口前，原版 `calculate_size()` 依次弹兼容性提问和速度提示，
     /// 全部答完才轮到窗口本身。
+    #[test]
+    fn player_mode_save_commands_are_noops() {
+        let _lock = crate::frame_lock();
+        let ctx = Context::default();
+        let mut state = EditorState::for_test();
+        state.window = None;
+        state.player = true;
+        state.doc.song.dirty = true;
+        state.doc.song.filename = Some(std::path::PathBuf::from("C:/tmp/demo.nbs"));
+        dispatch(&mut state, Command::Save, &ctx);
+        assert!(state.doc.song.dirty, "播放器档 Save 不许真保存");
+        assert_eq!(state.window, None, "播放器档 Save 不许弹窗");
+        // 无文件名的变体走 SaveAs——同样被 save_song.gml:20 的门拦掉。
+        state.doc.song.filename = None;
+        dispatch(&mut state, Command::SaveAs, &ctx);
+        assert_eq!(state.window, None);
+        assert!(state.doc.song.dirty);
+    }
+
     #[test]
     fn open_schematic_export_queues_the_original_dialogs_in_order() {
         let _lock = crate::frame_lock();
@@ -2989,6 +3048,32 @@ mod tests {
         assert!(!state.canvas_hires, "1.0 ≤ 1.25 退回普通贴图");
     }
 
+    /// 端口自加（用户要求 #92）：缩放降到阈值以下时方块上的字整批不画。阈值默认 50%，
+    /// 正好是原版能拖到的最低档 —— 在原版可达的缩放里这个开关永远不触发，行为和原版一致；
+    /// 只有我们把下限放开到 10% 之后它才有意义。判据用首选项显示的那个百分数。
+    #[test]
+    fn low_window_scale_hides_the_note_block_text() {
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        state.prefs.note_text_min_percent = 50;
+        state.prefs.window_scale = Some(0.5);
+        let _ = ctx.run(raw_input(), |c| state.tick_transport(c));
+        assert!(!state.hide_note_text, "50% 等于出厂阈值，字照画");
+        state.prefs.window_scale = Some(0.4);
+        let _ = ctx.run(raw_input(), |c| state.tick_transport(c));
+        assert!(state.hide_note_text, "40% 低于阈值，格内文字收掉");
+        state.prefs.note_text_min_percent = 0;
+        let _ = ctx.run(raw_input(), |c| state.tick_transport(c));
+        assert!(!state.hide_note_text, "阈值填 0 = 永不收字");
+        state.prefs.window_scale = Some(2.0);
+        state.prefs.note_text_min_percent = 100;
+        let _ = ctx.run(raw_input(), |c| state.tick_transport(c));
+        assert!(!state.hide_note_text, "放大到 200% 更不会触发");
+        state.prefs.window_scale = Some(1.0);
+        let _ = ctx.run(raw_input(), |c| state.tick_transport(c));
+        assert!(!state.hide_note_text, "100% 正是阈值本身，照画");
+    }
+
     /// 原版 `control_draw.gml:736-751` 的那串 `else if`：Ctrl+滚轮 / Ctrl+± 只能停在
     /// 离散档位上，两端封顶 0.5 和 4，中间按当前值就近跳下一档；Ctrl+0 回出厂值。
     #[test]
@@ -3463,6 +3548,39 @@ mod tests {
             state.message.as_ref().map(|(m, _)| m.as_str()),
             Some("Song saved"),
             "原版不翻译这条消息"
+        );
+    }
+
+    /// 用户要求 #91：演奏到带 `press` 的音符时，对应琴键要跟着弹下。
+    /// 派发侧盖章（`VisualEvent::KeyPlayed`）→ 排空时写 `state.key_played`，
+    /// 绘制侧 [`crate::piano::played_key`] 用 300ms 窗口决定染黄与下沉。
+    #[test]
+    fn played_note_stamps_the_piano_key() {
+        let one_note = |tick: u32, instrument: u8, key: u8| {
+            let mut song = Song::new();
+            song.set(tick, 0, Note::new(instrument, key));
+            song.recalculate();
+            song
+        };
+        // 内置 0 = Harp（原版建表带 press）；内置 2 = Bass Drum（没带）。
+        let mut state = state_with(one_note(0, 0, 45));
+        assert_eq!(
+            state.key_played[45],
+            f64::NEG_INFINITY,
+            "没播放过就不该有记录"
+        );
+        play_and_drain(&mut state, 0.0);
+        assert!(
+            state.key_played[45].is_finite(),
+            "竖琴那一下要给键 45 盖上时间戳，实测 {}",
+            state.key_played[45]
+        );
+        let mut drum = state_with(one_note(0, 2, 47));
+        play_and_drain(&mut drum, 0.0);
+        assert_eq!(
+            drum.key_played[47],
+            f64::NEG_INFINITY,
+            "底鼓原版没带 press，琴键不该动"
         );
     }
 
