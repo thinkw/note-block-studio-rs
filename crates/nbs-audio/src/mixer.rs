@@ -1,5 +1,7 @@
-//! Voice 池与混音器。实时播放与离线导出共用同一套渲染代码，
-//! 保证「听到的」和「导出的」完全一致。
+//! Voice 池与混音器。实时播放与离线导出共用同一套 voice 取值 / 增益 / 音高代码；
+//! 总线过载处理不共用——导出照 nbswave 归一化，实时走电平下探（见 `Mixer::duck_frame`）。
+
+use std::collections::VecDeque;
 
 use nbs_core::model::{Note, PAN_CENTER};
 
@@ -111,6 +113,52 @@ impl Voice {
     }
 }
 
+/// 总线「电平下探」限幅的三个参数。
+///
+/// 原版这条链是闭源的（GM 后端 = modified OpenAL，上游 issue #452 只说了
+/// 「响的部分整体压低」），任何数值都无法从 GML 推出，因此这三个数是**有意偏离**：
+/// 只按包络整体压低电平、不逐点削波形，为的是消掉谐波失真（听感上的「炸」）。
+/// 前视 3 ms + 下探瞬时、释放 60 ms；等价性与「不削顶」由
+/// `duck_window_matches_brute_force_lookahead` / `duck_dips_the_level_instead_of_shaving_waveforms`
+/// 两个用例守住。
+const DUCK_LOOKAHEAD_MS: f32 = 3.0;
+const DUCK_RELEASE_MS: f32 = 60.0;
+/// 下探的目标电平：留 0.001 的余量，保证输出永远够不到满量程（后端 i16 转换不再截顶）。
+const DUCK_CEILING: f32 = 0.999;
+
+/// 定长窗口内的峰值最大值（单调队列，摊还 O(1)）。
+/// 队列里只保留「还可能成为窗口最大值」的帧，前端即当前窗口最大值。
+#[derive(Clone, Debug, Default)]
+struct PeakWindow {
+    len: usize,
+    /// (帧号, 该帧峰值)，按帧号递增、峰值递减排列。
+    items: VecDeque<(u64, f32)>,
+}
+
+impl PeakWindow {
+    fn new(len: usize) -> Self {
+        Self {
+            len: len.max(1),
+            items: VecDeque::with_capacity(len.max(1)),
+        }
+    }
+
+    fn push(&mut self, at: u64, peak: f32) {
+        while self.items.back().is_some_and(|&(_, p)| p <= peak) {
+            self.items.pop_back();
+        }
+        self.items.push_back((at, peak));
+        let oldest = at.saturating_sub(self.len as u64 - 1);
+        while self.items.front().is_some_and(|&(i, _)| i < oldest) {
+            self.items.pop_front();
+        }
+    }
+
+    fn max(&self) -> f32 {
+        self.items.front().map_or(0.0, |&(_, p)| p)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Mixer {
     pub voices: Vec<Voice>,
@@ -124,10 +172,23 @@ pub struct Mixer {
     /// 同一 tick 的音符共享的随机起始延迟宽度（毫秒），0 = 关闭。
     /// 见 [`Mixer::spawn`]。
     pub jitter_ms: f64,
+    /// 前视窗口（即将输出那一帧的未来 DUCK_LOOKAHEAD_MS 帧）。
+    duck_win: PeakWindow,
+    /// 延迟线：为了「看到未来」，每一帧要在这里等 DUCK_LOOKAHEAD_MS 才输出。
+    duck_delay: VecDeque<(f32, f32)>,
+    /// 当前总线增益（下探后的电平）。
+    duck_gain: f32,
+    /// 每帧向目标增益回升的比例（释放时间常数换算而来）。
+    duck_release: f32,
+    /// 已进入总线的帧数，用于窗口的淘汰判断。
+    duck_step: u64,
 }
 
 impl Mixer {
     pub fn new(output_rate: u32) -> Self {
+        let lookahead = Self::duck_frames(output_rate);
+        let duck_release =
+            1.0 - (-1.0 / (output_rate.max(1) as f64 * DUCK_RELEASE_MS as f64 / 1000.0)).exp();
         Self {
             voices: Vec::with_capacity(64),
             max_voices: DEFAULT_MAX_VOICES,
@@ -137,7 +198,17 @@ impl Mixer {
             serial: 0,
             peak: 0.0,
             jitter_ms: 0.0,
+            duck_win: PeakWindow::new(lookahead),
+            duck_delay: VecDeque::with_capacity(lookahead),
+            duck_gain: 1.0,
+            duck_release: duck_release as f32,
+            duck_step: 0,
         }
+    }
+
+    /// 前视窗口长度（帧）：输出比调度晚这么多，见 [`DUCK_LOOKAHEAD_MS`]。
+    fn duck_frames(rate: u32) -> usize {
+        ((rate.max(1) as f64 * DUCK_LOOKAHEAD_MS as f64 / 1000.0).ceil() as usize).max(1)
     }
 
     /// 开启每列起始抖动（见 [`REALTIME_TICK_JITTER_MS`]）；0 = 关闭，导出用 0。
@@ -170,6 +241,12 @@ impl Mixer {
     pub fn clear(&mut self) {
         self.voices.clear();
         self.peak = 0.0;
+        // 总线状态一起归零：否则暂停/seek 后延迟线里最多残留 DUCK_LOOKAHEAD_MS
+        // 的旧音频，会在新的落点后面冒出来。
+        self.duck_win = PeakWindow::new(Self::duck_frames(self.output_rate));
+        self.duck_delay.clear();
+        self.duck_gain = 1.0;
+        self.duck_step = 0;
     }
 
     pub fn active(&self) -> usize {
@@ -265,25 +342,41 @@ impl Mixer {
         }
         self.voices.retain(|v| v.alive);
         self.peak = self.peak.max(l.abs()).max(r.abs());
-        // 密集段的求和远超满量程，原版靠引擎后端压下来（GM 2022.0.3 LTS 用的是
-        // modified OpenAL，见上游 issue #452），那条曲线闭源。这里保留软饱和而非
-        // ±1 硬削波：同一首歌的尾部硬削把 24.6% 采样钉成平顶，软饱和只 7.6%。
-        (clip_roundoff(l), clip_roundoff(r))
+        // 密集列的求和远超满量程。原版靠引擎后端把响的部分整体压低（GM 2022.0.3 LTS
+        // 用的是 modified OpenAL，见上游 issue #452，曲线闭源）。这里用「电平下探」
+        // 复刻这个整体压低，而不是逐点削波形：逐点曲线（先前是 SoLoud CLIP_ROUNDOFF）
+        // 本身就是谐波失真的来源，实测同曲尾部把它听成「炸」。
+        self.duck_frame(l, r)
     }
-}
 
-/// SoLoud `clip_internal` 的 CLIP_ROUNDOFF 分支（逐字移植）：
-/// `|x| >= 1.65` 钉在 ±0.9862875，其余 `0.87x - 0.1x³`，
-/// 输出再乘 `mPostClipScaler = 0.95`（postinit 固定值）。
-fn clip_roundoff(x: f32) -> f32 {
-    let f = if x <= -1.65 {
-        -0.9862875
-    } else if x >= 1.65 {
-        0.9862875
-    } else {
-        0.87 * x - 0.1 * x * x * x
-    };
-    0.95 * f
+    /// 一帧进总线：先记进前视窗口，攒满窗口后按包络增益输出最早那一帧。
+    /// 增益只随包络变化，波形逐点原样通过，因此不会产生谐波失真。
+    fn duck_frame(&mut self, l: f32, r: f32) -> (f32, f32) {
+        let at = self.duck_step;
+        self.duck_step += 1;
+        self.duck_win.push(at, l.abs().max(r.abs()));
+        // 窗口 = 最近 duck_frames() 帧，正好是即将输出那一帧的前视区间。
+        let top = self.duck_win.max();
+        let want = if top > DUCK_CEILING {
+            DUCK_CEILING / top
+        } else {
+            1.0
+        };
+        // 下探瞬时（前视已保证不越界，不需要慢 attack），回升按释放时间常数。
+        self.duck_gain = if want < self.duck_gain {
+            want
+        } else {
+            self.duck_gain + (want - self.duck_gain) * self.duck_release
+        };
+        self.duck_delay.push_back((l, r));
+        if self.duck_delay.len() < self.duck_win.len {
+            return (0.0, 0.0);
+        }
+        let Some((dl, dr)) = self.duck_delay.pop_front() else {
+            return (0.0, 0.0);
+        };
+        (dl * self.duck_gain, dr * self.duck_gain)
+    }
 }
 
 #[cfg(test)]
@@ -312,18 +405,141 @@ mod tests {
         assert!((Voice::playback_ratio(&n, 45, 48000) - 44100.0 / 48000.0).abs() < 1e-9);
     }
 
-    /// SoLoud CLIP_ROUNDOFF 曲线：墙点连续（0.87·1.65 − 0.1·1.65³ = 0.9862875），
-    /// 全程乘 mPostClipScaler 0.95。
+    /// 前视下探的等价性：单调队列的窗口最大值必须与「逐帧重扫未来 L 帧」
+    /// 的暴力算法得到同一串输出（实时侧只是整体晚 L-1 帧）。
     #[test]
-    fn clip_roundoff_matches_soloud() {
-        assert!(clip_roundoff(0.0).abs() < 1e-9);
-        assert!((clip_roundoff(1.0) - 0.95 * 0.77).abs() < 1e-9);
-        let wall = 0.95 * 0.9862875;
-        for x in [1.65f32, 2.0, 6.6, 100.0] {
-            assert!((clip_roundoff(x) - wall).abs() < 1e-6);
-            assert!((clip_roundoff(-x) + wall).abs() < 1e-6);
+    fn duck_window_matches_brute_force_lookahead() {
+        let rate = 44100u32;
+        let win = Mixer::duck_frames(rate);
+        // 确定性伪随机：有安静段、有 4 倍满量程的尖峰。
+        let mut seq: Vec<f32> = Vec::new();
+        let mut x = 1234.5f32;
+        for i in 0..4000usize {
+            x = (x * 0.999 + (i % 37) as f32) % 7919.0;
+            let spike = if i % 511 == 0 { 4.0 } else { 1.0 };
+            seq.push((x / 7919.0 * 2.4 - 1.2) * spike);
         }
-        assert!(clip_roundoff(1.5) < clip_roundoff(1.6) && clip_roundoff(1.6) < wall);
+        // 暴力参考：want[i] = min(1, 天花板/|x[i]|)，peek[i] = want[i..i+win] 的最小值。
+        let want: Vec<f32> = seq
+            .iter()
+            .map(|s| {
+                let m = s.abs();
+                if m > DUCK_CEILING {
+                    DUCK_CEILING / m
+                } else {
+                    1.0
+                }
+            })
+            .collect();
+        let n = seq.len();
+        let k = (1.0 - (-1.0 / (rate as f64 * DUCK_RELEASE_MS as f64 / 1000.0)).exp()) as f32;
+        let mut expect: Vec<f32> = Vec::with_capacity(n);
+        let mut g = 1.0f32;
+        for i in 0..n {
+            let peek = want[i..(i + win).min(n)]
+                .iter()
+                .copied()
+                .fold(1.0f32, f32::min);
+            g = if peek < g { peek } else { g + (peek - g) * k };
+            expect.push(seq[i] * g);
+        }
+        let mut mixer = Mixer::new(rate);
+        for i in 0..n {
+            let got = mixer.duck_frame(seq[i], 0.0).0;
+            if i + 1 < win {
+                assert_eq!(got, 0.0, "前视填充期（帧 {i}）应静音");
+                continue;
+            }
+            let out_i = i + 1 - win;
+            if out_i + win > n {
+                break; // 参考串末尾的前视窗口被截短，实时侧这时还看不到未来
+            }
+            assert_eq!(got, expect[out_i], "帧 {out_i} 输出不符");
+        }
+    }
+
+    /// 下探不会把任何采样推到满量程，也不会削平波形：尖峰整段被压低，
+    /// 但采样之间的差别原样保留。
+    #[test]
+    fn duck_dips_the_level_instead_of_shaving_waveforms() {
+        let rate = 44100u32;
+        let win = Mixer::duck_frames(rate);
+        let mut mixer = Mixer::new(rate);
+        let mut out: Vec<f32> = Vec::new();
+        // 3 倍满量程的锯齿：逐点限幅会把它削成一堆相同的最大值。
+        for i in 0..3000usize {
+            let s = 3.0 * ((i % 97) as f32 / 96.0 * 2.0 - 1.0);
+            out.push(mixer.duck_frame(s, s).0);
+        }
+        let over = out.iter().filter(|s| s.abs() > DUCK_CEILING + 1e-6).count();
+        assert_eq!(over, 0, "前视下探不该有任何采样越过天花板");
+        // 锯齿每 97 帧才回到同一个值，相邻输出不该相等；被逐点削顶则会成片同值。
+        // 跳过前视填充期（那段本来就是静音，会被当成连续同值）。
+        let steady = &out[win..];
+        let mut run = 0usize;
+        let mut longest = 0usize;
+        for w in steady.windows(2) {
+            if w[0].to_bits() == w[1].to_bits() {
+                run += 1;
+                longest = longest.max(run);
+            } else {
+                run = 0;
+            }
+        }
+        assert!(
+            longest < 8,
+            "出现连续 {longest} 个相同采样＝波形被削平了，应只按电平整体压低"
+        );
+    }
+
+    /// 响的一段整体压低、安静段要按释放时间常数回到原电平，不能一路压着不放。
+    #[test]
+    fn duck_releases_back_to_unity() {
+        let rate = 44100u32;
+        let win = Mixer::duck_frames(rate);
+        let mut mixer = Mixer::new(rate);
+        // 4 倍满量程的段落喂满窗口和延迟线后，出来的仍是那一段，被压到天花板。
+        for _ in 0..win * 2 {
+            mixer.duck_frame(4.0, 4.0);
+        }
+        let dipped = mixer.duck_frame(4.0, 4.0).0;
+        assert!(
+            (dipped - DUCK_CEILING).abs() < 1e-4,
+            "4 倍满量程应被整体压到 {DUCK_CEILING}，实测 {dipped}"
+        );
+        // 换成 0.2 的小电平，等延迟线里的 4.0 全部出来、包络再走 8 个释放周期。
+        let settle = win + (rate as usize * DUCK_RELEASE_MS as usize / 1000) * 8;
+        for _ in 0..settle {
+            mixer.duck_frame(0.2, 0.2);
+        }
+        let back = mixer.duck_frame(0.2, 0.2).0;
+        assert!(
+            (back - 0.2).abs() < 1e-3,
+            "安静 8 个释放周期后应基本回到原电平，实测 {back}"
+        );
+    }
+
+    /// 暂停 / seek 调 `clear()`：延迟线里剩下的旧音频不许冒到新落点后面。
+    #[test]
+    fn duck_clear_flushes_the_delay_line() {
+        let rate = 44100u32;
+        let win = Mixer::duck_frames(rate);
+        let mut mixer = Mixer::new(rate);
+        for _ in 0..win * 2 {
+            mixer.duck_frame(0.3, 0.3);
+        }
+        mixer.clear();
+        for i in 0..win {
+            assert_eq!(
+                mixer.duck_frame(0.0, 0.0).0,
+                0.0,
+                "clear 后第 {i} 帧还在前视填充期，应为静音"
+            );
+        }
+        assert_eq!(
+            mixer.duck_step, win as u64,
+            "clear 要把帧计数归零，否则窗口淘汰会算错"
+        );
     }
 
     #[test]
@@ -463,9 +679,14 @@ mod tests {
         let n = Note::new(0, 45);
         mixer.spawn(&n, 100, 100, &bank, 1, 7);
         let pre = Mixer::jitter_delay(7, ms, rate) as usize;
-        for _ in 0..pre {
+        // 总线上还套了一层前视下探：输出比调度晚 duck_frames()-1 帧。
+        let lookahead = Mixer::duck_frames(rate) - 1;
+        for _ in 0..pre + lookahead {
             assert_eq!(mixer.render_sample(&bank).0, 0.0, "延迟期内应静音");
         }
-        assert!(mixer.render_sample(&bank).0 > 0.0, "延迟结束后应开始发声");
+        assert!(
+            mixer.render_sample(&bank).0 > 0.0,
+            "延迟（列抖动 + 前视）结束后应开始发声"
+        );
     }
 }
