@@ -2317,8 +2317,10 @@ impl EditorState {
         }
     }
 
-    /// 有界预算的方案构建（原版 `full_search = false`），供窗口计数/尺寸查询；
-    /// 真正导出用 [`Self::rebuild_command_plan_forced`]（全预算）。
+    /// 有界预算的方案构建（原版 `full_search = false`）。原版把带预算的那一档用在
+    /// 窗口计数上（`schematic_height/length` 走 `get_schematic_plan(false)` 复用缓存），
+    /// 但命令方块模式下窗口画的是「导出时计算」（`draw_window_schematic_export.gml:138-140`），
+    /// 所以端口只有导出这一条路，走 [`Self::rebuild_command_plan_forced`]（全预算）。
     fn build_command_plan(&self, full_search: bool) -> nbs_io::mc_export::Plan {
         use nbs_io::mc_export;
         let o = &self.schematic_options;
@@ -2346,17 +2348,6 @@ impl EditorState {
                     .filter(|d| *d > 0.0)
             },
         )
-    }
-
-    /// 原版 `minecraft_export_get_schematic_plan(false)`：签名没变就复用缓存。
-    pub fn ensure_command_plan(&mut self) -> &nbs_io::mc_export::Plan {
-        let signature = self.command_plan_signature();
-        if self.schematic_command_plan.is_none() || self.schematic_command_signature != signature {
-            let plan = self.build_command_plan(false);
-            self.schematic_command_signature = signature;
-            self.schematic_command_plan = Some(plan);
-        }
-        self.schematic_command_plan.as_ref().unwrap()
     }
 
     /// 原版 `minecraft_export_get_schematic_plan(true)`：导出时全预算重建并替换缓存。

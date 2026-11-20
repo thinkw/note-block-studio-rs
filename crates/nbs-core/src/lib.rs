@@ -86,9 +86,8 @@ pub use document::Document;
 pub use history::{Edit, History};
 pub use macros::{parse_pattern, transform as transform_notes, Macro, TremoloFade};
 pub use model::{
-    key_name, key_offset, panning_velocity_to_short, short_to_panning_velocity, Column,
-    CustomInstrument, Layer, LockMode, Note, Song, SongMeta, FIRST_CUSTOM_INDEX, KEY_MAX, KEY_MIN,
-    MC_KEY_MAX, MC_KEY_MIN, PAN_CENTER, PAN_MAX, PIT_MAX, SOUND_STOPPER_NAME, TEMPO_CHANGER_NAME,
-    VEL_MAX,
+    key_name, panning_velocity_to_short, short_to_panning_velocity, Column, CustomInstrument,
+    Layer, LockMode, Note, Song, SongMeta, FIRST_CUSTOM_INDEX, KEY_MAX, MC_KEY_MAX, MC_KEY_MIN,
+    PAN_CENTER, PAN_MAX, PIT_MAX, SOUND_STOPPER_NAME, TEMPO_CHANGER_NAME, VEL_MAX,
 };
 pub use selection::{Selection, SelectionNote};

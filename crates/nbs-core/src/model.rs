@@ -6,7 +6,6 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// NBS 音高范围（88 键）。Minecraft 原生可播放区间是 33..=57。
-pub const KEY_MIN: u8 = 0;
 pub const KEY_MAX: u8 = 87;
 pub const MC_KEY_MIN: u8 = 33;
 pub const MC_KEY_MAX: u8 = 57;
@@ -474,11 +473,6 @@ pub fn key_name(key: u8, show_octave: bool, flats: bool) -> String {
     } else {
         name.to_string()
     }
-}
-
-/// 相对 MC 音域的半音数（状态栏显示用）。
-pub fn key_offset(key: u8) -> i32 {
-    key as i32 - 33
 }
 
 /// 原版 `draw_block` / `control_step` 都是拿乐器名硬比的两个特殊自定义音色。
