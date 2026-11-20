@@ -12,7 +12,9 @@ pub mod datapack;
 pub mod image_export;
 pub mod mc_export;
 pub mod midi;
+pub mod midi_enhanced;
 pub mod midi_gm;
+mod midi_miau;
 pub mod nbt;
 pub mod pattern;
 pub mod prefs;
@@ -30,6 +32,10 @@ pub use image_export::{export_png, render_image, ImageOptions};
 pub use midi::{
     export_midi, export_midi_bytes, import_midi_bytes, import_midi_data, import_midi_path,
     parse_midi, MidiData, MidiEvent, MidiImportOptions, MidiImportPrefs, MidiPart, MidiTrack,
+};
+pub use midi_enhanced::{
+    import_midi_enhanced, ChannelCombination, EnhancedImportReport, EnhancedMidiOptions,
+    InstrumentSubstitution, MidiSlot, RangeMode,
 };
 pub use midi_gm::{MidiDrum, MidiGmPersist, MidiGmTable, MidiPatch, MIDI_DRUMS, MIDI_PATCHES};
 pub use pattern::{

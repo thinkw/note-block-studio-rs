@@ -24,6 +24,7 @@ pub mod icons;
 pub mod interaction;
 pub mod layers_panel;
 pub mod live_midi;
+mod midi_enhanced;
 pub mod piano;
 pub mod shortcuts;
 pub mod sound_import;

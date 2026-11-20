@@ -1077,6 +1077,9 @@ pub struct EditorState {
     pub stereo_width: i32,
     pub stereo_reverse: bool,
     pub midi_options: MidiImportOptions,
+    pub midi_enhanced: nbs_io::midi_enhanced::EnhancedMidiOptions,
+    pub midi_enhanced_options: MidiImportOptions,
+    pub midi_enhanced_check: Option<Result<nbs_io::midi_enhanced::EnhancedImportReport, String>>,
     /// 原版 `midi_*` 那一堆全局：解析好的 MIDI。导入窗口只在这有值时才打开——
     /// 原版 `open_midi()` 是先解析、再 `window = w_midi`，没有「先开空窗口」这条路。
     pub midi_data: Option<nbs_io::midi::MidiData>,
@@ -1404,7 +1407,10 @@ impl EditorState {
             pitch_additive: false,
             stereo_width: 50,
             stereo_reverse: false,
+            midi_enhanced_options: midi_options.clone(),
             midi_options,
+            midi_enhanced: nbs_io::midi_enhanced::EnhancedMidiOptions::default(),
+            midi_enhanced_check: None,
             midi_data: None,
             midi_file: String::new(),
             midi_tab: 0,

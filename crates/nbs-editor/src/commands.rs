@@ -986,9 +986,26 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 state.window = None;
                 return;
             };
-            let song = nbs_io::midi::import_midi_data(&midi, &state.midi_options);
+            let (song, report) = if state.midi_enhanced.enabled {
+                match nbs_io::midi_enhanced::import_midi_enhanced(
+                    &midi,
+                    &state.midi_enhanced_options,
+                    &state.midi_enhanced,
+                ) {
+                    Ok((song, report)) => (song, Some(report)),
+                    Err(error) => {
+                        state.midi_enhanced_check = Some(Err(error.clone()));
+                        state.set_message(error);
+                        return;
+                    }
+                }
+            } else {
+                let song = nbs_io::midi::import_midi_data(&midi, &state.midi_options);
+                state.midi_options.finish_import(&midi, &mut state.midi_gm);
+                (song, None)
+            };
             let n = song.total_blocks;
-            state.midi_options.finish_import(&midi, &mut state.midi_gm);
+            state.midi_enhanced_check = None;
             state.window = None;
             state.midi_data = None;
             state.midi_file.clear();
@@ -1001,10 +1018,17 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.set_marker(0.0);
             state.clear_section();
             state.save_prefs();
-            state.set_message(if crate::lang() == 1 {
-                format!("MIDI 导入完成：{n} 个音符")
-            } else {
-                format!("MIDI import finished: {n} notes")
+            state.set_message(match report {
+                Some(report) if crate::lang() == 1 => format!(
+                    "增强 MIDI 导入完成：{n} 个音符，{} 个超出原生音域（key 33..57）",
+                    report.out_of_range,
+                ),
+                Some(report) => format!(
+                    "Enhanced MIDI import: {n} notes, {} outside native range (key 33..57)",
+                    report.out_of_range,
+                ),
+                None if crate::lang() == 1 => format!("MIDI 导入完成：{n} 个音符"),
+                None => format!("MIDI import finished: {n} notes"),
             });
         }
         Command::MidiUseDefaults => {
@@ -1730,6 +1754,9 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     match nbs_io::midi::parse_midi_path(&path) {
                         Ok(midi) => {
                             state.midi_options.reload_tables(&midi, &state.midi_gm);
+                            state.midi_enhanced = nbs_io::midi_enhanced::EnhancedMidiOptions::for_midi(&midi);
+                            state.midi_enhanced_options = state.midi_options.clone();
+                            state.midi_enhanced_check = None;
                             state.midi_data = Some(midi);
                             state.midi_file = path
                                 .file_name()
@@ -2330,6 +2357,68 @@ mod tests {
     use super::*;
     use nbs_core::model::Layer;
     use std::path::Path;
+
+    fn enhanced_import_fixture(note: u8) -> nbs_io::midi::MidiData {
+        use nbs_io::midi::{MidiData, MidiEvent, MidiPart, MidiTrack};
+        MidiData {
+            division: 480, minpos: 0, maxpos: 480, micsecqn: 500_000,
+            tracks: vec![MidiTrack { name: "Piano".into(), events: vec![MidiEvent {
+                pos: 0, channel: 0, note, velocity: 100, patch: 0, part: 0, until: 480,
+            }] }],
+            parts: vec![MidiPart { track: 0, channel: 0, patch: 0, note_duration: true }],
+            ..MidiData::default()
+        }
+    }
+
+    #[test]
+    fn enhanced_import_replaces_song_without_changing_traditional_gm() {
+        let _prefs = crate::isolate_prefs();
+        let _lock = crate::frame_lock();
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        let midi = enhanced_import_fixture(60);
+        state.midi_gm.set_patch(0, 6, -1);
+        let gm_before = state.midi_gm.patch(0);
+        state.midi_options = nbs_io::MidiImportOptions::for_midi(&midi, &state.midi_gm);
+        state.midi_enhanced_options = state.midi_options.clone();
+        state.midi_options.use_velocity = false;
+        let options_before = state.midi_options.clone();
+        state.midi_enhanced = nbs_io::midi_enhanced::EnhancedMidiOptions::for_midi(&midi);
+        state.midi_enhanced.enabled = true;
+        state.midi_data = Some(midi);
+        state.window = Some(WindowKind::MidiImport);
+        dispatch(&mut state, Command::MidiImportRun, &ctx);
+        assert_eq!(state.doc.song.total_blocks, 2);
+        assert!(state.doc.song.iter_notes().all(|(_, _, note)| note.velocity == 78));
+        assert_eq!(state.midi_gm.patch(0), gm_before);
+        assert_eq!(state.midi_options, options_before);
+        assert!(!nbs_io::Preferences::load().midi_import.unwrap().use_velocity);
+        assert!(state.midi_data.is_none());
+        assert!(state.window.is_none());
+    }
+
+    #[test]
+    fn enhanced_import_error_keeps_song_and_dialog() {
+        let _prefs = crate::isolate_prefs();
+        let _lock = crate::frame_lock();
+        let ctx = Context::default();
+        let mut state = state_with(four_case_song(10.0));
+        let before = nbs_core::nbs::save_bytes(&state.doc.song, nbs_core::nbs::NBS_VERSION).unwrap();
+        let midi = enhanced_import_fixture(0);
+        state.midi_options = nbs_io::MidiImportOptions::for_midi(&midi, &state.midi_gm);
+        state.midi_enhanced_options = state.midi_options.clone();
+        state.midi_enhanced = nbs_io::midi_enhanced::EnhancedMidiOptions::for_midi(&midi);
+        state.midi_enhanced.enabled = true;
+        state.midi_enhanced.range_mode = nbs_io::midi_enhanced::RangeMode::Keep;
+        state.midi_enhanced.channels[0].transpose = 0;
+        state.midi_data = Some(midi);
+        state.window = Some(WindowKind::MidiImport);
+        dispatch(&mut state, Command::MidiImportRun, &ctx);
+        assert_eq!(before, nbs_core::nbs::save_bytes(&state.doc.song, nbs_core::nbs::NBS_VERSION).unwrap());
+        assert!(matches!(state.midi_enhanced_check, Some(Err(_))));
+        assert!(state.midi_data.is_some());
+        assert_eq!(state.window, Some(WindowKind::MidiImport));
+    }
 
     /// 固定内容的歌曲：2 八度内一个、外一个、自定义音色一个、带微调一个，
     /// 正好让 `calculate_size()` 的三段提问全部出现且顺序固定。

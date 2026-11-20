@@ -696,22 +696,23 @@ pub fn import_midi_path(path: &Path, opts: &MidiImportOptions) -> Result<Song, S
     import_midi_bytes(&data, opts)
 }
 
-/// 原版一个 note-on 在本轮量化后的全部派生值，两遍扫描各算一次（原版也是各算一次）。
-struct Resolved {
-    channel: usize,
+/// 一个 note-on 在本轮量化后的全部派生值，供传统/增强导入共用分配器。
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Resolved {
+    pub(super) channel: usize,
     /// 量化后的起始 tick，可能为负（原版第二遍不拦，交给 `add_block` 的 `xx < 0` 忽略）。
-    pos: i64,
+    pub(super) pos: i64,
     /// 量化后的结束 tick（未配对到 note-off 时为 -1 量化出来的负数）。
-    until: i64,
-    note: i32,
-    ins: i8,
+    pub(super) until: i64,
+    pub(super) note: i32,
+    pub(super) ins: i8,
     /// 通道 9 且该鼓音被设成静音 / 通道被设成无视。
-    stop: bool,
-    include_duration: bool,
-    vel: u8,
+    pub(super) stop: bool,
+    pub(super) include_duration: bool,
+    pub(super) vel: u8,
 }
 
-fn resolve(midi: &MidiData, opts: &MidiImportOptions, ev: &MidiEvent, dpt: f64) -> Resolved {
+pub(super) fn resolve(midi: &MidiData, opts: &MidiImportOptions, ev: &MidiEvent, dpt: f64) -> Resolved {
     let channel = ev.channel as usize;
     let pos = midi.quantize(ev.pos, opts.remove_silent, dpt);
     let until = midi.quantize(ev.until, opts.remove_silent, dpt);
@@ -804,6 +805,19 @@ fn assign_layers(
 
 /// 逐条对应装机版的 `import_midi.gml`。
 pub fn import_midi_data(midi: &MidiData, opts: &MidiImportOptions) -> Song {
+    let dpt = midi.deltapertick(opts.precision).max(1e-9);
+    let events: Vec<Vec<(Resolved, u16)>> = midi.tracks.iter().map(|track| {
+        track.events.iter().map(|ev| (resolve(midi, opts, ev, dpt), ev.patch)).collect()
+    }).collect();
+    import_resolved(midi, opts, &events)
+}
+
+/// 共用量化后事件的层分配、尾音、速度变化和层名逻辑。事件保持原轨/事件/槽顺序。
+pub(super) fn import_resolved(
+    midi: &MidiData,
+    opts: &MidiImportOptions,
+    events: &[Vec<(Resolved, u16)>],
+) -> Song {
     let mut song = Song::new();
     let dpt = midi.deltapertick(opts.precision).max(1e-9);
     let seconds = midi.song_length(opts.tempo_changer, opts.remove_silent) as f32;
@@ -820,12 +834,11 @@ pub fn import_midi_data(midi: &MidiData, opts: &MidiImportOptions) -> Song {
     let last_channel = midi.channels as usize;
     let mut per_channel: Vec<Vec<EvRef>> = (0..last_channel + 1).map(|_| Vec::new()).collect();
     let mut eventlayer: Vec<Vec<i32>> =
-        midi.tracks.iter().map(|t| vec![-1; t.events.len()]).collect();
+        events.iter().map(|track| vec![-1; track.len()]).collect();
 
     // 第一遍：只登记事件并算出每个通道要占几层。
-    for (t, track) in midi.tracks.iter().enumerate() {
-        for (e, ev) in track.events.iter().enumerate() {
-            let r = resolve(midi, opts, ev, dpt);
+    for (t, track) in events.iter().enumerate() {
+        for (e, (r, _)) in track.iter().enumerate() {
             if r.channel > last_channel || r.stop || r.pos < 0 {
                 continue;
             }
@@ -837,9 +850,8 @@ pub fn import_midi_data(midi: &MidiData, opts: &MidiImportOptions) -> Song {
     let channel_height = assign_layers(&mut per_channel, &mut eventlayer, opts.max_height);
 
     // 第二遍：落块。层号 = 该事件在通道内的声部 + 前面所有通道的层数之和（开速度变化再 +1）。
-    for (t, track) in midi.tracks.iter().enumerate() {
-        for (e, ev) in track.events.iter().enumerate() {
-            let r = resolve(midi, opts, ev, dpt);
+    for (t, track) in events.iter().enumerate() {
+        for (e, (r, patch)) in track.iter().enumerate() {
             if r.channel > last_channel || r.ins < 0 || eventlayer[t][e] < 0 {
                 continue;
             }
@@ -855,9 +867,9 @@ pub fn import_midi_data(midi: &MidiData, opts: &MidiImportOptions) -> Song {
             if r.include_duration {
                 if opts.note_duration_fade {
                     fade_mode = 0;
-                } else if is_note_fade(MidiGmTable::patch_name(ev.patch as u8), false) {
+                } else if is_note_fade(MidiGmTable::patch_name(*patch as u8), false) {
                     fade_mode = 1;
-                } else if is_note_fade(MidiGmTable::patch_name(ev.patch as u8), true) {
+                } else if is_note_fade(MidiGmTable::patch_name(*patch as u8), true) {
                     fade_mode = 2;
                 }
             }
@@ -1080,5 +1092,132 @@ pub fn export_midi(song: &Song, path: &Path) -> Result<(), String> {
 fn grow_layers(song: &mut Song, n: usize) {
     while song.layers.len() < n {
         song.layers.push(Layer::default());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(pos: i64, until: i64, note: u8, patch: u16) -> MidiEvent {
+        MidiEvent { pos, until, note, patch, channel: 0, velocity: 100, part: 0 }
+    }
+
+    fn fixture(events: Vec<MidiEvent>) -> MidiData {
+        MidiData {
+            division: 480,
+            minpos: events.iter().map(|e| e.pos).min().unwrap_or(-1),
+            maxpos: events.iter().map(|e| e.until.max(e.pos)).max().unwrap_or(0),
+            micsecqn: 500_000,
+            tracks: vec![MidiTrack { name: String::new(), events }],
+            ..MidiData::default()
+        }
+    }
+
+    #[test]
+    fn traditional_precision_trim_and_tempo_regression() {
+        let mut midi = fixture(vec![event(241, 721, 60, 0), event(601, 841, 72, 0)]);
+        midi.tracks[0].events[0].velocity = 120;
+        midi.tracks[0].events[1].velocity = 64;
+        for precision in [0, 1, 3] {
+            let factor = precision as u32 + 1;
+            for trim in [false, true] {
+                let opts = MidiImportOptions { precision, remove_silent: trim, ..Default::default() };
+                let song = import_midi_data(&midi, &opts);
+                let first = if trim { 0 } else { 2 * factor };
+                let last = if trim { 3 * factor } else { 5 * factor };
+                assert_eq!(song.total_blocks, 2);
+                assert_eq!(song.get(first, 0).unwrap().key, 39);
+                assert_eq!(song.get(first, 0).unwrap().velocity, 100); // legacy clamp, not /127
+                assert_eq!(song.get(last, 0).unwrap().velocity, 64);
+                let seconds = if trim { 600.0 / 960.0 } else { 841.0 / 960.0 };
+                assert!((song.meta.tempo - last as f32 / seconds).abs() < 0.0001);
+            }
+            midi.tempo_changers = vec![(0, 120.0), (481, 60.0), (481, 90.0)];
+            let opts = MidiImportOptions { precision, tempo_changer: true, ..Default::default() };
+            let song = import_midi_data(&midi, &opts);
+            assert_eq!(song.meta.tempo, 8.0 * factor as f32);
+            assert_eq!(song.get(0, 0).unwrap().pitch, 120 * factor as i16);
+            assert_eq!(song.get(2 * factor, 0).unwrap().pitch, 90 * factor as i16);
+            assert_eq!(song.get(0, 1).unwrap().key, 39);
+            assert_eq!(song.total_blocks, 4);
+            assert_eq!(song.layers[0].name, "TempoChgr");
+        }
+    }
+
+    #[test]
+    fn traditional_tail_patch_and_pan_regression() {
+        let midi = fixture(vec![
+            event(0, 480, 60, 119), // Reverse Cymbal: fade in
+            event(480, 960, 64, 127), // Gunshot: fade out
+            event(960, 1440, 67, 0),
+        ]);
+        let mut opts = MidiImportOptions {
+            precision: 0, note_duration: true, part_durations: vec![true],
+            ..Default::default()
+        };
+        let song = import_midi_data(&midi, &opts);
+        assert_eq!(song.total_blocks, 12);
+        let volumes: Vec<_> = song.iter_notes().map(|(_, _, n)| n.velocity).collect();
+        assert_eq!(volumes, [0, 25, 50, 75, 100, 75, 50, 25, 100, 50, 50, 50]);
+        assert_eq!(song.get(9, 0).unwrap().panning, 50);
+        assert_eq!(song.get(10, 0).unwrap().panning, 150);
+        assert_eq!(song.get(1, 0).unwrap().panning, 100);
+        opts.note_duration_fade = true;
+        opts.note_duration_fade_start = 80;
+        opts.note_duration_fade_end = 20;
+        let faded = import_midi_data(&midi, &opts);
+        for start in [0, 4, 8] {
+            let volumes: Vec<_> = (start..start + 4).map(|t| faded.get(t, 0).unwrap().velocity).collect();
+            assert_eq!(volumes, [100, 80, 50, 20]);
+        }
+        opts.part_durations[0] = false;
+        assert_eq!(import_midi_data(&midi, &opts).total_blocks, 3);
+    }
+
+    #[test]
+    fn traditional_filters_layers_drums_and_range_regression() {
+        let mut midi = fixture(vec![event(-120, -1, 60, 0), event(0, 480, 127, 0), event(0, 480, 64, 0)]);
+        midi.channels = 9;
+        midi.perc_notes = vec![36, 38];
+        midi.tracks.push(MidiTrack { name: String::new(), events: vec![
+            MidiEvent { channel: 9, ..event(0, 480, 36, 0) },
+            MidiEvent { channel: 9, ..event(0, 480, 38, 0) },
+            MidiEvent { channel: 1, ..event(0, 480, 60, 0) },
+            MidiEvent { channel: 10, ..event(0, 480, 60, 0) }, // above channels
+        ] });
+        let mut opts = MidiImportOptions {
+            precision: 0, remove_silent: false, max_height: 1,
+            note_duration: true, part_durations: vec![true],
+            perc_ins: vec![2, -1], perc_pitch: vec![100, 45], ..Default::default()
+        };
+        opts.channel_ins[1] = -1;
+        let song = import_midi_data(&midi, &opts);
+        assert_eq!(song.total_blocks, 5); // 4 melody ticks, 1 drum
+        assert_eq!(song.get(0, 0).unwrap().key, 87); // legacy clamp is unchanged
+        assert_eq!(song.get(0, 1).unwrap().key, 87);
+        assert_eq!(song.get(0, 1).unwrap().instrument, 2);
+        assert_eq!(song.layers.len(), 2);
+        opts.keep_octave_range = true;
+        let folded = import_midi_data(&midi, &opts);
+        assert!(folded.iter_notes().all(|(_, _, n)| n.key == 51));
+        opts.perc_ins.clear(); // incomplete drum map is silent, no extra layer
+        assert_eq!(import_midi_data(&midi, &opts).total_blocks, 4);
+    }
+
+    #[test]
+    fn traditional_duration_guards_and_smpte_tempo_regression() {
+        let midi = fixture(vec![
+            event(0, -1, 60, 0), event(120, 120, 62, 0),
+            event(240, 960, 64, 128),
+            MidiEvent { part: 9, ..event(360, 960, 66, 0) },
+        ]);
+        let opts = MidiImportOptions { precision: 0, note_duration: true, part_durations: vec![true], ..Default::default() };
+        assert_eq!(import_midi_data(&midi, &opts).total_blocks, 4);
+        let mut midi = midi;
+        midi.tempo_changers = vec![(0, 120.0), (480, 60.0)];
+        assert_eq!(midi.duration_cache(), [[1.0, 1.0], [1.5, 1.5]]);
+        midi.division |= 0x8000;
+        assert_eq!(midi.duration_cache(), [[1.0, 1.0], [1.0, 1.0]]);
     }
 }

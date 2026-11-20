@@ -5755,6 +5755,37 @@ fn assign_midi_device(state: &mut EditorState, device: usize, value: i8) {
 }
 
 fn midi_import_window(state: &mut EditorState, ui: &mut Ui) {
+    let previous_mode = state.midi_enhanced.enabled;
+    ui.horizontal(|ui| {
+        ui.selectable_value(&mut state.midi_enhanced.enabled, false, tr("Traditional import", "传统导入"));
+        ui.selectable_value(&mut state.midi_enhanced.enabled, true, tr("Enhanced import", "增强导入"));
+    });
+    if previous_mode != state.midi_enhanced.enabled {
+        if state.midi_enhanced.enabled {
+            state.midi_enhanced_options.perc_ins = state.midi_options.perc_ins.clone();
+            state.midi_enhanced_options.perc_pitch = state.midi_options.perc_pitch.clone();
+        }
+        state.midi_menu = None;
+        state.midi_submenu = None;
+        state.midi_enhanced_check = None;
+    }
+    ui.separator();
+    if state.midi_enhanced.enabled {
+        if let Some(midi) = state.midi_data.as_ref() {
+            if let Some(command) = crate::midi_enhanced::show(
+                ui,
+                midi,
+                &mut state.midi_enhanced_options,
+                &mut state.midi_enhanced,
+                &mut state.midi_enhanced_check,
+            ) {
+                state.emit(command);
+            }
+        } else {
+            ui.label(tr("No parsed MIDI file.", "没有已解析的 MIDI 文件。"));
+        }
+        return;
+    }
     // 原版没有「空白的 MIDI 导入窗口」：`command_open_midi` 一定先解析、解析成功才开窗，
     // 所以这里只在数据被清掉的边缘情况下退回一句说明。
     let Some(midi) = state.midi_data.as_ref() else {
