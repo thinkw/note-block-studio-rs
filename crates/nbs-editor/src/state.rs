@@ -1257,15 +1257,24 @@ fn load_bundled_text(name: &str) -> Option<String> {
 
 impl EditorState {
     pub fn new() -> Self {
-        let prefs = Preferences::load();
+        let mut prefs = Preferences::load();
         // 演示曲的说明是「生成那一刻」定型的文案，按 prefs 的语言显式传进去；
         // 这里不翻全局开关——new() 会加载采样、开音频设备，占着全局会把并行跑的
         // 单测串台（其余状态串都是绘制时现翻的）。
         let song = nbs_core::model::Song::demo_in(prefs.language);
         let bank = SoundBank::load_auto(prefs.sounds_dir_path().as_deref());
-        // 端口自加（用户要求 #94）：上次点名的输出设备直接交给引擎当起始设备。
-        // 拿不到就让它回落系统默认，启动阶段不弹提示（那会儿状态栏还没画起来）——
-        // 引擎在构造函数里同步等这一趟，结果只进设备那一格，不进状态栏。
+        // 端口自加（用户要求 #94）：老版本首选项存的是设备名，这里认一次并换成系统给的
+        // 稳定 ID（改名、重插、换驱动都还认得同一台）；那台已经不在了就清空、跟着系统
+        // 默认走，稍后在状态栏说一声。这一趟枚举顺带当作下拉的初始列表。
+        let devices = nbs_audio::list_output_devices();
+        let stored_output = prefs.audio_output.clone();
+        let output_gone = migrate_output_pref(&mut prefs, &devices);
+        if prefs.audio_output != stored_output {
+            let _ = prefs.save();
+        }
+        // 上次点名的输出设备直接交给引擎当起始设备。引擎那一趟拿不到就自己回落系统
+        // 默认，结果只进设备那一格、不进状态栏（那会儿窗口还没画起来）；
+        // 「上次那台不在了」这一句是上面那趟迁移说的，见 new() 结尾。
         let mut audio: Box<dyn AudioEngine> = Box::new(CpalEngine::with_bank_output(
             bank,
             Some(prefs.audio_output.clone()),
@@ -1422,7 +1431,7 @@ impl EditorState {
             prefs_language_menu: false,
             prefs_output_menu: false,
             output_menu: false,
-            output_list: Vec::new(),
+            output_list: devices,
             prefs_drag: 0.0,
             png_options: ImageOptions {
                 dark: png_dark,
@@ -1460,6 +1469,19 @@ impl EditorState {
             wallpaper: None,
         };
         state.enter_startup();
+        // 迁移那趟在设备表里认不出的老名字：在状态栏说一句，别让人以为还在自己
+        // 点名的那台出声。引擎这时候已经跟着系统默认建好流了。
+        if let Some(stale) = output_gone {
+            state.set_message(format!(
+                "{}{}{}",
+                nbs_core::tr("Output device \"", "上次那台输出设备「"),
+                stale,
+                nbs_core::tr(
+                    "\" is no longer available; following the system default instead.",
+                    "」已经不在了，已改回跟随系统默认。"
+                )
+            ));
+        }
         state
     }
 
@@ -2083,6 +2105,26 @@ impl EditorState {
         items
     }
 
+    /// 一台设备在首选项里应当怎么被记下来：优先用系统给的稳定 ID（改名、重插、
+    /// 换驱动都还认得同一台），后端没给 ID 时退回名字。
+    fn output_key(device: &nbs_audio::OutputDevice) -> String {
+        if device.id.is_empty() {
+            device.name.clone()
+        } else {
+            device.id.clone()
+        }
+    }
+
+    /// 把首选项里那个标识（稳定 ID，或没迁移前的老设备名）翻回给人看的设备名。
+    /// 拿手边的设备表翻，不额外枚举（这一格每帧都要画）。
+    fn output_display_name(&self, id_or_name: &str) -> String {
+        self.output_list
+            .iter()
+            .find(|d| d.id == id_or_name || d.name == id_or_name)
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| id_or_name.to_string())
+    }
+
     /// 当前选择落在下拉的第几项；点名的设备已经不在了返回 `usize::MAX`（菜单里不打勾）。
     pub fn output_selection(&self) -> usize {
         if self.prefs.audio_output.is_empty() {
@@ -2090,16 +2132,16 @@ impl EditorState {
         }
         self.output_list
             .iter()
-            .position(|d| d.name == self.prefs.audio_output)
+            .position(|d| d.id == self.prefs.audio_output || d.name == self.prefs.audio_output)
             .map_or(usize::MAX, |i| i + 1)
     }
 
-    /// 下拉里选中第 `i` 项（0 = 跟随系统默认）。
+    /// 下拉里选中第 `i` 项（0 = 跟随系统默认），返回该存进首选项的那个标识。
     pub fn output_choice(&self, i: usize) -> Option<String> {
         if i == 0 {
             None
         } else {
-            self.output_list.get(i - 1).map(|d| d.name.clone())
+            self.output_list.get(i - 1).map(Self::output_key)
         }
     }
 
@@ -2114,7 +2156,7 @@ impl EditorState {
         } else {
             format!(
                 "{}{}",
-                self.prefs.audio_output,
+                self.output_display_name(&self.prefs.audio_output),
                 nbs_core::tr(" (unavailable)", "（不可用）")
             )
         }
@@ -2387,6 +2429,30 @@ fn step_in_ladder(cur: f32, up: bool) -> Option<f32> {
     }
 }
 
+/// 端口自加（用户要求 #94、#103 阶段 1）：首选项里那个输出设备标识只认一次——
+/// 老版本存的是设备名，在当前设备表里认得出来就换成系统给的稳定 ID（改名、重插、
+/// 换驱动都还认得同一台）；认不出来（那台已经不在了）就清空，让引擎跟着系统默认走，
+/// 并把旧名字还回去，由调用方在状态栏说一声。
+fn migrate_output_pref(
+    prefs: &mut Preferences,
+    devices: &[nbs_audio::OutputDevice],
+) -> Option<String> {
+    if prefs.audio_output.is_empty() {
+        return None;
+    }
+    let known = devices
+        .iter()
+        .find(|d| d.id == prefs.audio_output || d.name == prefs.audio_output)
+        .map(EditorState::output_key);
+    match known {
+        Some(key) => {
+            prefs.audio_output = key;
+            None
+        }
+        None => Some(std::mem::take(&mut prefs.audio_output)),
+    }
+}
+
 fn apply_audio_prefs(audio: &mut dyn AudioEngine, p: &Preferences) {
     let clock = audio.clock_mut();
     clock.set_master(p.master_volume);
@@ -2449,16 +2515,18 @@ mod tests {
     }
 
     /// 端口自加 #94：「输出」下拉第 0 项固定是跟随系统默认，设备从第 1 项开始；
-    /// 点名设备掉线后不再打勾，也不能凭空造出一个选择。
+    /// 选中项存的是稳定 ID，点名设备掉线后不再打勾，也不能凭空造出一个选择。
     #[test]
     fn output_menu_items_map_back_to_a_device_name() {
         let mut st = EditorState::for_test();
         st.output_list = vec![
             nbs_audio::OutputDevice {
+                id: "wasapi:{SPK}".into(),
                 name: "扬声器".into(),
                 is_default: true,
             },
             nbs_audio::OutputDevice {
+                id: "wasapi:{HP}".into(),
                 name: "耳机".into(),
                 is_default: false,
             },
@@ -2466,13 +2534,90 @@ mod tests {
         assert_eq!(st.output_items().len(), 3, "1 个跟随默认 + 2 台设备");
         assert_eq!(st.output_selection(), 0, "出厂跟随系统默认 → 勾第 0 项");
         assert_eq!(st.output_choice(0), None);
-        assert_eq!(st.output_choice(1).as_deref(), Some("扬声器"));
-        assert_eq!(st.output_choice(2).as_deref(), Some("耳机"));
+        assert_eq!(st.output_choice(1).as_deref(), Some("wasapi:{SPK}"));
+        assert_eq!(st.output_choice(2).as_deref(), Some("wasapi:{HP}"));
         assert_eq!(st.output_choice(3), None, "越界不编造设备名");
+        st.prefs.audio_output = "wasapi:{HP}".into();
+        assert_eq!(st.output_selection(), 2, "存 ID 要能认回第 2 项");
         st.prefs.audio_output = "耳机".into();
-        assert_eq!(st.output_selection(), 2);
+        assert_eq!(st.output_selection(), 2, "老名字也认得，别判成掉线");
         st.prefs.audio_output = "已经拔掉的声卡".into();
         assert_eq!(st.output_selection(), usize::MAX, "不在了就不打勾");
+    }
+
+    /// 端口自加 #103 阶段 1：老首选项存的设备名只认一次换成稳定 ID；后端没给 ID 的
+    /// 设备退回名字（别把它清空）；那台已经不在了就清空回落「跟随系统默认」，
+    /// 并把旧名字交回调用方去状态栏说一声。
+    #[test]
+    fn an_old_output_device_name_is_migrated_to_its_id_once() {
+        let devices = vec![
+            nbs_audio::OutputDevice {
+                id: "wasapi:{SPK}".into(),
+                name: "扬声器".into(),
+                is_default: true,
+            },
+            nbs_audio::OutputDevice {
+                id: String::new(),
+                name: "没有 ID 的声卡".into(),
+                is_default: false,
+            },
+        ];
+        let mut prefs = Preferences::default();
+        // 出厂空值：什么都不动
+        assert_eq!(migrate_output_pref(&mut prefs, &devices), None);
+        assert!(prefs.audio_output.is_empty());
+        // 名字认得出来 → 换成 ID，不需要提示
+        prefs.audio_output = "扬声器".into();
+        assert_eq!(migrate_output_pref(&mut prefs, &devices), None);
+        assert_eq!(prefs.audio_output, "wasapi:{SPK}");
+        // 已经是 ID：再跑一次不该改动，也不该报「不在了」
+        prefs.audio_output = "wasapi:{HP}".into();
+        let devices_with_hp = {
+            let mut d = devices.clone();
+            d.push(nbs_audio::OutputDevice {
+                id: "wasapi:{HP}".into(),
+                name: "耳机".into(),
+                is_default: false,
+            });
+            d
+        };
+        assert_eq!(migrate_output_pref(&mut prefs, &devices_with_hp), None);
+        assert_eq!(prefs.audio_output, "wasapi:{HP}");
+        // 后端没给 ID：存名字就是它能认的全部，别清掉
+        prefs.audio_output = "没有 ID 的声卡".into();
+        assert_eq!(migrate_output_pref(&mut prefs, &devices), None);
+        assert_eq!(prefs.audio_output, "没有 ID 的声卡");
+        // 那台不在了：清空 + 把旧名字交回去
+        prefs.audio_output = "拔掉的外置声卡".into();
+        assert_eq!(
+            migrate_output_pref(&mut prefs, &devices).as_deref(),
+            Some("拔掉的外置声卡")
+        );
+        assert!(prefs.audio_output.is_empty(), "回落跟随系统默认");
+    }
+
+    /// 端口自加 #103 阶段 1：整条启动链路（`EditorState::new()`）——盘上存的那台已经不
+    /// 在了，要清空回落「跟随系统默认」、落盘，并在状态栏说一声是哪台。
+    /// 设备名用一句这台机器上不可能存在的，用例才不依赖具体硬件。
+    #[test]
+    fn a_gone_output_device_is_cleared_at_startup_and_said_aloud() {
+        let _prefs = crate::isolate_prefs();
+        let mut seed = Preferences::default();
+        seed.audio_output = "nbs-rust 这台机器上不存在的输出设备".into();
+        seed.save().unwrap();
+        let _cn = crate::LangGuard::set(1);
+        let st = EditorState::new();
+        assert!(st.prefs.audio_output.is_empty(), "认不出来的老名字要清空");
+        assert!(
+            Preferences::load().audio_output.is_empty(),
+            "清空要落盘，别每次启动都撞一次同一堵墙"
+        );
+        let m = st.active_message().unwrap_or_default().to_string();
+        assert!(
+            m.contains("已经不在了") && m.contains("跟随系统默认"),
+            "状态栏要说清回落了：{m:?}"
+        );
+        assert!(m.contains("不存在的输出设备"), "要说清是哪台不在了：{m:?}");
     }
 
     /// 端口自加 #94：点名的设备拿不到 → 当场回落系统默认，落盘的选择必须跟着变空，

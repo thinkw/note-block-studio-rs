@@ -17,9 +17,10 @@ pub struct Preferences {
     pub play_speed: f32,
     pub metronome: bool,
     pub mono: bool,
-    /// 端口自加（用户要求 #94）：点名的输出设备名，空 = 跟随系统默认。
+    /// 端口自加（用户要求 #94）：点名的输出设备标识（cpal 的稳定 `DeviceId` 串，
+    /// Windows 上是端点 ID，形如 `wasapi:{0.0.0.00000000}.{GUID}`），空 = 跟随系统默认。
     /// 原版把声音整个交给 GameMaker，只会落在系统默认设备上，没有这一项。
-    /// 存的是设备名而不是 ID：cpal 0.15 不对外暴露稳定设备 ID。
+    /// 老版本存的是设备名（当时 cpal 0.15 不对外暴露稳定 ID），启动时按名字认一次换过来。
     pub audio_output: String,
     /// 原版 `realvolume`：图层行里画不画音量小图标。
     pub show_layer_volumes: bool,

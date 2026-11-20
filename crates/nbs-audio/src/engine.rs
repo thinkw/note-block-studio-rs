@@ -105,10 +105,12 @@ enum DeviceReport {
     /// 还没尝试建流。
     Uninitialised,
 }
-/// 一台可选的输出设备，用设备名当标识（Windows 给的名字自带设备描述，
-/// 如「耳机 (Realtek(R) Audio)」，实际重名概率极低；真撞上同名就选枚举到的第一台）。
+/// 一台可选的输出设备。`id` 是系统给的稳定标识（Windows 上是端点 ID，形如
+/// `wasapi:{0.0.0.00000000}.{GUID}`），首选项存它 —— 改名、重插、换驱动都还认得同一台；
+/// `name` 由系统给、只给人看。个别后端拿不到 ID 时 `id` 是空串，那就只能按名字认。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutputDevice {
+    pub id: String,
     pub name: String,
     pub is_default: bool,
 }
@@ -118,12 +120,17 @@ fn device_name(device: &cpal::Device) -> Result<String, cpal::Error> {
     device.description().map(|d| d.name().to_owned())
 }
 
+/// 系统给一台设备的稳定标识（cpal 的 `DeviceId` 串，`host:后端 ID`）。
+fn device_id(device: &cpal::Device) -> Option<String> {
+    device.id().ok().map(|id| id.to_string())
+}
+
 /// 枚举系统里的输出设备。拿不到后端时返回空表（不报错：没设备只是没得选）。
 pub fn list_output_devices() -> Vec<OutputDevice> {
     let host = cpal::default_host();
-    let default_name = host
-        .default_output_device()
-        .and_then(|d| device_name(&d).ok());
+    let default = host.default_output_device();
+    let default_id = default.as_ref().and_then(device_id);
+    let default_name = default.as_ref().and_then(|d| device_name(d).ok());
     let Ok(devices) = host.output_devices() else {
         return Vec::new();
     };
@@ -135,12 +142,36 @@ pub fn list_output_devices() -> Vec<OutputDevice> {
         if out.iter().any(|o| o.name == name) {
             continue;
         }
+        let id = device_id(&device).unwrap_or_default();
+        // 认「哪台是系统默认」优先比 ID：`default_output_device()` 给的是「跟随默认」
+        // 那个虚拟句柄，名字撞得上不代表是同一台。
+        let is_default = match (id.is_empty(), default_id.as_ref()) {
+            (false, Some(default_id)) => &id == default_id,
+            _ => Some(&name) == default_name.as_ref(),
+        };
         out.push(OutputDevice {
-            is_default: Some(&name) == default_name.as_ref(),
+            id,
             name,
+            is_default,
         });
     }
     out
+}
+
+/// 这台设备是不是 `wanted` 指的那一台：先认稳定 ID，再认名字（老偏好存的是名字）。
+fn is_the_wanted(device: &cpal::Device, wanted: &str) -> bool {
+    device_id(device).as_deref() == Some(wanted)
+        || device_name(device).ok().as_deref() == Some(wanted)
+}
+
+/// 把一个标识（稳定 ID，或老偏好里的设备名）翻回给人看的那句设备名，认不出原样给回。
+/// 只在报错那几趟调用（要枚举一次，实测 2.6~4.0 毫秒），别放进每帧的路径。
+pub fn device_label(id_or_name: &str) -> String {
+    list_output_devices()
+        .into_iter()
+        .find(|d| d.id == id_or_name || d.name == id_or_name)
+        .map(|d| d.name)
+        .unwrap_or_else(|| id_or_name.to_string())
 }
 
 /// 系统当前的默认输出设备名（一台设备都没有时 `None`）。
@@ -150,27 +181,37 @@ fn default_output_name() -> Option<String> {
         .and_then(|d| device_name(&d).ok())
 }
 
-/// 取一台输出设备：`wanted` 为空就拿系统默认；指定名字时先比对默认（省一次枚举），
-/// 再全表按名字找。找不到报错，由调用方决定回落策略。
+/// 取一台输出设备：`wanted` 为空就拿系统默认；指定时先比对默认（省一次枚举），再按
+/// cpal 的稳定 ID 反查，最后按名字找（老偏好存的是名字）。找不到才报错，
+/// 由调用方决定回落策略。
 fn open_output_device(wanted: Option<&str>) -> Result<cpal::Device, String> {
     let host = cpal::default_host();
-    if let Some(device) = host.default_output_device() {
-        if wanted.is_none() || device_name(&device).ok().as_deref() == wanted {
-            return Ok(device);
-        }
-    } else if wanted.is_none() {
-        return Err("no default output device".to_string());
+    let Some(wanted) = wanted.filter(|w| !w.is_empty()) else {
+        return host
+            .default_output_device()
+            .ok_or_else(|| "no default output device".to_string());
+    };
+    let found = host
+        .default_output_device()
+        .filter(|d| is_the_wanted(d, wanted))
+        .or_else(|| {
+            wanted
+                .parse::<cpal::DeviceId>()
+                .ok()
+                .and_then(|id| host.device_by_id(&id))
+        })
+        .or_else(|| {
+            host.output_devices()
+                .ok()?
+                .find(|d| is_the_wanted(d, wanted))
+        });
+    match found {
+        Some(device) => Ok(device),
+        None => Err(format!(
+            "output device \"{}\" is not available",
+            device_label(wanted)
+        )),
     }
-    let wanted = wanted.unwrap_or_default();
-    let devices = host
-        .output_devices()
-        .map_err(|e| format!("failed to enumerate output devices: {e}"))?;
-    for device in devices {
-        if device_name(&device).ok().as_deref() == Some(wanted) {
-            return Ok(device);
-        }
-    }
-    Err(format!("output device \"{wanted}\" is not available"))
 }
 
 /// 一趟「取设备 + 建流」做完后留下的结论。
@@ -186,7 +227,7 @@ pub struct StreamOutcome {
     pub fell_back: bool,
 }
 
-/// 建流那一步的注入点：收到「想要的设备名（`None` = 系统默认）」，返回这一趟的结论
+/// 建流那一步的注入点：收到「想要的设备标识（`None` = 系统默认）」，返回这一趟的结论
 /// 加上建好的流。用例往里塞假替身，就不必真去碰音频硬件。
 type Connect =
     dyn Fn(&Shared, Option<String>) -> (StreamOutcome, Option<cpal::Stream>) + Send + 'static;
@@ -341,8 +382,9 @@ pub struct CpalEngine {
     device: DeviceReport,
     /// 自动跟随 / 补建那几趟没成时留下的原因，等着界面取走（同一趟只报一次）。
     stream_error: Option<String>,
-    /// 用户点名的输出设备；`None` = 跟随系统默认。原版没有这个概念
-    /// （声音整个交给 GameMaker，只会落在系统默认设备上），端口自加 #94。
+    /// 用户点名的输出设备标识（[`OutputDevice::id`]，老偏好里可能是设备名）；
+    /// `None` = 跟随系统默认。原版没有这个概念（声音整个交给 GameMaker，
+    /// 只会落在系统默认设备上），端口自加 #94。
     wanted: Option<String>,
     /// 默认设备探测的限流时戳，和最近看到 / 最近尝试建流时系统默认设备的名字。
     probe_at: Instant,
@@ -506,7 +548,8 @@ impl CpalEngine {
             // 免得下次启动又去点一台已经不在的设备。
             self.wanted = None;
             self.stream_error = Some(format!(
-                "output device \"{requested}\" is not available, now on {name}"
+                "output device \"{}\" is not available, now on {name}",
+                device_label(&requested)
             ));
         } else if let Some(e) = &outcome.error {
             self.stream_error = Some(e.clone());
@@ -526,10 +569,11 @@ impl CpalEngine {
         let default_changed = seen != self.seen_default;
         self.seen_default = seen.clone();
         // 点名的那台还在不在：不在就得跟过去，别继续对着一台已经不存在的设备出声。
-        let wanted_gone = self
-            .wanted
-            .as_ref()
-            .is_some_and(|wanted| !list_output_devices().iter().any(|d| &d.name == wanted));
+        let wanted_gone = self.wanted.as_ref().is_some_and(|wanted| {
+            !list_output_devices()
+                .iter()
+                .any(|d| &d.id == wanted || &d.name == wanted)
+        });
         // 建流失败过（没流）+ 系统有可用默认 + 这台默认还没试过：再试一次。
         let dead_but_available =
             !self.stream_live() && seen.is_some() && seen != self.tried_default;
