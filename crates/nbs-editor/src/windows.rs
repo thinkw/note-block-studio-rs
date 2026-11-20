@@ -6,7 +6,7 @@ use egui::{
     UiBuilder, Vec2,
 };
 use nbs_core::instruments::{instrument_name, INSTRUMENTS};
-use nbs_core::model::{key_name, SongMeta};
+use nbs_core::model::key_name;
 use nbs_core::{Macro, TremoloFade};
 
 use crate::commands::Command;
@@ -985,51 +985,136 @@ fn donate_banner_window(state: &mut EditorState, ctx: &Context) {
 }
 
 fn song_info(state: &mut EditorState, ui: &mut Ui) {
-    let mut changed = false;
-    egui::Grid::new("song_info_grid")
-        .num_columns(2)
-        .show(ui, |ui| {
-            let m: &mut SongMeta = &mut state.doc.song.meta;
-            ui.label(tr("Name", "名称"));
-            if ui.text_edit_singleline(&mut m.name).changed() {
-                changed = true;
+    // 原版 `draw_window_songinfo.gml:62-136`：这个窗只把已经存着的元数据念一遍，空的字段
+    // 整行都不画（:71/84/104 的 `!= ""` 判定），底下那句提示和「修改」「确定」两个按钮
+    // （:130-136）——「修改」跳到属性窗，要改字段是在那儿改，这里没有输入框。
+    let (name, author, orauthor, desc, midi) = {
+        let m = &state.doc.song.meta;
+        (
+            m.name.clone(),
+            m.author.clone(),
+            m.original_author.clone(),
+            m.description.clone(),
+            m.midi_file.clone(),
+        )
+    };
+    ui.vertical_centered(|ui| {
+        ui.label(
+            RichText::new(if name.is_empty() {
+                tr("Untitled song", "无名歌曲").to_string()
+            } else {
+                name
+            })
+            .strong(),
+        );
+        if !author.is_empty() {
+            ui.label(tr("Created by ", "作者：").to_string() + &author);
+        }
+        if !orauthor.is_empty() {
+            ui.label(tr("Originally created by ", "原作者：").to_string() + &orauthor);
+        }
+        if !desc.is_empty() {
+            // 原版把简介画在一块 236 宽（`-118 .. +118`）的框里，按 216 断词（:49）。
+            ui.group(|ui| {
+                ui.allocate_ui_with_layout(
+                    Vec2::new(216.0, 0.0),
+                    egui::Layout::top_down(egui::Align::LEFT),
+                    |ui| {
+                        ui.label(&desc);
+                    },
+                );
+            });
+        }
+        if !midi.is_empty() {
+            ui.label(tr("Imported from ", "导入自：").to_string() + &midi);
+        }
+        ui.label(
+            RichText::new(tr(
+                "This message is shown when the file is opened.",
+                "此信息在打开文件时显示。",
+            ))
+            .small()
+            .weak(),
+        );
+        ui.horizontal(|ui| {
+            if ui.button(tr("Edit", "修改")).clicked() {
+                state.emit(Command::ShowWindow(WindowKind::Properties));
             }
-            ui.end_row();
-            ui.label(tr("Author", "作者"));
-            if ui.text_edit_singleline(&mut m.author).changed() {
-                changed = true;
+            if ui.button(tr("OK", "确定")).clicked() {
+                state.emit(Command::CloseWindow);
             }
-            ui.end_row();
-            ui.label(tr("Original author", "原作者"));
-            if ui.text_edit_singleline(&mut m.original_author).changed() {
-                changed = true;
-            }
-            ui.end_row();
-            ui.label(tr("Description", "描述"));
-            if ui
-                .add(egui::TextEdit::multiline(&mut m.description).desired_rows(3))
-                .changed()
-            {
-                changed = true;
-            }
-            ui.end_row();
         });
-    if changed {
-        state.doc.song.dirty = true;
-    }
-    ui.separator();
-    ui.label(
-        RichText::new(tr(
-            "These fields are saved with the .nbs file.",
-            "这些字段会随 .nbs 一起保存",
-        ))
-        .small()
-        .weak(),
-    );
-    footer(state, ui);
+    });
 }
 
 fn properties(state: &mut EditorState, ui: &mut Ui) {
+    // 原版 `draw_window_properties.gml:29-66` 的 Information 区：歌曲名 / 作者 / 原作者 /
+    // 简介四个框。原版是直接写 `cursong.*` 再标一句 `changed = 1`（:42/49/56），不进撤销栈，
+    // 所以这里也不走 `edit_meta`——一次敲字压一条历史反而和原版差得更远。
+    let mut info_dirty = false;
+    egui::Grid::new("properties_info")
+        .num_columns(2)
+        .show(ui, |ui| {
+            let m = &mut state.doc.song.meta;
+            ui.label(tr("Song name", "歌曲名"));
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut m.name)
+                        .hint_text(tr("Untitled song", "无名歌曲"))
+                        .desired_width(240.0),
+                )
+                .on_hover_text(tr("The name of the song.", "歌曲的名称。"))
+                .changed()
+            {
+                info_dirty = true;
+            }
+            ui.end_row();
+            ui.label(tr("Song author", "作者"));
+            if ui
+                .add(egui::TextEdit::singleline(&mut m.author).desired_width(240.0))
+                .on_hover_text(tr(
+                    "The name of the creator of the song.",
+                    "歌曲作者的名称。",
+                ))
+                .changed()
+            {
+                info_dirty = true;
+            }
+            ui.end_row();
+            ui.label(tr("Original song author", "原作者"));
+            if ui
+                .add(egui::TextEdit::singleline(&mut m.original_author).desired_width(240.0))
+                .on_hover_text(tr(
+                    "The name of the creator of the original song\n\
+                     (Leave empty if you composed the song yourself.)",
+                    "歌曲原作者的名称。（如果是自作曲就留空）",
+                ))
+                .changed()
+            {
+                info_dirty = true;
+            }
+            ui.end_row();
+            ui.label(tr("Description", "简介"));
+            if ui
+                .add(
+                    egui::TextEdit::multiline(&mut m.description)
+                        .desired_rows(3)
+                        .desired_width(240.0),
+                )
+                .on_hover_text(tr(
+                    "Enter a description for your song.",
+                    "为你的歌曲输入简介。",
+                ))
+                .changed()
+            {
+                info_dirty = true;
+            }
+            ui.end_row();
+        });
+    if info_dirty {
+        state.doc.song.dirty = true;
+    }
+    ui.separator();
     let mut tempo = state.doc.song.meta.tempo as f64;
     if ui
         .add(egui::Slider::new(&mut tempo, 0.25..=60.0).text(tr("Tempo (tick/s)", "速度 (tick/s)")))

@@ -3755,6 +3755,101 @@ mod gui_window_tests {
             "原版用完默认值仍停在这扇窗"
         );
     }
+
+    /// 属性窗的 Information 区（原版 `draw_window_properties.gml:29-66`）：歌曲名 / 作者 /
+    /// 原作者 / 简介四个框。原版是直接写 `cursong.*` 再标一句 `changed = 1`（:42/49/56），
+    /// 不进撤销栈，所以端口也只标脏、不入历史——一次敲字压一条历史反而离原版更远。
+    #[test]
+    fn properties_window_edits_the_song_meta() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.prefs.language = 0;
+        let _en = crate::LangGuard::set(0);
+        state.theme.apply(&ctx);
+        state.doc.song.meta.name.clear();
+        state.doc.song.meta.author.clear();
+        state.doc.song.meta.original_author.clear();
+        state.doc.song.meta.description.clear();
+        state.doc.song.dirty = false;
+        state.window = Some(WindowKind::Properties);
+        let texts = drawn_texts(&mut state, &ctx);
+        for t in [
+            "Song name",
+            "Song author",
+            "Original song author",
+            "Description",
+        ] {
+            assert!(texts.iter().any(|s| s == t), "属性窗缺「{t}」：{texts:?}");
+        }
+        // 空框画的是占位文案，它的中心就落在输入框里，点一下即聚焦。
+        frame_out(&mut state, &ctx, base_input());
+        let out = frame_out(&mut state, &ctx, base_input());
+        let at = text_center_if(&out.shapes, |t| t == "Untitled song");
+        click_pos_at(&mut state, &ctx, at);
+        for chunk in ["O", "de"] {
+            let mut raw = base_input();
+            raw.events.push(egui::Event::Text(chunk.into()));
+            frame_out(&mut state, &ctx, raw);
+        }
+        assert_eq!(state.doc.song.meta.name, "Ode", "敲进去的字没落到歌曲名上");
+        assert!(state.doc.song.dirty, "改元数据要标脏");
+        assert!(
+            !state.doc.history.can_undo(),
+            "原版敲字不进撤销栈（逐字符压历史会把 Ctrl+Z 变成删字）"
+        );
+    }
+
+    /// 歌曲信息窗在原版是**只读**的（`draw_window_songinfo.gml:62-136`）：字段为空整行不画，
+    /// 底部只有「修改」跳属性窗、「确定」关窗两个按钮。端口原来在这儿放了四个输入框，
+    /// 和原版正好反了。
+    #[test]
+    fn song_info_window_is_a_readonly_card() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.prefs.language = 0;
+        let _en = crate::LangGuard::set(0);
+        state.theme.apply(&ctx);
+        state.doc.song.meta.name = "Ring".into();
+        state.doc.song.meta.author = "Notch".into();
+        state.doc.song.meta.original_author.clear();
+        state.doc.song.meta.description.clear();
+        state.doc.song.meta.midi_file = "ring.mid".into();
+        state.window = Some(WindowKind::SongInfo);
+        let texts = drawn_texts(&mut state, &ctx);
+        for t in [
+            "Ring",
+            "Created by Notch",
+            "Imported from ring.mid",
+            "Edit",
+            "OK",
+        ] {
+            assert!(texts.iter().any(|s| s == t), "信息窗缺「{t}」：{texts:?}");
+        }
+        for t in ["Originally created by ", "Song name", "Untitled song"] {
+            assert!(
+                !texts.iter().any(|s| s.starts_with(t)),
+                "空字段不该画出来，编辑态标签也不该出现在只读窗里：{t}"
+            );
+        }
+        let mut raw = base_input();
+        raw.events.push(egui::Event::Text("Z".into()));
+        frame_out(&mut state, &ctx, raw);
+        assert_eq!(state.doc.song.meta.name, "Ring", "只读窗不该吃键盘输入");
+        click_text(&mut state, &ctx, "OK");
+        frame(&mut state, &ctx);
+        assert_eq!(state.window, None, "「确定」关窗");
+
+        state.window = Some(WindowKind::SongInfo);
+        click_text(&mut state, &ctx, "Edit");
+        frame(&mut state, &ctx);
+        assert_eq!(
+            state.window,
+            Some(WindowKind::Properties),
+            "「修改」应换到属性窗（原版 :130-133 就是直接切窗）"
+        );
+    }
 }
 
 #[cfg(test)]
