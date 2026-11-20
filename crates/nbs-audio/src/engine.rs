@@ -279,6 +279,36 @@ fn stream_failed(
     )
 }
 
+/// 后端投进错误回调的那件事，是不是「这条流到此为止了」。
+///
+/// cpal 0.18.2 的 WASAPI 只会投「到此为止」那几种：默认设备换了投 `StreamInvalidated`
+/// （`host/wasapi/stream.rs:730`：它从不重绑 IAudioClient，所以实话实说这条流已经废了）、
+/// 点名的那台掉了投 `DeviceNotAvailable`（`host/wasapi/mod.rs:63` 把
+/// `AUDCLNT_E_DEVICE_INVALIDATED` 映射成它）。
+/// 剩下这三种是别的后端（ALSA / CoreAudio / ASIO）的「抖一下，我自己在恢复」：
+/// `Xrun` 之后 ALSA 自己 prepare() 回来、`DeviceChanged` 文档明说流还活着不用重建、
+/// `RealtimeDenied` 只说优先级没提上去。跟着它们停表拆流，等于我们把还在出声的播放掐掉。
+fn stream_is_dead(kind: cpal::ErrorKind) -> bool {
+    !matches!(
+        kind,
+        cpal::ErrorKind::Xrun | cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied
+    )
+}
+
+/// 音频线程投过来的错误：只记账，不在回调里动流。
+fn on_stream_error(shared: &Shared, e: cpal::Error) {
+    let kind = e.kind();
+    if !stream_is_dead(kind) {
+        eprintln!("[nbs-audio] output stream hiccup ({kind:?}): {e}");
+        return;
+    }
+    eprintln!("[nbs-audio] output stream ended ({kind:?}): {e}");
+    let mut st = shared.lock();
+    // 撤掉「有音频回调在驱动播放头」这个前提：不撤的话流一死，播放头就冻在那儿不动了。
+    st.audio_active = false;
+    st.stream_needs_rebuild = true;
+}
+
 /// 在一台具体设备上建输出流，建好的流连同结论一起交回。
 fn open_stream_on(
     device: &cpal::Device,
@@ -314,10 +344,7 @@ fn open_stream_on(
                         data.fill(0.0);
                     }
                 },
-                move |e| {
-                    eprintln!("[nbs-audio] output stream error: {e}");
-                    err_shared.lock().audio_active = false;
-                },
+                move |e| on_stream_error(&err_shared, e),
                 None,
             )
             .map_err(|e| format!("failed to build f32 output stream: {e}")),
@@ -338,10 +365,7 @@ fn open_stream_on(
                             *d = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
                         }
                     },
-                    move |e| {
-                        eprintln!("[nbs-audio] output stream error: {e}");
-                        err_shared.lock().audio_active = false;
-                    },
+                    move |e| on_stream_error(&err_shared, e),
                     None,
                 )
                 .map_err(|e| format!("failed to build i16 output stream: {e}"))
@@ -367,9 +391,10 @@ fn open_stream_on(
     )
 }
 
-/// 默认设备探测间隔：插耳机、切蓝牙到跟随切换的最大延迟。这一档只做便宜的事
-/// （读系统默认设备名，本机实测 1.6 毫秒；点名那台才多跑一次全量枚举，2.6~4.0 毫秒）。
-const OUTPUT_PROBE: Duration = Duration::from_millis(1000);
+/// 两次自动重试之间的最小间隔。设备出事不靠我们猜（cpal 的错误回调会投过来），这一档
+/// 只管两件事：一条流都没有的时候隔一会儿回头看一眼系统默认出现了没；以及挡住
+/// 「建起来就死」的坏设备把界面线程每帧都拖去重建一遍（建一条要 0.1 秒）。
+const OUTPUT_RETRY: Duration = Duration::from_millis(1000);
 pub struct CpalEngine {
     shared: Shared,
     clock: TransportClock,
@@ -386,9 +411,9 @@ pub struct CpalEngine {
     /// `None` = 跟随系统默认。原版没有这个概念（声音整个交给 GameMaker，
     /// 只会落在系统默认设备上），端口自加 #94。
     wanted: Option<String>,
-    /// 默认设备探测的限流时戳，和最近看到 / 最近尝试建流时系统默认设备的名字。
+    /// 上一次自动重试的时戳（见 [`OUTPUT_RETRY`]），和上一次建流时系统默认是哪台
+    /// —— 同一台默认撞过一次就不必每秒再撞一次。
     probe_at: Instant,
-    seen_default: Option<String>,
     tried_default: Option<String>,
     last_song: Option<Song>,
     export_options: ExportOptions,
@@ -417,7 +442,6 @@ impl CpalEngine {
         let bank = Arc::new(bank);
         let shared = make_shared((*bank).clone(), SAMPLE_RATE);
         let clock = TransportClock::with_shared(shared.clone());
-        let seen_default = default_output_name();
         let mut engine = Self {
             shared,
             clock,
@@ -428,7 +452,6 @@ impl CpalEngine {
             stream_error: None,
             wanted,
             probe_at: Instant::now(),
-            seen_default,
             tried_default: None,
             last_song: None,
             export_options: ExportOptions::default(),
@@ -494,9 +517,12 @@ impl CpalEngine {
     /// 这套策略在 [`connect_output`] 里。返回换到的新设备名（该报给界面那句）；
     /// 回落、以及名字本来就在报的不返。失败返 `Err`，原因给状态栏。
     fn reconnect(&mut self) -> Result<Option<String>, String> {
-        self.tried_default = self.seen_default.clone();
         // 先把旧流放掉再建：两条流同时从一份调度器里拉数据，播放时钟会被推快一倍。
+        // cpal 的 `drop` 会等音频线程收工，所以这一步之后旧流再不会往信号位上记东西；
+        // 记在那儿的事件这一趟就当着已处理掉。
         self.stream = None;
+        self.shared.lock().stream_needs_rebuild = false;
+        self.tried_default = default_output_name();
         let (outcome, stream) = (self.connect)(&self.shared, self.wanted.clone());
         let announced = match &outcome.built {
             Some((name, _, _)) if !outcome.fell_back => Some(name.clone()),
@@ -556,29 +582,30 @@ impl CpalEngine {
         }
     }
 
-    /// 系统默认输出换了（插耳机、切蓝牙）就跟随过去；用户点名的设备掉线也回落默认；
-    /// 之前没建成流、现在系统又有可用设备了就补一次。约每秒一次，做的是便宜的那半：
-    /// 读默认设备名（实测 1.6 毫秒），点名的那台才顺带全量枚举一次（实测 2.6~4.0 毫秒，
-    /// 0.15 那一趟要 1.3 秒，所以当年得挪去后台）。返回换到的新设备名。
+    /// 设备出事了没有？出事与否由 cpal 的错误回调在音频线程上记一笔（[`on_stream_error`]），
+    /// 这里在界面线程取走、当场重建一条 —— 拆流建流这种事不能放在回调里做，那是它自己
+    /// 那条流。返回换到的新设备名（该报给界面那句）。
+    ///
+    /// 还留着一条时间闸的理由：一条流都没有的时候（开机就没设备、系统默认被全禁用），
+    /// 没有任何东西会来通知我们，只能隔一会儿回头看一眼系统默认出现了没。这条闸同时
+    /// 挡住「建起来就死」的坏设备把每帧都变成一趟注定失败的重建。
     fn poll_output_change(&mut self) -> Option<String> {
-        if self.probe_at.elapsed() < OUTPUT_PROBE {
+        let died = self.shared.lock().stream_needs_rebuild;
+        // 有流、又没出事：一个字节都不探测。以前这一档每秒要读一次系统默认设备名，
+        // 点名的那台还要每秒全量枚举一次——cpal 0.18 之后这些都不要了，事件会告诉我们。
+        if !died && self.stream_live() {
+            return None;
+        }
+        if self.probe_at.elapsed() < OUTPUT_RETRY {
             return None;
         }
         self.probe_at = Instant::now();
+        if died {
+            return self.reconnect().ok().flatten();
+        }
+        // 走到这里是一条流都没有：系统有了可用的默认、而且这台还没撞过，才补建一次。
         let seen = default_output_name();
-        let default_changed = seen != self.seen_default;
-        self.seen_default = seen.clone();
-        // 点名的那台还在不在：不在就得跟过去，别继续对着一台已经不存在的设备出声。
-        let wanted_gone = self.wanted.as_ref().is_some_and(|wanted| {
-            !list_output_devices()
-                .iter()
-                .any(|d| &d.id == wanted || &d.name == wanted)
-        });
-        // 建流失败过（没流）+ 系统有可用默认 + 这台默认还没试过：再试一次。
-        let dead_but_available =
-            !self.stream_live() && seen.is_some() && seen != self.tried_default;
-        let follow_default = self.wanted.is_none() && default_changed;
-        if follow_default || wanted_gone || dead_but_available {
+        if seen.is_some() && seen != self.tried_default {
             self.reconnect().ok().flatten()
         } else {
             None
@@ -1289,6 +1316,166 @@ mod tests {
             !engine.shared().lock().audio_active,
             "没建成流就不许还挂在「有音频回调驱动播放头」上"
         );
+    }
+
+    /// 数得出建了几趟流的假替身：接上的永远是同一台「假设备」，只用来数次数。
+    fn counted_connect(tally: Arc<std::sync::atomic::AtomicUsize>) -> Box<Connect> {
+        Box::new(move |_shared: &Shared, wanted: Option<String>| {
+            tally.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            built_outcome(wanted, "假设备")
+        })
+    }
+
+    /// 阶段 2：流废了这件事由 cpal 在音频线程上记一笔，界面线程下一帧取走就重建，
+    /// 不再靠每秒去猜。取走之后信号位要跟着清掉，否则每帧重建一遍。
+    #[test]
+    fn a_dying_stream_is_replaced_on_the_next_poll() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut engine =
+            CpalEngine::start(SoundBank::empty(), None, counted_connect(calls.clone()));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "启动建一趟");
+        // 本机 WASAPI 在「系统默认换了」那一趟投的就是这个。
+        on_stream_error(
+            engine.shared(),
+            cpal::Error::new(cpal::ErrorKind::StreamInvalidated),
+        );
+        assert!(
+            !engine.shared().lock().audio_active,
+            "流废了就不许还挂在「有音频回调驱动播放头」上"
+        );
+        engine.probe_at = Instant::now() - OUTPUT_RETRY * 2;
+        assert_eq!(
+            engine.poll_output().as_deref(),
+            Some("假设备"),
+            "取走事件当场重建，并把接上的那台报出去"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "一趟事件只重建一趟");
+        assert!(
+            !engine.shared().lock().stream_needs_rebuild,
+            "取走了就该清掉，别留到下一帧再建一遍"
+        );
+        assert_eq!(engine.poll_output(), None, "报过的那一趟不许再报一遍");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// 阶段 2：后端投「抖一下，我自己在恢复」那几类事件时，既不许停表也不许拆流。
+    /// WASAPI 不投这三种，投的是 ALSA / CoreAudio / ASIO —— 跟着它们停播放，等于
+    /// 我们亲手把一条还在出声的流掐死。
+    #[test]
+    fn a_transient_event_neither_stops_the_clock_nor_rebuilds() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for kind in [
+            cpal::ErrorKind::Xrun,
+            cpal::ErrorKind::DeviceChanged,
+            cpal::ErrorKind::RealtimeDenied,
+        ] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut engine =
+                CpalEngine::start(SoundBank::empty(), None, counted_connect(calls.clone()));
+            engine.shared().lock().audio_active = true;
+            on_stream_error(engine.shared(), cpal::Error::new(kind));
+            assert!(
+                engine.shared().lock().audio_active,
+                "{kind:?} 之后播放头还该由音频回调驱动"
+            );
+            assert!(
+                !engine.shared().lock().stream_needs_rebuild,
+                "{kind:?} 不该要求重建"
+            );
+            engine.probe_at = Instant::now() - OUTPUT_RETRY * 2;
+            assert_eq!(engine.poll_output(), None, "{kind:?} 不该触发重建");
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "{kind:?} 之后一条流都不该动"
+            );
+        }
+    }
+
+    /// 阶段 2 要省掉的那笔：有流又没出事，就绝不因为「过了一秒」再去读默认设备名、
+    /// 再去全量枚举、再凭猜重建。改造前点名一台（用例里这台假设备真表里没有）的设备，
+    /// 每秒都会被判成「掉线了」而重建一趟。
+    #[test]
+    fn a_live_stream_is_never_rebuilt_by_the_clock() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut engine = CpalEngine::start(
+            SoundBank::empty(),
+            Some("假设备".to_string()),
+            counted_connect(calls.clone()),
+        );
+        assert_eq!(engine.wanted_output(), Some("假设备"));
+        for _ in 0..8 {
+            engine.probe_at = Instant::now() - OUTPUT_RETRY * 2;
+            assert_eq!(engine.poll_output(), None);
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "点名的那台还在出声，一次都不该重建"
+        );
+    }
+
+    /// 一条流都没有，且撞的还是同一条默认设备：不每秒傻撞（撞一次就往状态栏塞一句重复
+    /// 的失败原因）。要等默认换个名儿——插了台新设备成了默认——才再试。
+    #[test]
+    fn a_bare_default_is_not_retried_every_second() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let tally = calls.clone();
+        let connect = Box::new(move |_shared: &Shared, wanted: Option<String>| {
+            tally.fetch_add(1, Ordering::SeqCst);
+            stream_failed(wanted, "no audio device at all".to_string())
+        });
+        let mut engine = CpalEngine::start(SoundBank::empty(), None, connect);
+        assert_eq!(engine.output_name(), None);
+        for _ in 0..3 {
+            engine.probe_at = Instant::now() - OUTPUT_RETRY * 2;
+            assert_eq!(engine.poll_output(), None);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "同一台默认不该反复撞");
+    }
+
+    /// 开机就没设备、后来插上来了：没有任何东西会来通知一个根本没建的流，只能隔一会儿
+    /// 回头看一眼——但只在「系统默认换了 / 出现了」那一刻回头。
+    #[test]
+    fn a_stream_is_made_as_soon_as_a_default_shows_up() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let ready = Arc::new(AtomicBool::new(false));
+        let gate = ready.clone();
+        let tally = calls.clone();
+        let connect = Box::new(move |_shared: &Shared, wanted: Option<String>| {
+            tally.fetch_add(1, Ordering::SeqCst);
+            if gate.load(Ordering::SeqCst) {
+                built_outcome(wanted, "后来插上那台")
+            } else {
+                stream_failed(wanted, "no audio device at all".to_string())
+            }
+        });
+        let mut engine = CpalEngine::start(SoundBank::empty(), None, connect);
+        ready.store(true, Ordering::SeqCst);
+        // 当成「开机时系统压根没有默认设备」：现在系统里那台就是新出现的。
+        engine.tried_default = None;
+        engine.probe_at = Instant::now() - OUTPUT_RETRY * 2;
+        let before = calls.load(Ordering::SeqCst);
+        let reported = engine.poll_output();
+        let has_default = default_output_name().is_some();
+        assert_eq!(
+            calls.load(Ordering::SeqCst) > before,
+            has_default,
+            "系统有可用默认才补建，没默认补了也是白补"
+        );
+        if has_default {
+            assert_eq!(
+                reported.as_deref(),
+                Some("后来插上那台"),
+                "补建成功要报出新设备"
+            );
+        } else {
+            assert_eq!(reported, None);
+        }
     }
 
     #[test]

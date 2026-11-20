@@ -236,6 +236,11 @@ pub struct SharedState {
     pub sample_rate: u32,
     /// 是否由真实音频回调推进（false 时 UI 侧内部时钟代理）。
     pub audio_active: bool,
+    /// 输出流的错误回调记下的「这条流废了，请重建」。音频线程里只许记这一笔——
+    /// 拆流建流都在界面线程下一帧做（在回调里动自己那条流会自己等自己）。
+    /// 和 `audio_active` 分开是因为后端会投「抖一下、我自己在恢复」那一类事件，
+    /// 那种既不该停表也不该重建。
+    pub stream_needs_rebuild: bool,
     pub frames_rendered: u64,
     /// 改界面的事件乐器副作用，等 UI 线程每帧取走。
     pub visual_events: Vec<VisualEvent>,
@@ -257,6 +262,7 @@ impl SharedState {
             bank,
             sample_rate,
             audio_active: false,
+            stream_needs_rebuild: false,
             frames_rendered: 0,
             visual_events: Vec::new(),
             metronome_played: -1,

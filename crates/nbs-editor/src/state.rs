@@ -1775,16 +1775,10 @@ impl EditorState {
     pub fn tick_transport(&mut self, ctx: &Context) {
         self.apply_ui_scale(ctx);
         self.apply_window_icon(ctx);
-        // 端口自加（用户要求 #94）：系统默认输出换了（插耳机、切蓝牙）就跟随过去，
-        // 点名的那台掉了则回落默认；切出去的那趟结果也在这一趟取回来。
-        // 引擎内部限流到约每秒一次，这里每帧调即可；贵的全量枚举和建流都在引擎自己的
-        // 后台线程上，这条每帧路径只读缓存（#94 治本）。
+        // 端口自加（用户要求 #94）：输出流出事（拔设备、换驱动、默认被禁用）时 cpal 会在
+        // 音频线程上记一笔，这里在界面线程取走并当场重建一条，顺带把换到的设备报给状态栏。
+        // 有流又没出事时这一趟只是读一个标志位，不碰系统（设备表也只在打开下拉时才枚举）。
         self.poll_output_report();
-        // 设备表是后台线程扫回来的，菜单开着时要定时重绘，否则扫完的那几台
-        // 设备要等用户再动一下鼠标才出现（120ms 一次，只在这个瞬态里跑）。
-        if self.output_menu || self.prefs_output_menu {
-            ctx.request_repaint_after(std::time::Duration::from_millis(120));
-        }
         // 原版 else-if 链里「改界面」的事件乐器副作用（control_step.gml:283-296）
         // 由音频调度发回来，这里统一落地。彩虹开/关都重置表且不发消息，照抄原版。
         let mut accent_changed = false;
