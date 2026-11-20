@@ -193,6 +193,7 @@ fn main() -> Result<(), String> {
             "preferences" => WindowKind::Preferences,
             "instruments" => WindowKind::Instruments,
             "songinfo" => WindowKind::SongInfo,
+            "songinfoedit" => WindowKind::SongInfoEdit,
             "properties" => WindowKind::Properties,
             "statistics" => WindowKind::Statistics,
             "shortcuts" => WindowKind::Shortcuts,

@@ -122,7 +122,8 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         .default_width(default_width)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| match &kind {
-            WindowKind::SongInfo => song_info(state, ui),
+            WindowKind::SongInfo => song_info(state, ui, false),
+            WindowKind::SongInfoEdit => song_info(state, ui, true),
             WindowKind::Properties => properties(state, ui),
             WindowKind::Statistics => statistics(state, ui),
             WindowKind::Preferences => preferences(state, ui),
@@ -984,10 +985,14 @@ fn donate_banner_window(state: &mut EditorState, ctx: &Context) {
     }
 }
 
-fn song_info(state: &mut EditorState, ui: &mut Ui) {
-    // 原版 `draw_window_songinfo.gml:62-136`：这个窗只把已经存着的元数据念一遍，空的字段
-    // 整行都不画（:71/84/104 的 `!= ""` 判定），底下那句提示和「修改」「确定」两个按钮
-    // （:130-136）——「修改」跳到属性窗，要改字段是在那儿改，这里没有输入框。
+/// 原版 `draw_window_songinfo.gml` 是一张卡片供两扇窗共用：
+/// - `w_songinfo`（`with_buttons = false`）：脚注「点击任意位置以关闭」（`:110`），
+///   没有按钮，全屏任意一处按下左键就关（`:138-143`）。打开文件后自动弹的是这扇。
+/// - `w_songinfoedit`（`true`）：脚注换成「此信息在打开文件时显示。」，底下再加
+///   「修改」→属性窗、「确定」→关窗 两个钮（`:129-136`），窗高也多留 32（`:56-57`）。
+fn song_info(state: &mut EditorState, ui: &mut Ui, with_buttons: bool) {
+    // 原版只把已经存着的元数据念一遍，空的字段整行都不画（:71/84/104 的 `!= ""` 判定）——
+    // 要改字段是在属性窗改，这里没有输入框。
     let (name, author, orauthor, desc, midi) = {
         let m = &state.doc.song.meta;
         (
@@ -1028,23 +1033,35 @@ fn song_info(state: &mut EditorState, ui: &mut Ui) {
         if !midi.is_empty() {
             ui.label(tr("Imported from ", "导入自：").to_string() + &midi);
         }
-        ui.label(
-            RichText::new(tr(
-                "This message is shown when the file is opened.",
-                "此信息在打开文件时显示。",
-            ))
-            .small()
-            .weak(),
-        );
-        ui.horizontal(|ui| {
-            if ui.button(tr("Edit", "修改")).clicked() {
-                state.emit(Command::ShowWindow(WindowKind::Properties));
-            }
-            if ui.button(tr("OK", "确定")).clicked() {
-                state.emit(Command::CloseWindow);
-            }
-        });
+        if with_buttons {
+            ui.label(
+                RichText::new(tr(
+                    "This message is shown when the file is opened.",
+                    "此信息在打开文件时显示。",
+                ))
+                .small()
+                .weak(),
+            );
+            ui.horizontal(|ui| {
+                if ui.button(tr("Edit", "修改")).clicked() {
+                    state.emit(Command::ShowWindow(WindowKind::Properties));
+                }
+                if ui.button(tr("OK", "确定")).clicked() {
+                    state.emit(Command::CloseWindow);
+                }
+            });
+        } else {
+            ui.label(
+                RichText::new(tr("Click anywhere to dismiss", "点击任意位置以关闭"))
+                    .small()
+                    .weak(),
+            );
+        }
     });
+    if !with_buttons && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) {
+        // 原版 :139 用的是全屏的左键判定，不要求指针落在卡片里。
+        state.emit(Command::CloseWindow);
+    }
 }
 
 fn properties(state: &mut EditorState, ui: &mut Ui) {

@@ -3858,12 +3858,13 @@ mod gui_window_tests {
         state.doc.song.meta.original_author.clear();
         state.doc.song.meta.description.clear();
         state.doc.song.meta.midi_file = "ring.mid".into();
-        state.window = Some(WindowKind::SongInfo);
+        state.window = Some(WindowKind::SongInfoEdit);
         let texts = drawn_texts(&mut state, &ctx);
         for t in [
             "Ring",
             "Created by Notch",
             "Imported from ring.mid",
+            "This message is shown when the file is opened.",
             "Edit",
             "OK",
         ] {
@@ -3883,7 +3884,7 @@ mod gui_window_tests {
         frame(&mut state, &ctx);
         assert_eq!(state.window, None, "「确定」关窗");
 
-        state.window = Some(WindowKind::SongInfo);
+        state.window = Some(WindowKind::SongInfoEdit);
         click_text(&mut state, &ctx, "Edit");
         frame(&mut state, &ctx);
         assert_eq!(
@@ -3891,6 +3892,81 @@ mod gui_window_tests {
             Some(WindowKind::Properties),
             "「修改」应换到属性窗（原版 :130-133 就是直接切窗）"
         );
+    }
+
+    /// 原版 `load_song.gml:64`：`if (window != w_instruments && newsong.song_name != "") window = w_songinfo`。
+    /// 拆成三条闸门——歌名非空才弹、音色窗开着不抢、整段又在 `if (!backup)` 里；
+    /// 弹的是没按钮、按左键即关的那一版（`:110/138-143`），不是工具栏开的带按钮版。
+    #[test]
+    fn opening_a_named_song_pops_the_plain_info_card() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let dir = scratch("auto-pop");
+        let named = dir.join("ring.nbs");
+        let blank = dir.join("blank.nbs");
+        let mut song = nbs_core::Song::new();
+        song.set(0, 0, nbs_core::Note::new(0, 40));
+        song.meta.name = "Ring".into();
+        nbs_core::nbs::save(&named, &song, nbs_core::nbs::NBS_VERSION).unwrap();
+        song.meta.name.clear();
+        nbs_core::nbs::save(&blank, &song, nbs_core::nbs::NBS_VERSION).unwrap();
+
+        let mut state = EditorState::for_test();
+        state.prefs.language = 0;
+        let _en = crate::LangGuard::set(0);
+        state.theme.apply(&ctx);
+
+        dispatch(&mut state, commands::Command::OpenPath(named.clone()), &ctx);
+        assert_eq!(
+            state.window,
+            Some(WindowKind::SongInfo),
+            "原版开一首有名字的歌就弹这一版"
+        );
+        let texts = drawn_texts(&mut state, &ctx);
+        assert!(texts.iter().any(|t| t == "Ring"), "卡片要念得出曲名");
+        assert!(
+            texts.iter().any(|t| t == "Click anywhere to dismiss"),
+            "原版这一版的脚注：{texts:?}"
+        );
+        // 「Edit」不算：菜单栏本来就有一格叫 Edit，负向断言只能挑窗口独有的文案。
+        for t in ["OK", "This message is shown when the file is opened."] {
+            assert!(
+                !texts.iter().any(|s| s == t),
+                "自动弹的这一版没有按钮、也不是另一句脚注：{t}"
+            );
+        }
+
+        // 原版 :139 的左键判定是全屏的，落在卡片外照样关；同一帧网格仍被窗口挡着。
+        let notes = state.doc.song.total_blocks;
+        click_pos_at(&mut state, &ctx, egui::pos2(400.0, 400.0));
+        assert_eq!(state.window, None, "按左键即关");
+        assert_eq!(
+            state.doc.song.total_blocks, notes,
+            "关窗那一下不该顺手落音符"
+        );
+
+        dispatch(&mut state, commands::Command::OpenPath(blank.clone()), &ctx);
+        assert_eq!(state.window, None, "原版 song_name 为空时不弹");
+
+        dispatch(
+            &mut state,
+            commands::Command::ShowWindow(WindowKind::Instruments),
+            &ctx,
+        );
+        dispatch(&mut state, commands::Command::OpenPath(named.clone()), &ctx);
+        assert_ne!(
+            state.window,
+            Some(WindowKind::SongInfo),
+            "原版 `window != w_instruments` 是弹出的前提"
+        );
+
+        let before = state.recent_files.len();
+        dispatch(&mut state, commands::Command::RestoreAutosave(named), &ctx);
+        assert_eq!(state.window, None, "备份档在原版 `if (!backup)` 外，不弹");
+        assert_eq!(state.recent_files.len(), before, "原版备份档不写最近列表");
+        assert!(state.doc.song.dirty, "原版 :69 备份档标 changed = 1");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

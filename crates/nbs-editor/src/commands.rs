@@ -375,39 +375,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             import_schematic(state, &path);
             state.window = None;
         }
-        Command::OpenPath(path) => match nbs_core::nbs::load(&path) {
-            Ok(song) => {
-                let name = song.meta.name.clone();
-                // 原版 `open_song_nbs.gml:12-13`：文件版本比 `nbs_version` 旧就先警告。
-                // 比它新的文件根本进不来这一支（加载器直接报「不支持的 NBS 版本」，
-                // 对应源码 :14-18 的报错并 return -1）。
-                let old = song.meta.save_version < nbs_core::nbs::NBS_VERSION
-                    && state.prefs.show_old_warning;
-                let text = nbs_io::prefs::old_file_warning("NBS");
-                state.doc.replace_song(song);
-                state.song_session += 1;
-                state.prepare_audio();
-                state.viewport.start_tick = 0;
-                state.viewport.start_layer = 0;
-                state.set_marker(0.0);
-                state.clear_section();
-                state.add_recent(path.clone());
-                state.window = None;
-                if old {
-                    state.modals = ModalQueue::message(tr("Warning", "警告"), &text);
-                }
-                state.set_message(if crate::lang() == 1 {
-                    format!("已打开 {}（{} 个音符）", name, state.doc.song.total_blocks)
-                } else {
-                    format!("Loaded {} ({} notes)", name, state.doc.song.total_blocks)
-                });
-            }
-            Err(e) => state.set_message(if crate::lang() == 1 {
-                format!("打开失败: {e}")
-            } else {
-                format!("Load failed: {e}")
-            }),
-        },
+        Command::OpenPath(path) => open_nbs_at(state, &path, false),
         Command::SavePath(path) => {
             if state.player {
                 return;
@@ -1928,7 +1896,8 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.save_prefs();
             state.set_message(crate::tr("Preferences saved", "偏好设置已保存"));
         }
-        Command::RestoreAutosave(path) => dispatch(state, Command::OpenPath(path), ctx),
+        // 原版 `load_song(fn, 1)` 那一档：还原自动备份既不弹歌曲信息，也不写最近列表。
+        Command::RestoreAutosave(path) => open_nbs_at(state, &path, true),
         // 原版 `open_url(url)`：欢迎窗 / 关于窗 / 更新弹窗里所有跳浏览器的链接都走这里。
         // 单测里不真开浏览器，把 url 记进下面的线程局部槽，由用例 `take_open_url()` 取。
         Command::OpenUrl(url) => {
@@ -2128,6 +2097,62 @@ fn open_url(url: &str) {
     #[cfg(not(windows))]
     {
         let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
+}
+
+/// 原版 `load_song.gml:38-70` 的 `.nbs`/`.zip` 落地段。`backup` 就是原版的第二个实参
+/// （`download_song_from_url.gml:65` 那句注释写得很直白：load as backup file —
+/// keep unsaved, don't add to recent etc.）。端口的自动备份还原窗是自加的，
+/// 语义正对得上这一档，所以走 `backup = true`。
+fn open_nbs_at(state: &mut EditorState, path: &std::path::Path, backup: bool) {
+    match nbs_core::nbs::load(path) {
+        Ok(song) => {
+            let name = song.meta.name.clone();
+            // 原版 `open_song_nbs.gml:12-13`：文件版本比 `nbs_version` 旧就先警告。
+            // 比它新的文件根本进不来这一支（加载器直接报「不支持的 NBS 版本」，
+            // 对应源码 :14-18 的报错并 return -1）。
+            let old =
+                song.meta.save_version < nbs_core::nbs::NBS_VERSION && state.prefs.show_old_warning;
+            let text = nbs_io::prefs::old_file_warning("NBS");
+            // 原版 `load_song.gml:64` 的 `window != w_instruments` 判的是换歌**之前**
+            // 开着的那扇窗，所以要在 `replace_song` 前先记下来。
+            let on_instruments = state.window == Some(WindowKind::Instruments);
+            state.doc.replace_song(song);
+            state.song_session += 1;
+            state.prepare_audio();
+            state.viewport.start_tick = 0;
+            state.viewport.start_layer = 0;
+            state.set_marker(0.0);
+            state.clear_section();
+            if backup {
+                // 原版 :68-70：备份档不写最近列表，反而把 `changed` 标成 1（还原出来算未保存）。
+                state.doc.song.dirty = true;
+                state.window = None;
+            } else {
+                state.add_recent(path.to_path_buf());
+                // 原版 `load_song.gml:64`：歌名非空才弹歌曲信息；名字空的原版什么都不弹。
+                // 弹的是 `w_songinfo`（点任意处关闭那一版），不是工具栏开的带按钮版。
+                // 两个条件不满足时端口保持原有行为——把上一扇窗关掉，不留着一窗旧数据。
+                state.window = if !on_instruments && !name.is_empty() {
+                    Some(WindowKind::SongInfo)
+                } else {
+                    None
+                };
+            }
+            if old {
+                state.modals = ModalQueue::message(tr("Warning", "警告"), &text);
+            }
+            state.set_message(if crate::lang() == 1 {
+                format!("已打开 {}（{} 个音符）", name, state.doc.song.total_blocks)
+            } else {
+                format!("Loaded {} ({} notes)", name, state.doc.song.total_blocks)
+            });
+        }
+        Err(e) => state.set_message(if crate::lang() == 1 {
+            format!("打开失败: {e}")
+        } else {
+            format!("Load failed: {e}")
+        }),
     }
 }
 

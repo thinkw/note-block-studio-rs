@@ -166,7 +166,15 @@ impl RemoveFx {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WindowKind {
+    /// 原版 `w_songinfo`（`macros.gml:96`）：只读卡片，脚注是「点击任意位置以关闭」，
+    /// 没有按钮，按左键即关（`draw_window_songinfo.gml:110/138-143`）。
+    /// 打开文件后自动弹的就是这一版（`load_song.gml:64`），播放器档位的工具栏图标
+    /// （`control_draw.gml:2042`）和 `settingsp` 菜单（`menu_click.gml:374`）也开这一版。
     SongInfo,
+    /// 原版 `w_songinfoedit`（`macros.gml:95`）：同一张卡片，脚注换成
+    /// 「此信息在打开文件时显示。」并多一排「修改」「确定」（`:129-136`）。
+    /// 编辑器档位的工具栏信息图标和 `settings` 菜单开的是这一版。
+    SongInfoEdit,
     Properties,
     Statistics,
     Preferences,
@@ -235,7 +243,7 @@ pub enum WindowKind {
 impl WindowKind {
     pub fn title(&self) -> &'static str {
         match self {
-            Self::SongInfo => tr("Song Info", "歌曲信息"),
+            Self::SongInfo | Self::SongInfoEdit => tr("Song Info", "歌曲信息"),
             Self::Properties => tr("Song Properties", "歌曲属性"),
             // 原版 `draw_window_stats`：EN "Song Stats" / CN "歌曲数据"。
             Self::Statistics => tr("Song Stats", "歌曲数据"),
