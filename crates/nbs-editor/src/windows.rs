@@ -2031,7 +2031,9 @@ fn prefs_playback(state: &mut EditorState, pg: &mut Page, out_at: &mut Pos2) {
         false,
         false,
     ) {
+        // 同页其他行都是点一下即落盘；这格原来只翻 `marker_follow`，重启后开关白设。
         state.emit(Command::ToggleFollow);
+        state.emit(Command::SavePreferences);
     }
     // 原版 `marker_pagebypage`：1 按页 / 0 按刻 / 2 按帧，跟随关掉时三格都锁定。
     let lock = !state.marker_follow;

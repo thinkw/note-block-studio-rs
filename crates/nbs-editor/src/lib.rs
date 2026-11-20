@@ -2627,6 +2627,48 @@ mod gui_window_tests {
         assert!(back.marker_end);
     }
 
+    /// 跟随播放头这一组：复选框 + 三档单选（原版 `draw_window_preferences.gml:596-599`，
+    /// 中文 `:648-651`）。出厂 `marker_follow = 1` / `marker_pagebypage = 1`
+    /// （`control_create.gml:379-380`）即「开着、按页」；关掉跟随后三格整体锁定，点不动。
+    /// 档位和开关都得真的落盘，否则重启回到按页等于白设。
+    #[test]
+    fn preferences_follow_rows_pick_the_mode_and_lock_when_off() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.prefs.language = 0;
+        let _en = crate::LangGuard::set(0);
+        state.theme.apply(&ctx);
+        state.marker_follow = true;
+        state.follow_mode = 1;
+        state.window = Some(WindowKind::Preferences);
+        state.prefs_tab = 4;
+        let texts = drawn_texts(&mut state, &ctx);
+        for t in [
+            "Follow marker when playing",
+            "Page by page",
+            "Tick by tick",
+            "Frame by frame",
+        ] {
+            assert!(
+                texts.iter().any(|s| s == t),
+                "播放页缺少「{t}」：{}",
+                texts.join(" | ")
+            );
+        }
+        click_text(&mut state, &ctx, "Tick by tick");
+        assert_eq!(state.follow_mode, 0, "「按刻」没接上 marker_pagebypage = 0");
+        click_text(&mut state, &ctx, "Frame by frame");
+        assert_eq!(state.follow_mode, 2, "「按帧」没接上 marker_pagebypage = 2");
+        click_text(&mut state, &ctx, "Follow marker when playing");
+        assert!(!state.marker_follow, "复选框没接 ToggleFollow");
+        click_text(&mut state, &ctx, "Page by page");
+        assert_eq!(state.follow_mode, 2, "跟随关掉时三格是锁定态，不该被点动");
+        let back = nbs_io::prefs::Preferences::load();
+        assert_eq!(back.follow_mode, 2, "跟随档位要落盘");
+        assert!(!back.follow_marker, "跟随开关要落盘");
+    }
+
     /// 原版页 3「访问」的两组：`draw_areaheader(22, 74, 456, 140, "鼠标滚轮")` 里的
     /// 三个档位 + 「滚动速度」拖拽行（`y1 + 150`，出厂 1）+ 「悬停层预览」
     /// （`y1 + 198`），和 `draw_areaheader(22, 240, 456, 105, "琴键与层")` 组名本身。
