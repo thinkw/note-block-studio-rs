@@ -131,16 +131,25 @@ pub struct OutputDevice {
     pub is_default: bool,
 }
 
+/// cpal 0.18 把 `Device::name()` 收进了 `description()`，取名字这一步统一走这里。
+fn device_name(device: &cpal::Device) -> Result<String, cpal::Error> {
+    device.description().map(|d| d.name().to_owned())
+}
+
 /// 枚举系统里的输出设备。拿不到后端时返回空表（不报错：没设备只是没得选）。
 pub fn list_output_devices() -> Vec<OutputDevice> {
     let host = cpal::default_host();
-    let default_name = host.default_output_device().and_then(|d| d.name().ok());
+    let default_name = host
+        .default_output_device()
+        .and_then(|d| device_name(&d).ok());
     let Ok(devices) = host.output_devices() else {
         return Vec::new();
     };
     let mut out: Vec<OutputDevice> = Vec::new();
     for device in devices {
-        let Ok(name) = device.name() else { continue };
+        let Ok(name) = device_name(&device) else {
+            continue;
+        };
         if out.iter().any(|o| o.name == name) {
             continue;
         }
@@ -156,7 +165,7 @@ pub fn list_output_devices() -> Vec<OutputDevice> {
 fn default_output_name() -> Option<String> {
     cpal::default_host()
         .default_output_device()
-        .and_then(|d| d.name().ok())
+        .and_then(|d| device_name(&d).ok())
 }
 
 /// 取一台输出设备：`wanted` 为空就拿系统默认；指定名字时先比对默认（省一次枚举），
@@ -164,7 +173,7 @@ fn default_output_name() -> Option<String> {
 fn open_output_device(wanted: Option<&str>) -> Result<cpal::Device, String> {
     let host = cpal::default_host();
     if let Some(device) = host.default_output_device() {
-        if wanted.is_none() || device.name().ok().as_deref() == wanted {
+        if wanted.is_none() || device_name(&device).ok().as_deref() == wanted {
             return Ok(device);
         }
     } else if wanted.is_none() {
@@ -175,7 +184,7 @@ fn open_output_device(wanted: Option<&str>) -> Result<cpal::Device, String> {
         .output_devices()
         .map_err(|e| format!("failed to enumerate output devices: {e}"))?;
     for device in devices {
-        if device.name().ok().as_deref() == Some(wanted) {
+        if device_name(&device).ok().as_deref() == Some(wanted) {
             return Ok(device);
         }
     }
@@ -317,16 +326,14 @@ fn open_stream_on(
     shared: &Shared,
     for_wanted: Option<String>,
 ) -> (StreamOutcome, Option<cpal::Stream>) {
-    let name = device
-        .name()
-        .unwrap_or_else(|_| "unknown device".to_string());
+    let name = device_name(device).unwrap_or_else(|_| "unknown device".to_string());
     let supported = match device.default_output_config() {
         Ok(supported) => supported,
         Err(e) => return stream_failed(for_wanted, format!("failed to read output config: {e}")),
     };
     let sample_format = supported.sample_format();
     let config: cpal::StreamConfig = supported.config();
-    let rate = config.sample_rate.0;
+    let rate = config.sample_rate;
     let channels = config.channels as usize;
 
     {
@@ -340,7 +347,7 @@ fn open_stream_on(
     let built = match sample_format {
         cpal::SampleFormat::F32 => device
             .build_output_stream::<f32, _, _>(
-                &config,
+                config,
                 move |data, _| {
                     if let Some(mut st) = cb_shared.try_lock() {
                         st.render_interleaved(data, channels);
@@ -360,7 +367,7 @@ fn open_stream_on(
             let render_shared = shared.clone();
             device
                 .build_output_stream::<i16, _, _>(
-                    &config,
+                    config,
                     move |data, _| {
                         scratch.resize(data.len(), 0.0);
                         if let Some(mut st) = render_shared.try_lock() {
