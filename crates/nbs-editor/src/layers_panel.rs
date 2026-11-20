@@ -19,7 +19,7 @@ use nbs_core::model::{Layer, LockMode, PAN_CENTER};
 
 use crate::commands::Command;
 use crate::fonts::{info_med_bold_font, main_font, small_font};
-use crate::icons::Bank;
+use crate::icons::{layer as layer_icon, macro_icon, Bank};
 use crate::state::{ContextKind, ContextMenu, EditorState, LayerDrag, WindowKind};
 use crate::theme::{Theme, ThemeKind};
 use crate::tr;
@@ -755,7 +755,7 @@ fn row(
         && bank.layer_button(
             ui,
             pos2(bx(126.0), by),
-            0,
+            layer_icon::LOCK,
             idx,
             tr("Lock this layer", "静音本层\n（拖拽可批量操作）"),
             layer.lock == LockMode::Locked,
@@ -776,7 +776,7 @@ fn row(
         && bank.layer_button(
             ui,
             pos2(bx(144.0), by),
-            1,
+            layer_icon::SOLO,
             idx,
             tr("Solo this layer", "独奏本层\n（拖拽可批量操作）"),
             layer.lock == LockMode::Solo,
@@ -792,7 +792,7 @@ fn row(
         };
         state.emit(Command::SetLayerLock(idx, next));
     }
-    if exists && idle && bank.layer_button(ui, pos2(bx(162.0), by), 2, idx, tr(
+    if exists && idle && bank.layer_button(ui, pos2(bx(162.0), by), layer_icon::SELECT, idx, tr(
         "Select all note blocks in this layer\n(Click and drag to select multiple; click again to deselect)",
         "选择本层所有方块\n（拖拽可批量选择，再次点选取消选择）",
     ), false, th, u, state.canvas_hires) {
@@ -802,7 +802,7 @@ fn row(
         && bank.layer_button(
             ui,
             pos2(bx(180.0), by),
-            3,
+            layer_icon::ADD,
             idx,
             tr(
                 "Add empty layer here\n(Click and drag to add multiple layers)",
@@ -821,7 +821,7 @@ fn row(
         && bank.layer_button(
             ui,
             pos2(bx(198.0), by),
-            4,
+            layer_icon::REMOVE,
             idx,
             tr(
                 "Remove this layer\n(Click and drag to remove multiple layers)",
@@ -842,7 +842,7 @@ fn row(
         && bank.layer_button(
             ui,
             pos2(bx(216.0), by),
-            5,
+            layer_icon::UP,
             idx,
             tr(
                 "Shift layer up\n(Click and drag to shift multiple layers)",
@@ -863,7 +863,7 @@ fn row(
         && bank.layer_button(
             ui,
             pos2(down_x, by),
-            6,
+            layer_icon::DOWN,
             idx,
             tr(
                 "Shift layer down\n(Click and drag to shift multiple layers)",
@@ -992,7 +992,7 @@ use nbs_core::Macro as M;
 
 const MACRO_BTNS: [MacroBtn; 15] = [
     MacroBtn {
-        index: 0,
+        index: macro_icon::TREMOLO,
         tip_en: "Tremolo...",
         tip_zh: "Tremolo...",
         label_en: "Tremolo...",
@@ -1000,7 +1000,7 @@ const MACRO_BTNS: [MacroBtn; 15] = [
         action: MacroAction::Window(WindowKind::Tremolo),
     },
     MacroBtn {
-        index: 1,
+        index: macro_icon::STEREO,
         tip_en: "Stereo...",
         tip_zh: "Stereo...",
         label_en: "Stereo...",
@@ -1008,7 +1008,7 @@ const MACRO_BTNS: [MacroBtn; 15] = [
         action: MacroAction::Window(WindowKind::Stereo),
     },
     MacroBtn {
-        index: 2,
+        index: macro_icon::ARPEGGIO,
         tip_en: "Arpeggio...",
         tip_zh: "Arpeggio...",
         label_en: "Arpeggio...",
@@ -1016,7 +1016,7 @@ const MACRO_BTNS: [MacroBtn; 15] = [
         action: MacroAction::Window(WindowKind::Arpeggio),
     },
     MacroBtn {
-        index: 3,
+        index: macro_icon::PORTAMENTO,
         tip_en: "Portamento...",
         tip_zh: "Portamento...",
         label_en: "Portamento...",
@@ -1024,7 +1024,7 @@ const MACRO_BTNS: [MacroBtn; 15] = [
         action: MacroAction::Window(WindowKind::Portamento),
     },
     MacroBtn {
-        index: 4,
+        index: macro_icon::VIBRATO,
         tip_en: "Vibrato",
         tip_zh: "Vibrato",
         label_en: "Vibrato",
@@ -1032,7 +1032,7 @@ const MACRO_BTNS: [MacroBtn; 15] = [
         action: MacroAction::Run(M::Vibrato),
     },
     MacroBtn {
-        index: 5,
+        index: macro_icon::STAGGER,
         tip_en: "Stagger...",
         tip_zh: "Stagger...",
         label_en: "Stagger...",
@@ -1040,7 +1040,7 @@ const MACRO_BTNS: [MacroBtn; 15] = [
         action: MacroAction::Window(WindowKind::Stagger),
     },
     MacroBtn {
-        index: 6,
+        index: macro_icon::CHORUS,
         tip_en: "Chorus",
         tip_zh: "Chorus",
         label_en: "Chorus",
@@ -1048,7 +1048,7 @@ const MACRO_BTNS: [MacroBtn; 15] = [
         action: MacroAction::Run(M::Chorus { detune: 5 }),
     },
     MacroBtn {
-        index: 7,
+        index: macro_icon::VELOCITY_LFO,
         tip_en: "Volume LFO",
         tip_zh: "Volume LFO",
         label_en: "Volume LFO",
@@ -1056,7 +1056,7 @@ const MACRO_BTNS: [MacroBtn; 15] = [
         action: MacroAction::Run(M::VelocityLfo),
     },
     MacroBtn {
-        index: 8,
+        index: macro_icon::FADE_IN,
         tip_en: "Fade in",
         tip_zh: "淡入",
         label_en: "Fade in",
@@ -1064,7 +1064,7 @@ const MACRO_BTNS: [MacroBtn; 15] = [
         action: MacroAction::Run(M::FadeIn),
     },
     MacroBtn {
-        index: 9,
+        index: macro_icon::FADE_OUT,
         tip_en: "Fade out",
         tip_zh: "淡出",
         label_en: "Fade out",
@@ -1072,7 +1072,7 @@ const MACRO_BTNS: [MacroBtn; 15] = [
         action: MacroAction::Run(M::FadeOut),
     },
     MacroBtn {
-        index: 10,
+        index: macro_icon::REPLACE_KEY,
         tip_en: "Replace key",
         tip_zh: "替换音",
         label_en: "Replace key",
@@ -1080,7 +1080,7 @@ const MACRO_BTNS: [MacroBtn; 15] = [
         action: MacroAction::Run(M::ReplaceKey),
     },
     MacroBtn {
-        index: 11,
+        index: macro_icon::SET_VELOCITY,
         tip_en: "Set velocity...",
         tip_zh: "设定音量......",
         label_en: "Set velocity...",
@@ -1088,7 +1088,7 @@ const MACRO_BTNS: [MacroBtn; 15] = [
         action: MacroAction::Window(WindowKind::SetVelocity),
     },
     MacroBtn {
-        index: 12,
+        index: macro_icon::SET_PANNING,
         tip_en: "Set panning...",
         tip_zh: "设定声道......",
         label_en: "Set panning...",
@@ -1096,7 +1096,7 @@ const MACRO_BTNS: [MacroBtn; 15] = [
         action: MacroAction::Window(WindowKind::SetPanning),
     },
     MacroBtn {
-        index: 13,
+        index: macro_icon::SET_PITCH,
         tip_en: "Set pitch...",
         tip_zh: "设定音高......",
         label_en: "Set pitch...",
@@ -1104,7 +1104,7 @@ const MACRO_BTNS: [MacroBtn; 15] = [
         action: MacroAction::Window(WindowKind::SetPitch),
     },
     MacroBtn {
-        index: 14,
+        index: macro_icon::RESET,
         tip_en: "Reset all properties",
         tip_zh: "重置所有属性",
         label_en: "Reset all properties",
