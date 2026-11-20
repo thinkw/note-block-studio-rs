@@ -701,15 +701,14 @@ mod gui_window_tests {
             })
             .expect("设备列表第 0 项");
         click(&mut state, row);
-        // 工具栏产生的命令在同一帧的 `flush_all` 里就落地了，所以这里断言落地的结果：
-        // `apply_output_choice` 把请求派给引擎（结果稍后由 poll_output_report 报回来），
-        // 派不下去才当场报错。这台机器能不能真的建成那条流是环境实情，
-        // 两种结果都说明点击已经打到命令总线。
+        // 工具栏产生的命令在同一帧的 `flush_all` 里就落地了：`apply_output_choice` 当场
+        // 切完并报名字。这台机器能不能真建成那条流是环境实情，接上和失败两种结果
+        // 都说明点击已经打到命令总线。
         let m = msg(&state);
         assert!(
             [
-                "Connecting output device",
-                "正在切换输出设备",
+                "Output device: ",
+                "输出设备：",
                 "Failed to switch output device: ",
                 "切换输出设备失败："
             ]

@@ -2058,33 +2058,15 @@ impl EditorState {
     }
 
     /// 把偏好推给音频引擎（主音量、速度、节拍器、voice 上限、单声道、锁定层）。
-    /// 端口自加（用户要求 #94）：请引擎的后台线程重列一次输出设备，拿它手上已有的那份。
-    /// 界面线程等不起那次枚举（本机实测 1.3 秒，#94 头一版就是把它放在这里，
-    /// 结果整个界面每隔一秒僵死一次），所以「打开下拉」= 发起扫描 + 显示缓存。
+    /// 端口自加（用户要求 #94）：列一遍可选的输出设备。cpal 0.18 在本机实测这一趟
+    /// 2.6~4.0 毫秒（0.15 要 1.3 秒，当年得挪去后台线程），打开下拉时当场拿就行。
     pub fn refresh_outputs(&mut self) {
         self.output_list = self.audio.output_devices();
     }
 
-    /// 设备表还在路上（还没扫完过，或正有一趟在扫）。
-    pub fn outputs_pending(&self) -> bool {
-        self.audio.output_scan_pending()
-    }
-
-    /// 「正在扫描输出设备…」那一行摆在哪：只有**还在扫**且**手上一台设备都还没有**时
-    /// 才占第 1 行（第 0 行永远是「跟随系统默认」）。那一行点不得 —— 点它什么都不许改。
-    /// 已有设备表时不摆：扫描中的旧列表照样能用，没必要闪一行字打扰。
-    fn output_hint_row_at(pending: bool, devices: usize) -> Option<usize> {
-        (pending && devices == 0).then_some(1)
-    }
-
-    /// 同 [`Self::output_hint_row_at`]，取当前状态。
-    pub fn output_hint_row(&self) -> Option<usize> {
-        Self::output_hint_row_at(self.outputs_pending(), self.output_list.len())
-    }
-
     /// 「输出」下拉的条目：第 0 项是跟随系统默认，其余按枚举顺序列出设备名。
     /// 设备名由系统给（Windows 会按系统语言给「耳机 (Realtek(R) Audio)」这类名字），
-    /// 不由我们翻译；只有后缀文案翻。设备表还没扫回来时末尾补一行「正在扫描…」。
+    /// 不由我们翻译；只有后缀文案翻。
     pub fn output_items(&self) -> Vec<String> {
         let mut items = vec![nbs_core::tr("Follow system default", "跟随系统默认").to_string()];
         items.extend(self.output_list.iter().map(|d| {
@@ -2098,11 +2080,6 @@ impl EditorState {
                 d.name.clone()
             }
         }));
-        if self.output_hint_row() == Some(items.len()) {
-            items.push(
-                nbs_core::tr("Scanning output devices...", "正在扫描输出设备...").to_string(),
-            );
-        }
         items
     }
 
@@ -2126,13 +2103,9 @@ impl EditorState {
         }
     }
 
-    /// 「输出」那一格显示的字：正在出声的设备名。切换还在后台跑时先报「正在连接」，
-    /// 别拿上一台的名字装作已经切过去；还没建成流时按偏好退回「系统默认」或
+    /// 「输出」那一格显示的字：正在出声的设备名。还没建成流时按偏好退回「系统默认」或
     /// 「<点名设备>（不可用）」，绝不显示一个根本没在出声的设备糊弄人。
     pub fn output_label(&self) -> String {
-        if self.audio.output_connecting() {
-            return nbs_core::tr("Connecting…", "正在连接…").to_string();
-        }
         if let Some(name) = self.audio.output_name() {
             return name;
         }
@@ -2147,40 +2120,45 @@ impl EditorState {
         }
     }
 
-    /// 端口自加 #94：切输出设备，`None` = 跟随系统默认。
-    /// 这里只把请求派下去就返回——在非默认设备上建流实测要 0.6 秒（全量枚举 + 建流），
-    /// 以前当场等完，点一下设备菜单整个窗口僵在那里。结果进 [`Self::poll_output_report`]。
+    /// 端口自加 #94：切输出设备，`None` = 跟随系统默认。当场拆旧流、当场建新流
+    /// （本机实测连拆带建约 0.1 秒，只在用户点那一下付），所以结果就在这一次里报。
     pub fn apply_output_choice(&mut self, wanted: Option<String>) {
-        if let Err(e) = self.audio.set_output(wanted) {
-            self.set_message(format!(
+        let err = self.audio.set_output(wanted).err();
+        // 引擎那句「点名的没拿到，已经落到哪台」比 Err 里的原因更具体，优先报它。
+        let fallback = self.audio.take_output_error();
+        self.sync_output_prefs();
+        match err.or(fallback) {
+            Some(e) => self.set_message(format!(
                 "{}{e}",
                 nbs_core::tr("Failed to switch output device: ", "切换输出设备失败：")
-            ));
-            return;
+            )),
+            None => self.set_message(format!(
+                "{}{}",
+                nbs_core::tr("Output device: ", "输出设备："),
+                self.audio.output_name().unwrap_or_default()
+            )),
         }
-        // 偏好不在这里落盘：这会儿还没接上，落下去的可能是一个没生效的选择。
-        // 等结果落地那一趟照引擎的实情写（点名的拿不到会被退回「跟随系统默认」）。
-        self.set_message(nbs_core::tr(
-            "Connecting output device…",
-            "正在切换输出设备…",
-        ));
     }
 
-    /// 取回后台建流的结果：接上了就报设备名，没接上就报原因，两种都把偏好按引擎的
-    /// 实情写回去。`tick_transport` 每帧调一次；引擎内部限流，贵的都在它自己的线程上。
+    /// 把引擎手上的实情写进偏好并落盘：点名的那台没拿到时引擎已经把它退回「跟随系统
+    /// 默认」，存一个没生效的选择，下次启动还要再撞一次。
+    fn sync_output_prefs(&mut self) {
+        let wanted = self.audio.wanted_output().unwrap_or_default().to_string();
+        if self.prefs.audio_output != wanted {
+            self.prefs.audio_output = wanted;
+            self.save_prefs();
+        }
+    }
+
+    /// 自动跟随 / 补建那几趟的结果：接上了报设备名，没接上就报原因，两种都把偏好按
+    /// 引擎的实情写回去。`tick_transport` 每帧调一次；引擎内部限流。
     pub fn poll_output_report(&mut self) {
         let name = self.audio.poll_output();
         let error = self.audio.take_output_error();
         if name.is_none() && error.is_none() {
             return;
         }
-        // 落定了才动偏好：点名的那台没拿到时引擎已经把它退回「跟随系统默认」，
-        // 存一个没生效的选择，下次启动还要再撞一次。
-        let wanted = self.audio.wanted_output().unwrap_or_default().to_string();
-        if self.prefs.audio_output != wanted {
-            self.prefs.audio_output = wanted;
-            self.save_prefs();
-        }
+        self.sync_output_prefs();
         if let Some(e) = error {
             self.set_message(format!(
                 "{}{e}",
@@ -2495,74 +2473,27 @@ mod tests {
         assert_eq!(st.output_selection(), 2);
         st.prefs.audio_output = "已经拔掉的声卡".into();
         assert_eq!(st.output_selection(), usize::MAX, "不在了就不打勾");
-        assert_eq!(
-            st.output_hint_row(),
-            None,
-            "静音引擎不扫描，且手上已经有设备表 → 不该有占位行"
-        );
     }
 
-    /// #94 治本：设备表改由后台线程扫，扫回来之前下拉要老实说「正在扫描」，
-    /// 但那一行不许被当成一台设备（点它什么都不该改，见 toolbar/windows 的闸门）。
-    #[test]
-    fn the_scanning_hint_row_only_exists_while_nothing_is_known_yet() {
-        assert_eq!(
-            EditorState::output_hint_row_at(true, 0),
-            Some(1),
-            "还在扫且一台都还没有 → 占第 1 行（第 0 行是跟随系统默认）"
-        );
-        assert_eq!(
-            EditorState::output_hint_row_at(true, 3),
-            None,
-            "手上已经有表就别闪字打扰，旧表照用"
-        );
-        assert_eq!(
-            EditorState::output_hint_row_at(false, 0),
-            None,
-            "扫完发现真的一台都没有 → 那是实情，不是「还不知道」"
-        );
-        assert_eq!(EditorState::output_hint_row_at(false, 2), None);
-    }
-
-    /// 端口自加 #94：切换是派给后台的，点下去只报「正在切换」，偏好要等结果落地才写；
-    /// 引擎把拿不到的那台退回系统默认后，落盘的选择也必须跟着变空。
+    /// 端口自加 #94：点名的设备拿不到 → 当场回落系统默认，落盘的选择必须跟着变空，
+    /// 别存一个没生效的下标（否则下次启动还要再撞一次）。
     #[test]
     fn dead_output_choice_does_not_stick_in_prefs() {
         let _prefs = crate::isolate_prefs();
         let mut st = EditorState::for_test();
         let missing = "nbs-rust 这台机器上不存在的输出设备".to_string();
         st.apply_output_choice(Some(missing.clone()));
-        let started = st.active_message().unwrap_or_default().to_string();
-        assert!(
-            started.starts_with("正在切换输出设备")
-                || started.starts_with("Connecting output device"),
-            "点下去先报「正在切换」，实际消息 {started:?}"
-        );
-        assert!(
-            st.prefs.audio_output.is_empty(),
-            "结果没回来就不该把一个可能没生效的选择落盘：{}",
-            st.prefs.audio_output
-        );
-        for _ in 0..400 {
-            st.poll_output_report();
-            if !st.audio.output_connecting() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
         assert!(
             st.prefs.audio_output.is_empty(),
             "没生效的点选不该留下：{}",
             st.prefs.audio_output
         );
+        let m = st.active_message().unwrap_or_default().to_string();
+        assert!(
+            m.contains(&missing) || m.starts_with("输出设备：") || m.starts_with("Output device: "),
+            "点下去当场就该报出结果，实际消息 {m:?}"
+        );
         st.apply_output_choice(None);
-        for _ in 0..400 {
-            st.poll_output_report();
-            if !st.audio.output_connecting() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
         assert!(st.prefs.audio_output.is_empty());
     }
 
