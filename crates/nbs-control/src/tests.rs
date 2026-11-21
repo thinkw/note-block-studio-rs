@@ -209,8 +209,8 @@ fn error_codes_have_stable_strings() {
 fn read_only_ops_are_the_safe_subset() {
     assert!(Op::Ping.is_read_only());
     assert!(Op::GetNotes {
-        tick_from: 0,
-        tick_to: 1,
+        tick_from: Some(0),
+        tick_to: Some(1),
         layer_from: None,
         layer_to: None
     }
