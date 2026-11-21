@@ -7,7 +7,7 @@
 //! ② 去掉原版 `draw_piano.gml:12/119-120` 的两侧渐隐蒙版（alpha 机制），恒全亮度
 //! ——原版播放器模式（isplayer）本来就不渐隐。
 
-use egui::{pos2, Align2, Color32, Painter, Pos2, Rect, Sense, Stroke, Ui, Vec2};
+use egui::{pos2, Align2, Color32, Context, LayerId, Painter, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use nbs_core::model::{key_name, KEY_MAX, MC_KEY_MAX, MC_KEY_MIN};
 
 use crate::commands::Command;
@@ -178,6 +178,23 @@ fn key_color(key: u8, o: &DrawOpts, th: &Theme, tint: f32) -> (Color32, bool) {
     (col, out)
 }
 
+/// 悬停琴键这一帧要画的五线谱参数；`show_piano` 只登记，真正落笔延到中央面板
+/// 之后（#112，见 `paint_notechart`）。
+#[derive(Clone, Copy)]
+pub struct ChartRequest {
+    /// 琴键面板宽（原版 `rw`），用来算面板左缘和「贴右缘」判定。
+    rw: f32,
+    /// 原版传给 `draw_notechart` 的横坐标：白键取列左缘 +18，黑键取列左缘。
+    x1: f32,
+    /// 白键顶边（原版 `yy` 由它减 32 得到）。
+    y0: f32,
+    /// 列号 `startkey + a`（黑键升号再减 1），不是实际键号 —— 原版如此。
+    key: i32,
+    accidental: bool,
+    flats: bool,
+    u: f32,
+}
+
 struct DrawOpts {
     names: bool,
     numbers: bool,
@@ -188,7 +205,7 @@ struct DrawOpts {
     flats: bool,
 }
 
-pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
+pub fn show_piano(state: &mut EditorState, ui: &mut Ui) -> Option<ChartRequest> {
     let th = state.theme.clone();
     let bank = state.icons.bank();
     // 端口自加（用户要求）：`u` = 琴键面板独立缩放，乘所有原版像素常量。
@@ -209,7 +226,12 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
     let keysshow = 52usize.min(((rw) / (KEY_W * u)).floor() as usize).max(1);
     if state.piano_keys_shown as usize != keysshow {
         // 原版：窗口宽度变了就把键盘重新以 27 号键为中心。
-        state.piano_start = 27usize.saturating_sub(keysshow / 2) as u8;
+        // 偏离原版（#110）：中心位再夹进 `[0, 52 - keysshow]`。原式的 `27` 是给
+        // `keysmax ≤ 50` 用的，端口去掉 keysmax 后 keysshow 能到 52（= 整台 88 键），
+        // 算出 startkey = 1：槽 0 的 A0 永远画不出来，最右一列还落空（用户报告
+        // 「缩到较小时低音区缺几个键，挪过去又少高音区几个」）。夹住之后
+        // 52 槽时正好是槽 0..51 = MIDI 0..87，一个键都不缺，也无需再平移。
+        state.piano_start = (27usize.saturating_sub(keysshow / 2)).min(52 - keysshow) as u8;
         state.piano_keys_shown = keysshow as u8;
     }
     let startkey = state.piano_start as usize;
@@ -260,6 +282,7 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
     let p = ui.painter();
     let frames = FrameMap::new(&th);
     let mut picked: Option<u8> = None;
+    let mut chart: Option<ChartRequest> = None;
     let mut b = 0usize;
     let mut edge = 0i8;
 
@@ -294,20 +317,15 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
             // （C/F 分支用 c1，值相同），键号参数是列号 `startkey + a`。没有播放器模式，
             // `!isplayer` 恒真，C/F 分支少的那一个门可以合并。
             if hovering && show_chart && !opts.playing && white > 6 && white < 69 {
-                if let Some(bank) = bank.as_deref() {
-                    draw_notechart(
-                        ui,
-                        bank,
-                        &th,
-                        rw,
-                        x + 18.0 * u,
-                        y0,
-                        (startkey + a) as i32,
-                        false,
-                        opts.flats,
-                        u,
-                    );
-                }
+                chart = Some(ChartRequest {
+                    rw,
+                    x1: x + 18.0 * u,
+                    y0,
+                    key: (startkey + a) as i32,
+                    accidental: false,
+                    flats: opts.flats,
+                    u,
+                });
             }
             if let Some(bank) = bank.as_deref() {
                 draw_white_key(
@@ -353,20 +371,15 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
                     (key > 6 && key < 70, (startkey + a) as i32 - 1)
                 };
                 if ok {
-                    if let Some(bank) = bank.as_deref() {
-                        draw_notechart(
-                            ui,
-                            bank,
-                            &th,
-                            rw,
-                            x,
-                            y0,
-                            chart_key,
-                            true,
-                            opts.flats,
-                            u,
-                        );
-                    }
+                    chart = Some(ChartRequest {
+                        rw,
+                        x1: x,
+                        y0,
+                        key: chart_key,
+                        accidental: true,
+                        flats: opts.flats,
+                        u,
+                    });
                 }
             }
             // 原版：白键先画，黑键压在它上面。
@@ -403,14 +416,25 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
 
     // 原版 `d` + `delay`：停在边缘白键上（没按住鼠标时）每 0.1 秒平移一个音。
     state.piano_scroll_delay = (state.piano_scroll_delay - dt).max(0.0);
-    if edge != 0 && !holding && state.piano_scroll_delay == 0.0 {
-        if edge < 0 && startkey > 0 {
-            state.piano_start = (startkey - 1) as u8;
-        } else if edge > 0 && startkey + keysshow < RIGHT_LIMIT {
-            state.piano_start = (startkey + 1) as u8;
+    if edge != 0 && !holding {
+        // 还能不能再往这一侧挪：左到头是槽 0，右到头是槽 `52 - keysshow`。
+        let can_pan = (edge < 0 && startkey > 0) || (edge > 0 && startkey + keysshow < RIGHT_LIMIT);
+        if can_pan && state.piano_scroll_delay == 0.0 {
+            state.piano_start = (startkey as i32 + if edge < 0 { -1 } else { 1 }) as u8;
+            state.piano_scroll_delay = 0.1;
         }
-        state.piano_scroll_delay = 0.1;
+        // 偏离原版（#111）：GameMaker 的 draw 事件每步都跑，egui 只在有输入或自己
+        // 约过重绘时出帧。鼠标停在边缘不动就没有新事件，上面那个计时器不推进，
+        // 琴键只挪一次卡住（用户报告「得鼠标持续位移才继续移动」）。这里在还能挪
+        // 的时候按计时器剩余时间约一次重绘，频率与原版 0.1 秒一步一致。
+        if can_pan {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(
+                    state.piano_scroll_delay as f64,
+                ));
+        }
     }
+    chart
 }
 
 /// 原版 `draw_piano` 结尾那段 `for (a = 0; a <= 87)` 的键盘轮询：
@@ -560,31 +584,39 @@ fn draw_black_key(
     }
 }
 
+/// #112：悬停五线谱的真正落笔点，由 `app::show` 在中央面板画完之后调用。
+/// 面板 / 指针 / 音符都进背景层（`LayerId::background()`），出队顺序晚于网格，
+/// 所以五线谱盖在编辑区之上；弹窗是 Area（`Order::Medium`），仍压在五线谱之上
+/// ——和原版「先画网格琴键、最后画窗口」的顺序一致。
+pub fn paint_notechart(ctx: &Context, state: &EditorState, req: ChartRequest) {
+    let Some(bank) = state.icons.bank() else {
+        return;
+    };
+    draw_notechart(ctx, &bank, &state.theme, req);
+}
+
 /// 原版 `draw_notechart(x1, yy, key, accidental)`：悬停琴键上的五线谱面板。
-/// 画在与琴键同层、剪辑区向上扩展的 painter 里：面板 / 指针 / 音符都在这根键的
-/// 精灵之前出队（原版同序），而整层钢琴晚于网格，所以面板叠在网格之上。
 /// 原版传入的 `key` 是列号 `startkey + a`（黑键升号再 -1），不是实际悬停键号，
 /// 音符位置因此与键名差 `sharpkeys + b` —— 原版如此，逐字复刻。
-fn draw_notechart(
-    ui: &Ui,
-    bank: &Bank,
-    th: &Theme,
-    rw: f32,
-    x1: f32,
-    y0: f32,
-    key: i32,
-    accidental: bool,
-    flats: bool,
-    u: f32,
-) {
+fn draw_notechart(ctx: &Context, bank: &Bank, th: &Theme, req: ChartRequest) {
+    let ChartRequest {
+        rw,
+        x1,
+        y0,
+        key,
+        accidental,
+        flats,
+        u,
+    } = req;
     let yy = y0 - 32.0 * u;
     let xx = chart_left(x1, rw, u);
-    // 剪辑区向上扩到最高键位（startkey + keysshow ≤ 51）的上加线 / 音符顶，
-    // 向下盖过白键命中区（越界部分会被之后画的琴键压住，与原版一致）。
+    // 剪辑区向上扩到最高键位（startkey + keysshow ≤ 51）的上加线 / 音符顶。
+    // 向下只到白键顶边为止：原版是先画五线谱再画这根键，键把越界的一小条压掉，
+    // 现在五线谱晚于整排键出队，改成剪到同一条线才能保持同样的可见范围（#112）。
     let p = Painter::new(
-        ui.ctx().clone(),
-        ui.layer_id(),
-        Rect::from_min_max(pos2(0.0, y0 - 660.0 * u), pos2(rw, y0 + WHITE_HIT_H * u)),
+        ctx.clone(),
+        LayerId::background(),
+        Rect::from_min_max(pos2(0.0, y0 - 660.0 * u), pos2(rw, y0)),
     );
     let right = x1 > rw - 250.0 * u;
     bank.notechart_panel(&p, pos2(xx, yy - 319.0 * u), th.kind, u);
