@@ -1399,32 +1399,56 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
     ));
 
     // 竖线：原版 `control_draw.gml:311-321` 只有三种 —— 小节线 alpha 0.3、整 4 tick 0.25、
-    // 其余 0.1，颜色一律是黑。原版没有横线。
-    // 宽度按缩放换算，但钳到不低于 1 物理像素：原版整幅画在固定分辨率贴图上再缩放，
-    // 亚像素的线被过滤摊开（淡，但看得见）；端口直接按物理坐标画，egui 无圆角填矩形
-    // 的边走硬采样，宽度不足 1px 会让整条线一个像素都不落地（实测 50% 档 83 条只剩 5 条）。
+    // 其余 0.1，颜色一律是黑，画布像素宽分别 2 / 1 / 1。原版没有横线。
     if state.flags.show_grid_lines && !blackout {
-        let small = u < 1.0;
+        let ppi = ui.ctx().pixels_per_point();
+        // 原版 `window_scale` 是「一个画布像素 = 屏幕上几个物理像素」。端口 #80 之后
+        // 把它拆成了 `viewport.scale`（相对系统 DPI）× egui 的 `pixels_per_point`
+        // （见 `state.rs:1750-1752`），这里合回去，缩放相关的判断一律按原版的口径走。
+        let eff = u * ppi;
+        let small = eff < 1.0 - 0.001;
+        // 竖线的落点和宽度都量化到整数物理像素。原版所有线都画在整数逻辑坐标上
+        // （`control_draw.gml:307` 的 `note_offset` 被 `floor` 过），整幅画在固定分辨率
+        // 贴图上，上屏时才由 GPU 一次性缩放，所以每条线在屏幕上的落地宽度恒定；
+        // 端口是直接按物理坐标画、且 `note_offset` 留了小数（按帧跟随时每帧都在变），
+        // 1 逻辑像素的线在 150% 系统缩放下 = 1.5 物理像素，硬采样后按相位吃 1 个还是
+        // 2 个像素列会逐帧变化 —— 用户实测的「播放时线条闪烁、粗细不均」就是这个。
+        let snap = |v: f32| (v * ppi).round() / ppi;
+        let line_w = |canvas_px: f32| (canvas_px * eff).round().max(1.0) / ppi;
         // 原版 `:314`：缩放小于 1 时小节线提到 alpha 0.5（Issue #254）。
         let bar = if small {
             th.grid_bar_small
         } else {
             th.grid_bar
         };
-        // 原版 `:315-316`：播放中 + 按帧跟随 + 缩放小于 1 时小节线改画 1px 的线，不再加粗。
+        // 原版 `:315-316`：播放中 + 按帧跟随 + 缩放小于 1 时小节线改画和拍线同粗的线。
         let thin_bar = small && state.follow_mode == 2 && state.is_playing();
+        let w_line = line_w(1.0);
+        let w_bar = line_w(2.0);
+        // 分档丢弃（用户定案，刻意偏离原版）：缩放小于 50% 不画刻内细分线，
+        // 小于等于 20% 连拍线也不画、只留小节线。原版到这些档位时最细的线本来就只剩
+        // 半个屏幕像素、被过滤摊成一片灰；端口是硬边绘制，不丢会在密集处连成一片，
+        // 反而比原版更抢眼。留 0.001 的余量：`viewport.scale` 是「绝对缩放 ÷ 系统 DPI」
+        // 算出来的，150% 系统缩放下取 50% 档会折回 0.49999997，不能让它掉到下一档。
+        let draw_beat = eff > 0.201;
+        let draw_sub_beat = eff >= 0.5 - 0.001;
         for tick in t0..t1 {
-            let x = vp.tick_x(tick as i64);
+            let x = snap(vp.tick_x(tick as i64));
             if x < rect.min.x - 1.0 || x > rect.max.x + 1.0 {
                 continue;
             }
-            let is_bar = tick % ts == 0;
-            let (w, c) = if is_bar {
-                (if thin_bar { 1.0 } else { (2.0 * u).max(1.0) }, bar)
+            let (w, c) = if tick % ts == 0 {
+                (if thin_bar { w_line } else { w_bar }, bar)
             } else if tick % 4 == 0 {
-                (u.max(1.0), th.grid_beat)
+                if !draw_beat {
+                    continue;
+                }
+                (w_line, th.grid_beat)
             } else {
-                (u.max(1.0), th.grid_line)
+                if !draw_sub_beat {
+                    continue;
+                }
+                (w_line, th.grid_line)
             };
             shapes.push(Shape::rect_filled(
                 Rect::from_min_size(pos2(x, rect.min.y), Vec2::new(w, rect.height())),
@@ -2915,6 +2939,146 @@ mod tests {
             played.iter().all(|&(w, _)| w <= 1.001),
             "原版 `:315-316`：{played:?}"
         );
+    }
+
+    /// 本帧所有竖线的（左边 x、宽度、alpha），按系统缩放 `ppi` 渲染。
+    /// `offset` 就是按帧跟随时每帧都在变的亚刻位移（原版 `control_draw.gml:307` 把它
+    /// `floor` 成整数逻辑像素，端口 `viewport.rs:172-176` 留成小数）。
+    fn vline_geometry(scale: f32, ppi: f32, offset: f32, playing: bool) -> Vec<(f32, f32, u8)> {
+        let mut st = ruler_state();
+        st.viewport.scale = scale;
+        st.viewport.note_offset = offset;
+        st.follow_mode = 2;
+        if playing {
+            st.begin_playback();
+        }
+        let ctx = egui::Context::default();
+        ctx.set_pixels_per_point(ppi);
+        crate::fonts::install(&ctx);
+        let out = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                draw_grid(&mut st, ui, grid_rect());
+            });
+        });
+        if playing {
+            st.audio.stop();
+        }
+        out.shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Rect(r)
+                    if (r.fill.r(), r.fill.g(), r.fill.b()) == (0, 0, 0)
+                        && r.rect.width() < 8.0
+                        && r.rect.height() > 100.0
+                        && matches!(r.fill.a(), 26 | 64 | 77 | 128) =>
+                {
+                    Some((r.rect.min.x, r.rect.width(), r.fill.a()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn whole_dev(v: f32) -> bool {
+        (v - v.round()).abs() < 0.001
+    }
+
+    /// #114：竖线必须落在**物理像素**格上，否则播放时会闪、粗细还不均。
+    /// 本机 Windows 缩放 150%（`AppliedDPI = 120`），1 逻辑像素 = 1.5 物理像素；
+    /// #113 把宽度钳到「不低于 1 逻辑像素」在这台机器上等于 1.5 物理像素，而 egui
+    /// 无圆角填矩形的边是硬采样 —— 同样宽的线，相位不同就吃掉 1 个或 2 个像素列，
+    /// 按帧跟随时每帧相位都在变，于是线在 1px / 2px 之间来回跳。原版不抖是因为它
+    /// 整幅画在整数逻辑坐标的贴图上，再由 GPU 一次性缩放，每条线的落地宽度恒定。
+    #[test]
+    fn the_grid_vlines_land_on_the_device_pixel_grid() {
+        let _prefs = crate::isolate_prefs();
+        for (ppi, scale) in [
+            (1.5f32, 0.5f32),
+            // 本机 Windows 缩放 150% 时「窗口缩放 50%」这一档的实际值（用户复现闪烁的档位）。
+            (1.5, 0.5 / 1.5),
+            (1.25, 0.5),
+            (1.0, 0.5),
+        ] {
+            for playing in [true, false] {
+                let mut base: Vec<(u8, i32)> = Vec::new();
+                for (i, offset) in [0.0f32, 1.7, 5.1, 8.5, 11.9].into_iter().enumerate() {
+                    let lines = vline_geometry(scale, ppi, offset, playing);
+                    assert!(
+                        !lines.is_empty(),
+                        "ppi {ppi} 缩放 {scale} 位移 {offset}：一条竖线都没提交"
+                    );
+                    for (x, w, _) in &lines {
+                        assert!(
+                            whole_dev(x * ppi),
+                            "ppi {ppi} 缩放 {scale} 位移 {offset}：线头 x={x:.3} \
+                            不在物理像素格上（{:.3}）",
+                            x * ppi
+                        );
+                        assert!(
+                            whole_dev(w * ppi) && w * ppi > 0.999,
+                            "ppi {ppi} 缩放 {scale} 位移 {offset}：宽 w={w:.3} \
+                            不是整数个物理像素（{:.3}）",
+                            w * ppi
+                        );
+                    }
+                    // 同一档线在一帧里只能有一种物理宽度，而且各帧相同；否则画面上的线
+                    // 就是粗细不均、并且随播放逐帧变化。
+                    let mut tiers: Vec<(u8, i32)> = lines
+                        .iter()
+                        .map(|(_, w, a)| (*a, (w * ppi).round() as i32))
+                        .collect();
+                    tiers.sort_unstable();
+                    tiers.dedup();
+                    let alpha_only = tiers.iter().map(|(a, _)| *a).collect::<Vec<_>>();
+                    assert_eq!(
+                        alpha_only.len(),
+                        tiers.len(),
+                        "ppi {ppi} 缩放 {scale} 位移 {offset}：同一档线出现了多种物理宽度 {tiers:?}"
+                    );
+                    if i == 0 {
+                        base = tiers;
+                    } else {
+                        assert_eq!(
+                            tiers, base,
+                            "ppi {ppi} 缩放 {scale}：位移 {offset} 时物理宽度变了（逐帧就会闪）"
+                        );
+                    }
+                }
+                // 非播放态（`playing = false`）才有原版 `draw_rectangle` 那条 2 画布像素
+                // 宽的小节线，上面几条断言在播放态会被 1px 分支盖住。
+                assert!(
+                    base.iter().any(|(a, _)| *a == 128),
+                    "ppi {ppi} 缩放 {scale}：小节线一档没提交，断言盖不到它"
+                );
+            }
+        }
+    }
+
+    /// #114 附带的小缩放分档（用户定的口径，刻意偏离原版）：缩放**小于 50%** 时
+    /// 刻内细分线整档不画（原版此时它们只有半像素、本来就糊成一片），只留拍线；
+    /// **小于等于 20%** 连拍线也去掉，只留小节线。
+    #[test]
+    fn the_grid_drops_the_finer_line_tiers_at_small_zoom() {
+        let _prefs = crate::isolate_prefs();
+        let tiers = |scale: f32| -> Vec<u8> {
+            let mut a: Vec<u8> = vline_geometry(scale, 1.0, 0.0, false)
+                .into_iter()
+                .map(|(_, _, a)| a)
+                .collect();
+            a.sort_unstable();
+            a.dedup();
+            a
+        };
+        assert_eq!(tiers(1.0), vec![26, 64, 77], "100% 三档都在");
+        assert_eq!(
+            tiers(0.5),
+            vec![26, 64, 128],
+            "50% 是「小于」的边界，三档都留"
+        );
+        assert_eq!(tiers(0.45), vec![64, 128], "45% 去掉刻内细分线");
+        assert_eq!(tiers(0.25), vec![64, 128], "25% 仍留拍线");
+        assert_eq!(tiers(0.2), vec![128], "20% 只剩小节线");
+        assert_eq!(tiers(0.1), vec![128], "10% 只剩小节线");
     }
 
     /// #95：网格里空格是箭头（原版 `cr_cross` 全文没用过，`control_draw.gml:125-129`
