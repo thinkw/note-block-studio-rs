@@ -1650,7 +1650,7 @@ the machine in your world before pasting this structure.\n\nThis warning will ne
                                     state.log_strs.push(line);
                                 }
                             }
-                            state.set_message(if crate::lang() == 1 {
+                            let mut msg = if crate::lang() == 1 {
                                 format!(
                                     "Schematic 已保存：{}×{}×{}，{} 个音符盒",
                                     info.length, info.width, info.height, info.note_blocks
@@ -1660,7 +1660,12 @@ the machine in your world before pasting this structure.\n\nThis warning will ne
                                     "Schematic saved: {}×{}×{}, {} note blocks",
                                     info.length, info.width, info.height, info.note_blocks
                                 )
-                            });
+                            };
+                            if let Some(hint) = worldedit_name_hint(&path) {
+                                msg.push('\n');
+                                msg.push_str(&hint);
+                            }
+                            state.set_message(msg);
                             let mut q = ModalQueue::message(
                                 crate::tr("Schematic Export", "导出 Schematic"),
                                 crate::tr("Schematic saved!", "Schematic 已保存！"),
@@ -1741,14 +1746,20 @@ the machine in your world before pasting this structure.\n\nThis warning will ne
                                 state.log_strs.push(line);
                             }
                         }
-                        let mut q = ModalQueue::message(
-                            crate::tr("Track Export", "导出直轨"),
-                            if structure {
-                                crate::tr("Structure saved!", "结构已保存！")
-                            } else {
-                                crate::tr("Schematic saved!", "Schematic 已保存！")
-                            },
-                        );
+                        let mut text = if structure {
+                            crate::tr("Structure saved!", "结构已保存！").to_string()
+                        } else {
+                            crate::tr("Schematic saved!", "Schematic 已保存！").to_string()
+                        };
+                        // 结构方块文件由 MC 自己读，只有 .schematic 归创世神管。
+                        if !structure {
+                            if let Some(hint) = worldedit_name_hint(&path) {
+                                text.push('\n');
+                                text.push_str(&hint);
+                            }
+                        }
+                        let mut q =
+                            ModalQueue::message(crate::tr("Track Export", "导出直轨"), &text);
                         q.then = Some(Command::ShowWindow(WindowKind::TrackExport));
                         state.modals = q;
                     }
@@ -1795,6 +1806,9 @@ the machine in your world before pasting this structure.\n\nThis warning will ne
                             }
                             let mut status = vec![head];
                             status.extend(lines);
+                            if let Some(hint) = worldedit_name_hint(&path) {
+                                status.push(hint);
+                            }
                             state.export_status = Some(status.join("\n"));
                             state.maestro_report = Some(report);
                             state.maestro_error = None;
@@ -2285,6 +2299,21 @@ fn is_schematic_path(path: &std::path::Path) -> bool {
     path.extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase() == "schematic")
         .unwrap_or(false)
+}
+
+/// 端口自加：非 ASCII 文件名创世神（WorldEdit）不收——`/schem list` 里不显示，
+/// 按名 `/schem load` 也判非法（照它 jar 里的 `SAFE_FILENAME_REGEX` 判定）。
+/// 导出成功后在状态文案里补一句，免得人在游戏里对着空列表发愣；投影模组不受影响。
+fn worldedit_name_hint(path: &std::path::Path) -> Option<String> {
+    nbs_io::schematic::worldedit_rejects_filename(path).then(|| {
+        tr(
+            "WorldEdit skips non-ASCII file names: this one won't show up in /schem list and \
+/schem load rejects it. Use an ASCII name for WorldEdit (Litematica reads this name fine).",
+            "创世神不接受非 ASCII 文件名：这一份不会出现在 /schem list 里，按名 /schem load 也会判非法。\
+要用创世神加载请改成英文名（投影模组不受影响）。",
+        )
+        .to_string()
+    })
 }
 
 /// 原版 `open_schematic(fn)`：整个替换当前歌曲，失败弹模态框。

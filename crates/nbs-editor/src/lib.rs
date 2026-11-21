@@ -1493,7 +1493,32 @@ mod gui_window_tests {
         assert_eq!(&bytes[..2], &[0x1f, 0x8b], "gzip 魔数");
         assert!(state.export_status.is_some(), "窗口里要能看到这次改写了什么");
         assert_eq!(state.window, Some(WindowKind::MaestroExport), "导出完窗口留着");
-        assert!(state.maestro_report.unwrap().streams > 0, "示例歌该有声音流");
+        assert!(
+            state.maestro_report.as_ref().unwrap().streams > 0,
+            "示例歌该有声音流"
+        );
+        let plain = state.export_status.clone().unwrap_or_default();
+        assert!(
+            !plain.contains("/schem list"),
+            "英文名不该带改名提示：{plain}"
+        );
+
+        // 创世神（WorldEdit）的目录监视器只收 ASCII 文件名：中文名不进 `/schem list`，
+        // 按名加载也判非法，所以状态区要在导出后点一句（投影模组不受影响）。
+        dispatch(
+            &mut state,
+            commands::Command::OpenDialog(state::DialogAction::ExportMaestro),
+            &ctx,
+        );
+        let cjk = dir.join("无间的钟.schem");
+        dispatch(
+            &mut state,
+            commands::Command::DialogConfirm(cjk.clone()),
+            &ctx,
+        );
+        let hinted = state.export_status.clone().unwrap_or_default();
+        assert!(hinted.contains("/schem list"), "中文名该在状态区提示改名：{hinted}");
+        let _ = std::fs::remove_file(&cjk);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
