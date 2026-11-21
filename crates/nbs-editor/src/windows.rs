@@ -78,6 +78,7 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         WindowKind::MinecraftCompat => 490.0,
         // 原版 `draw_window(x1, y1, x1 + 600, y1 + 400 + navigation_space)`。
         WindowKind::MidiImport => 600.0,
+        WindowKind::Transcription => 740.0,
         // 原版 `draw_window(x1, y1, x1 + 500, y1 + 350)`。
         WindowKind::MidiDevices => 500.0,
         // 原版 `draw_window(x1, y1, x1 + 415, y1 + 310)`。
@@ -150,6 +151,9 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::AudioExport => audio_export_window(state, ui),
             WindowKind::AudioSettings => audio_settings_window(state, ui),
             WindowKind::MidiImport => midi_import_window(state, ui),
+            WindowKind::Transcription => {
+                egui::ScrollArea::vertical().max_height(650.0).show(ui, |ui| crate::transcription::show(state, ui));
+            }
             WindowKind::MidiDevices => midi_devices_window(state, ui),
             WindowKind::SoundImport => sound_import_window(state, ui),
             WindowKind::SchematicExport => schematic_export_window(state, ui),
@@ -169,7 +173,11 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::Greeting => {}
         });
     if !open {
-        state.window = None;
+        if kind == WindowKind::MidiImport && state.transcription.import_from_preview {
+            state.emit(Command::MidiImportCancel);
+        } else {
+            state.window = None;
+        }
     }
 }
 

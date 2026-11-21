@@ -198,6 +198,10 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                 });
                 ui.separator();
                 ui.menu_button(tr("Import...", "导入"), |ui| {
+                    if ui.button(tr("Audio to MIDI / preview…", "音频转 MIDI／预览…")).clicked() {
+                        state.emit(Command::ShowWindow(WindowKind::Transcription));
+                        ui.close_menu();
+                    }
                     if ui.button(tr("MIDI...", "从 MIDI 导入…")).clicked() {
                         state.emit(Command::OpenDialog(crate::state::DialogAction::ImportMidi));
                         ui.close_menu();

@@ -119,6 +119,7 @@ pub enum Command {
     ToggleLoop,
     ToggleFollow,
     ShowWindow(WindowKind),
+    Transcription(crate::transcription::TranscriptionAction),
     CloseWindow,
     SetTheme(ThemeKind),
     ToggleFlag(Flag),
@@ -812,6 +813,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 (state.viewport.start_layer as i64 + d as i64 * rows).clamp(0, max) as u32;
         }
         Command::PlayPause => {
+            state.transcription.stop_preview();
             let playing = state.is_playing();
             state.prepare_audio();
             if playing {
@@ -834,6 +836,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         }
         Command::ToggleFollow => state.marker_follow = !state.marker_follow,
         Command::Exit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+        Command::Transcription(action) => crate::transcription::handle(state, action),
         Command::ShowWindow(kind) => {
             // 原版 `anim_window_open`：`window != window_last` 时窗口重新做打开动画，
             // 所有页签回到第一页；重复打开同一个窗口不重置。
@@ -876,7 +879,14 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.context_menu = None;
         }
         Command::CloseWindow => {
+            let return_to_preview = (state.window == Some(WindowKind::MidiImport) && state.transcription.import_from_preview)
+                || (matches!(state.window, Some(WindowKind::FileOpen | WindowKind::FileSave)) && state.dialog_return == Some(WindowKind::Transcription));
+            if return_to_preview {
+                state.dialog_return = None;
+                state.file_dialog = None;
+            }
             if state.window == Some(WindowKind::MidiImport) {
+                state.transcription.import_from_preview = false;
                 // 键盘 Escape 关窗和点「取消」一样，解析好的那份 MIDI 跟着丢。
                 state.midi_data = None;
                 state.midi_file.clear();
@@ -886,7 +896,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 // `draw_windows.gml:94-99`）；双倍速度的勾选是偏好，不跟着清。
                 state.tapper.reset_for_close();
             }
-            state.window = None;
+            state.window = return_to_preview.then_some(WindowKind::Transcription);
             // 原版的 `obj_menu` 跟着窗口一起销毁。这里不清的话，下拉菜单开着时用
             // Escape / Ctrl+P 关窗，下次打开首选项会凭空冒出一个悬浮菜单。
             state.prefs_theme_menu = false;
@@ -979,6 +989,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             ));
         }
         Command::MidiImportRun => {
+            state.transcription.import_from_preview = false;
             // 原版 `import_midi()`：用窗口里那份已解析的 MIDI + 界面上的映射表落一首新歌，
             // 收尾按「记住我的更改」把映射写回 GM 表，否则只把 w_midi_* 恢复成出厂值，
             // 两种情况最后都会 `save_settings()`。
@@ -1023,7 +1034,8 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         Command::MidiImportCancel => {
             // 原版「取消」：`songs[song].midifile = ""` 后关窗，解析好的那份 MIDI 一起丢掉，
             // 不写 settings.ini（界面上的改动留在内存里，等下次开文件时重刷）。
-            state.window = None;
+            state.window = if state.transcription.import_from_preview { Some(WindowKind::Transcription) } else { None };
+            state.transcription.import_from_preview = false;
             state.midi_data = None;
             state.midi_file.clear();
             state.midi_tab = 0;
@@ -1409,7 +1421,9 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             };
         }
         Command::OpenDialog(action) => {
-            let initial = if action.is_save() {
+            let initial = if action == DialogAction::SaveTranscriptionMidi {
+                state.transcription.preview.as_ref().map(|asset| PathBuf::from(&asset.name))
+            } else if action.is_save() {
                 state.doc.song.filename.clone()
             } else {
                 None
@@ -1724,7 +1738,13 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     }
                     state.window = None;
                 }
+                DialogAction::TranscriptionAudio | DialogAction::TranscriptionMidi
+                | DialogAction::TranscriptionModel | DialogAction::TranscriptionSoundFont
+                | DialogAction::SaveTranscriptionMidi => {
+                    crate::transcription::selected_file(state, action, path);
+                }
                 DialogAction::ImportMidi => {
+                    state.transcription.import_from_preview = false;
                     // 原版 `open_midi()`：先读盘解析，解析成功才开导入窗口，
                     // 并把当前 GM 映射表摊到界面四张表上（不落歌，等「导入」）。
                     match nbs_io::midi::parse_midi_path(&path) {

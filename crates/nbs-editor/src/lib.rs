@@ -31,6 +31,7 @@ pub mod state;
 pub mod statusbar;
 pub mod theme;
 pub mod toolbar;
+pub mod transcription;
 pub mod viewport;
 pub mod windows;
 

@@ -13,10 +13,12 @@ pub mod image_export;
 pub mod mc_export;
 pub mod midi;
 pub mod midi_gm;
+pub mod midi_preview;
 pub mod nbt;
 pub mod pattern;
 pub mod prefs;
 pub mod schematic;
+pub mod transcription;
 
 // ---- 多语言。原版 GML 的 `language` 是全局变量，深层脚本（导入导出、错误
 // 消息）照样读它；开关住在最底层的 nbs-core，IO 侧文案统一写 tr(英文, 中文)。

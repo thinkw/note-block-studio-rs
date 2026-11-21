@@ -63,6 +63,7 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
     state.maybe_save_prefs();
     // 原版 create 事件发起 HTTP 请求，Draw 事件里轮询结果更新欢迎窗的状态行。
     state.poll_update_check();
+    crate::transcription::poll(state, ctx);
     for cmd in collect_shortcuts(state, ctx) {
         state.emit(cmd);
     }
