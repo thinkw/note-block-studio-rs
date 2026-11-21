@@ -65,6 +65,10 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
         state.emit(cmd);
     }
     flush_all(state, ctx);
+    // 外部控制（MCP 桥、脚本）投来的请求在这一帧就地执行。放在快捷键之后：
+    // 同一帧里人的输入先落地，AI 拿到的 rev 才包含这一帧的人为改动。
+    // `state.control` 是 None 时这里等于一次空判断，不开链路就没有任何开销。
+    crate::control::drain(state, ctx);
 
     // 原版把壁纸画在 `draw_clear` 之后、所有面板之前（control_draw.gml:48-67），
     // 端口对应的位置是背景层最前面：菜单条 / 工具栏 / 状态栏 / 琴键 / 图层栏随后

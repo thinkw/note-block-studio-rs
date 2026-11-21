@@ -623,6 +623,42 @@ impl Document {
         tx.commit();
     }
 
+    /// 把 `from` 层整体挪到 `to` 位，中间的层顺延；一条事务 = 一次撤销。
+    /// 和 `swap_layers`（界面上移/下移一格）不是一回事：那只是两层互换，
+    /// 这里是「删一层再插一层」合成一次，所以层号映射要按方向分开算。
+    pub fn move_layer(&mut self, from: u32, to: u32) {
+        let len = self.song.layers.len() as u32;
+        if from == to || from >= len || to >= len {
+            return;
+        }
+        let lo = from.min(to);
+        let mut tx = self.begin(crate::tr("Move layer", "移动图层"));
+        tx.track_layers();
+        // 先落定浮动选区：层号一顺延，还挂在选区里的音符会对不上原来的层。
+        place_selection_in_tx(&mut tx);
+        tx.track_selection();
+        remap_layers(&mut tx, lo, |l| {
+            if l == from {
+                Some(to)
+            } else if from > to {
+                // 上移：夹在 to..from 之间的层各往下让一格。
+                if l >= lo && l < from {
+                    Some(l + 1)
+                } else {
+                    Some(l)
+                }
+            } else if l > from && l <= to {
+                // 下移：夹在 from..=to 之间的层各往上让一格。
+                Some(l - 1)
+            } else {
+                Some(l)
+            }
+        });
+        let layer = tx.song().layers.remove(from as usize);
+        tx.song().layers.insert(to as usize, layer);
+        tx.commit();
+    }
+
     pub fn set_layer(&mut self, index: u32, f: impl Fn(&mut Layer)) {
         if index as usize >= self.song.layers.len() {
             return;
@@ -805,6 +841,63 @@ mod tests {
         assert_eq!(doc.song.get(3, 0), Some(Note::new(0, 45)));
         assert_eq!(doc.song.get(3, 1), Some(Note::new(1, 40)));
         assert_eq!(doc.song.layers.len(), 1);
+    }
+
+    /// `move_layer` 的下移方向：夹在中间的层各让一格，音符跟着层号走。
+    #[test]
+    fn move_layer_down_shifts_range_and_carries_notes() {
+        let mut doc = Document::new();
+        doc.append_layer();
+        doc.append_layer();
+        doc.place_note(3, 0, Note::new(0, 45));
+        doc.place_note(3, 1, Note::new(1, 40));
+        doc.place_note(3, 2, Note::new(2, 38));
+        let before = doc.history.len();
+        doc.move_layer(0, 2);
+        // 一次调用 = 一条历史：层表变更和整列音符搬移不能拆成两笔。
+        assert_eq!(doc.history.len(), before + 1);
+        assert_eq!(doc.song.get(3, 2), Some(Note::new(0, 45)));
+        assert_eq!(doc.song.get(3, 0), Some(Note::new(1, 40)));
+        assert_eq!(doc.song.get(3, 1), Some(Note::new(2, 38)));
+        assert!(doc.undo());
+        assert_eq!(doc.song.get(3, 0), Some(Note::new(0, 45)));
+        assert_eq!(doc.song.get(3, 1), Some(Note::new(1, 40)));
+        assert_eq!(doc.song.get(3, 2), Some(Note::new(2, 38)));
+    }
+
+    /// 上移方向 + 浮动选区：选区里的音符不在网格上，必须先把它们落回原层再搬，
+    /// 否则层号一顺延，那枚音符会掉在错的层里。
+    #[test]
+    fn move_layer_up_places_floating_selection_first() {
+        let mut doc = Document::new();
+        doc.append_layer();
+        doc.append_layer();
+        doc.place_note(3, 0, Note::new(0, 45));
+        doc.place_note(3, 2, Note::new(2, 38));
+        // 选中即摘出：这一刻 (3,2) 在歌曲里是空的。
+        doc.select_rect(3, 2, 3, 2, false, false, false);
+        assert_eq!(doc.song.get(3, 2), None);
+        doc.move_layer(2, 0);
+        assert!(doc.selection.is_empty(), "落定后选区清空");
+        assert_eq!(doc.song.get(3, 0), Some(Note::new(2, 38)));
+        assert_eq!(doc.song.get(3, 1), Some(Note::new(0, 45)));
+        assert_eq!(doc.song.get(3, 2), None);
+    }
+
+    #[test]
+    fn move_layer_noop_does_not_touch_history() {
+        let mut doc = Document::new();
+        doc.append_layer();
+        let before = doc.history.len();
+        doc.move_layer(1, 1);
+        doc.move_layer(0, 9);
+        doc.move_layer(9, 0);
+        assert_eq!(
+            doc.history.len(),
+            before,
+            "原地不动和越界都不该留一条空历史"
+        );
+        assert_eq!(doc.song.layers.len(), 2);
     }
 
     #[test]

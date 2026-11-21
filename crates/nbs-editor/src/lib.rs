@@ -18,6 +18,7 @@
 pub mod app;
 pub mod background;
 pub mod commands;
+pub mod control;
 pub mod fonts;
 pub mod grid;
 pub mod icons;
@@ -4090,6 +4091,89 @@ mod gui_window_tests {
         assert!(state.doc.song.dirty, "原版 :69 备份档标 changed = 1");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 「谁连着」的两个常驻出口都从真绘制结果里读：菜单那一格（面板关着也看得见）
+    /// 和面板里的那几行。断言的是屏幕上画出来的字，不是拼装函数的返回值。
+    #[test]
+    fn menu_and_panel_both_show_who_is_connected() {
+        let _cn = crate::LangGuard::set(1);
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.prefs.language = 1;
+        state.theme.apply(&ctx);
+        // 链路挂上但服务不起：这一栏的账本由用例自己记，免得测试去抢真端口。
+        let board = crate::control::attach(&mut state, &ctx).clients.clone();
+        state.window = None;
+
+        // 没在监听：菜单那一格不带尾巴（这时报端口会骗人）。
+        click_text(&mut state, &ctx, "设置");
+        let texts = drawn_texts(&mut state, &ctx);
+        assert!(
+            texts.iter().any(|t| t == "外部控制（MCP）…"),
+            "设置菜单里没找到外部控制那一格：{texts:?}"
+        );
+
+        state.control_info = Some(crate::control::ControlInfo {
+            port: 13537,
+            discovery_path: Some("C:/cfg/control.json".to_string()),
+            source: "设置页这一栏".to_string(),
+            allow_danger: false,
+            cli_dirs: Vec::new(),
+        });
+        let texts = drawn_texts(&mut state, &ctx);
+        assert!(
+            texts.iter().any(|t| t == "外部控制（MCP）… · 监听 :13537"),
+            "监听中却没报出端口：{texts:?}"
+        );
+
+        let epoch = board.open_epoch();
+        let busy = board
+            .attach(epoch, "probe-ide", "127.0.0.1:40001")
+            .expect("刚领的任期");
+        busy.requested();
+        let texts = drawn_texts(&mut state, &ctx);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t == "外部控制（MCP）… · 监听 :13537 · 1 个客户端在连"),
+            "有人在连着，菜单那一格必须说出来：{texts:?}"
+        );
+
+        // 面板：握手名、对端、调用次数都画出来，一条连接一行。
+        state.window = Some(WindowKind::ExternalControl);
+        let texts = drawn_texts(&mut state, &ctx);
+        assert!(
+            texts.iter().any(|t| t == "当前 1 个 AI 客户端连着："),
+            "面板没报连接数：{texts:?}"
+        );
+        let row = texts
+            .iter()
+            .find(|t| t.contains("probe-ide") && t.contains("127.0.0.1:40001"))
+            .unwrap_or_else(|| panic!("面板没画出这条连接：{texts:?}"));
+        assert!(row.contains("1 次调用"), "调用次数没进那一行：{row}");
+
+        // 只连上没调用的（IDE 把桥接起了放着）也要露面，不能显示成好像没人来。
+        let idle = board
+            .attach(epoch, "idle-ide", "127.0.0.1:40002")
+            .expect("同一任期还能登记第二条");
+        let texts = drawn_texts(&mut state, &ctx);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("idle-ide") && t.contains("还没调用")),
+            "连上但没调用的客户端也要露面：{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t == "外部控制（MCP）… · 监听 :13537 · 2 个客户端在连"),
+            "两条连接该报两条：{texts:?}"
+        );
+
+        drop(idle);
+        drop(busy);
+        assert_eq!(board.count(), 0, "用例自己收账，别把连接留给别的用例");
     }
 }
 

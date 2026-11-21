@@ -1,0 +1,792 @@
+//! 协议层自测：线格式、帧读写、收件箱、任务表、发现文件，以及回环服务的握手与超时。
+//! 这里刻意不起真正的编辑器，`echo` 冒充主线程干活。
+
+use std::io::{BufReader, Cursor, ErrorKind};
+use std::net::{Ipv4Addr, TcpStream};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+
+use crate::bus::{Hello, Request, Response};
+use crate::client::{ClientError, ControlClient};
+use crate::discovery::{Discovery, DISCOVERY_FILE};
+use crate::frame::{read_json_line, write_json_line};
+use crate::op::{CellNote, ExportFormat, Op, Playback, Scope, SelectTarget};
+use crate::outcome::{ChangeReport, Data, ErrorCode, JobInfo, JobStatus, Outcome};
+use crate::server::{ControlServer, ServerConfig};
+use crate::task::{CancelOutcome, JobRegistry, SpawnReject};
+use crate::Inbox;
+
+fn report(rev: u64) -> ChangeReport {
+    ChangeReport {
+        rev,
+        ..Default::default()
+    }
+}
+
+fn wait_until<F>(what: &str, mut f: F)
+where
+    F: FnMut() -> bool,
+{
+    for _ in 0..2_000 {
+        if f() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("等不到：{what}");
+}
+
+fn temp_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("nbs-control-{tag}-{}", Discovery::random_token()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+// ---------------------------------------------------------------- 线格式
+
+#[test]
+fn set_notes_wire_shape() {
+    let op = Op::SetNotes {
+        cells: vec![CellNote {
+            tick: 0,
+            layer: 1,
+            instrument: 1,
+            key: 45,
+            velocity: None,
+            panning: None,
+            pitch: Some(-13),
+        }],
+        label: None,
+        expect_rev: Some(12),
+    };
+    let value = serde_json::to_value(&op).unwrap();
+    assert_eq!(value["kind"], json!("set_notes"));
+    assert_eq!(value["expect_rev"], json!(12));
+    // 省略的量不上线，回来时仍是 None
+    assert_eq!(value["cells"][0].get("velocity"), None);
+    assert_eq!(value["cells"][0]["pitch"], json!(-13));
+    assert_eq!(serde_json::from_value::<Op>(value).unwrap(), op);
+}
+
+#[test]
+fn playback_newtype_variant_keeps_both_tags() {
+    let op = Op::Playback(Playback::Seek { tick: 12.5 });
+    let value = serde_json::to_value(&op).unwrap();
+    assert_eq!(value["kind"], json!("playback"));
+    assert_eq!(value["action"], json!("seek"));
+    assert_eq!(value["tick"], json!(12.5));
+    assert_eq!(serde_json::from_value::<Op>(value).unwrap(), op);
+}
+
+#[test]
+fn nested_scope_and_target_tags() {
+    let op = Op::Transpose {
+        scope: Scope::Rect {
+            tick_from: 4,
+            layer_from: 0,
+            tick_to: 8,
+            layer_to: 2,
+        },
+        semitones: -2,
+        expect_rev: None,
+    };
+    let value = serde_json::to_value(&op).unwrap();
+    assert_eq!(value["scope"]["scope"], json!("rect"));
+    assert_eq!(serde_json::from_value::<Op>(value).unwrap(), op);
+
+    let sel = Op::Select {
+        target: SelectTarget::Rect {
+            tick_from: 0,
+            layer_from: 0,
+            tick_to: 16,
+            layer_to: 3,
+            copy: true,
+            additive: false,
+        },
+    };
+    let value = serde_json::to_value(&sel).unwrap();
+    assert_eq!(value["target"]["target"], json!("rect"));
+    assert_eq!(serde_json::from_value::<Op>(value).unwrap(), sel);
+}
+
+#[test]
+fn export_format_and_file_data_are_snake_case() {
+    assert_eq!(
+        serde_json::to_value(ExportFormat::Wav).unwrap(),
+        json!("wav")
+    );
+    let data = Data::File {
+        path: "a/b.nbs".to_string(),
+        file_kind: "save".to_string(),
+        notes: 7,
+    };
+    let value = serde_json::to_value(&data).unwrap();
+    assert_eq!(value["kind"], json!("file"));
+    assert_eq!(value["file_kind"], json!("save"));
+    assert_eq!(serde_json::from_value::<Data>(value).unwrap(), data);
+}
+
+/// 线上跑的是字节，不是 `Value`：`to_value` 把重复键并进同一个 map，
+/// 「摊平出两个 kind」这种形状在 Value 里 round-trip 得过去，落到 socket 上
+/// 客户端却读不回来（`JobInfo` 自带 `kind`，和 `Data` 的内部 tag 撞名）。
+/// 所以这条测试坚持先 `to_string` 再按 `read_json_line` 的路子从字符串读。
+#[test]
+fn job_data_survives_the_real_wire() {
+    let job = JobInfo {
+        id: 3,
+        kind: "export".to_string(),
+        status: JobStatus::Running,
+        progress: 0.5,
+        message: "离线混音".to_string(),
+        started_unix: 1_700_000_000,
+        finished_unix: None,
+        result: None,
+    };
+    let cases = [
+        Data::Job(Box::new(job.clone())),
+        Data::Jobs {
+            jobs: vec![job.clone()],
+        },
+        Data::File {
+            path: "a/b.nbs".to_string(),
+            file_kind: "save".to_string(),
+            notes: 7,
+        },
+        Data::Pong {
+            app_version: "0.1.0".to_string(),
+            protocol: crate::PROTOCOL_VERSION,
+            rev: 7,
+            song_session: 2,
+        },
+    ];
+    for data in cases {
+        let outcome = Outcome::ok(data.clone(), report(7));
+        let text = serde_json::to_string(&outcome).unwrap();
+        assert_eq!(
+            text.matches("\"kind\"").count(),
+            1,
+            "线上出现了两个 kind：{text}"
+        );
+        let back: Outcome =
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e} 读不回来：{text}"));
+        assert_eq!(back, outcome, "{:?} 的形状发出去和读回来不一样", data);
+    }
+}
+
+#[test]
+fn error_codes_have_stable_strings() {
+    for code in [
+        ErrorCode::BadArgument,
+        ErrorCode::NotFound,
+        ErrorCode::LockedLayer,
+        ErrorCode::RevConflict,
+        ErrorCode::ModalOpen,
+        ErrorCode::WindowOpen,
+        ErrorCode::Busy,
+        ErrorCode::Unsupported,
+        ErrorCode::NotAllowed,
+        ErrorCode::Io,
+        ErrorCode::OutOfRange,
+        ErrorCode::Timeout,
+        ErrorCode::Closed,
+        ErrorCode::Internal,
+    ] {
+        let value = serde_json::to_value(code).unwrap();
+        assert_eq!(
+            value.as_str(),
+            Some(code.as_str()),
+            "{code:?} 的字符串漂移了"
+        );
+        assert_eq!(serde_json::from_value::<ErrorCode>(value).unwrap(), code);
+    }
+}
+
+#[test]
+fn read_only_ops_are_the_safe_subset() {
+    assert!(Op::Ping.is_read_only());
+    assert!(Op::GetNotes {
+        tick_from: 0,
+        tick_to: 1,
+        layer_from: None,
+        layer_to: None
+    }
+    .is_read_only());
+    assert!(Op::JobList.is_read_only());
+    // 这些会动歌、动磁盘或动播放，一律不算只读
+    assert!(!Op::Save.is_read_only());
+    assert!(!Op::Playback(Playback::Play).is_read_only());
+    assert!(!Op::Undo { steps: None }.is_read_only());
+    assert!(!Op::RunAction {
+        action: "anything".to_string(),
+        args: None
+    }
+    .is_read_only());
+}
+
+// ---------------------------------------------------------------- 帧
+
+#[test]
+fn frame_round_trip_adds_exactly_one_newline() {
+    let mut buf = Vec::new();
+    write_json_line(
+        &mut buf,
+        &Request {
+            id: 7,
+            op: Op::JobCancel { id: 3 },
+        },
+    )
+    .unwrap();
+    assert!(buf.ends_with(b"\n"));
+    assert_eq!(
+        buf.iter().filter(|b| **b == b'\n').count(),
+        1,
+        "内嵌换行会把一帧拆成两帧"
+    );
+
+    let mut cursor = Cursor::new(buf);
+    let got: Option<Request> = read_json_line(&mut cursor).unwrap();
+    assert_eq!(
+        got.unwrap(),
+        Request {
+            id: 7,
+            op: Op::JobCancel { id: 3 }
+        }
+    );
+}
+
+#[test]
+fn frame_skips_blank_lines_and_reports_clean_eof() {
+    let mut cursor = Cursor::new(b"\n\n{\"id\":1,\"op\":{\"kind\":\"ping\"}}".to_vec());
+    let got: Option<Request> = read_json_line(&mut cursor).unwrap();
+    assert_eq!(
+        got.unwrap(),
+        Request {
+            id: 1,
+            op: Op::Ping
+        }
+    );
+    let eof: Option<Request> = read_json_line(&mut cursor).unwrap();
+    assert!(eof.is_none());
+}
+
+#[test]
+fn frame_tail_without_newline_still_parses() {
+    let mut cursor = Cursor::new(b"{\"id\":2,\"op\":{\"kind\":\"job_list\"}}".to_vec());
+    let got: Option<Request> = read_json_line(&mut cursor).unwrap();
+    assert_eq!(
+        got.unwrap(),
+        Request {
+            id: 2,
+            op: Op::JobList
+        }
+    );
+}
+
+#[test]
+fn frame_bad_json_is_invalid_data_not_a_panic() {
+    let mut cursor = Cursor::new(b"{\"id\":x}".to_vec());
+    let err = read_json_line::<Cursor<Vec<u8>>, Request>(&mut cursor).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
+}
+
+// ---------------------------------------------------------------- 收件箱
+
+#[test]
+fn inbox_wakes_submitter_and_replies_only_once() {
+    let woken = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&woken);
+    let inbox = Inbox::with_waker(move || {
+        counter.fetch_add(1, Ordering::SeqCst);
+    });
+
+    let rx = inbox.submit(1, "test", Op::Ping);
+    assert_eq!(inbox.pending(), 1);
+    assert_eq!(
+        woken.load(Ordering::SeqCst),
+        1,
+        "投递必须催帧，否则窗口静止时请求会烂在队列里"
+    );
+
+    let reqs = inbox.drain();
+    assert_eq!(reqs.len(), 1);
+    assert!(inbox.is_empty());
+    assert_eq!(reqs[0].client, "test");
+
+    assert!(reqs[0].reply(Outcome::done(report(1))), "第一次回执要成功");
+    assert!(
+        !reqs[0].reply(Outcome::done(report(1))),
+        "重复回执必须安静失败"
+    );
+    assert!(rx.recv().unwrap().ok);
+}
+
+#[test]
+fn inbox_reply_to_abandoned_request_returns_false() {
+    let inbox = Inbox::idle();
+    let rx = inbox.submit(1, "test", Op::Ping);
+    drop(rx);
+    let reqs = inbox.drain();
+    assert!(!reqs[0].reply(Outcome::done(report(1))));
+}
+
+// ---------------------------------------------------------------- 任务表
+
+#[test]
+fn job_reports_progress_then_result() {
+    let registry = JobRegistry::new(2, 8);
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let id = registry
+        .spawn("test", move |job| {
+            job.progress(0.5, "干一半");
+            let _ = rx.recv();
+            Ok(json!({ "cells": 3 }))
+        })
+        .unwrap();
+
+    wait_until(
+        "任务进入 Running",
+        || matches!(registry.status(id), Some(info) if info.status == JobStatus::Running),
+    );
+    assert_eq!(registry.status(id).unwrap().progress, 0.5);
+    assert_eq!(registry.status(id).unwrap().message, "干一半");
+
+    tx.send(()).unwrap();
+    wait_until(
+        "任务收工",
+        || matches!(registry.status(id), Some(info) if info.status == JobStatus::Done),
+    );
+    let info = registry.status(id).unwrap();
+    assert_eq!(info.result, Some(json!({ "cells": 3 })));
+    assert_eq!(info.progress, 1.0);
+    assert!(info.finished_unix.is_some());
+}
+
+#[test]
+fn job_progress_is_clamped() {
+    let registry = JobRegistry::new(1, 2);
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let id = registry
+        .spawn("test", move |job| {
+            job.progress(9.0, "超了");
+            let _ = rx.recv();
+            Ok(Value::Null)
+        })
+        .unwrap();
+    wait_until("进度被夹住", || {
+        registry
+            .status(id)
+            .map(|info| info.progress == 1.0)
+            .unwrap_or(false)
+    });
+    tx.send(()).unwrap();
+}
+
+#[test]
+fn job_cancel_is_cooperative() {
+    let registry = JobRegistry::new(2, 4);
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let id = registry
+        .spawn("test", move |job| {
+            let _ = rx.recv(); // 等外部把取消位置好
+            if job.cancelled() {
+                Err("按取消位收手".to_string())
+            } else {
+                Ok(Value::Null)
+            }
+        })
+        .unwrap();
+
+    wait_until(
+        "任务进入 Running",
+        || matches!(registry.status(id), Some(info) if info.status == JobStatus::Running),
+    );
+    assert_eq!(registry.cancel(id), CancelOutcome::Signalled);
+    tx.send(()).unwrap();
+    wait_until(
+        "任务按取消收手",
+        || matches!(registry.status(id), Some(info) if info.status == JobStatus::Cancelled),
+    );
+
+    // 已结束的任务再取消是无意义的，不能伪装成成功
+    assert_eq!(registry.cancel(id), CancelOutcome::Finished);
+    assert_eq!(registry.cancel(9_999), CancelOutcome::NotFound);
+}
+
+#[test]
+fn job_panics_are_recorded_as_failures() {
+    let registry = JobRegistry::new(1, 2);
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {})); // 别把刻意制造的 panic 打到测试输出里
+    let id = registry.spawn("boom", |_| panic!("任务体炸了")).unwrap();
+    wait_until(
+        "panic 被兜住",
+        || matches!(registry.status(id), Some(info) if info.status == JobStatus::Failed),
+    );
+    std::panic::set_hook(previous);
+    assert_eq!(registry.status(id).unwrap().message, "任务线程异常退出");
+}
+
+#[test]
+fn job_slot_limit_rejects_extra_work() {
+    let registry = JobRegistry::new(1, 4);
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    registry
+        .spawn("block", move |_| {
+            let _ = rx.recv();
+            Ok(Value::Null)
+        })
+        .unwrap();
+    wait_until("占住唯一的槽", || registry.running() == 1);
+    assert_eq!(
+        registry.spawn("second", |_| Ok(Value::Null)),
+        Err(SpawnReject::Busy)
+    );
+
+    tx.send(()).unwrap();
+    wait_until("槽位释放", || registry.running() == 0);
+    assert!(registry.spawn("third", |_| Ok(Value::Null)).is_ok());
+}
+
+#[test]
+fn finished_jobs_are_pruned_to_the_recent_ones() {
+    let registry = JobRegistry::new(1, 2);
+    let mut ids = Vec::new();
+    for _ in 0..4 {
+        let id = registry.spawn("quick", |_| Ok(Value::Null)).unwrap();
+        ids.push(id);
+        wait_until(
+            "任务收工",
+            || matches!(registry.status(id), Some(info) if info.finished_unix.is_some()),
+        );
+    }
+    let kept: Vec<u64> = registry.list().into_iter().map(|info| info.id).collect();
+    assert_eq!(
+        kept,
+        vec![ids[3], ids[2]],
+        "完成的历史只留最近两条，新的在前"
+    );
+}
+
+// ---------------------------------------------------------------- 发现文件
+
+#[test]
+fn discovery_writes_reads_and_only_removes_its_own() {
+    let dir = temp_dir("discovery");
+    let mine = Discovery {
+        protocol: crate::PROTOCOL_VERSION,
+        app: "nbs-rs".to_string(),
+        pid: std::process::id(),
+        port: 45_001,
+        token: Discovery::random_token(),
+        started_unix: 1,
+    };
+    let written = mine.write_to(&dir).unwrap();
+    assert_eq!(written, dir.join(DISCOVERY_FILE));
+    assert_eq!(Discovery::read_from(&dir).unwrap(), mine);
+
+    // 别的实例还活着：token 对不上就不许删
+    Discovery::remove_matching(&dir, "别人的 token");
+    assert!(written.exists());
+
+    Discovery::remove_matching(&dir, &mine.token);
+    assert!(!written.exists());
+    assert!(matches!(
+        Discovery::read_from(&dir),
+        Err(crate::discovery::DiscoveryError::Io(_))
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn discovery_tokens_differ_across_calls() {
+    assert_ne!(Discovery::random_token(), Discovery::random_token());
+}
+
+// ---------------------------------------------------------------- 服务 + 客户端
+
+fn test_config(token: &str, inbox: Inbox) -> ServerConfig {
+    let mut cfg = ServerConfig::new(token.to_string(), inbox);
+    cfg.app_name = "nbs-test".to_string();
+    cfg.app_version = "0.0.0-test".to_string();
+    cfg
+}
+
+/// 冒充 UI 主线程：轮询收件箱，按 `Op` 回一份固定回执。
+fn fake_main_thread(inbox: Inbox, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || loop {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        for req in inbox.drain() {
+            let outcome = match &req.op {
+                Op::Ping => Outcome::ok(
+                    Data::Pong {
+                        app_version: "0.0.0-test".to_string(),
+                        protocol: crate::PROTOCOL_VERSION,
+                        rev: 42,
+                        song_session: 9,
+                    },
+                    report(42),
+                ),
+                Op::GetSnapshot => Outcome::ok(Data::Empty, report(42)),
+                other => Outcome::ok(
+                    Data::Empty,
+                    report(if other.is_read_only() { 42 } else { 43 }),
+                ),
+            };
+            let _ = req.reply(outcome);
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    })
+}
+
+#[test]
+fn server_answers_requests_serially_on_one_connection() {
+    let inbox = Inbox::idle();
+    let server_inbox = inbox.clone();
+    let mut cfg = test_config("tok", server_inbox);
+    cfg.discovery_dir = None;
+    let mut server = ControlServer::start(0, cfg).unwrap();
+    assert_ne!(server.port(), 0);
+    assert_eq!(server.token(), "tok");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let main = fake_main_thread(inbox.clone(), Arc::clone(&stop));
+
+    let mut client =
+        ControlClient::connect(server.port(), "tok", "test", Duration::from_secs(2)).unwrap();
+    assert_eq!(client.server_app(), "nbs-test 0.0.0-test");
+    assert!(client.alive());
+
+    let out = client
+        .request(Op::SetNotes {
+            cells: vec![CellNote {
+                tick: 0,
+                layer: 0,
+                instrument: 1,
+                key: 45,
+                velocity: None,
+                panning: None,
+                pitch: None,
+            }],
+            label: None,
+            expect_rev: Some(42),
+        })
+        .unwrap();
+    assert!(out.ok);
+    assert_eq!(out.report.rev, 43, "写操作之后 rev 必须前进");
+
+    // 同一连接的第二条请求看得到前一条的结果，id 也对得上
+    let out = client.request(Op::GetSnapshot).unwrap();
+    assert!(out.ok);
+    assert_eq!(out.report.rev, 42);
+
+    client.close();
+    stop.store(true, Ordering::Relaxed);
+    main.join().unwrap();
+    server.stop();
+    assert!(inbox.is_empty(), "回执发完不该留待件");
+}
+
+#[test]
+fn server_refuses_wrong_token() {
+    let inbox = Inbox::idle();
+    let mut server = ControlServer::start(0, test_config("right", inbox)).unwrap();
+    let err = match ControlClient::connect(server.port(), "wrong", "test", Duration::from_secs(2)) {
+        Ok(_) => panic!("错误 token 居然连上了"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, ClientError::Refused(_)), "拿到的是 {err:?}");
+    server.stop();
+}
+
+#[test]
+fn server_refuses_protocol_mismatch_with_a_structured_error() {
+    let inbox = Inbox::idle();
+    let mut server = ControlServer::start(0, test_config("tok", inbox)).unwrap();
+    let port = server.port();
+
+    let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    write_json_line(
+        &mut writer,
+        &Hello {
+            token: "tok".to_string(),
+            protocol: crate::PROTOCOL_VERSION + 1,
+            client: "test".to_string(),
+        },
+    )
+    .unwrap();
+    let mut reader = BufReader::new(stream);
+    let resp: Response = read_json_line(&mut reader).unwrap().unwrap();
+    assert_eq!(resp.id, 0);
+    assert!(!resp.outcome.ok);
+    assert_eq!(resp.outcome.error_code(), Some(ErrorCode::NotAllowed));
+    server.stop();
+}
+
+#[test]
+fn server_times_out_when_the_main_thread_is_busy() {
+    let inbox = Inbox::idle();
+    let mut cfg = test_config("tok", inbox.clone());
+    cfg.request_timeout = Duration::from_millis(50);
+    let mut server = ControlServer::start(0, cfg).unwrap();
+
+    // 没有主线程取件：请求烂在队列里，服务端必须自己给个交代。
+    let mut client =
+        ControlClient::connect(server.port(), "tok", "test", Duration::from_secs(2)).unwrap();
+    let out = client.request(Op::Ping).unwrap();
+    assert!(!out.ok);
+    assert_eq!(out.error_code(), Some(ErrorCode::Timeout));
+    // 连接没被这次超时打死，还能接着用
+    assert_eq!(inbox.pending(), 1);
+    client.close();
+    server.stop();
+}
+
+// ---------------------------------------------------------------- 连接看板
+
+#[test]
+fn board_only_counts_a_session_once_the_server_is_open() {
+    let board = crate::ClientBoard::default();
+    // 没人 open_epoch = 服务没在对外，登记这条路根本不该走得通。
+    assert!(board.attach(7, "nbs-mcp", "127.0.0.1:1").is_none());
+    assert_eq!(board.count(), 0);
+
+    let epoch = board.open_epoch();
+    let s = board.attach(epoch, "nbs-mcp", "127.0.0.1:52133").expect("刚开任期");
+    let snap = board.snapshot();
+    assert_eq!(snap.len(), 1);
+    assert_eq!(snap[0].client, "nbs-mcp");
+    assert_eq!(snap[0].requests, 0, "连上还没调用");
+    assert_eq!(snap[0].last_request_unix, None);
+
+    s.requested();
+    let snap = board.snapshot();
+    assert_eq!(snap[0].requests, 1);
+    assert!(snap[0].last_request_unix.is_some(), "调用时刻要报得出来");
+
+    drop(s);
+    assert_eq!(board.count(), 0, "连接收尾必须销账");
+}
+
+#[test]
+fn a_stale_server_cannot_wipe_the_current_ledger() {
+    let board = crate::ClientBoard::default();
+    let old = board.open_epoch();
+    board.close_epoch(old);
+
+    let now = board.open_epoch();
+    let _s = board.attach(now, "claude", "127.0.0.1:40001").unwrap();
+    // 上一趟服务晚到的收尾（线程还在关连接）不能把这一趟刚登记的连接抹掉。
+    board.close_epoch(old);
+    assert_eq!(board.count(), 1, "旧任期的 close 不该动新账");
+
+    board.close_epoch(now);
+    assert_eq!(board.count(), 0);
+    assert!(board.attach(now, "late", "127.0.0.1:40002").is_none());
+}
+
+#[test]
+fn server_board_shows_the_connected_client_and_its_calls() {
+    let inbox = Inbox::idle();
+    let server_inbox = inbox.clone();
+    let mut cfg = test_config("tok", server_inbox);
+    cfg.discovery_dir = None;
+    let board = cfg.clients.clone();
+    let mut server = ControlServer::start(0, cfg).unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let main = fake_main_thread(inbox.clone(), Arc::clone(&stop));
+    assert!(board.snapshot().is_empty(), "起服不等于有人连着");
+
+    let mut client =
+        ControlClient::connect(server.port(), "tok", "probe-ide", Duration::from_secs(2)).unwrap();
+    wait_until("看板出现这条连接", || board.count() == 1);
+    let s = &board.snapshot()[0];
+    assert_eq!(s.client, "probe-ide", "握手自报的名字要原样显示");
+    assert!(s.peer.starts_with("127.0.0.1:"), "对端 {}", s.peer);
+    assert_eq!(s.requests, 0);
+
+    client.request(Op::Ping).unwrap();
+    wait_until("调用次数记上", || board.snapshot()[0].requests == 1);
+    let s = &board.snapshot()[0];
+    assert!(s.last_request_unix.is_some());
+    assert!(s.connected_unix <= s.last_request_unix.unwrap());
+
+    client.close();
+    wait_until("断线后销账", || board.snapshot().is_empty());
+
+    stop.store(true, Ordering::Relaxed);
+    main.join().unwrap();
+    server.stop();
+    assert!(board.snapshot().is_empty());
+}
+
+#[test]
+fn server_board_ignores_connections_that_never_handshook() {
+    let inbox = Inbox::idle();
+    let mut cfg = test_config("tok", inbox);
+    cfg.discovery_dir = None;
+    let board = cfg.clients.clone();
+    let mut server = ControlServer::start(0, cfg).unwrap();
+    let port = server.port();
+
+    // 扫端口 / token 不对的进程不该显示成「有 AI 连着」，否则这一栏就是在骗人。
+    let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    write_json_line(
+        &mut writer,
+        &Hello {
+            token: "wrong".to_string(),
+            protocol: crate::PROTOCOL_VERSION,
+            client: "scanner".to_string(),
+        },
+    )
+    .unwrap();
+    let mut reader = BufReader::new(stream);
+    // 握手没过时服务端回的是**一条普通回执**（id 0 + ok:false），不是 HelloAck。
+    let resp: Response = read_json_line(&mut reader).unwrap().unwrap();
+    assert!(!resp.outcome.ok, "token 不对必须先被挡下");
+    assert_eq!(resp.outcome.error_code(), Some(ErrorCode::NotAllowed));
+    assert_eq!(board.count(), 0, "没过握手不能登记");
+
+    // 光连上就放着（一句都没发）也算没登记：登记发生在握手之后。
+    let _idle = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+    assert_eq!(board.count(), 0);
+    server.stop();
+}
+
+#[test]
+fn a_stopped_server_stops_serving_connections_that_stayed_open() {
+    let inbox = Inbox::idle();
+    let server_inbox = inbox.clone();
+    let mut cfg = test_config("tok", server_inbox);
+    cfg.discovery_dir = None;
+    let board = cfg.clients.clone();
+    let mut server = ControlServer::start(0, cfg).unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let main = fake_main_thread(inbox.clone(), Arc::clone(&stop));
+    let mut client =
+        ControlClient::connect(server.port(), "tok", "probe-ide", Duration::from_secs(2)).unwrap();
+    wait_until("连接登记好", || board.count() == 1);
+    client.request(Op::Ping).unwrap();
+
+    // 用户在面板上取消勾选：端口关了还不够，**还连着的那条**也不能再使唤编辑器。
+    server.stop();
+    assert!(board.snapshot().is_empty(), "停服当场清空看板");
+    let err = match client.request(Op::Ping) {
+        Ok(out) => panic!("停服之后这条连接居然还能用：{out:?}"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, ClientError::Closed), "拿到的是 {err:?}");
+    assert!(inbox.is_empty(), "停服后的请求不该投给主线程执行");
+
+    stop.store(true, Ordering::Relaxed);
+    main.join().unwrap();
+}

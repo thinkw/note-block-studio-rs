@@ -6,8 +6,6 @@ use std::path::{Path, PathBuf};
 use nbs_core::model::Song;
 use serde::{Deserialize, Serialize};
 
-const APP_DIR: &str = "nbs-rust";
-
 /// 图层栏出厂宽度 = 原版列宽 264（`x1 = 4` + `spr_layerbox` 宽 256）。
 pub const LAYER_PANEL_DEFAULT_WIDTH: f32 = 264.0;
 /// 图层栏最窄一档：再窄的话 7 个功能按钮（18px 一档、末档宽 16）就出栏了。
@@ -170,6 +168,19 @@ pub struct Preferences {
     /// 原版 `[recent]` 段的 11 条最近歌曲（`recent_song_N_path` / `recent_song_N_time`）。
     #[serde(default, deserialize_with = "recent_files_deser")]
     pub recent_files: Vec<RecentFile>,
+    /// 外部控制（MCP 桥）：开着时窗口一起来就监听回环，不用命令行旗标。
+    /// 原版没有对应物，这三条都是我们自己的开关。默认关：打开意味着本机多一个
+    /// 回环端口和一份写着 token 的发现文件，得有人在设置页里点过同意才算。
+    /// `--control` 那条命令行路径不看这个字段，给了旗标就照起。
+    pub control_enabled: bool,
+    /// 额外放行给外部读写的目录。词法前缀判断、不解析符号链接，所以这里每加一条
+    /// 都是**安全决定**：那个目录底下所有子目录和文件都算放行。
+    /// 配置目录、当前工程目录、启动时快照下来的最近文件目录本来就在白名单里，
+    /// 这一栏只用于额外追加，不需要把默认那几条抄进来。
+    pub control_dirs: Vec<String>,
+    /// 危险动作（退出程序、替你答确认框、打开外链）是否可调。
+    /// **独立**开关：勾「启用外部控制」绝不会把这条一起打开，取消勾选也不会清掉它。
+    pub control_danger: bool,
 }
 
 /// 最近歌曲一条：路径 + 上次打开的时间（unix 秒，原版 `date_current_datetime()`）。
@@ -328,6 +339,10 @@ impl Default for Preferences {
             donate_banner_time: 0,
             last_version: None,
             recent_files: Vec::new(),
+            // 外部控制出厂全关：同意是人在设置页里给的，不是每次启动默认就给的。
+            control_enabled: false,
+            control_dirs: Vec::new(),
+            control_danger: false,
         }
     }
 }
@@ -402,21 +417,11 @@ impl Preferences {
     }
 
     pub fn config_dir() -> PathBuf {
-        // 无头校验（examples/uipng.rs）需要一份和真实用户配置隔离的设置，
-        // 否则正在运行的 GUI 会把默认值覆盖回来。
-        if let Ok(dir) = std::env::var("NBS_RUST_CONFIG_DIR") {
-            return PathBuf::from(dir);
-        }
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            return PathBuf::from(appdata).join(APP_DIR);
-        }
-        if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-            return PathBuf::from(xdg).join(APP_DIR);
-        }
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(".config").join(APP_DIR);
-        }
-        PathBuf::from(".").join(".nbs-rust")
+        // 规则本体在 `nbs_core::paths::config_dir`：MCP 桥算的是同一处，
+        // 不会出现「编辑器写在一个目录、桥在另一个目录找」这种两边都自洽的连不上。
+        // 无头校验（examples/uipng.rs）靠 `NBS_RUST_CONFIG_DIR` 拿到一份和真实用户
+        // 隔离的设置，否则正在运行的 GUI 会把默认值覆盖回来。
+        nbs_core::paths::config_dir()
     }
 
     pub fn config_path() -> PathBuf {
@@ -804,6 +809,27 @@ mod tests {
             "官方转换器默认 round，老配置缺键时必须退回它"
         );
         assert!(!old.warning_maestro);
+    }
+
+    /// 外部控制这三条是我们自己加的（原版没有对应物），所以对旧文件的口径是「全关」：
+    /// 装了老版本、prefs.json 里根本没这些键的用户，不该升级完就多出一个在听的端口。
+    #[test]
+    fn control_opt_in_defaults_to_off_in_old_files() {
+        let old: Preferences = serde_json::from_str(r#"{"theme":2,"language":1}"#).unwrap();
+        assert!(!old.control_enabled, "旧配置缺键时外部控制退回关闭");
+        assert!(old.control_dirs.is_empty(), "旧配置缺键时不放行任何额外目录");
+        assert!(!old.control_danger, "旧配置缺键时危险动作退回关闭");
+        assert_eq!(old.theme, 2, "已有的键照常读出来");
+
+        let p = Preferences {
+            control_enabled: true,
+            control_dirs: vec!["D:\\乐谱".to_string(), "D:\\采样".to_string()],
+            control_danger: true,
+            ..Default::default()
+        };
+        let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert!(back.control_enabled && back.control_danger, "两条勾选都要存下来");
+        assert_eq!(back.control_dirs, p.control_dirs, "目录列表要按顺序存下来");
     }
 
     /// 原版 `control_create.gml` 的出厂值：autosave=0、autosavemins=10、mousewheel=0、
