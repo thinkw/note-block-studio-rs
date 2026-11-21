@@ -424,14 +424,11 @@ pub fn handle(state: &mut EditorState, action: TranscriptionAction) {
                         t.error = Some(tr("The NBS importer would change the source note count before mapping; import was stopped.", "NBS 导入器在映射前已改变源音符数量，已停止导入以避免静默丢音。").into());
                         return;
                     }
-                    state.midi_options.reload_tables(&midi, &state.midi_gm);
-                    state.midi_data = Some(midi);
-                    state.midi_file = asset.name.clone();
-                    state.midi_tab = 0;
-                    state.midi_scroll = [0.0; 4];
+                    let name = asset.name.clone();
+                    crate::commands::load_midi_for_import(state, midi, name);
+                    let t = &mut state.transcription;
                     t.stop_preview();
                     t.import_from_preview = true;
-                    state.window = Some(WindowKind::MidiImport);
                 }
                 Err(error) => t.error = Some(error),
             }
@@ -972,6 +969,39 @@ mod tests {
         assert_eq!(state.doc.song.total_blocks, before);
         assert!(state.transcription.preview.is_some());
         assert!(state.midi_data.is_some());
+    }
+
+    /// 增强配器表是从「这一份 MIDI 的通道 program」派生的数据，不是用户偏好：
+    /// 转录导入必须整套重算，否则上一首曲子留下的表会被拿来映射当前这首。
+    #[test]
+    fn transcription_import_rederives_enhanced_tables_from_the_current_midi() {
+        let _prefs = crate::isolate_prefs();
+        let mut state = EditorState::for_test();
+        let mut previous = nbs_io::midi::MidiData::default();
+        previous.channel_patch[0] = 40;
+        crate::commands::load_midi_for_import(&mut state, previous, "previous.mid".to_string());
+        state.midi_enhanced.enabled = true;
+
+        let bytes = midi_bytes();
+        state.transcription.preview = Some(MidiPreviewAsset {
+            path: "original.mid".into(),
+            name: "original.mid".into(),
+            data: parse_midi_preview(&bytes).unwrap(),
+            bytes: bytes.clone(),
+            warnings: Vec::new(),
+        });
+        handle(&mut state, TranscriptionAction::Import);
+
+        let current = nbs_io::midi::parse_midi(&bytes).unwrap();
+        assert_eq!(current.channel_patch[0], 0);
+        assert_eq!(
+            state.midi_enhanced,
+            nbs_io::midi_enhanced::EnhancedMidiOptions::for_midi(&current)
+        );
+        assert_eq!(
+            state.midi_enhanced_options.channel_ins,
+            state.midi_options.channel_ins
+        );
     }
 
     #[test]

@@ -1896,18 +1896,11 @@ the machine in your world before pasting this structure.\n\nThis warning will ne
                     // 并把当前 GM 映射表摊到界面四张表上（不落歌，等「导入」）。
                     match nbs_io::midi::parse_midi_path(&path) {
                         Ok(midi) => {
-                            state.midi_options.reload_tables(&midi, &state.midi_gm);
-                            state.midi_enhanced = nbs_io::midi_enhanced::EnhancedMidiOptions::for_midi(&midi);
-                            state.midi_enhanced_options = state.midi_options.clone();
-                            state.midi_enhanced_check = None;
-                            state.midi_data = Some(midi);
-                            state.midi_file = path
+                            let name = path
                                 .file_name()
                                 .map(|s| s.to_string_lossy().into_owned())
                                 .unwrap_or_default();
-                            state.midi_tab = 0;
-                            state.midi_scroll = [0.0; 4];
-                            state.window = Some(WindowKind::MidiImport);
+                            load_midi_for_import(state, midi, name);
                         }
                         Err(e) => {
                             state.window = None;
@@ -2394,6 +2387,25 @@ fn import_schematic(state: &mut EditorState, path: &std::path::Path) {
     }
 }
 
+/// 装载一份待导入的 MIDI：配器表全部是从这个文件的 `channel_patch` / `perc_notes` /
+/// `parts` 派生的数据，所以每次装载整套重算，绝不沿用上一首的。传统那侧只摊表，
+/// 用户的标量偏好和 `[midi_import]` 首选项一样留着；增强那侧目前连开关一起回出厂值
+/// （`for_midi` = `default` + 重算通道），要改成继承偏好得单独拍板。
+/// 两个生产入口（文件导入、转录导入）都走这里。
+pub fn load_midi_for_import(state: &mut EditorState, midi: nbs_io::midi::MidiData, name: String) {
+    state.midi_options.reload_tables(&midi, &state.midi_gm);
+    state.midi_enhanced = nbs_io::midi_enhanced::EnhancedMidiOptions::for_midi(&midi);
+    state.midi_enhanced_options = state.midi_options.clone();
+    state.midi_enhanced_check = None;
+    state.midi_menu = None;
+    state.midi_submenu = None;
+    state.midi_data = Some(midi);
+    state.midi_file = name;
+    state.midi_tab = 0;
+    state.midi_scroll = [0.0; 4];
+    state.window = Some(WindowKind::MidiImport);
+}
+
 /// 原版 `open_url(folder)`：把这个目录交给系统文件管理器。
 /// Windows 的 `explorer` 即使成功也返回非 0，所以只看 `spawn` 是否起来。
 fn open_in_file_manager(dir: &std::path::Path) -> std::io::Result<std::process::Child> {
@@ -2594,14 +2606,10 @@ mod tests {
         let midi = enhanced_import_fixture(60);
         state.midi_gm.set_patch(0, 6, -1);
         let gm_before = state.midi_gm.patch(0);
-        state.midi_options = nbs_io::MidiImportOptions::for_midi(&midi, &state.midi_gm);
-        state.midi_enhanced_options = state.midi_options.clone();
+        load_midi_for_import(&mut state, midi, "fixture.mid".to_string());
         state.midi_options.use_velocity = false;
         let options_before = state.midi_options.clone();
-        state.midi_enhanced = nbs_io::midi_enhanced::EnhancedMidiOptions::for_midi(&midi);
         state.midi_enhanced.enabled = true;
-        state.midi_data = Some(midi);
-        state.window = Some(WindowKind::MidiImport);
         dispatch(&mut state, Command::MidiImportRun, &ctx);
         assert_eq!(state.doc.song.total_blocks, 2);
         assert!(state.doc.song.iter_notes().all(|(_, _, note)| note.velocity == 78));
@@ -2620,14 +2628,10 @@ mod tests {
         let mut state = state_with(four_case_song(10.0));
         let before = nbs_core::nbs::save_bytes(&state.doc.song, nbs_core::nbs::NBS_VERSION).unwrap();
         let midi = enhanced_import_fixture(0);
-        state.midi_options = nbs_io::MidiImportOptions::for_midi(&midi, &state.midi_gm);
-        state.midi_enhanced_options = state.midi_options.clone();
-        state.midi_enhanced = nbs_io::midi_enhanced::EnhancedMidiOptions::for_midi(&midi);
+        load_midi_for_import(&mut state, midi, "fixture.mid".to_string());
         state.midi_enhanced.enabled = true;
         state.midi_enhanced.range_mode = nbs_io::midi_enhanced::RangeMode::Keep;
         state.midi_enhanced.channels[0].transpose = 0;
-        state.midi_data = Some(midi);
-        state.window = Some(WindowKind::MidiImport);
         dispatch(&mut state, Command::MidiImportRun, &ctx);
         assert_eq!(before, nbs_core::nbs::save_bytes(&state.doc.song, nbs_core::nbs::NBS_VERSION).unwrap());
         assert!(matches!(state.midi_enhanced_check, Some(Err(_))));
