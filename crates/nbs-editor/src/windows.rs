@@ -52,6 +52,8 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
     let default_width = match kind {
         // 原版 `draw_window(x1, y1, x1 + 500, y1 + 510)`。
         WindowKind::Preferences => 500.0,
+        // 我们自己的窗口（原版没有）：要放得下发现文件全路径和目录列表。
+        WindowKind::ExternalControl => 520.0,
         // 原版 `draw_window(x1, y1, x1 + 500 + theme_offset, y1 + 400)`：
         // `theme_offset` 只有非 Fluent 才 +20（那三套字体更宽）。
         WindowKind::Changelist | WindowKind::Update => {
@@ -74,6 +76,8 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         WindowKind::SchematicExport => 560.0,
         // 原版 `draw_window_track_export` 也是 550×400。
         WindowKind::TrackExport => 560.0,
+        // 端口自加：MAESTRO 节目单窗口，改写清单最长，给到 600。
+        WindowKind::MaestroExport => 600.0,
         // 原版 `draw_window(x1, y1, x1 + 490, y1 + 450)`。
         WindowKind::MinecraftCompat => 490.0,
         // 原版 `draw_window(x1, y1, x1 + 600, y1 + 400 + navigation_space)`。
@@ -128,6 +132,7 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::Properties => properties(state, ui),
             WindowKind::Statistics => statistics(state, ui),
             WindowKind::Preferences => preferences(state, ui),
+            WindowKind::ExternalControl => external_control_window(state, ui),
             WindowKind::Instruments => instruments_window(state, ui),
             WindowKind::About => about(state, ui),
             // 原版 `draw_windows.gml:56-57`：`w_update` 和 `w_changelist` 都进
@@ -159,6 +164,7 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::SoundImport => sound_import_window(state, ui),
             WindowKind::SchematicExport => schematic_export_window(state, ui),
             WindowKind::TrackExport => track_export_window(state, ui),
+            WindowKind::MaestroExport => maestro_export_window(state, ui),
             WindowKind::DatapackExport => datapack_export_window(state, ui),
             WindowKind::PngExport => png_export_window(state, ui),
             WindowKind::Autosaves => autosaves_window(state, ui),
@@ -2388,6 +2394,300 @@ fn rate_items() -> [&'static str; 5] {
     }
 }
 
+/// 「外部控制（MCP）」这一页。原版首选项是 500×510 的五页像素稿，塞第六个页签会把
+/// 页签条顶出窗口，而这一页要显示端口、发现文件全路径、目录列表这些长字符串，
+/// 所以单开一窗、按 egui 常规排版，不冒充原版的坐标。
+///
+/// 这里的每一个改动都做两件事：写进 prefs（下次启动照旧），并且立刻改本进程的
+/// 服务或策略。点了要当场看见结果——「取消勾选但端口还在听」是最坏的一种界面。
+fn external_control_window(state: &mut EditorState, ui: &mut Ui) {
+    let info = state.control_info.clone();
+    ui.label(
+        RichText::new(tr(
+            "This page decides whether the machine keeps a path open for AI clients. The server binds 127.0.0.1 only; \
+             what gates access is the token inside control.json in the config folder - any local process that can read \
+             that file can connect. That is the whole access control.",
+            "这一页决定本机要不要留一条给 AI 用的通路。服务只绑 127.0.0.1，\
+             能不能连上取决于配置目录里那份 control.json 写的令牌——同机能读到这个文件的进程就能连，\
+             这就是全部的访问控制。",
+        ))
+        .small()
+        .weak(),
+    );
+    ui.separator();
+
+    // 勾选框反映的是「现在听不听」，不是 prefs 那一位：命令行旗标或环境变量开起来的
+    // 会话也要在这一页上看得见、能一键关掉，否则界面说的和实际跑的不是一件事。
+    let listening = info.is_some();
+    let mut enabled = listening;
+    if ui
+        .checkbox(
+            &mut enabled,
+            tr(
+                "Enable external control (listen as soon as the window opens)",
+                "启用外部控制（打开窗口就监听）",
+            ),
+        )
+        .changed()
+    {
+        state.prefs.control_enabled = enabled;
+        state.control_change = Some(if enabled {
+            crate::control::ControlChange::Enable
+        } else {
+            crate::control::ControlChange::Disable
+        });
+        state.save_prefs();
+    }
+    if let Some(info) = info.as_ref() {
+        ui.indent("control_live", |ui| {
+            // 带变量的整句自己拼：`tr` 借的是两个字符串字面量，塞 `format!` 的临时值会活不过这句。
+            let line = if crate::lang() == 1 {
+                if info.allow_danger {
+                    format!(
+                        "正在监听 127.0.0.1:{}；危险动作已放行。来源：{}",
+                        info.port, info.source
+                    )
+                } else {
+                    format!(
+                        "正在监听 127.0.0.1:{}；危险动作仍被挡（退出、开外链、答确认框）。来源：{}",
+                        info.port, info.source
+                    )
+                }
+            } else if info.allow_danger {
+                format!(
+                    "Listening on 127.0.0.1:{}; dangerous actions are allowed. Source: {}",
+                    info.port, info.source
+                )
+            } else {
+                format!(
+                    "Listening on 127.0.0.1:{}; dangerous actions (exit, open URL, answer dialogs) stay blocked. Source: {}",
+                    info.port, info.source
+                )
+            };
+            ui.label(line);
+            match info.discovery_path.as_deref() {
+                Some(path) => {
+                    ui.label(RichText::new(tr("Discovery file:", "发现文件：")).small().weak());
+                    // 可选中：排查「IDE 配好了却连不上」要把这一整串抄去和 IDE 那边的 --config-dir 比。
+                    ui.add(egui::SelectableLabel::new(
+                        false,
+                        RichText::new(path).small(),
+                    ));
+                }
+                // 没写发现文件时直连才有意义，这时 IDE 那份配置要填端口和令牌。
+                None => {
+                    ui.label(
+                        RichText::new(tr(
+                            "No discovery file this run: the bridge must connect with --port and --token.",
+                            "这一趟没写发现文件：桥接要用 --port 和 --token 直连。",
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                }
+            }
+            client_board(state, ui);
+        });
+    } else if state.prefs.control_enabled {
+        // 勾着却不在听：起服务失败了。这一行必须说出去，不然是「设置显示开着、
+        // 桥接却说连不上」那种最难查的状态。
+        ui.colored_label(
+            ui.visuals().error_fg_color,
+            tr(
+                "Settings say it is on, but nothing is listening this run - see the status bar error \
+                 (usually the port is taken or the config folder is not writable).",
+                "设置里开着，但这一趟没能监听——看状态栏那条错误（多半是端口被占或配置目录不可写）。",
+            ),
+        );
+    }
+    ui.separator();
+
+    // 危险动作单独一条，不跟「启用」联动：勾了启用绝不顺手把「替你退出程序」也打开。
+    let mut danger = state.prefs.control_danger;
+    if ui
+        .checkbox(
+            &mut danger,
+            tr(
+                "Allow dangerous actions (quit, open URLs, answer confirmation dialogs for you)",
+                "允许危险动作（退出程序、打开链接、替你回答确认框）",
+            ),
+        )
+        .changed()
+    {
+        state.prefs.control_danger = danger;
+        if listening {
+            state.control_change = Some(crate::control::ControlChange::Reapply);
+        }
+        state.save_prefs();
+    }
+    ui.label(
+        RichText::new(tr(
+            "This takes effect only with --control-danger on the command line or a tick here. \
+             An environment variable can never set it.",
+            "这一条只在命令行给了 --control-danger、或在这里勾了时才生效。环境变量给不了它。",
+        ))
+        .small()
+        .weak(),
+    );
+    ui.separator();
+
+    ui.label(tr("Extra directories external control may read and write", "外部可读写的额外目录"));
+    ui.label(
+        RichText::new(tr(
+            "The config folder, the open project's folder and the recent-file folders from startup are always allowed; \
+             this list is only what you add. The check is lexical (symlinks are not resolved): allowing a directory \
+             means allowing everything under it.",
+            "配置目录、当前工程目录、以及启动时最近文件所在的那些目录本来就放行，\
+             这里只列你额外加上去的。判定是词法的、不解析符号链接：加一个目录，\
+             等于把它底下所有子目录和文件一起交出去。",
+        ))
+        .small()
+        .weak(),
+    );
+    let dirs = state.prefs.control_dirs.clone();
+    if dirs.is_empty() {
+        ui.label(tr("(no extra directories yet)", "（暂时没有额外目录）"));
+    }
+    let mut remove: Option<usize> = None;
+    for (i, dir) in dirs.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.add(egui::SelectableLabel::new(false, dir.as_str()));
+            if ui.button(tr("Remove", "移除")).clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        let gone = state.prefs.control_dirs.remove(i);
+        // 移除要当场生效：白名单少一条而策略还留着，等于用户以为收走了其实没有。
+        state.control_change = Some(crate::control::ControlChange::Reapply);
+        if listening {
+            state.set_message(if crate::lang() == 1 {
+                format!("已移除 {gone}（不再允许外部读写它下面的文件）")
+            } else {
+                format!("{gone} removed (files under it are no longer writable from outside)")
+            });
+        }
+        state.save_prefs();
+    }
+    if let Some(info) = info.as_ref() {
+        if !info.cli_dirs.is_empty() {
+            // 这一栏删不掉它们：那是命令行上的一次同意，只有取消上面的勾选（整条通路关掉）
+            // 才收得走。不写出来的话，「移除」看起来像清空了白名单，其实没有。
+            ui.label(
+                RichText::new(format!(
+                    "{}{}",
+                    tr(
+                        "Also allowed by --control-dir for this run (this page cannot remove them - untick the box above to shut the whole path): ",
+                        "启动旗标 --control-dir 额外放行的（这一趟删不掉，要收走就取消上面的勾选）："
+                    ),
+                    info.cli_dirs.join("、")
+                ))
+                .small()
+                .weak(),
+            );
+        }
+    }
+    if ui.button(tr("Add directory…", "添加目录…")).clicked() {
+        state.emit(Command::OpenDialog(DialogAction::PickControlDir));
+    }
+    footer(state, ui);
+}
+
+/// 谁在使唤这台编辑器：握手名 + 对端 + 调用次数 + 最近一次动作距今多久。
+///
+/// 每帧现读、不缓存——「刚才那个 IDE 还连着吗」要的是此刻的答案。记账在服务端的连接线程
+/// 那边做（`nbs-control` 的连接看板），这里只读；停服时看板当场清空，所以这一栏不会留着
+/// 几条早断了的连接骗人。
+fn client_board(state: &EditorState, ui: &mut Ui) {
+    let sessions = state
+        .control
+        .as_ref()
+        .map(|ch| ch.clients.snapshot())
+        .unwrap_or_default();
+    if sessions.is_empty() {
+        ui.label(RichText::new(tr(
+            "No AI client is connected right now. A client appears here as soon as it finishes the token \
+             handshake, before it has asked for anything.",
+            "当前没有 AI 客户端连着。客户端走完令牌握手就会在这一栏露面，不用等它提第一个请求。",
+        ))
+        .small());
+        return;
+    }
+    let n = sessions.len();
+    ui.label(if crate::lang() == 1 {
+        format!("当前 {n} 个 AI 客户端连着：")
+    } else {
+        format!("{n} AI client(s) connected:")
+    });
+    let now = nbs_control::discovery::now_unix();
+    for s in sessions {
+        ui.label(RichText::new(client_row(&s, now)).monospace());
+    }
+    ui.label(
+        RichText::new(tr(
+            "The last column is the most recent activity: the latest call, or the moment it connected when \
+             it has not called yet. Unticking the box above drops every one of these connections.",
+            "最后一列是最近一次动作：调过就是最近一次调用，一条没发就是连上那一刻。取消上面那个勾选，这些连接一起断掉。",
+        ))
+        .small()
+        .weak(),
+    );
+}
+
+/// 一行连接：`nbs-mcp · 127.0.0.1:52133 · 12 次调用 · 3 秒前`。
+fn client_row(s: &nbs_control::ClientSession, now: i64) -> String {
+    let zh = crate::lang() == 1;
+    let calls = if s.requests == 0 {
+        if zh {
+            "还没调用".to_string()
+        } else {
+            "no calls yet".to_string()
+        }
+    } else if zh {
+        format!("{} 次调用", s.requests)
+    } else {
+        format!("{} call{}", s.requests, if s.requests == 1 { "" } else { "s" })
+    };
+    // 连上的时刻也要报：只连上不发请求的客户端（IDE 把桥接起了放着）就是这一种。
+    let since = s.last_request_unix.unwrap_or(s.connected_unix);
+    format!(
+        "{} · {} · {calls} · {}",
+        s.client,
+        s.peer,
+        ago_text(now.saturating_sub(since), zh)
+    )
+}
+
+/// 「距今多久」，秒 / 分 / 时三档；这一列只看新旧，不需要精确到秒。
+fn ago_text(secs: i64, zh: bool) -> String {
+    let secs = secs.max(0);
+    if secs < 5 {
+        return if zh { "刚刚".to_string() } else { "just now".to_string() };
+    }
+    if secs < 60 {
+        return if zh {
+            format!("{secs} 秒前")
+        } else {
+            format!("{secs} s ago")
+        };
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return if zh {
+            format!("{mins} 分钟前")
+        } else {
+            format!("{mins} min ago")
+        };
+    }
+    let hours = mins / 60;
+    if zh {
+        format!("{hours} 小时前")
+    } else {
+        format!("{hours} h ago")
+    }
+}
+
 /// 原版首选项的五个页签（`draw_window_preferences.gml` 的 `str` 数组）。
 fn prefs_tabs() -> [&'static str; 5] {
     if crate::lang() == 1 {
@@ -3797,6 +4097,11 @@ fn file_dialog(state: &mut EditorState, ui: &mut Ui, save: bool) {
                 "选择Minecraft安装目录",
             )
             .to_string(),
+            crate::state::DialogAction::PickControlDir => tr(
+                "Add a directory external control may read and write",
+                "添加允许外部控制读写的目录",
+            )
+            .to_string(),
             _ => format!(
                 "{}: *.{}   {}",
                 tr("File type", "文件类型"),
@@ -3825,6 +4130,7 @@ fn file_dialog(state: &mut EditorState, ui: &mut Ui, save: bool) {
             action,
             crate::state::DialogAction::PickFolder(_)
                 | crate::state::DialogAction::PickMinecraftDir
+                | crate::state::DialogAction::PickControlDir
         );
         if !pick_folder {
             ui.horizontal(|ui| {
@@ -8480,6 +8786,87 @@ fn datapack_export_window(state: &mut EditorState, ui: &mut Ui) {
             state.set_message(tr(
                 "Data pack export defaults restored",
                 "已恢复数据包导出默认设置",
+            ));
+        }
+        if ui.button(tr("Close", "关闭")).clicked() {
+            state.emit(Command::CloseWindow);
+        }
+    });
+}
+
+/// 端口自加（用户要求「导出那一栏多加个 MAESTRO 格式」）：MAESTRO 机体节目单导出。
+/// 原版没有这一档，布局照数据包导出窗口：选项在上、说明贴着选项、底部三个按钮。
+fn maestro_export_window(state: &mut EditorState, ui: &mut Ui) {
+    ui.label(tr(
+        "This file is the instruction sheet for an already built MAESTRO music machine.\nIt carries no sound of its own and it does not build the machine.",
+        "这份文件是给已建好的 MAESTRO 音乐机读的节目单：\n它本身不含声音，也不会把机体搭出来。",
+    ));
+    ui.separator();
+
+    let timing = state.maestro_options.timing;
+    ui.label(tr("Timing mode", "时间轴模式"));
+    let mut picked: Option<nbs_io::TimingMode> = None;
+    for m in nbs_io::TimingMode::ALL {
+        if ui
+            .radio(timing == m, m.label())
+            .on_hover_text(m.hint())
+            .clicked()
+        {
+            picked = Some(m);
+        }
+    }
+    ui.label(RichText::new(timing.hint()).small().weak());
+    if let Some(m) = picked {
+        state.maestro_options.timing = m;
+        // 换模式即换改写结果，清单要跟着重算（用户要求「自动改写 + 看得见」）。
+        state.refresh_maestro_preview();
+    }
+
+    ui.separator();
+    ui.label(tr("Changes to the song", "对歌曲的改写"));
+    if let Some(e) = &state.maestro_error {
+        ui.label(RichText::new(e.replace('\n', " ")).small().color(Color32::from_rgb(200, 90, 90)));
+    } else if let Some(r) = &state.maestro_report {
+        let lines = r.lines();
+        if lines.is_empty() {
+            ui.label(RichText::new(tr(
+                "Nothing needs rewriting: this song already fits the machine.",
+                "无需改写：这首歌本就符合机体的范围。",
+            )));
+        }
+        for line in lines {
+            ui.label(RichText::new(format!("· {line}")).small());
+        }
+        let stats = if crate::lang() == 1 {
+            format!(
+                "产出：{} 条声音流，{} 组箱子（{} 组装了物品）。",
+                r.streams, r.chest_pairs, r.block_entities
+            )
+        } else {
+            format!(
+                "Output: {} sound streams, {} chest pairs ({} with contents).",
+                r.streams, r.chest_pairs, r.block_entities
+            )
+        };
+        ui.label(RichText::new(stats).small().weak());
+    }
+
+    if let Some(s) = &state.export_status {
+        ui.separator();
+        ui.label(RichText::new(s).small());
+    }
+    ui.separator();
+    ui.horizontal(|ui| {
+        if ui.button(tr("Export", "导出")).clicked() {
+            state.emit(Command::ExportMaestroChecked);
+        }
+        if ui.button(tr("Use default", "使用默认值")).clicked() {
+            state.maestro_options = nbs_io::MaestroOptions::default();
+            state.export_status = None;
+            state.refresh_maestro_preview();
+            state.set_message(tr(
+                "MAESTRO export defaults restored",
+                "已恢复 MAESTRO 导出默认设置",
             ));
         }
         if ui.button(tr("Close", "关闭")).clicked() {

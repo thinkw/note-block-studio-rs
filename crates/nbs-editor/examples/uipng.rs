@@ -22,6 +22,11 @@
 //! `NBS_UIPNG_ZOOM=<倍>` 设界面缩放档（走 prefs，下一帧换算成 viewport.scale）；
 //! `NBS_UIPNG_PANEL=<px>` 设图层栏宽度（#108：侧栏横轴不跟缩放，只能拖）；
 //! `NBS_UIPNG_SELECT=1` 把第一个音符摘进浮动选区（宏条只在有选区时出现）。
+//! `NBS_UIPNG_PIANO=<倍>` 设琴键栏独立缩放（`prefs.piano_scale`）；
+//! `NBS_UIPNG_CHART=1` 打开「琴键五线谱」运行时开关（首选项出厂是关的）；
+//! `NBS_UIPNG_PAN=1` 把帧驱动改成照 egui 自己报的「下次重绘延迟」走（鼠标只到位一次、
+//! 之后不动，延迟为无穷大就断流），每帧打印起始槽 / 同屏键数 / 延迟，用来验证
+//! 「鼠标停在琴键边缘不放，键盘是否还在继续平移」。
 //! `NBS_UIPNG_DRAG=x0,y0,x1,y1` / `NBS_UIPNG_DBLCLICK=x,y` 补一段鼠标事件（拖动 /
 //! 双击），用来验证图层栏右边界把手，跑完打印结果宽度。
 //! ```
@@ -179,6 +184,16 @@ fn main() -> Result<(), String> {
     if let Ok(w) = std::env::var("NBS_UIPNG_PANEL") {
         state.prefs.layer_panel_width = w.parse::<f32>().unwrap_or(264.0);
     }
+    // `NBS_UIPNG_PIANO=<倍>`：琴键栏独立缩放（不跟界面缩放，见 #85/#80）。
+    if let Ok(s) = std::env::var("NBS_UIPNG_PIANO") {
+        state.prefs.piano_scale = s.parse::<f32>().unwrap_or(1.0);
+    }
+    // `NBS_UIPNG_CHART=1`：打开「琴键五线谱」运行时开关（首选项出厂是关的）。
+    if std::env::var("NBS_UIPNG_CHART").is_ok() {
+        state.flags.show_notechart = true;
+    }
+    // `NBS_UIPNG_PAN=1`：见文件头，逐帧打印琴键平移相关的三个量。
+    let pan_probe = std::env::var("NBS_UIPNG_PAN").is_ok();
     // `NBS_UIPNG_MONO=1`：关掉立体声（原版 `realstereo = 0`），声像图标消失、按钮整簇左移 10px。
     if std::env::var("NBS_UIPNG_MONO").is_ok() {
         state.prefs.mono = true;
@@ -411,8 +426,15 @@ fn main() -> Result<(), String> {
     // 整个窗口子树会被乘上一个不到 1 的不透明度（area.rs 的 multiply_opacity），
     // 只渲染两帧 16ms 的话窗口底色会变成半透明，看起来就像「底色没画」。
     const FRAMES: u32 = 8;
-    for frame in 0..FRAMES {
+    // `NBS_UIPNG_PAN=1` 的驱动方式：鼠标只在第 0 帧到位，之后一动不动，
+    // 帧也不再固定 0.05s 推进，而是照 egui 报的「下次重绘延迟」走——
+    // 它报 Duration::MAX 就断流，这一帧之后真实程序里不会再有帧。
+    let mut vtime = 0.05f64;
+    // 平移一步要 0.1 秒，8 帧只够看一步，所以这条路径把帧数拉长。
+    let frames = if pan_probe { 24 } else { FRAMES };
+    for frame in 0..frames {
         let mut events: Vec<egui::Event> = pointer
+            .filter(|_| !pan_probe || frame == 0)
             .map(|p| vec![egui::Event::PointerMoved(p)])
             .unwrap_or_default();
         if let Some((a, b)) = drag {
@@ -458,9 +480,11 @@ fn main() -> Result<(), String> {
                 });
             }
         }
+        let steady = 0.05 * (frame + 1) as f64;
+        let secs = if pan_probe { vtime } else { steady };
         let input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(w, h))),
-            time: Some(0.05 * (frame + 1) as f64),
+            time: Some(secs),
             events,
             ..Default::default()
         };
@@ -471,6 +495,24 @@ fn main() -> Result<(), String> {
             }
         }
         let out = ctx.run(input, |c| nbs_editor::show(c, &mut state));
+        if pan_probe {
+            let delay = out
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .map(|v| v.repaint_delay)
+                .unwrap_or(std::time::Duration::MAX);
+            eprintln!(
+                "帧 {frame}: t={vtime:.3} piano_start={} keysshow={} delay={:.3}s",
+                state.piano_start,
+                state.piano_keys_shown,
+                delay.as_secs_f64().min(99.0)
+            );
+            if delay == std::time::Duration::MAX {
+                eprintln!("帧 {frame} 之后 egui 不再要求重绘：真实程序到这里就停帧了");
+                break;
+            }
+            vtime += delay.as_secs_f64().clamp(0.016, 1.0);
+        }
         ppp = out.pixels_per_point;
         for (id, delta) in &out.textures_delta.set {
             apply_delta(&mut texs, *id, delta);
@@ -479,7 +521,7 @@ fn main() -> Result<(), String> {
             texs.remove(id);
         }
         let shapes = out.shapes;
-        if dump && frame + 1 == FRAMES {
+        if dump && frame + 1 == frames {
             eprintln!(
                 "visuals: window_fill {:?} panel_fill {:?}",
                 ctx.style().visuals.window_fill,

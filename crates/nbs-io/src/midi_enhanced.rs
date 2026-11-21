@@ -4,9 +4,10 @@
 use nbs_core::model::{Song, FIRST_CUSTOM_INDEX, KEY_MAX, MC_KEY_MAX, MC_KEY_MIN};
 
 use crate::midi::{
-    import_midi_data, import_resolved, resolve, MidiData, MidiImportOptions, Resolved,
+    import_midi_data, import_resolved, resolve, MidiData, MidiImportOptions, Resolved, SustainTail,
 };
 use crate::midi_miau::{DEFAULT_SUBSTITUTES, GM_COMBINATIONS, INSTRUMENT_OFFSETS};
+use crate::midi_voices::{plan_all_channels, VoiceNote};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RangeMode {
@@ -56,6 +57,16 @@ pub struct EnhancedMidiOptions {
     pub range_mode: RangeMode,
     pub smart_substitute: bool,
     pub force_fold: bool,
+    /// Retrigger held notes on each instrument's measured decay instead of one block per tick.
+    pub sustain: bool,
+    /// Taper those retriggers along the measured envelope; off holds them at one level.
+    pub sustain_fade: bool,
+    /// Split one MIDI channel into two NBS voices, following Miau's `separate_voices`.
+    pub separate_voices: bool,
+    /// Ignore MIDI track metadata in that split and fall back to pitch clustering (`voice_ignore_metadata`).
+    pub voice_ignore_metadata: bool,
+    /// Drop notes that repeat instrument+key on the same tick, keeping the first (`dedupe_notes`).
+    pub dedupe_notes: bool,
     pub channels: [ChannelCombination; 16],
     pub substitutes: [InstrumentSubstitution; 20],
 }
@@ -67,6 +78,11 @@ impl Default for EnhancedMidiOptions {
             range_mode: RangeMode::Octave,
             smart_substitute: true,
             force_fold: false,
+            sustain: false,
+            sustain_fade: true,
+            separate_voices: false,
+            voice_ignore_metadata: false,
+            dedupe_notes: false,
             channels: std::array::from_fn(|_| ChannelCombination::default()),
             substitutes: DEFAULT_SUBSTITUTES.map(|[high, low]| InstrumentSubstitution {
                 high: u8::try_from(high).ok(),
@@ -205,6 +221,10 @@ pub struct EnhancedImportReport {
     pub substituted: usize,
     /// Processed melody slot events actually shifted by folding, not tails.
     pub folded: usize,
+    /// MIDI 音符里拿到声部标记的条数（一音符一条，不含槽位复制与尾音块）。
+    pub voiced_notes: usize,
+    /// 同 tick 同乐器同音高被删掉的块数（尾音块一起算）。
+    pub deduped: usize,
 }
 
 fn in_range(key: i32) -> bool {
@@ -229,6 +249,27 @@ fn finish_report(song: &Song, tempo_changer: bool, report: &mut EnhancedImportRe
         .count();
 }
 
+/// Miau `dedupe_notes`：同 tick、同乐器、同音高只留第一条。
+/// Miau 在图层压实前删，这里在落块后删，所以被清空的层会留着名字继续占位，
+/// 也不做 `dedupe_reorder` 的向上回填（本项目不迁那套）。速度变化块不是音符，跳过。
+fn dedupe_notes(song: &mut Song) -> usize {
+    let mut seen = std::collections::HashSet::new();
+    let mut drops: Vec<(u32, u32)> = Vec::new();
+    for (tick, layer, note) in song.iter_notes() {
+        if note.instrument == FIRST_CUSTOM_INDEX as u8 {
+            continue;
+        }
+        if !seen.insert((tick, note.instrument, note.key)) {
+            drops.push((tick, layer));
+        }
+    }
+    for (tick, layer) in &drops {
+        song.remove(*tick, *layer);
+    }
+    song.recalculate();
+    drops.len()
+}
+
 /// Unsupported NBS keys fail without clamping; native-range outliers remain in the song.
 pub fn import_midi_enhanced(
     midi: &MidiData,
@@ -242,10 +283,42 @@ pub fn import_midi_enhanced(
         return Ok((song, report));
     }
     let dpt = midi.deltapertick(opts.precision).max(1e-9);
+    // Miau 的声部规划看到的是原始音符事件：一音符一条、按 MIDI tick 分单元，槽位复制发生在拆分之后。
+    let mut voice_notes: Vec<VoiceNote> = Vec::new();
+    let mut voice_at: Vec<(usize, usize)> = Vec::new();
+    for (t, track) in midi.tracks.iter().enumerate() {
+        for (e, ev) in track.events.iter().enumerate() {
+            let channel = ev.channel as usize;
+            if channel >= 16 || ev.channel > midi.channels {
+                continue;
+            }
+            if midi.quantize(ev.pos, opts.remove_silent, dpt) < 0 {
+                continue;
+            }
+            voice_notes.push(VoiceNote {
+                track: t,
+                channel,
+                tick: ev.pos,
+                note: ev.note as i32,
+            });
+            voice_at.push((t, e));
+        }
+    }
+    let marks =
+        plan_all_channels(&voice_notes, enhanced.separate_voices, enhanced.voice_ignore_metadata);
+    report.voiced_notes = marks.iter().filter(|mark| mark.is_some()).count();
+    let mut voices: Vec<Vec<Option<u8>>> = midi
+        .tracks
+        .iter()
+        .map(|track| vec![None; track.events.len()])
+        .collect();
+    for ((t, e), mark) in voice_at.iter().zip(marks) {
+        voices[*t][*e] = mark;
+    }
     let mut events: Vec<Vec<(Resolved, u16)>> = Vec::with_capacity(midi.tracks.len());
-    for track in &midi.tracks {
+    for (t, track) in midi.tracks.iter().enumerate() {
         let mut expanded = Vec::new();
-        for ev in &track.events {
+        for (e, ev) in track.events.iter().enumerate() {
             let channel = ev.channel as usize;
             if channel >= 16 || ev.channel > midi.channels {
                 continue;
@@ -255,6 +328,7 @@ pub fn import_midi_enhanced(
             if resolved.pos < 0 {
                 continue;
             }
+            resolved.voice = voices[t][e];
             let base = base_volume(ev.velocity, opts.use_velocity);
             if channel == 9 {
                 resolved.vel = base;
@@ -312,7 +386,11 @@ pub fn import_midi_enhanced(
         }
         events.push(expanded);
     }
-    let song = import_resolved(midi, opts, &events);
+    let sustain = enhanced.sustain.then_some(SustainTail { fade: enhanced.sustain_fade });
+    let mut song = import_resolved(midi, opts, &events, sustain);
+    if enhanced.dedupe_notes {
+        report.deduped = dedupe_notes(&mut song);
+    }
     finish_report(&song, opts.tempo_changer, &mut report);
     Ok((song, report))
 }
@@ -320,6 +398,7 @@ pub fn import_midi_enhanced(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::midi_decay::gain_at;
     use crate::{parse_midi, MidiEvent, MidiGmTable, MidiPart, MidiTrack};
 
     fn midi_keys(keys: &[i32]) -> MidiData {
@@ -803,7 +882,9 @@ mod tests {
                 notes: 8,
                 out_of_range: 0,
                 substituted: 2,
-                folded: 1
+                folded: 1,
+                voiced_notes: 0,
+                deduped: 0,
             }
         );
         config.range_mode = RangeMode::Keep;
@@ -814,7 +895,9 @@ mod tests {
                 notes: 8,
                 out_of_range: 8,
                 substituted: 0,
-                folded: 0
+                folded: 0,
+                voiced_notes: 0,
+                deduped: 0,
             }
         );
     }
@@ -995,4 +1078,285 @@ mod tests {
         assert_eq!(opts, before_opts);
         assert_eq!(gm, before_gm);
     }
+
+    /// 同通道、一低一高交替：12 音、span 46，聚类必然分成两个声部。
+    fn two_hands() -> MidiData {
+        midi_keys(&[39, 79, 41, 81, 43, 83, 45, 85, 40, 80, 42, 82])
+    }
+
+    /// 同通道两条轨道，音域合计只有 13 个半音且各自错开 tick：聚类必然被 poly/span 双门槛拦住。
+    fn two_tracks(low: &[i32], high: &[i32]) -> MidiData {
+        let track = |index: usize, shift: i64, keys: &[i32]| MidiTrack {
+            name: format!("Track {index}"),
+            events: keys
+                .iter()
+                .enumerate()
+                .map(|(i, &key)| MidiEvent {
+                    pos: (shift + i as i64) * 120,
+                    until: (shift + i as i64) * 120 + 120,
+                    channel: 0,
+                    note: (key + 21) as u8,
+                    velocity: 100,
+                    patch: 0,
+                    part: index,
+                })
+                .collect(),
+        };
+        let part = |track: usize| MidiPart {
+            track,
+            channel: 0,
+            patch: 0,
+            note_duration: true,
+        };
+        MidiData {
+            division: 480,
+            maxpos: (low.len() + high.len()) as i64 * 120,
+            micsecqn: 500_000,
+            tracks: vec![track(0, 0, low), track(1, low.len() as i64, high)],
+            parts: vec![part(0), part(1)],
+            ..Default::default()
+        }
+    }
+
+    fn layer_names(song: &Song) -> Vec<String> {
+        song.layers.iter().map(|layer| layer.name.clone()).collect()
+    }
+
+    fn layer_of(song: &Song, tick: u32, key: u8) -> u32 {
+        song.iter_notes()
+            .find(|(x, _, note)| *x == tick && note.key == key)
+            .map(|(_, layer, _)| layer)
+            .unwrap_or_else(|| panic!("tick {tick} key {key} 没有音符"))
+    }
+
+    #[test]
+    fn voice_split_gives_each_hand_its_own_layer_named_by_the_piano_convention() {
+        let midi = two_hands();
+        let mut config = enhanced();
+        let (plain, plain_report) = import_midi_enhanced(&midi, &options(), &config).unwrap();
+        assert_eq!(plain.layers.len(), 1, "未拆分时单通道一层");
+        assert_eq!(plain_report.voiced_notes, 0);
+
+        config.separate_voices = true;
+        let (song, report) = import_midi_enhanced(&midi, &options(), &config).unwrap();
+        assert_eq!(report.voiced_notes, 12);
+        // 高声部排在前面；GM 0（钢琴族）用「右手/左手」而非「高声部/低声部」。
+        assert_eq!(
+            layer_names(&song),
+            ["Piano 1 · 右手", "Piano 1 · 左手"],
+            "层名与层序"
+        );
+        assert_eq!(layer_of(&song, 1, 79), 0, "高音应在第 0 层");
+        assert_eq!(layer_of(&song, 0, 39), 1, "低音应在第 1 层");
+        assert_eq!(notes(&song).len(), notes(&plain).len(), "拆分不该增删音符");
+    }
+
+    #[test]
+    fn voice_split_uses_track_metadata_when_pitch_clustering_would_refuse() {
+        // 整体 span 14 < 15 且 poly = 1：聚类分支被双门槛拦住，只能靠轨道元数据分。
+        let midi = two_tracks(&[39, 40, 41, 42, 43, 44, 45, 46], &[47, 48, 49, 50, 51, 52, 53]);
+        let mut config = enhanced();
+        config.separate_voices = true;
+        let (auto, _) = import_midi_enhanced(&midi, &options(), &config).unwrap();
+        assert_eq!(
+            layer_names(&auto),
+            ["Piano 1 · 右手", "Piano 1 · 左手"],
+            "轨道元数据优先"
+        );
+
+        config.voice_ignore_metadata = true;
+        let (blind, blind_report) = import_midi_enhanced(&midi, &options(), &config).unwrap();
+        assert_eq!(blind_report.voiced_notes, 0, "无视元数据后应被门槛拒绝");
+        assert_eq!(layer_names(&blind), ["Piano 1"]);
+        assert_same_song(&blind, &import_midi_enhanced(&midi, &options(), &enhanced()).unwrap().0);
+    }
+
+    #[test]
+    fn voice_split_and_combination_slots_share_the_layer_block_by_tick() {
+        // 两个槽位 × 两个声部：同 tick 的两条槽位不能撞层，各自再占一层。
+        let midi = two_hands();
+        let mut config = enhanced();
+        three_slots(&mut config); // 槽位 0/6/7，这里只取前两个够用
+        config.channels[0].slots = [slot(0, 100), slot(6, 50), MidiSlot::default()];
+        config.separate_voices = true;
+        let (song, report) = import_midi_enhanced(&midi, &options(), &config).unwrap();
+        assert_eq!(report.voiced_notes, 12);
+        assert_eq!(
+            layer_names(&song),
+            [
+                "Piano 1 · 右手",
+                "Piano 1 · 右手 2",
+                "Piano 1 · 左手",
+                "Piano 1 · 左手 2"
+            ],
+            "声部组内按 tick 压紧，第二层带序号"
+        );
+        // 高声部在前的两层，同 tick 的两个槽位各占一层；低声部接在后两层。
+        let group = |tick: u32| {
+            let mut layers: Vec<_> = song
+                .iter_notes()
+                .filter(move |(x, _, _)| *x == tick)
+                .map(|(_, layer, note)| (layer, note.instrument))
+                .collect();
+            layers.sort();
+            layers
+        };
+        assert_eq!(group(1), [(0, 0), (1, 6)], "tick 1 的高音：两个槽位两层");
+        assert_eq!(group(0), [(2, 0), (3, 6)], "tick 0 的低音：后两层");
+        assert_eq!(layer_of(&song, 0, 39), 2);
+    }
+
+    #[test]
+    fn dedupe_keeps_the_first_note_per_tick_instrument_and_key() {
+        let mut midi = midi_keys(&[39, 39]);
+        midi.tracks[0].events[1].pos = 0;
+        let mut config = enhanced();
+        config.channels[0].slots = [slot(0, 100); 3];
+        let (plain, _) = import_midi_enhanced(&midi, &options(), &config).unwrap();
+        assert_eq!(plain.total_blocks, 6);
+
+        config.dedupe_notes = true;
+        let (song, report) = import_midi_enhanced(&midi, &options(), &config).unwrap();
+        assert_eq!(report.deduped, 5, "六块里同 tick 同乐器同音高的五块被删");
+        assert_eq!(song.total_blocks, 1);
+        assert_eq!(notes(&song)[0].2.key, 39);
+        assert_eq!(song.layers.len(), 6, "清空的不回收，层名还占位");
+    }
+
+    #[test]
+    fn dedupe_collapses_duplicated_tails_and_leaves_tempo_blocks_alone() {
+        let mut midi = midi_keys(&[39, 39]);
+        midi.tracks[0].events[1].pos = 0;
+        midi.tempo_changers = vec![(0, 120.0), (480, 60.0)];
+        let opts = MidiImportOptions {
+            note_duration: true,
+            tempo_changer: true,
+            ..options()
+        };
+        let mut config = enhanced();
+        config.channels[0].slots = [slot(0, 100); 3];
+        config.dedupe_notes = true;
+        let (song, report) = import_midi_enhanced(&midi, &opts, &config).unwrap();
+        // 未去重：三个槽位 ×（4 块 + 5 块）= 27 块；去重后 tick 0..4 各留一块。
+        assert_eq!(song.iter_notes().filter(|(_, _, n)| n.instrument != 20).count(), 5);
+        assert_eq!(report.deduped, 22);
+        assert_eq!(
+            song.iter_notes()
+                .filter(|(_, _, n)| n.instrument == FIRST_CUSTOM_INDEX as u8)
+                .count(),
+            2,
+            "速度变化块不是音符，不能被当成重复删掉"
+        );
+    }
+
+    fn held_note(key: i32, ticks: i64) -> MidiData {
+        let mut midi = midi_keys(&[key]);
+        midi.tracks[0].events[0].until = ticks * 120;
+        midi.maxpos = ticks * 120;
+        midi
+    }
+
+    fn placed(song: &Song) -> Vec<(u32, u8)> {
+        notes(song).iter().map(|(x, _, n)| (*x, n.velocity)).collect()
+    }
+
+    /// 原版尾音和延音都挂在 `note_duration` 下面，默认值是关的。
+    fn held_opts() -> MidiImportOptions {
+        MidiImportOptions {
+            note_duration: true,
+            ..options()
+        }
+    }
+
+    #[test]
+    fn sustain_retriggers_at_measured_decay_period_instead_of_every_tick() {
+        let midi = held_note(39, 40);
+        let opts = held_opts();
+        let (dense, _) = import_midi_enhanced(&midi, &opts, &enhanced()).unwrap();
+        // enda 是最后一个音头所在的 tick：39 tick 播满 5 秒 → 7.8 TPS。
+        assert_eq!(dense.enda, 39);
+        assert!(
+            (f64::from(dense.meta.tempo) - 7.8).abs() < 0.01,
+            "实得 {}",
+            dense.meta.tempo
+        );
+        assert_eq!(placed(&dense).len(), 40, "原版尾音每 tick 一块");
+        let head = placed(&dense)[0].1;
+
+        let mut config = enhanced();
+        config.sustain = true;
+        config.sustain_fade = false;
+        let (song, _) = import_midi_enhanced(&midi, &opts, &config).unwrap();
+        assert_eq!(song.meta.tempo, dense.meta.tempo, "延音不许改速度");
+        // 重敲间隔由「实测衰减毫秒 ÷ 每 tick 毫秒」四舍五入得到，测试用同一个公式反推，
+        // 免得曲速微调就把断言写死在 2 还是 3 上。
+        let ticks: Vec<u32> = placed(&song).iter().map(|(x, _)| *x).collect();
+        let ms_per_tick = 1000.0 / f64::from(song.meta.tempo);
+        let step = (f64::from(crate::midi_decay::SAMPLE_DECAYS[0].decay_ms) / ms_per_tick)
+            .round()
+            .max(1.0) as usize;
+        assert_eq!(
+            ticks,
+            (0..40u32).step_by(step).collect::<Vec<_>>(),
+            "每 {step} tick 重敲一次（{ms_per_tick:.1}ms/tick，实测衰减 320ms）"
+        );
+        assert!(
+            40 - (*ticks.last().unwrap_or(&0) as usize) <= step,
+            "关掉渐弱应敲满整个音长"
+        );
+        assert!(
+            placed(&song).iter().all(|(_, vel)| *vel == head),
+            "关渐弱时每次重敲保持音头音量 {head}"
+        );
+    }
+
+    #[test]
+    fn sustain_fade_tapers_along_the_measured_envelope_and_stops_at_silence() {
+        let midi = held_note(39, 40);
+        let opts = held_opts();
+        let mut config = enhanced();
+        config.sustain = true;
+        let (song, _) = import_midi_enhanced(&midi, &opts, &config).unwrap();
+        let placed = placed(&song);
+        let head = placed[0].1;
+        assert_eq!(placed[0], (0, head), "音头保持原音量");
+        assert!(
+            placed.windows(2).all(|w| w[1].1 <= w[0].1),
+            "包络只许单调不增：{placed:?}"
+        );
+        assert!(
+            placed.last().unwrap().1 > 0,
+            "最后一敲必须还听得见：{placed:?}"
+        );
+        // 实测 harp 320ms 衰减、音长 39 tick：渐弱比「敲满音长」早收，且贴着包络走。
+        let step = (f64::from(crate::midi_decay::SAMPLE_DECAYS[0].decay_ms)
+            / (1000.0 / f64::from(song.meta.tempo)))
+            .round()
+            .max(1.0) as usize;
+        let full = (0..40u32).step_by(step).count();
+        assert!(
+            placed.len() < full,
+            "渐弱应在音长结束前收声：敲满应 {} 块，实得 {}",
+            full,
+            placed.len()
+        );
+        let harp = crate::midi_decay::SAMPLE_DECAYS[0];
+        for (i, (tick, vel)) in placed.iter().enumerate() {
+            let expected = (f64::from(head) * gain_at(&harp.env, f64::from(*tick) / 39.0)).round() as i32;
+            assert!(
+                (i32::from(*vel) - expected).abs() <= 1,
+                "第 {i} 敲 tick={tick} 音量 {vel}，包络应给 {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn gain_at_interpolates_the_table_and_clamps_both_ends() {
+        let harp = crate::midi_decay::SAMPLE_DECAYS[0];
+        assert_eq!(gain_at(&harp.env, -1.0), 1.0);
+        assert!((gain_at(&harp.env, 0.5) - (0.1783 + 0.1139) / 2.0).abs() < 1e-6);
+        assert!((gain_at(&harp.env, 1.0) - 0.0001).abs() < 1e-6);
+        assert!((gain_at(&harp.env, 9.0) - 0.0001).abs() < 1e-6);
+    }
 }
+

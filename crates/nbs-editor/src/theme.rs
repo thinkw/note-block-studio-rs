@@ -67,6 +67,8 @@ pub struct Theme {
     pub grid_line: Color32,
     pub grid_beat: Color32,
     pub grid_bar: Color32,
+    /// 缩放小于 1 时的小节线：原版 `control_draw.gml:314` 把 alpha 从 0.3 提到 0.5。
+    pub grid_bar_small: Color32,
     pub text: Color32,
     pub text_dim: Color32,
     /// 原版 `accent1/2/3`：出厂 (0,120,212)，settings.ini [preferences] 持久化。
@@ -94,6 +96,9 @@ impl Theme {
     const LINE_A: u8 = 26;
     const BEAT_A: u8 = 64;
     const BAR_A: u8 = 77;
+    /// 原版 `:314` `if (window_scale < 1) draw_set_alpha(0.5)`，注释标的是 Issue #254：
+    /// 缩下去线太淡，专门提亮小节线这一档。
+    const BAR_A_SMALL: u8 = 128;
 
     /// 原版 `control_create.gml:143-145` 的 accent1/2/3 出厂值（RGB 0,120,212）。
     const FACTORY_ACCENT: [u8; 3] = [0, 120, 212];
@@ -261,6 +266,7 @@ impl Theme {
             grid_line: Color32::from_rgba_premultiplied(0, 0, 0, Self::LINE_A),
             grid_beat: Color32::from_rgba_premultiplied(0, 0, 0, Self::BEAT_A),
             grid_bar: Color32::from_rgba_premultiplied(0, 0, 0, Self::BAR_A),
+            grid_bar_small: Color32::from_rgba_premultiplied(0, 0, 0, Self::BAR_A_SMALL),
             text: if dark { Color32::WHITE } else { Color32::BLACK },
             text_dim: if dark {
                 Color32::from_gray(160)
