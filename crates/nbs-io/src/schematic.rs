@@ -180,6 +180,20 @@ impl Nbt {
         self.buf.extend_from_slice(&(v.len() as i32).to_be_bytes());
         self.buf.extend_from_slice(v);
     }
+    /// `TAG_Int_Array(name, values)`——结构方块的 `size`/`Offset` 一类用得到。
+    /// 注意这是数组标签（元素类型由标签本身决定），不是 [`Self::list`] 的列表。
+    ///
+    /// 编号按 NBT 规范：11 是 Int_Array，12 是 Long_Array（规范里没有 short 数组）。
+    /// 这里曾写成 12，Java 侧（创世神内置的 linbus、投影模组）照规范当 3 个 long 读，
+    /// 多吞 12 字节后整份文件错位，报 `Invalid NBT ID: 80`。
+    pub fn int_array(&mut self, name: &str, v: &[i32]) {
+        self.header(11, name);
+        self.buf
+            .extend_from_slice(&(v.len() as i32).to_be_bytes());
+        for x in v {
+            self.item_int(*x);
+        }
+    }
     /// `TAG_List(name, length, type)` —— 参数顺序照原版：先长度后类型。
     pub fn list(&mut self, name: &str, count: i32, element_type: u8) {
         self.header(9, name);
@@ -3381,7 +3395,7 @@ pub struct SchematicInfo {
     pub repeaters: usize,
 }
 
-fn gzip(data: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn gzip(data: &[u8]) -> Result<Vec<u8>, String> {
     let mut enc = GzEncoder::new(Vec::new(), Compression::default());
     enc.write_all(data).map_err(|e| {
         crate::tr(
@@ -3522,6 +3536,36 @@ pub fn export_schematic(
         .to_string()
     })?;
     Ok(built.info())
+}
+
+/// 创世神（WorldEdit 7.4.5）认不认这个文件名。
+///
+/// 判据照它自己的白名单正则 `WorldEdit.SAFE_FILENAME_REGEX`：
+/// `^[A-Za-z0-9_\- \./\\'$@~!%^*()\[\]\+{},\?]+\.[A-Za-z0-9]+$`
+/// 字符类里一个非 ASCII 字符都没有，所以中文歌名命不中：目录监视器
+/// `RecursiveDirectoryWatcher` 会跳过这个文件并写一行 `Invalid file name detected`
+/// （于是 `/schem list` 里看不见），按名 `/schem load` 走 `getSafeOpenFile` 同样判非法。
+/// 投影模组（Litematica）没这条限制，中文名照读。
+pub fn worldedit_rejects_filename(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+        return true;
+    };
+    // 正则要求 `名字.扩展名`，扩展名只能是 ASCII 字母数字。
+    let Some(dot) = name.rfind('.') else {
+        return true;
+    };
+    let (stem, ext) = (&name[..dot], &name[dot + 1..]);
+    if stem.is_empty() || ext.is_empty() {
+        return true;
+    }
+    !stem.chars().all(worldedit_name_char) || !ext.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// 那条字符类里除字母数字之外的成员。
+const WORLDEDIT_NAME_PUNCT: &str = "_- ./\\'$@~!%^*()[]+{},?";
+
+fn worldedit_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || WORLDEDIT_NAME_PUNCT.contains(c)
 }
 
 /// 生成未压缩的 NBT 字节，供测试与检查用。
@@ -4647,6 +4691,52 @@ mod tests {
     use super::*;
     use crate::nbt::Value;
     use nbs_core::model::{CustomInstrument, Layer, LockMode, Note, Song};
+
+    /// 每条都对着创世神 jar 里的 `SAFE_FILENAME_REGEX` 实跑过一遍（2026-11-21）：
+    /// 中文名被 `RecursiveDirectoryWatcher` 记成 `Invalid file name detected`，
+    /// 所以下面这批判定不是猜的，是照那台模组自己的正则复现。
+    #[test]
+    fn worldedit_filename_whitelist_follows_the_mod() {
+        let accepted = [
+            "untitled.schem",
+            "wujiande_zhong_v3.schem",
+            "song (1).schem",
+            "a~b!c%s.schem",
+            "a-b_c.d.schem",
+            "n0.5.schem",
+            "x[s].schem",
+            "a+.schem",
+            "a{}.schem",
+            "a,?.schem",
+            "a'.schem",
+            "a@.schem",
+        ];
+        let rejected = [
+            "无间的钟_v3.schem",
+            "MAESTRO 节目单.schem",
+            "no_ext",
+            ".schem",
+            "a#.schem",
+            "a&b.schem",
+            "a;b.schem",
+            "a=b.schem",
+            "a<b.schem",
+            // 正则里 `:` 同样不在字符类，但 Windows 文件名根本容不下它，就不拿来当样本了。
+            "a\u{e9}.schem",
+            "a.schem~",
+            "a|.schem",
+            "a\tb.schem",
+        ];
+        for name in accepted {
+            // 挂在目录下取 file_name，判的是文件名而不是整条路径（同模组的用法）。
+            let path = Path::new("schematics").join(name);
+            assert!(!worldedit_rejects_filename(&path), "{name} 该被创世神接受");
+        }
+        for name in rejected {
+            let path = Path::new("schematics").join(name);
+            assert!(worldedit_rejects_filename(&path), "{name} 该被创世神拒绝");
+        }
+    }
 
     /// 每个音符的默认力度/声像/微调与原版一致（100/100/0），所以测试只需要 tick/层/音色/音高。
     fn song_with(notes: &[(u32, u32, u8, u8)]) -> Song {

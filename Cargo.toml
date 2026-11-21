@@ -5,13 +5,17 @@ members = [
     "crates/nbs-audio",
     "crates/nbs-io",
     "crates/nbs-editor",
+    "crates/nbs-control",
+    "crates/nbs-mcp",
     "crates/nbs-app",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
+# 1.88 是 rmcp 3.x 的 rust-version；本仓库其余 crate 本身还跑得在更低版本上，
+# 抬这一档只为了让 MCP 桥接进同一个 workspace 编译。
+rust-version = "1.88"
 license = "AGPL-3.0-only"
 authors = ["nbs-rust contributors"]
 
@@ -20,6 +24,8 @@ nbs-core = { path = "crates/nbs-core" }
 nbs-audio = { path = "crates/nbs-audio" }
 nbs-io = { path = "crates/nbs-io" }
 nbs-editor = { path = "crates/nbs-editor" }
+nbs-control = { path = "crates/nbs-control" }
+nbs-mcp = { path = "crates/nbs-mcp" }
 egui = "0.31"
 # 默认用 glow（OpenGL）后端：依赖少、兼容性最好；
 # 想切 wgpu 只需把 features 改成 ["wgpu", "default_fonts"]。
@@ -35,6 +41,16 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 parking_lot = "0.12"
 # 与 eframe 自己那条依赖同版本同特性，共用一份编译产物；nbs-app 里只在 Windows 目标下引用。
 winapi = { version = "0.3.9", features = ["winuser"] }
+# MCP 桥接（crates/nbs-mcp）专用：编辑器那侧一行都不引。
+# server 特性自带 schemars + transport-async-rw；stdio 要显式加 transport-io。
+rmcp = { version = "3", default-features = false, features = [
+    "base64",
+    "macros",
+    "server",
+    "transport-io",
+] }
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync"] }
+schemars = "1"
 
 [profile.release]
 opt-level = 3

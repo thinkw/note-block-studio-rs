@@ -195,20 +195,22 @@ impl<'a> Reader<'a> {
                 self.compound(0)?
             }
             11 => {
-                let n = self.i32()?.max(0) as usize;
-                let mut v = Vec::with_capacity(n.min(1024));
-                for _ in 0..n {
-                    v.push(self.i16()?);
-                }
-                Value::List(2, v.into_iter().map(Value::Short).collect())
-            }
-            12 => {
+                // TAG_Int_Array：元素类型由标签本身决定，宽度固定 4 字节。
                 let n = self.i32()?.max(0) as usize;
                 let mut v = Vec::with_capacity(n.min(1024));
                 for _ in 0..n {
                     v.push(self.i32()?);
                 }
                 Value::List(3, v.into_iter().map(Value::Int).collect())
+            }
+            12 => {
+                // TAG_Long_Array：规范里 12 是 long，不是 int，读侧宽度不能按 4 字节算。
+                let n = self.i32()?.max(0) as usize;
+                let mut v = Vec::with_capacity(n.min(1024));
+                for _ in 0..n {
+                    v.push(self.i64()?);
+                }
+                Value::List(4, v.into_iter().map(Value::Long).collect())
             }
             other => {
                 return Err(if crate::lang() == 1 {
@@ -342,6 +344,43 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].get("note").and_then(Value::as_i8), Some(12));
         assert_eq!(items[0].get("x").and_then(Value::as_i32), Some(-3));
+    }
+
+    #[test]
+    fn int_and_long_arrays_come_back_as_typed_lists() {
+        // MAESTRO 的 .schem 里 Offset 与 BlockEntities.Pos 是 TAG_Int_Array（11）。
+        // 规范编号：11 = int 数组、12 = long 数组，写侧用错一位就会让 Java 侧整份错位。
+        let mut buf: Vec<u8> = vec![10, 0, 0];
+        buf.push(11);
+        buf.extend_from_slice(&(4u16).to_be_bytes());
+        buf.extend_from_slice(b"ints");
+        buf.extend_from_slice(&2i32.to_be_bytes());
+        buf.extend_from_slice(&7i32.to_be_bytes());
+        buf.extend_from_slice(&(-3i32).to_be_bytes());
+        buf.push(12);
+        buf.extend_from_slice(&(5u16).to_be_bytes());
+        buf.extend_from_slice(b"longs");
+        buf.extend_from_slice(&2i32.to_be_bytes());
+        buf.extend_from_slice(&9i64.to_be_bytes());
+        buf.extend_from_slice(&(-11i64).to_be_bytes());
+        buf.push(0);
+
+        let root = parse(&buf).unwrap();
+        let (ty, items) = root.get("ints").unwrap().as_list().unwrap();
+        assert_eq!(ty, 3);
+        assert_eq!(
+            items.iter().map(Value::as_i32).collect::<Vec<_>>(),
+            [Some(7), Some(-3)]
+        );
+        let (ty, items) = root.get("longs").unwrap().as_list().unwrap();
+        assert_eq!(ty, 4);
+        assert_eq!(
+            items
+                .iter()
+                .map(|v| matches!(v, Value::Long(x) if *x == 9 || *x == -11))
+                .collect::<Vec<_>>(),
+            [true, true]
+        );
     }
 
     #[test]

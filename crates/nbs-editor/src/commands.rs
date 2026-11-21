@@ -207,6 +207,11 @@ pub enum Command {
     TrackExportChecked,
     /// 原版「使用默认值」= `reset_schematic_export(1)`。
     ResetSchematicOptions,
+    /// 端口自加：MAESTRO 机体节目单入口（导出菜单）。第一次用先提示
+    /// 「产物要在已建好的机体里才出声」，随后算一遍预览再开窗口。
+    OpenMaestroExport,
+    /// 端口自加：MAESTRO 窗口「导出」按钮——预览报错就不弹保存框。
+    ExportMaestroChecked,
     /// 原版导入窗口的「导入」= `import_midi()`，随后 `save_settings()`。
     MidiImportRun,
     /// 原版导入窗口「使用默认值」答「是」之后那一大段：`midi_instruments()`
@@ -946,6 +951,64 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 "导出 Schematic 的设定已还原",
             ));
         }
+        // ---------------------------------------------- MAESTRO 机体节目单（端口自加）
+        Command::OpenMaestroExport => {
+            // 用户拍板「照做，接受机器依赖」：这份 .schem 要在已建好的 MAESTRO 机体里
+            // 才出声，第一次用时说明一次。规矩照 warning_schematic：提示完就落盘，不再重复。
+            let mut items: std::collections::VecDeque<Modal> = std::collections::VecDeque::new();
+            if !state.prefs.warning_maestro {
+                items.push_back(Modal {
+                    title: tr("MAESTRO machine sheet", "MAESTRO 机体节目单"),
+                    text: if crate::lang() == 1 {
+                        "导出的 .schem 是给已建好的 MAESTRO 音乐机读的节目单：\
+它本身不含声音，也不会在 Minecraft 里自动搭出机体，\
+请先在世界里放好机体再套用这份结构。\n\n此提示将不再提示。"
+                            .into()
+                    } else {
+                        "The exported .schem is a set of instructions for an already built MAESTRO \
+music machine. It carries no sound by itself and will not build the machine for you, so place \
+the machine in your world before pasting this structure.\n\nThis warning will never be shown again."
+                            .into()
+                    },
+                    yes_no: false,
+                });
+                state.prefs.warning_maestro = true;
+                let _ = state.prefs.save();
+            }
+            // 开窗前先算一遍改写清单（原版没有这一步；这是「自动改写要看得见」的落地）。
+            state.refresh_maestro_preview();
+            state.modals = ModalQueue {
+                items,
+                then: Some(Command::ShowWindow(WindowKind::MaestroExport)),
+            };
+            if state.modals.is_empty() {
+                dispatch(state, Command::ShowWindow(WindowKind::MaestroExport), ctx);
+            }
+        }
+        Command::ExportMaestroChecked => {
+            // 闸门照 Schematic/直轨窗口那条「没有方块就别弹保存框」的规矩。
+            let blocked = if let Some(e) = &state.maestro_error {
+                Some(e.clone())
+            } else if state
+                .maestro_report
+                .as_ref()
+                .map(|r| r.streams == 0)
+                .unwrap_or(false)
+            {
+                Some(tr("There are no notes to export!", "没有音符可以导出！").to_string())
+            } else {
+                None
+            };
+            match blocked {
+                None => dispatch(state, Command::OpenDialog(DialogAction::ExportMaestro), ctx),
+                Some(msg) => {
+                    state.modals = ModalQueue::message(
+                        tr("MAESTRO machine sheet", "MAESTRO 机体节目单"),
+                        &msg,
+                    );
+                }
+            }
+        }
         Command::MidiImportRun => {
             // 原版 `import_midi()`：用窗口里那份已解析的 MIDI + 界面上的映射表落一首新歌，
             // 收尾按「记住我的更改」把映射写回 GM 表，否则只把 w_midi_* 恢复成出厂值，
@@ -1516,6 +1579,23 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     state.file_dialog = None;
                     state.window = Some(WindowKind::SoundImport);
                 }
+                DialogAction::PickControlDir => {
+                    // 外部控制的白名单：存进 prefs，再让宿主重算策略——加一条当场就该能写，
+                    // 不用等下次启动（和「移除」同一条路子，两个方向都得立刻生效）。
+                    let text = path.to_string_lossy().into_owned();
+                    if !state.prefs.control_dirs.iter().any(|d| d == &text) {
+                        state.prefs.control_dirs.push(text.clone());
+                    }
+                    state.file_dialog = None;
+                    state.window = Some(WindowKind::ExternalControl);
+                    state.control_change = Some(crate::control::ControlChange::Reapply);
+                    state.set_message(if crate::lang() == 1 {
+                        format!("已把 {text} 加入外部控制可读写的目录")
+                    } else {
+                        format!("{text} added to the external control allow-list")
+                    });
+                    state.save_prefs();
+                }
                 DialogAction::ExportAudio => {
                     export_audio(state, &path);
                     state.window = None;
@@ -1587,7 +1667,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                                     state.log_strs.push(line);
                                 }
                             }
-                            state.set_message(if crate::lang() == 1 {
+                            let mut msg = if crate::lang() == 1 {
                                 format!(
                                     "Schematic 已保存：{}×{}×{}，{} 个音符盒",
                                     info.length, info.width, info.height, info.note_blocks
@@ -1597,7 +1677,12 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                                     "Schematic saved: {}×{}×{}, {} note blocks",
                                     info.length, info.width, info.height, info.note_blocks
                                 )
-                            });
+                            };
+                            if let Some(hint) = worldedit_name_hint(&path) {
+                                msg.push('\n');
+                                msg.push_str(&hint);
+                            }
+                            state.set_message(msg);
                             let mut q = ModalQueue::message(
                                 crate::tr("Schematic Export", "导出 Schematic"),
                                 crate::tr("Schematic saved!", "Schematic 已保存！"),
@@ -1678,14 +1763,20 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                                 state.log_strs.push(line);
                             }
                         }
-                        let mut q = ModalQueue::message(
-                            crate::tr("Track Export", "导出直轨"),
-                            if structure {
-                                crate::tr("Structure saved!", "结构已保存！")
-                            } else {
-                                crate::tr("Schematic saved!", "Schematic 已保存！")
-                            },
-                        );
+                        let mut text = if structure {
+                            crate::tr("Structure saved!", "结构已保存！").to_string()
+                        } else {
+                            crate::tr("Schematic saved!", "Schematic 已保存！").to_string()
+                        };
+                        // 结构方块文件由 MC 自己读，只有 .schematic 归创世神管。
+                        if !structure {
+                            if let Some(hint) = worldedit_name_hint(&path) {
+                                text.push('\n');
+                                text.push_str(&hint);
+                            }
+                        }
+                        let mut q =
+                            ModalQueue::message(crate::tr("Track Export", "导出直轨"), &text);
                         q.then = Some(Command::ShowWindow(WindowKind::TrackExport));
                         state.modals = q;
                     }
@@ -1694,6 +1785,70 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     export_datapack(state, &path);
                     // 原版导出完把窗口重新打开（`window = w_datapack_export`）。
                     state.window = Some(WindowKind::DatapackExport);
+                }
+                DialogAction::ExportMaestro => {
+                    // 端口自加：按界面上的取整模式真导出，并把「实际改写了什么」写进窗口。
+                    let opts = state.maestro_options.clone();
+                    match nbs_io::export_maestro(&state.doc.song, &path, &opts) {
+                        Ok(report) => {
+                            let streams = report.streams;
+                            let pairs = report.chest_pairs;
+                            let bes = report.block_entities;
+                            let head = if crate::lang() == 1 {
+                                format!(
+                                    "节目单已保存到 {}\n\n{} 条声音流，{} 组箱子（{} 组装了物品）。",
+                                    path.display(),
+                                    streams,
+                                    pairs,
+                                    bes
+                                )
+                            } else {
+                                format!(
+                                    "Sheet saved to {}\n\n{} sound streams, {} chest pairs ({} with contents).",
+                                    path.display(),
+                                    streams,
+                                    pairs,
+                                    bes
+                                )
+                            };
+                            let mut lines = report.lines();
+                            if lines.is_empty() {
+                                lines.push(
+                                    tr(
+                                        "Nothing was rewritten: the song already fits the machine.",
+                                        "没有改写：这首歌本就符合机体的范围。",
+                                    )
+                                    .to_string(),
+                                );
+                            }
+                            let mut status = vec![head];
+                            status.extend(lines);
+                            if let Some(hint) = worldedit_name_hint(&path) {
+                                status.push(hint);
+                            }
+                            state.export_status = Some(status.join("\n"));
+                            state.maestro_report = Some(report);
+                            state.maestro_error = None;
+                            state.set_message(if crate::lang() == 1 {
+                                format!("MAESTRO 节目单已导出：{streams} 条声音流")
+                            } else {
+                                format!("MAESTRO sheet exported: {streams} streams")
+                            });
+                            state.save_prefs();
+                        }
+                        Err(e) => {
+                            state.export_status = None;
+                            state.maestro_error = Some(e.clone());
+                            state.maestro_report = None;
+                            state.set_message(if crate::lang() == 1 {
+                                format!("导出节目单失败: {e}")
+                            } else {
+                                format!("MAESTRO sheet export failed: {e}")
+                            });
+                        }
+                    }
+                    // 导出完把窗口留着（同数据包那条路），失败时人也能看到原因。
+                    state.window = Some(WindowKind::MaestroExport);
                 }
                 DialogAction::ExportPattern => {
                     let sel = if state.doc.selection.is_empty() {
@@ -2161,6 +2316,21 @@ fn is_schematic_path(path: &std::path::Path) -> bool {
     path.extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase() == "schematic")
         .unwrap_or(false)
+}
+
+/// 端口自加：非 ASCII 文件名创世神（WorldEdit）不收——`/schem list` 里不显示，
+/// 按名 `/schem load` 也判非法（照它 jar 里的 `SAFE_FILENAME_REGEX` 判定）。
+/// 导出成功后在状态文案里补一句，免得人在游戏里对着空列表发愣；投影模组不受影响。
+fn worldedit_name_hint(path: &std::path::Path) -> Option<String> {
+    nbs_io::schematic::worldedit_rejects_filename(path).then(|| {
+        tr(
+            "WorldEdit skips non-ASCII file names: this one won't show up in /schem list and \
+/schem load rejects it. Use an ASCII name for WorldEdit (Litematica reads this name fine).",
+            "创世神不接受非 ASCII 文件名：这一份不会出现在 /schem list 里，按名 /schem load 也会判非法。\
+要用创世神加载请改成英文名（投影模组不受影响）。",
+        )
+        .to_string()
+    })
 }
 
 /// 原版 `open_schematic(fn)`：整个替换当前歌曲，失败弹模态框。

@@ -254,6 +254,14 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                         state.emit(Command::ShowWindow(WindowKind::DatapackExport));
                         ui.close_menu();
                     }
+                    // 端口自加：MAESTRO 音乐机的节目单（.schem），要在已建好的机体里才出声。
+                    if ui
+                        .button(tr("MAESTRO machine sheet...", "MAESTRO 机体节目单…"))
+                        .clicked()
+                    {
+                        state.emit(Command::OpenMaestroExport);
+                        ui.close_menu();
+                    }
                     if ui.button(tr("Pattern...", "片段 (.nbp)…")).clicked() {
                         state.emit(Command::OpenDialog(
                             crate::state::DialogAction::ExportPattern,
@@ -488,6 +496,12 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                     .clicked()
                 {
                     state.emit(Command::ShowWindow(WindowKind::MidiDevices));
+                    ui.close_menu();
+                }
+                // 原版这一格往后就是首选项了；外部控制是我们自己加的一页，
+                // 排在它前面，因为它是「这台机器要不要留通路」那一类决定。
+                if ui.button(control_menu_label(state)).clicked() {
+                    state.emit(Command::ShowWindow(WindowKind::ExternalControl));
                     ui.close_menu();
                 }
                 if ui
@@ -1639,6 +1653,34 @@ fn show_toolbar_text(state: &mut EditorState, ui: &mut Ui) {
             state.emit(Command::SetMasterVolume(vol));
         }
     });
+}
+
+/// 菜单那一格自己报「听没听、有几个客户端在连着」。
+///
+/// 面板是个窗口，关掉就什么都看不见；这台机器有没有给 AI 留着通路，是人随时扫一眼
+/// 就该知道的事，所以它挂在一直开着的菜单上。端口用 `control_info` 里那份——那是
+/// **实际监听**的端口，旗标给过但起不来时那位是 `None`，这一格就退回不带尾巴。
+fn control_menu_label(state: &EditorState) -> String {
+    let base = tr("External control (MCP)...", "外部控制（MCP）…").to_string();
+    let Some(info) = state.control_info.as_ref() else {
+        return base;
+    };
+    let n = state
+        .control
+        .as_ref()
+        .map(|ch| ch.clients.count())
+        .unwrap_or(0);
+    if crate::lang() == 1 {
+        if n == 0 {
+            format!("{base} · 监听 :{}", info.port)
+        } else {
+            format!("{base} · 监听 :{} · {n} 个客户端在连", info.port)
+        }
+    } else if n == 0 {
+        format!("{base} · listening :{}", info.port)
+    } else {
+        format!("{base} · listening :{} · {n} connected", info.port)
+    }
 }
 
 #[cfg(test)]

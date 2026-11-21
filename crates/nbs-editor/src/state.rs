@@ -178,6 +178,10 @@ pub enum WindowKind {
     Properties,
     Statistics,
     Preferences,
+    /// 「外部控制（MCP）」这一栏。原版首选项是 500×510 的五页像素稿，
+    /// 塞第六个页签会把页签条顶出窗口，而且这一页要显示端口、发现文件全路径、
+    /// 目录列表这些长字符串——所以单开一窗，不冒充原版的排版。
+    ExternalControl,
     Instruments,
     About,
     /// 原版 `w_tempotapper`（`draw_window_tempo_tapper.gml`）：按 T 打点测速。
@@ -207,6 +211,9 @@ pub enum WindowKind {
     /// 415×310，本地 `.minecraft` 与 Mojang 下载两条路。
     SoundImport,
     SchematicExport,
+    /// 端口自加（用户要求「导出那一栏多加个这个格式」）：MAESTRO 音乐机的节目单导出。
+    /// 产物是给已建好的机体读的 `.schem`，本机没有声音。
+    MaestroExport,
     /// 原版 `w_track_export`（`draw_window_track_export.gml`）：550×400，
     /// 「普通过道」直轨布局的结构/schematic 导出。
     TrackExport,
@@ -248,6 +255,8 @@ impl WindowKind {
             // 原版 `draw_window_stats`：EN "Song Stats" / CN "歌曲数据"。
             Self::Statistics => tr("Song Stats", "歌曲数据"),
             Self::Preferences => tr("Preferences", "首选项"),
+            // 我们自己的一页，标题就是菜单上那句。
+            Self::ExternalControl => tr("External control (MCP)", "外部控制（MCP）"),
             Self::Instruments => tr("Instruments", "音色设置"),
             // 原版 `draw_window_about.gml:10-11`：框内标题就一个「About」/「关于」。
             Self::About => tr("About", "关于"),
@@ -285,6 +294,8 @@ impl WindowKind {
             Self::SoundImport => tr("Import sounds", "导入音效"),
             // 原版 `draw_window_schematic_export.gml:14`：CN "导出结构"。
             Self::SchematicExport => tr("Schematic Export", "导出结构"),
+            // 端口自加，原版没有对应文案；「节目单」沿用机体文档对 sheet 的叫法。
+            Self::MaestroExport => tr("MAESTRO Machine Sheet", "MAESTRO 机体节目单"),
             // 原版 `draw_window_track_export.gml:13`：CN "导出直轨"。
             Self::TrackExport => tr("Track Export", "导出直轨"),
             Self::PngExport => tr("Export PNG chart", "导出 PNG 谱面"),
@@ -501,6 +512,8 @@ pub enum DialogAction {
     /// 原版 `track_export()` 的保存对话框：structure 选 .nbt，classic 选 .schematic。
     ExportTrack,
     ExportPattern,
+    /// 端口自加：MAESTRO 机体节目单的保存框，扩展名 `.schem`（WorldEdit gzip 格式）。
+    ExportMaestro,
     ImportMidi,
     ImportPattern,
     ImportSchematic,
@@ -514,6 +527,11 @@ pub enum DialogAction {
     /// 音色导入向导「更改」：原版走的是真正的目录选择器 `get_directory(mc_install_path)`
     /// （`draw_window_sound_import.gml:71`），与首选项那条占位文件名路子不同。
     PickMinecraftDir,
+    /// 外部控制面板「添加目录…」：同一种真目录选择器，但结果写的是
+    /// `prefs.control_dirs`（白名单），不是某个工程的安装路径。
+    /// 单列一个动作而不是复用 `PickMinecraftDir`，是因为回填的目标窗口和落点都不同——
+    /// 共用的话「添加白名单」会把 `.minecraft` 改掉。
+    PickControlDir,
 }
 
 impl DialogAction {
@@ -523,6 +541,7 @@ impl DialogAction {
             Self::SaveSong | Self::ExportAudio | Self::ExportDatapack | Self::ExportMidi
                 | Self::ExportPng | Self::ExportSchematic | Self::ExportTrack
                 | Self::ExportPattern
+                | Self::ExportMaestro
                 | Self::SaveExtraNotes
                 // 原版选文件夹走的是 `get_save_filename_ext`（见 `picker_spec` 里那条），
                 // 不是目录选择器，所以这里也算「保存」式对话框。
@@ -544,6 +563,8 @@ impl DialogAction {
             // 对话框打开前的默认名已按模式选好扩展名（commands.rs 的 ExportTrack 分支）。
             Self::ExportTrack => "nbt",
             Self::ExportPattern | Self::ImportPattern => "nbp",
+            // 端口自加：MAESTRO 机体吃的是 WorldEdit 的 .schem（gzip），不是原版的 .schematic。
+            Self::ExportMaestro => "schem",
             // 原版背景图对话框一次放行 png/jpg/jpeg（`menu_click.gml:57`）；
             // 这里的单扩展名只用于兜底列表和默认名，多个扩展名在 `accepts` 里放行。
             Self::ImportBackground => "png",
@@ -552,7 +573,7 @@ impl DialogAction {
             // 原版这两个对话框的过滤器是空字符串：不做过滤，选的是目录。
             Self::PickFolder(_) => "",
             // 原版 get_directory 是目录选择器，没有过滤器。
-            Self::PickMinecraftDir => "",
+            Self::PickMinecraftDir | Self::PickControlDir => "",
         }
     }
 }
@@ -593,7 +614,7 @@ impl FileDialog {
         let ext = action.extension();
         let name = if let DialogAction::PickFolder(f) = action {
             f.placeholder().to_string()
-        } else if matches!(action, DialogAction::PickMinecraftDir) {
+        } else if matches!(action, DialogAction::PickMinecraftDir | DialogAction::PickControlDir) {
             // 目录选择器没有文件名栏。
             String::new()
         } else if action.is_save() {
@@ -764,6 +785,11 @@ impl FileDialog {
                 tr("Save pattern", "保存分段"),
                 vec![filter("Note Block Pattern (*.nbp)", "*.nbp")],
             ),
+            // 端口自加：MAESTRO 节目单。扩展名用机体那边认的 .schem。
+            DialogAction::ExportMaestro => (
+                tr("Export MAESTRO sheet", "导出 MAESTRO 节目单"),
+                vec![filter("Minecraft Schematic (*.schem)", "*.schem")],
+            ),
             // 原版 `open_midi.gml:14/15`。
             DialogAction::ImportMidi => (
                 tr("Import from MIDI", "从 MIDI 导入"),
@@ -805,11 +831,21 @@ impl FileDialog {
                 ),
                 Vec::new(),
             ),
+            DialogAction::PickControlDir => (
+                tr(
+                    "Add a directory external control may read and write",
+                    "添加允许外部控制读写的目录",
+                ),
+                Vec::new(),
+            ),
         };
         PickerSpec {
             title: title.to_string(),
             filters,
-            pick_folder: matches!(self.action, DialogAction::PickMinecraftDir),
+            pick_folder: matches!(
+                self.action,
+                DialogAction::PickMinecraftDir | DialogAction::PickControlDir
+            ),
         }
     }
 }
@@ -1014,6 +1050,16 @@ pub struct EditorState {
     pub file_dialog: Option<FileDialog>,
     /// 宿主装进来的原生选择器（Windows 上是 `IFileOpenDialog` / `IFileSaveDialog`）。
     pub picker: Option<std::sync::Arc<dyn FilePicker>>,
+    /// 外部控制链路（MCP 桥 ↔ 本进程）。`None` = 这个进程没开外部控制，
+    /// 每帧的 `control::drain` 因此是零成本。收件箱与任务表都挂在这里，
+    /// 服务端句柄由 nbs-app 持有（它要在退出时停服务、删发现文件）。
+    pub control: Option<crate::control::ControlChannel>,
+    /// 外部控制面板这一帧提的生命周期要求，宿主处理完置回 `None`。
+    /// 服务端句柄在 nbs-app（它要在退出时停服务、删发现文件），这里只放「要它做什么」。
+    pub control_change: Option<crate::control::ControlChange>,
+    /// 服务开着时才有的可显示信息（端口 / 发现文件绝对路径 / 来源 / danger）。
+    /// 由宿主在起停之后填；`None` = 现在没监听，面板就照着写。
+    pub control_info: Option<crate::control::ControlInfo>,
     /// 等着被原生选择器处理的请求。在帧外（`raw_input_hook`）取走，避免在 egui 帧内
     /// 起一个会泵消息的模态框。
     pub pending_dialog: Option<FileDialog>,
@@ -1108,6 +1154,13 @@ pub struct EditorState {
     /// 「记住我的更改」写回的改动。
     pub midi_gm: nbs_io::MidiGmTable,
     pub schematic_options: SchematicOptions,
+    /// 端口自加：MAESTRO 机体节目单的导出选项（只有取整模式），随首选项落盘。
+    pub maestro_options: nbs_io::MaestroOptions,
+    /// 上次/当前预览算出的改写清单。窗口每次开、每次换模式都会重算，
+    /// 导出成功后也用它给出「实际改写了什么」。
+    pub maestro_report: Option<nbs_io::MaestroReport>,
+    /// 预览失败的原因（空歌、超出箱子容量等），窗口用它替代清单显示。
+    pub maestro_error: Option<String>,
     /// 原版 `calculate_size()` 每次打开导出窗口时重算的歌曲统计。
     pub schematic_stats: nbs_io::schematic::SchematicStats,
     /// 原版 `selected_tab_sch`：0 = 设计，1 = 方块。关窗时回到 0。
@@ -1337,6 +1390,8 @@ impl EditorState {
         let png_dark = theme.kind.is_dark();
         // 原版 `load_settings` 的 `[schematic_export]` 段。
         let schematic_options = prefs.schematic.clone();
+        // 端口自加：MAESTRO 导出选项（`[maestro]`），出厂 round。
+        let maestro_options = prefs.maestro.clone();
         // 原版 `load_settings` 的 `[midi_import]` 段：14 个 `w_midi_*` 标量 +
         // 「记住我的更改」写回的 GM 表。通道/鼓映射不在这里恢复，那是
         // `open_midi` 每次解析完按 GM 表现算的（我们的 `MidiImportOptions::for_midi`）。
@@ -1384,6 +1439,9 @@ impl EditorState {
             pending: Vec::new(),
             file_dialog: None,
             picker: None,
+            control: None,
+            control_change: None,
+            control_info: None,
             pending_dialog: None,
             recent_files,
             update_check: std::sync::Arc::new(std::sync::Mutex::new(UpdateCheck::default())),
@@ -1428,6 +1486,9 @@ impl EditorState {
             midi_drags: [0.0; 3],
             midi_gm,
             schematic_options,
+            maestro_options,
+            maestro_report: None,
+            maestro_error: None,
             schematic_command_plan: None,
             schematic_command_signature: String::new(),
             song_session: 1,
@@ -2266,6 +2327,7 @@ impl EditorState {
         self.prefs.show_notechart = self.flags.show_notechart;
         // 原版把整份 sch_exp_* 无条件写进 settings.ini，「记住我的更改」并不门控它。
         self.prefs.schematic = self.schematic_options.clone();
+        self.prefs.maestro = self.maestro_options.clone();
         // MIDI 导入同理：`import_midi()` 结尾的 `save_settings()` 每次都把
         // 14 个 w_midi_* 和 128 组 ins_N / drum_N 全量写盘。
         self.prefs.midi_import = Some(nbs_io::MidiImportPrefs::from_options(&self.midi_options));
@@ -2292,6 +2354,21 @@ impl EditorState {
             } else {
                 format!("Failed to save preferences: {e}")
             });
+        }
+    }
+
+    /// 端口自加：按当前 `maestro_options` 重算一遍「导出会发生哪些改写」。
+    /// 只算不落盘，代价是一遍编码，开窗和换取整模式时调用。
+    pub fn refresh_maestro_preview(&mut self) {
+        match nbs_io::preview_maestro(&self.doc.song, &self.maestro_options) {
+            Ok(r) => {
+                self.maestro_report = Some(r);
+                self.maestro_error = None;
+            }
+            Err(e) => {
+                self.maestro_report = None;
+                self.maestro_error = Some(e);
+            }
         }
     }
 
