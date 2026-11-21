@@ -158,12 +158,25 @@ impl Drop for TranscriptionTask {
     }
 }
 
+fn workspace_root_from(exe: &Path) -> Option<PathBuf> {
+    let dir = exe.parent()?;
+    dir.ancestors()
+        .find(|ancestor| ancestor.join("Cargo.toml").is_file())
+        .map(Path::to_path_buf)
+}
+
 impl TranscriptionRuntime {
-    pub fn in_working_directory() -> Self {
+    /// Anchored to the executable's workspace, not the launch directory: a double-clicked
+    /// exe would otherwise build a second runtime tree and never find the weights already
+    /// downloaded. CWD is only the fallback for binaries outside any Cargo.toml tree.
+    pub fn in_workspace_directory() -> Self {
+        let root = std::env::current_exe()
+            .ok()
+            .as_deref()
+            .and_then(workspace_root_from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         Self {
-            root: std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join(".work/transcription"),
+            root: root.join(".work/transcription"),
         }
     }
 
@@ -253,7 +266,9 @@ impl TranscriptionRuntime {
             if !runtime.installed() {
                 send_message(sender, "Preparing workspace-local Python 3.12 / 正在准备工作区内的 Python 3.12");
                 let mut command = Command::new("uv");
-                command.args(["venv", "--managed-python", "--python", "3.12"])
+                // uv rejects --managed-python together with UV_PYTHON_PREFERENCE, which
+                // configure() already sets to only-managed for every child process.
+                command.args(["venv", "--python", "3.12"])
                     .arg(runtime.root.join("venv"));
                 runtime.configure(&mut command);
                 run_command(command, false, sender, cancel)?;
@@ -773,5 +788,23 @@ mod tests {
         };
         assert!(runtime.cached_model("../outside").is_none());
         assert!(runtime.cached_model("MEDIUM").is_none());
+    }
+
+    #[test]
+    fn workspace_root_is_the_nearest_manifest_above_the_executable() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("nbs-workspace-root-{stamp}"));
+        let exe = dir.join("target").join("debug").join("nbs-rust.exe");
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
+        fs::write(dir.join("target").join("Cargo.toml"), "[package]\n").unwrap();
+        assert_eq!(
+            workspace_root_from(&exe).as_deref(),
+            Some(dir.join("target").as_path())
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -64,7 +64,7 @@ pub struct TranscriptionState {
 
 impl Default for TranscriptionState {
     fn default() -> Self {
-        let runtime = TranscriptionRuntime::in_working_directory();
+        let runtime = TranscriptionRuntime::in_workspace_directory();
         let soundfont_path = runtime.default_soundfont().to_string_lossy().into_owned();
         Self {
             runtime,
