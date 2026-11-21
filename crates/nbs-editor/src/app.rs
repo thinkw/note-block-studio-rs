@@ -5,12 +5,12 @@ use egui::{Context, Frame};
 
 use crate::grid::show_grid;
 use crate::layers_panel::{panel_width, show_layers_panel};
-use crate::piano::show_piano;
+use crate::piano::{paint_notechart, show_piano, ChartRequest, PANEL_HEIGHT};
 use crate::shortcuts::collect_shortcuts;
 use crate::state::EditorState;
 use crate::statusbar::show_status_bar;
 use crate::toolbar::{show_menu_bar, show_toolbar};
-use crate::viewport::{MENU_HEIGHT, PIANO_HEIGHT, STATUS_HEIGHT, TOOLBAR_HEIGHT};
+use crate::viewport::{MENU_HEIGHT, STATUS_HEIGHT, TOOLBAR_HEIGHT};
 use crate::windows::show_windows;
 
 /// 原版界面全是绝对像素坐标，面板默认的 8×4 内边距会把每个按钮都推歪，
@@ -86,14 +86,21 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
         .exact_height(STATUS_HEIGHT)
         .show(ctx, |ui| show_status_bar(state, ui));
 
+    // 悬停琴键的五线谱：琴键面板里只登记请求，落笔延到中央面板之后（#112）。
+    let mut chart: Option<ChartRequest> = None;
     // 原版 `control_draw.gml:2549`：钢琴调用条件是 `show_piano && !isplayer`。
     if state.flags.show_piano && !state.player {
         // 端口自加（用户要求）：琴键面板独立缩放，高度跟 `piano_scale`，
         // 不随 `window_scale`（与 #80「钢琴栏不随界面缩放」一致）。
-        egui::TopBottomPanel::bottom("nbs_piano")
+        // #109：高度含黑键高出的 7px（见 `piano::PANEL_HEIGHT`），并且关掉 egui 面板
+        // 默认自带的可拖边界和那条分隔线——原版没有，分隔线还会横穿黑键顶部。
+        chart = egui::TopBottomPanel::bottom("nbs_piano")
             .frame(tight())
-            .exact_height(PIANO_HEIGHT * state.prefs.piano_scale)
-            .show(ctx, |ui| show_piano(state, ui));
+            .resizable(false)
+            .show_separator_line(false)
+            .exact_height(PANEL_HEIGHT * state.prefs.piano_scale)
+            .show(ctx, |ui| show_piano(state, ui))
+            .inner;
     } else {
         // 悬停路由用的矩形是每帧由面板写入的；面板关掉后必须清掉，
         // 否则悬停在原琴键位置时缩放键还会走琴键档。
@@ -120,6 +127,12 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
         let area = ui.available_rect_before_wrap();
         show_grid(state, ui, area);
     });
+
+    // #112：五线谱画在网格之后才能盖住编辑区（同层按出队顺序绘制，用户报告「音符被
+    // 主界面挡住出不来」）。弹窗是 Area，在更高的 `Order::Medium`，仍然压在五线谱上。
+    if let Some(req) = chart {
+        paint_notechart(ctx, state, req);
+    }
 
     // 网格交互 / 面板按钮产生的命令在这里落地
     flush_all(state, ctx);

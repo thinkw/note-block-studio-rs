@@ -175,31 +175,37 @@ const MOB_SOUNDS: [(&str, u8); 11] = [
     ("minecraft/mob/zombie/say3.ogg", 19),
 ];
 
-/// 上游为了把编号塞进 `TAG_Byte_Array` 把 palette 压到 127 以内，
-/// 所以这里必须沿用同一套固定编号，不能自动递增。
-const PAL_AIR: i8 = 120;
+/// 箱子 + 朝向 + 左右八态，表序即 palette 编号顺序（north/south/east/west × left/right）。
+const CHEST_PALETTE: [&str; 8] = [
+    "minecraft:chest[facing=north,type=left]",
+    "minecraft:chest[facing=north,type=right]",
+    "minecraft:chest[facing=south,type=left]",
+    "minecraft:chest[facing=south,type=right]",
+    "minecraft:chest[facing=east,type=left]",
+    "minecraft:chest[facing=east,type=right]",
+    "minecraft:chest[facing=west,type=left]",
+    "minecraft:chest[facing=west,type=right]",
+];
+/// 面板牌匾用的墙上告示牌（节目单本身不放牌子，只在 palette 里备着）。
+/// 插入顺序照上游：east/west/north/south。
+const SIGN_PALETTE: [&str; 4] = [
+    "minecraft:oak_wall_sign[facing=east]",
+    "minecraft:oak_wall_sign[facing=west]",
+    "minecraft:oak_wall_sign[facing=north]",
+    "minecraft:oak_wall_sign[facing=south]",
+];
+
+/// palette 编号一律按表序连着排（0..条目数），这是端侧改上游的一处：上游
+/// `customPaletteBlockIds` 把箱子/告示牌/空气/堆肥桶摆在 100..121，而投影模组
+/// （Litematica）的 Sponge 读取器按 `id < Palette 条目数` 校验，稀疏编号会被判成
+/// 「Invalid ID in the Sponge schematic palette」，整份 `.schem` 直接读不进来。
+/// 编号只是文件内部的索引，机体读的是箱子里的物品，改掉不影响节目单语义。
+const CHEST_PAL_BASE: i8 = INSTRUMENT_BASE_BLOCKS.len() as i8;
+const SIGN_PAL_BASE: i8 = CHEST_PAL_BASE + CHEST_PALETTE.len() as i8;
+/// 空气：区域里没铺到方块的格子。
+const PAL_AIR: i8 = SIGN_PAL_BASE + SIGN_PALETTE.len() as i8;
 /// 「这个音高没有音符」的占位方块（上游 `noteNotUsedBlockId`，堆肥桶）。
-const PAL_COMPOSTER: i8 = 121;
-/// 八种箱子朝向 + 左右，编号 100..107（`getChestPaletteId` 的另一半）。
-const CHEST_PALETTE: [(&str, i8); 8] = [
-    ("minecraft:chest[facing=north,type=left]", 100),
-    ("minecraft:chest[facing=north,type=right]", 101),
-    ("minecraft:chest[facing=south,type=left]", 102),
-    ("minecraft:chest[facing=south,type=right]", 103),
-    ("minecraft:chest[facing=east,type=left]", 104),
-    ("minecraft:chest[facing=east,type=right]", 105),
-    ("minecraft:chest[facing=west,type=left]", 106),
-    ("minecraft:chest[facing=west,type=right]", 107),
-];
-/// 面板牌匾用的墙上告示牌，编号 108..111（节目单本身不放牌子，只在 palette 里备着）。
-/// 上游的插入顺序是 east/west/north/south，但编号按方位字面量：north=108、south=109、
-/// east=110、west=111，这里两样都照抄。
-const SIGN_PALETTE: [(&str, i8); 4] = [
-    ("minecraft:oak_wall_sign[facing=east]", 110),
-    ("minecraft:oak_wall_sign[facing=west]", 111),
-    ("minecraft:oak_wall_sign[facing=north]", 108),
-    ("minecraft:oak_wall_sign[facing=south]", 109),
-];
+const PAL_COMPOSTER: i8 = PAL_AIR + 1;
 
 const LAYOUT_ROWS: usize = 8;
 const LAYOUT_COLS: usize = 14;
@@ -540,18 +546,15 @@ fn access_index(c: Coord) -> Option<usize> {
 
 /// `getChestPaletteId`：MC 的 left/right 与坐标朝向相反，照抄上游的绕法。
 fn chest_palette_id(left: bool, facing: Dir) -> i8 {
-    // south 朝向的读盘器把箱子摆在南墙上，所以取的是 facing=north 的两个编号。
-    let base = match facing {
-        Dir::South => 100,
-        Dir::North => 102,
-        Dir::West => 104,
-        Dir::East => 106,
+    // 表序是 north/south/east/west，而读盘器给的朝向正好错一对：
+    // south 朝向的读盘器把箱子摆在南墙上，取的是 facing=north 的那一对编号。
+    let pair = match facing {
+        Dir::South => 0,
+        Dir::North => 1,
+        Dir::West => 2,
+        Dir::East => 3,
     };
-    if left {
-        base
-    } else {
-        base + 1
-    }
+    CHEST_PAL_BASE + pair * 2 + if left { 0 } else { 1 }
 }
 
 // ============================================================ 物品编码
@@ -1061,11 +1064,11 @@ pub(crate) fn schematic_nbt(chests: &[ChestAt]) -> Result<Vec<u8>, String> {
     for (i, block) in INSTRUMENT_BASE_BLOCKS.iter().enumerate() {
         n.int(block, i as i32);
     }
-    for (name, id) in CHEST_PALETTE {
-        n.int(name, id as i32);
+    for (i, name) in CHEST_PALETTE.iter().enumerate() {
+        n.int(name, (CHEST_PAL_BASE + i as i8) as i32);
     }
-    for (name, id) in SIGN_PALETTE {
-        n.int(name, id as i32);
+    for (i, name) in SIGN_PALETTE.iter().enumerate() {
+        n.int(name, (SIGN_PAL_BASE + i as i8) as i32);
     }
     n.int("minecraft:air", PAL_AIR as i32);
     n.int("minecraft:composter", PAL_COMPOSTER as i32);
@@ -1251,6 +1254,9 @@ const _: () = {
     assert!(DISC_BY_SIGNAL.len() == 16, "15 discs plus a gap");
     assert!(CHEST_PALETTE.len() == 8, "8 chest states");
     assert!(SIGN_PALETTE.len() == 4, "4 wall sign states");
+    // palette 编号由表序推导，密集性不会走偏；剩下的红线只有一条：
+    // 最大编号必须 < 128，`Data` 是 TAG_Byte_Array，每格一个字节才读得成单字节 varint。
+    assert!((PAL_COMPOSTER as i32) < 128, "palette ids must stay single-byte varints");
 };
 
 #[cfg(test)]
@@ -1505,12 +1511,12 @@ mod tests {
         let blocks = sch.get("Blocks").unwrap();
         let pal = blocks.get("Palette").unwrap();
         assert_eq!(pal.get("minecraft:dirt").and_then(Value::as_i32), Some(0));
-        assert_eq!(pal.get("minecraft:composter").and_then(Value::as_i32), Some(121));
-        assert_eq!(pal.get("minecraft:air").and_then(Value::as_i32), Some(120));
+        assert_eq!(pal.get("minecraft:composter").and_then(Value::as_i32), Some(33));
+        assert_eq!(pal.get("minecraft:air").and_then(Value::as_i32), Some(32));
         let data = blocks.get("Data").unwrap().as_bytes().unwrap();
         assert_eq!(data.len(), (REGION_W * REGION_D * REGION_H) as usize);
         assert!(
-            data.iter().all(|b| (*b as i8) <= 121),
+            data.iter().all(|b| (*b as i8) < PAL_COMPOSTER + 1),
             "palette 编号得留在 signed byte 窗口里，否则 Data 数组会读成负数"
         );
 
@@ -1549,6 +1555,197 @@ mod tests {
                 ("minecraft:white_wool".to_string(), 2, 1),
             ]
         );
+    }
+
+    /// 按投影模组（Litematica）的 Sponge 导入校验走一遍导出的字节：
+    /// `LitematicaSchematic.readFromSpongeSchematic()`（分支 pre-rewrite/fabric/1.21.1-masa）
+    /// 依次做 v3 判定 → 尺寸 → Blocks 三件套 → varint 解 Data → palette 编号必须密集。
+    /// 上游 100..121 的稀疏编号就是在最后这一步被判死的。
+    #[test]
+    fn exported_bytes_pass_the_litematica_sponge_v3_checks() {
+        let (bytes, _rep) = build_bytes(&song(20.0), &MaestroOptions::default()).unwrap();
+        let root = crate::nbt::parse(&bytes).unwrap();
+        let sch = root.get("Schematic").expect("根复合标签里该有 Schematic");
+        // isValidSpongeSchematicv3()：Version >= 3，且 Blocks、DataVersion 都在。
+        assert!(sch.get("Version").and_then(Value::as_i32).unwrap_or_default() >= 3);
+        assert!(sch.get("DataVersion").is_some());
+        // readSizeFromTagSponge()：三个尺寸都得是正数。
+        let size: Vec<i32> = ["Width", "Height", "Length"]
+            .iter()
+            .map(|k| sch.get(k).and_then(Value::as_i32).unwrap_or_default())
+            .collect();
+        assert!(size.iter().all(|v| *v > 0), "{size:?}");
+        let volume = size[0] as i64 * size[1] as i64 * size[2] as i64;
+
+        let blocks = sch.get("Blocks").expect("readSpongeBlocksFromTag() 要 Blocks 复合标签");
+        // 三件套少任一个就直接 return false。
+        let pal = blocks.get("Palette").and_then(Value::fields).expect("Palette 得是复合标签");
+        let data = blocks.get("Data").and_then(Value::as_bytes).expect("Data 得是 TAG_Byte_Array");
+        let (be_ty, bes) = blocks.get("BlockEntities").and_then(Value::as_list).expect("BlockEntities 得是列表");
+        assert_eq!(be_ty, 10, "BlockEntities 的元素得是复合标签");
+        assert_eq!(
+            pal.len(),
+            INSTRUMENT_BASE_BLOCKS.len() + CHEST_PALETTE.len() + SIGN_PALETTE.len() + 2,
+            "palette 条目数"
+        );
+
+        // convertVarIntByteArrayToPackedLongArray()：每格读一个 varint，
+        // 编号 <128 才是单字节 varint，长度才会刚好等于 volume。
+        assert_eq!(data.len() as i64, volume, "varint 流得刚好解出 {volume} 格");
+        assert!(data.iter().all(|b| *b < 0x80), "编号超过 127 会读成多字节 varint");
+
+        // readSpongePaletteFromTag()：0 <= id < 条目数，越界即整份文件拒读。
+        for (name, value) in pal {
+            let id = value.as_i32().unwrap_or(-1);
+            assert!(
+                id >= 0 && (id as usize) < pal.len(),
+                "{name} 的 palette 编号 {id} 不在 0..{} 里",
+                pal.len()
+            );
+        }
+
+        // readBlockPosFromArrayTag() / readVec3iFromIntArray() 都只认长度 3 的 TAG_Int_Array。
+        for be in bes {
+            let (ty, pos) = be.get("Pos").and_then(Value::as_list).expect("每只箱子都要有 Pos");
+            assert_eq!(ty, 3, "Pos 得是 TAG_Int_Array");
+            assert_eq!(pos.len(), 3, "Pos 得是三个整数");
+            assert!(be.get("Data").is_some(), "v3 的方块实体内容装在 Data 里");
+        }
+        let (ty, off) = sch.get("Offset").and_then(Value::as_list).expect("Offset");
+        assert_eq!(ty, 3, "Offset 得是 TAG_Int_Array");
+        assert_eq!(off.len(), 3);
+    }
+
+    /// 按 NBT 规范严格走一遍导出的字节流，等价于创世神 7.4.5 内置 linbus
+    /// (`LinNbtReader`) 和投影模组读侧的走法：每个标签编号都得落在 0..=12，
+    /// 数组宽度照规范（11 = 4 字节 int、12 = 8 字节 long），走完必须刚好消耗干净。
+    ///
+    /// 需要这道闸门是因为 `crate::nbt::parse` 宽容：它按自己那套编号解释，
+    /// 写侧一旦把 Int_Array 标成 12，两边一起错就谁都看不出错位，而 Java 侧会在
+    /// 多吞 12 字节后把 "Palette" 的名字首字母 'P'（0x50 = 80）当标签编号读，
+    /// 报 `Invalid NBT ID: 80` 并整份拒读。
+    fn assert_nbt_stream_is_spec_exact(bytes: &[u8]) {
+        struct R<'a> {
+            d: &'a [u8],
+            p: usize,
+        }
+        impl<'a> R<'a> {
+            fn take(&mut self, n: usize) -> &'a [u8] {
+                assert!(self.p + n <= self.d.len(), "越界：@{} 还要 {n} 字节", self.p);
+                let s = &self.d[self.p..self.p + n];
+                self.p += n;
+                s
+            }
+            fn u8(&mut self) -> u8 {
+                self.take(1)[0]
+            }
+            fn i16(&mut self) -> i16 {
+                let b = self.take(2);
+                i16::from_be_bytes([b[0], b[1]])
+            }
+            fn i32(&mut self) -> i32 {
+                let b = self.take(4);
+                i32::from_be_bytes([b[0], b[1], b[2], b[3]])
+            }
+            fn name(&mut self) -> String {
+                let n = self.i16().max(0) as usize;
+                String::from_utf8_lossy(self.take(n)).into_owned()
+            }
+            fn payload(&mut self, id: u8, depth: u32) {
+                assert!(depth <= 64, "嵌套过深");
+                match id {
+                    1 => self.take(1),
+                    2 => self.take(2),
+                    3 => self.take(4),
+                    4 => self.take(8),
+                    5 => self.take(4),
+                    6 => self.take(8),
+                    7 => {
+                        let n = self.i32().max(0) as usize;
+                        self.take(n)
+                    }
+                    8 => {
+                        self.name();
+                        &[]
+                    }
+                    9 => {
+                        let elem = self.u8();
+                        assert!(elem <= 12, "Invalid NBT ID: {elem}（list 元素类型）");
+                        let n = self.i32().max(0) as usize;
+                        assert!(n <= self.d.len() - self.p, "list 声明 {n} 个元素，剩不下");
+                        for _ in 0..n {
+                            self.payload(elem, depth + 1);
+                        }
+                        &[]
+                    }
+                    10 => {
+                        loop {
+                            let next = self.u8();
+                            assert!(next <= 12, "Invalid NBT ID: {next}");
+                            if next == 0 {
+                                break;
+                            }
+                            self.name();
+                            self.payload(next, depth + 1);
+                        }
+                        &[]
+                    }
+                    11 => {
+                        let n = self.i32().max(0) as usize;
+                        self.take(n.checked_mul(4).expect("int 数组长度溢出"))
+                    }
+                    12 => {
+                        let n = self.i32().max(0) as usize;
+                        self.take(n.checked_mul(8).expect("long 数组长度溢出"))
+                    }
+                    other => panic!("Invalid NBT ID: {other}"),
+                };
+            }
+        }
+
+        let mut r = R { d: bytes, p: 0 };
+        let root_id = r.u8();
+        assert_eq!(root_id, 10, "根标签得是 compound");
+        r.name();
+        r.payload(10, 0);
+        assert_eq!(r.p, bytes.len(), "字节流没走完，说明中间某处宽度算错");
+    }
+
+    /// 数组标签的编号必须能在原始字节里查到（读侧解析器一旦跟着写侧一起错就查不出来）。
+    fn assert_array_tag_ids_are_int_arrays(bytes: &[u8], key: &str) {
+        let mut name = vec![(key.len() as u16 >> 8) as u8, key.len() as u8];
+        name.extend_from_slice(key.as_bytes());
+        let mut found = 0usize;
+        for w in bytes.windows(name.len() + 1) {
+            if w[1..] != name[..] {
+                continue;
+            }
+            found += 1;
+            assert_eq!(
+                w[0], 11,
+                "{key} 的标签编号是 {}，规范里 11 才是 TAG_Int_Array（12 = TAG_Long_Array）",
+                w[0]
+            );
+        }
+        assert!(found > 0, "原始字节里找不到 {key} 标签");
+    }
+
+    #[test]
+    fn exported_bytes_are_a_spec_exact_nbt_stream() {
+        // 有箱子（带 Pos）与空曲（只有 Offset）都得过同一条闸门。
+        let mut s = song(20.0);
+        s.set(0, 0, Note::new(0, 45));
+        s.set(3, 2, Note::new(1, 50));
+        s.recalculate();
+        let (bytes, _rep) = build_bytes(&s, &MaestroOptions::default()).unwrap();
+        assert_nbt_stream_is_spec_exact(&bytes);
+        assert_array_tag_ids_are_int_arrays(&bytes, "Offset");
+        assert_array_tag_ids_are_int_arrays(&bytes, "Pos");
+
+        let empty = build_bytes(&song(20.0), &MaestroOptions::default())
+            .unwrap()
+            .0;
+        assert_nbt_stream_is_spec_exact(&empty);
     }
 
     #[test]
