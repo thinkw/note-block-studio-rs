@@ -754,7 +754,6 @@ pub(crate) fn tempo_changer_ids(song: &Song) -> Vec<u8> {
         .enumerate()
         .filter(|(_, ci)| ci.name == TEMPO_CHANGER_NAME)
         .filter_map(|(i, _)| u8::try_from(FIRST_CUSTOM_INDEX as usize + i).ok())
-        .map(|id| id - 1)
         .collect()
 }
 
@@ -1779,5 +1778,49 @@ mod tests {
         clean.set(0, 0, Note::new(0, 45));
         clean.recalculate();
         assert!(preview(&clean, &MaestroOptions::default()).unwrap().lines().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod probe_changer {
+    use super::*;
+    use nbs_core::model::{CustomInstrument, Note, Song, TEMPO_CHANGER_NAME, FIRST_CUSTOM_INDEX};
+
+    /// 回归：changers 与 `note.instrument` 必须同口径。写歪一格时 Tempo Changer
+    /// 永远匹配不上，Flexible 会静默退回曲首速度，还会把前一格乐器（内置 19）误认成 changer。
+    #[test]
+    fn changer_ids_match_note_instruments() {
+        let mut s = Song::new();
+        s.meta.tempo = 10.0;
+        s.custom_instruments = vec![
+            CustomInstrument {
+                name: TEMPO_CHANGER_NAME.into(),
+                filename: String::new(),
+                key: 45,
+                press: true,
+            },
+            CustomInstrument {
+                name: "Other".into(),
+                filename: String::new(),
+                key: 45,
+                press: true,
+            },
+        ];
+        let mut changer = Note::new(FIRST_CUSTOM_INDEX, 45);
+        changer.pitch = 300;
+        s.set(3, 0, changer);
+        s.set(4, 0, Note::new(FIRST_CUSTOM_INDEX + 1, 45));
+        s.recalculate();
+
+        assert_eq!(
+            tempo_changer_ids(&s),
+            vec![FIRST_CUSTOM_INDEX],
+            "只有第 0 个自定义乐器叫 Tempo Changer"
+        );
+        let seg = tempo_segments(&s, &tempo_changer_ids(&s));
+        assert_eq!(seg.get(&0), Some(&10.0), "曲首仍是原速");
+        assert_eq!(seg.get(&3), Some(&20.0), "tick 3 起 300/15 = 20 t/s");
+        // 认错一格的话这里会拿内置 19 当 changer，段表就只剩曲首一项。
+        assert_eq!(seg.len(), 2, "{:?}", seg);
     }
 }
