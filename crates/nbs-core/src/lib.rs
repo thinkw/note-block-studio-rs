@@ -7,6 +7,7 @@
 //! - [`history`]    紧凑 diff 撤销/重做栈（D）
 //! - [`document`]   所有编辑命令的事务封装（D）
 //! - [`instruments`] 20 种内置乐器与方块配色（D）
+//! - [`paths`]      配置目录这一条规则（编辑器和 MCP 桥必须算出同一个目录）
 //!
 //! 设计要点：渲染只读 [`model::Song::notes_in_view`]，它基于 `BTreeMap::range`
 //! 只遍历视口内的列，绝不扫描全曲 —— 这是长曲子不掉帧的硬性保证。
@@ -17,6 +18,7 @@ pub mod instruments;
 pub mod macros;
 pub mod model;
 pub mod nbs;
+pub mod paths;
 pub mod selection;
 
 // ---- 多语言。原版 GML 只有一个全局 `language`，连最深层的脚本（读档报错、

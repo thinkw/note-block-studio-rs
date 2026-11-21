@@ -178,6 +178,10 @@ pub enum WindowKind {
     Properties,
     Statistics,
     Preferences,
+    /// 「外部控制（MCP）」这一栏。原版首选项是 500×510 的五页像素稿，
+    /// 塞第六个页签会把页签条顶出窗口，而且这一页要显示端口、发现文件全路径、
+    /// 目录列表这些长字符串——所以单开一窗，不冒充原版的排版。
+    ExternalControl,
     Instruments,
     About,
     /// 原版 `w_tempotapper`（`draw_window_tempo_tapper.gml`）：按 T 打点测速。
@@ -248,6 +252,8 @@ impl WindowKind {
             // 原版 `draw_window_stats`：EN "Song Stats" / CN "歌曲数据"。
             Self::Statistics => tr("Song Stats", "歌曲数据"),
             Self::Preferences => tr("Preferences", "首选项"),
+            // 我们自己的一页，标题就是菜单上那句。
+            Self::ExternalControl => tr("External control (MCP)", "外部控制（MCP）"),
             Self::Instruments => tr("Instruments", "音色设置"),
             // 原版 `draw_window_about.gml:10-11`：框内标题就一个「About」/「关于」。
             Self::About => tr("About", "关于"),
@@ -514,6 +520,11 @@ pub enum DialogAction {
     /// 音色导入向导「更改」：原版走的是真正的目录选择器 `get_directory(mc_install_path)`
     /// （`draw_window_sound_import.gml:71`），与首选项那条占位文件名路子不同。
     PickMinecraftDir,
+    /// 外部控制面板「添加目录…」：同一种真目录选择器，但结果写的是
+    /// `prefs.control_dirs`（白名单），不是某个工程的安装路径。
+    /// 单列一个动作而不是复用 `PickMinecraftDir`，是因为回填的目标窗口和落点都不同——
+    /// 共用的话「添加白名单」会把 `.minecraft` 改掉。
+    PickControlDir,
 }
 
 impl DialogAction {
@@ -552,7 +563,7 @@ impl DialogAction {
             // 原版这两个对话框的过滤器是空字符串：不做过滤，选的是目录。
             Self::PickFolder(_) => "",
             // 原版 get_directory 是目录选择器，没有过滤器。
-            Self::PickMinecraftDir => "",
+            Self::PickMinecraftDir | Self::PickControlDir => "",
         }
     }
 }
@@ -593,7 +604,7 @@ impl FileDialog {
         let ext = action.extension();
         let name = if let DialogAction::PickFolder(f) = action {
             f.placeholder().to_string()
-        } else if matches!(action, DialogAction::PickMinecraftDir) {
+        } else if matches!(action, DialogAction::PickMinecraftDir | DialogAction::PickControlDir) {
             // 目录选择器没有文件名栏。
             String::new()
         } else if action.is_save() {
@@ -805,11 +816,21 @@ impl FileDialog {
                 ),
                 Vec::new(),
             ),
+            DialogAction::PickControlDir => (
+                tr(
+                    "Add a directory external control may read and write",
+                    "添加允许外部控制读写的目录",
+                ),
+                Vec::new(),
+            ),
         };
         PickerSpec {
             title: title.to_string(),
             filters,
-            pick_folder: matches!(self.action, DialogAction::PickMinecraftDir),
+            pick_folder: matches!(
+                self.action,
+                DialogAction::PickMinecraftDir | DialogAction::PickControlDir
+            ),
         }
     }
 }
@@ -1014,6 +1035,16 @@ pub struct EditorState {
     pub file_dialog: Option<FileDialog>,
     /// 宿主装进来的原生选择器（Windows 上是 `IFileOpenDialog` / `IFileSaveDialog`）。
     pub picker: Option<std::sync::Arc<dyn FilePicker>>,
+    /// 外部控制链路（MCP 桥 ↔ 本进程）。`None` = 这个进程没开外部控制，
+    /// 每帧的 `control::drain` 因此是零成本。收件箱与任务表都挂在这里，
+    /// 服务端句柄由 nbs-app 持有（它要在退出时停服务、删发现文件）。
+    pub control: Option<crate::control::ControlChannel>,
+    /// 外部控制面板这一帧提的生命周期要求，宿主处理完置回 `None`。
+    /// 服务端句柄在 nbs-app（它要在退出时停服务、删发现文件），这里只放「要它做什么」。
+    pub control_change: Option<crate::control::ControlChange>,
+    /// 服务开着时才有的可显示信息（端口 / 发现文件绝对路径 / 来源 / danger）。
+    /// 由宿主在起停之后填；`None` = 现在没监听，面板就照着写。
+    pub control_info: Option<crate::control::ControlInfo>,
     /// 等着被原生选择器处理的请求。在帧外（`raw_input_hook`）取走，避免在 egui 帧内
     /// 起一个会泵消息的模态框。
     pub pending_dialog: Option<FileDialog>,
@@ -1384,6 +1415,9 @@ impl EditorState {
             pending: Vec::new(),
             file_dialog: None,
             picker: None,
+            control: None,
+            control_change: None,
+            control_info: None,
             pending_dialog: None,
             recent_files,
             update_check: std::sync::Arc::new(std::sync::Mutex::new(UpdateCheck::default())),

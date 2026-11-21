@@ -8,6 +8,7 @@
 //! cargo run -p nbs-app -- --export-midi song.nbs out.mid
 //! cargo run -p nbs-app -- --export-png song.nbs out.png
 //! cargo run -p nbs-app -- --export-schematic song.nbs out.schematic
+//! cargo run -p nbs-app -- song.nbs --control            # 界面 + 外部控制（127.0.0.1）
 //! ```
 //! 默认使用 glow (OpenGL) 后端；在根 Cargo.toml 的
 //! `workspace.dependencies.eframe.features` 改成 `wgpu` 即可切换，
@@ -37,6 +38,13 @@ mod window_icon;
 struct NbsApp {
     state: EditorState,
     last_title: String,
+    /// `--control` 起起来的回环服务。留着的唯一理由是要在退出时 `stop()`：
+    /// 发现文件（端口 + token）必须跟着进程一起消失，否则桥接进程会去连一个死端口。
+    /// 设置页上的开关也改这个字段——那一趟的同意是命令行给的，收走得由这里下手。
+    control: Option<nbs_editor::control::ControlStart>,
+    /// 启动旗标 `--control-dir` 给的那些目录。设置页反复开关服务时要把它们带回去：
+    /// 那是命令行上的一次同意，不该因为人手滑关了一次通路就消失。
+    control_cli_dirs: Vec<PathBuf>,
     /// Windows 上「旧图标」真正落到任务栏的那两枚句柄，见 `window_icon` 模块。
     #[cfg(windows)]
     icon_handles: [Option<usize>; 2],
@@ -103,9 +111,24 @@ impl NbsApp {
                 }
             }
         }
+        // 外部控制：命令行、环境变量、设置页三层都没点名就一行代码都不多跑
+        // （`state.control` 保持 None，每帧的 `control::drain` 等于空判断）。
+        // 服务只绑 127.0.0.1，发现文件里的 token 就是全部的访问控制。
+        let launch = resolve_control(
+            &std::env::args().skip(1).collect::<Vec<_>>(),
+            |key| std::env::var(key).ok(),
+            &state.prefs,
+        );
+        let cli_dirs = launch.as_ref().map(|req| req.cli_dirs.clone()).unwrap_or_default();
+        let control = launch
+            .as_ref()
+            .and_then(|req| start_control(&mut state, &cc.egui_ctx, req, true));
+
         Self {
             state,
             last_title: String::new(),
+            control,
+            control_cli_dirs: cli_dirs,
             #[cfg(windows)]
             icon_handles: [None, None],
             #[cfg(windows)]
@@ -114,10 +137,201 @@ impl NbsApp {
     }
 }
 
+/// 起服务，并把这一串的副作用（白名单、状态栏日志、面板要显示的那几项）落到 `state` 上。
+/// 起不来返回 `None`：链路没挂上，界面照常能用，但原因必须写出来——面板上
+/// 「设置开着却没在听」那一行就是靠它解释的。
+/// `announce_source` = false 用在人刚在面板上点「启用」的那一次：那一下不必回报来源。
+fn start_control(
+    state: &mut EditorState,
+    ctx: &egui::Context,
+    req: &ControlRequest,
+    announce_source: bool,
+) -> Option<nbs_editor::control::ControlStart> {
+    match nbs_editor::control::start(state, ctx, req.port, true, req.allow_danger) {
+        Ok(start) => {
+            let info = nbs_editor::control::ControlInfo {
+                port: start.port,
+                discovery_path: start.discovery_path.clone(),
+                source: source_label(req.source),
+                allow_danger: req.allow_danger,
+                cli_dirs: req
+                    .cli_dirs
+                    .iter()
+                    .map(|d| d.to_string_lossy().into_owned())
+                    .collect(),
+            };
+            // 白名单在这一处一次算全（种子目录 + 旗标 + 设置页）；面板改目录时走同一条函数。
+            nbs_editor::control::sync_policy(state, &req.cli_dirs, info.allow_danger);
+            state.log_strs.push(start.log.clone());
+            // 「是谁让我开的」只有这一层知道（三层判定的落点都在 nbs-app），
+            // 所以补在编辑器那条监听日志后面，而不是往 control::start 的签名里塞来源。
+            // 命令行那条路不补：旗标就是敲命令的人自己打的，再复述一遍是噪音。
+            let why = match req.source {
+                ControlSource::Cli => None,
+                ControlSource::Env => Some(nbs_editor::tr(
+                    "Source: the NBS_RUST_CONTROL environment variable. Untick it in Settings, or set it to 0.",
+                    "来源：环境变量 NBS_RUST_CONTROL。想关掉就在窗口里取消勾选，或把它设成 0。",
+                )),
+                ControlSource::Prefs => Some(nbs_editor::tr(
+                    "Source: Settings - External control (MCP). Whether dangerous actions are callable is decided by that same page.",
+                    "来源：设置页「外部控制（MCP）」。危险动作是否可调同样只看那一栏的勾选。",
+                )),
+            };
+            if announce_source {
+                if let Some(why) = why {
+                    state.log_strs.push(why.to_string());
+                }
+            }
+            state.control_info = Some(info);
+            Some(start)
+        }
+        Err(e) => {
+            // GUI 启动时终端未必接得上，两条路都写一遍。
+            state.set_message(e.clone());
+            eprintln!("{e}");
+            state.control_info = None;
+            None
+        }
+    }
+}
+
+/// 外部控制的开启是谁给的。设置页要说这句话，排查「本机为什么在监听」时靠它定位
+/// 该改哪一层——三层都能开，关掉的地方和开的地方不是同一个地方时，症状是关不掉。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlSource {
+    /// 命令行旗标。`main` 里判断「这条命令是给 CLI 还是给 GUI」时只认这一层。
+    Cli,
+    /// 环境变量 `NBS_RUST_CONTROL`：只回答开不开，给不出端口、目录，也永远给不出危险动作。
+    Env,
+    /// 设置页里存下来的开关（`Preferences::control_enabled`）。
+    Prefs,
+}
+
+/// `--control[=端口]` 与 `--control-danger`：端口自加的外部控制入口，原版没有对应物。
+struct ControlRequest {
+    /// 0 = 让系统挑端口，真实端口由发现文件带出来。
+    port: u16,
+    /// 已经判好的**生效值**：`--control-danger` 或设置页那条勾选，有一个就算。
+    /// 环境变量永远进不了这一项（A1 拍板：它能开通路，能给读写目录，不能给「替你退出」）。
+    allow_danger: bool,
+    /// `--control-dir=<目录>` 给的那些，可重复。设置页那栏目录不在这里——白名单由
+    /// `control::sync_policy` 现场汇总（种子目录 + 这里 + prefs），两处各拼一份就会有两份真相。
+    cli_dirs: Vec<PathBuf>,
+    source: ControlSource,
+}
+
+/// 标记出现在参数列表的任意位置都算，和原版 `-player` 的判定方式一致。
+/// 只看命令行，不看环境变量和 prefs：CLI 分支要用它判断「`--control` 不是条子命令」，
+/// 那里要是掺进 prefs，装了设置页开关之后 `--export` 会去打窗口而不是干活。
+fn control_request(args: &[String]) -> Option<ControlRequest> {
+    let mut port = 0;
+    let mut allow_danger = false;
+    let mut dirs = Vec::new();
+    let mut wanted = false;
+    for arg in args {
+        if arg == "--control" {
+            wanted = true;
+        } else if let Some(text) = arg.strip_prefix("--control=") {
+            wanted = true;
+            match text.parse::<u16>() {
+                Ok(p) => port = p,
+                Err(e) => eprintln!(
+                    "警告: --control={text} 不是端口号（{e}），改用系统分配的端口，以发现文件里的为准"
+                ),
+            }
+        } else if arg == "--control-danger" {
+            allow_danger = true;
+        } else if let Some(text) = arg.strip_prefix("--control-dir=") {
+            dirs.push(std::path::PathBuf::from(text));
+        }
+    }
+    // 只给 --control-danger / --control-dir 不开 --control 等于没服务可连，这里不当作开启。
+    wanted.then_some(ControlRequest {
+        port,
+        allow_danger,
+        cli_dirs: dirs,
+        source: ControlSource::Cli,
+    })
+}
+
+/// 这一趟到底开不开外部控制，以及按哪些口径开。优先级：命令行 > 环境变量 > prefs。
+///
+/// 环境变量排在前是为了给「临时按住」留口子：设置页开着时给一次 `NBS_RUST_CONTROL=0`
+/// 就不必先进窗口取消勾选。代价是它只能授予「启用」——危险动作（退出程序、
+/// 替你答确认框、开外链）只在命令行旗标和设置页那一条勾选上说话，
+/// 环境变量够不到（进程环境常常是从 shell 配置文件里带出来的，改那里的门槛比在窗口里
+/// 点一下同意低得多，能给的话等于把同意面架空了）。
+///
+/// 这里只算「要不要起、按什么口径起」。白名单目录不在这里拼：那一份由
+/// `control::sync_policy` 在起服务时现场汇总（种子目录 + 旗标 + 设置页），
+/// 因为设置页改目录要当场生效，启动时拼一次会拼出第二份真相。
+fn resolve_control(
+    args: &[String],
+    mut env: impl FnMut(&str) -> Option<String>,
+    prefs: &nbs_io::prefs::Preferences,
+) -> Option<ControlRequest> {
+    let mut req = match control_request(args) {
+        Some(cli) => cli,
+        None => {
+            // 环境变量排在前：它能把设置页的同意临时顶掉（`NBS_RUST_CONTROL=0` 就是
+            // 「这次别开」的应急口）。值认不出来时已经吼过一声，这里退到 prefs。
+            let switched = env_control_switch(env("NBS_RUST_CONTROL"));
+            if !switched.unwrap_or(prefs.control_enabled) {
+                return None;
+            }
+            ControlRequest {
+                port: 0,
+                allow_danger: false,
+                cli_dirs: Vec::new(),
+                source: match switched {
+                    Some(_) => ControlSource::Env,
+                    None => ControlSource::Prefs,
+                },
+            }
+        }
+    };
+    // danger 是机器级的一次同意：设置页勾了，任何一层开起来的会话都带上它。
+    req.allow_danger |= prefs.control_danger;
+    Some(req)
+}
+
+/// 面板上「来源：…」那半句。三层各给一种说法，排查时不用再猜。
+fn source_label(source: ControlSource) -> String {
+    match source {
+        ControlSource::Cli => nbs_editor::tr("--control on the command line", "命令行旗标 --control"),
+        ControlSource::Env => nbs_editor::tr(
+            "the NBS_RUST_CONTROL environment variable",
+            "环境变量 NBS_RUST_CONTROL",
+        ),
+        ControlSource::Prefs => nbs_editor::tr("this Settings page", "设置页这一栏"),
+    }
+    .to_string()
+}
+
+/// `NBS_RUST_CONTROL` 的值 → 开 / 关 / 不作数。认 1、true、yes、on 和 0、false、no、off
+/// （大小写和首尾空格随意）。认不出值时返回 `None` 并吼一声：静悄悄退回 prefs 会让
+/// 拼错的人以为环境变量生效了，回头又去查设置页。
+fn env_control_switch(value: Option<String>) -> Option<bool> {
+    let raw = value?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        other => {
+            eprintln!("警告: NBS_RUST_CONTROL={other:?} 不是 0/1 这类值，按没给这个变量处理");
+            None
+        }
+    }
+}
+
+
 impl Drop for NbsApp {
     fn drop(&mut self) {
         // 退出时持久化主题、音频参数、最近文件等偏好
         self.state.save_prefs();
+        // 显式 stop 而不只是丢句柄：要把 accept 线程收干净，发现文件才会保证不骗人。
+        if let Some(start) = &mut self.control {
+            start.server.stop();
+        }
     }
 }
 
@@ -176,6 +390,62 @@ impl eframe::App for NbsApp {
             self.last_title = title;
         }
         nbs_editor::show(ctx, &mut self.state);
+        // 面板这一帧提的起停要求要画完之后再办：`control::start` 吃 `&mut EditorState`，
+        // 而帧内它正被借去画界面；起 socket、写发现文件也不该发生在绘制路径里。
+        if let Some(change) = self.state.control_change.take() {
+            self.apply_control_change(change, ctx);
+        }
+    }
+}
+
+impl NbsApp {
+    /// 设置页那三个动作的落点。编辑器只提要求，起停在这里做：服务端句柄归本进程管，
+    /// 退出时要在 `Drop` 里 `stop()`，发现文件才不会留下骗人的旧端口。
+    fn apply_control_change(
+        &mut self,
+        change: nbs_editor::control::ControlChange,
+        ctx: &egui::Context,
+    ) {
+        use nbs_editor::control::ControlChange as C;
+        match change {
+            C::Disable => {
+                if let Some(mut start) = self.control.take() {
+                    start.server.stop();
+                    self.state.log_strs.push(
+                        nbs_editor::tr(
+                            "External control stopped listening (discovery file removed).",
+                            "外部控制已停止监听（发现文件已删）。",
+                        )
+                        .to_string(),
+                    );
+                }
+                // 没在听的时候关掉句柄不存在，显示位也要跟着清：留着就是面板上
+                // 「端口 1234」和「没监听」同时出现的那种假状态。
+                self.state.control_info = None;
+            }
+            C::Enable => {
+                if self.control.is_some() {
+                    // 已经在听了。这条只会在「勾选框本来就该是勾着」时到来，重起一遍
+                    // 只会换一个端口号，把正连着的那个客户端踢掉。
+                    return;
+                }
+                let req = ControlRequest {
+                    port: 0,
+                    // 面板碰过之后 danger 以设置页为准：命令行那一次同意不该盖过人亲手的一下。
+                    allow_danger: self.state.prefs.control_danger,
+                    cli_dirs: self.control_cli_dirs.clone(),
+                    source: ControlSource::Prefs,
+                };
+                self.control = start_control(&mut self.state, ctx, &req, false);
+            }
+            C::Reapply => {
+                let danger = self.state.prefs.control_danger;
+                nbs_editor::control::sync_policy(&self.state, &self.control_cli_dirs, danger);
+                if let Some(info) = &mut self.state.control_info {
+                    info.allow_danger = danger;
+                }
+            }
+        }
     }
 }
 
@@ -186,7 +456,10 @@ fn main() -> eframe::Result<()> {
     let is_player = args
         .iter()
         .any(|a| a == "-player" || a == "--protocol-launcher");
-    if !is_player && args.first().is_some_and(|a| a.starts_with("--")) {
+    // `--control` 是给 GUI 开的开关（无界面进程没有编辑器状态可操控），
+    // 和 `-player` 一样要排除在 CLI 分支之外，否则它会被当成一条子命令。
+    let has_control = control_request(&args).is_some();
+    if !is_player && !has_control && args.first().is_some_and(|a| a.starts_with("--")) {
         if let Err(e) = run_cli(&args) {
             // 前缀跟着语言走；`{e}` 本身（NbsError 的 Display）在 run_cli 里已经钉过语言了。
             let msg = if nbs_core::lang() == 1 {
@@ -258,7 +531,16 @@ fn run_cli(args: &[String]) -> Result<(), String> {
              --export-nbp <song.nbs> <out.nbp>         导出选区片段\n\
              --import-midi <in.mid> <out.nbs>          导入 MIDI 为 NBS\n\
              --import-schematic <in.schematic> <out.nbs>  导入 Minecraft 原理图为 NBS\n\
-             --audio-info                             显示音频设备与采样加载状态"
+             --audio-info                             显示音频设备与采样加载状态\n\
+             \n\
+             GUI 附加开关（任意位置出现都算，不触发上面的批处理分支）：\n\
+             --control[=端口]      开界面同时监听 127.0.0.1 外部控制，端口省略则由系统分配\n\
+             --control-dir=<目录>  允许外部在这个目录下读写，可重复\n\
+             --control-danger      允许「替人按按钮」那一类动作（退出、开外链、答确认框）\n\
+             \n\
+             不打旗标也能接：设置页「外部控制（MCP）」勾上后每次开窗口就监听；\n\
+             环境变量 NBS_RUST_CONTROL=0/1 临时摁住或顶开那个勾选（只给「启用」，\n\
+             危险动作仍然只认 --control-danger 和设置页那条独立勾选）。"
         );
         return Ok(());
     }
@@ -437,4 +719,121 @@ fn run_cli(args: &[String]) -> Result<(), String> {
         other => return Err(format!("未知命令: {other}，用 --help 查看")),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nbs_io::prefs::Preferences;
+
+    fn argv(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// 只认一个键的假环境：其它键一律「没设过」，和 `std::env::var` 报 `Err` 同口径。
+    fn env_with(value: Option<&str>) -> impl Fn(&str) -> Option<String> {
+        let value = value.map(str::to_string);
+        move |key| {
+            (key == "NBS_RUST_CONTROL")
+                .then(|| value.clone())
+                .flatten()
+        }
+    }
+
+    /// 什么都没设过。
+    fn no_env() -> impl Fn(&str) -> Option<String> {
+        |_| None
+    }
+
+    fn prefs(enabled: bool, danger: bool, dirs: &[&str]) -> Preferences {
+        Preferences {
+            control_enabled: enabled,
+            control_danger: danger,
+            control_dirs: dirs.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn cli_flags_still_say_everything() {
+        // 命令行那层必须原样好使：冒烟脚本就是靠 `--control` + `--control-dir` 起的服务。
+        // 这里同时钉住「环境变量摁不住命令行」——`NBS_RUST_CONTROL=0` 是给设置页
+        // 那个开关留的应急口，不是用来废掉用户自己敲的旗标的。
+        let req = resolve_control(
+            &argv(&["--control=1234", "--control-danger", "--control-dir=/a"]),
+            env_with(Some("0")),
+            &prefs(false, false, &[]),
+        )
+        .expect("给了 --control 就该起");
+        assert_eq!(req.source, ControlSource::Cli);
+        assert_eq!(req.port, 1234);
+        assert!(req.allow_danger);
+        assert_eq!(req.cli_dirs, vec![PathBuf::from("/a")]);
+    }
+
+    #[test]
+    fn env_and_prefs_decide_when_cli_stays_silent() {
+        let p = prefs(true, false, &[]);
+        // 设置页开着 → 起，端口交系统挑（真实端口在发现文件里）。
+        let req = resolve_control(&argv(&["song.nbs"]), no_env(), &p).expect("prefs 开着就该起");
+        assert_eq!(req.source, ControlSource::Prefs);
+        assert_eq!(req.port, 0);
+        assert!(!req.allow_danger);
+        // 同一份 prefs，环境变量给 0 就摁住：不用进窗口取消勾选也能临时不开。
+        assert!(resolve_control(&argv(&[]), env_with(Some("0")), &p).is_none());
+        // 反过来：prefs 关着，环境变量给个认得出的真值也能开（只授予启用）。
+        let req = resolve_control(&argv(&[]), env_with(Some("yes")), &prefs(false, false, &[]))
+            .expect("环境变量给了真值就该起");
+        assert_eq!(req.source, ControlSource::Env);
+        assert!(!req.allow_danger, "环境变量只给启用，不给危险动作");
+    }
+
+    #[test]
+    fn danger_only_comes_from_flag_or_settings() {
+        // 危险动作的两个来源单独测：这条是「AI 能不能替你退出程序」的闸，
+        // 最坏的写法是它跟着「启用」一起被默认打开。
+        for env_value in [None, Some("1"), Some("true"), Some("on")] {
+            let req = resolve_control(&argv(&[]), env_with(env_value), &prefs(true, false, &[]))
+                .expect("开着就该起");
+            assert!(!req.allow_danger, "env={env_value:?} 却把 danger 带起来了");
+        }
+        // danger 独立持久化：只勾它、不勾「启用」→ 服务根本不起。
+        assert!(resolve_control(&argv(&[]), no_env(), &prefs(false, true, &[])).is_none());
+        // 勾了启用 + 勾了 danger → 才给。
+        let req = resolve_control(&argv(&[]), no_env(), &prefs(true, true, &[])).unwrap();
+        assert!(req.allow_danger);
+        // 只给 --control-danger 不给 --control：原版口径，等于没服务可连，不算开启。
+        assert!(resolve_control(&argv(&["--control-danger"]), no_env(), &prefs(false, false, &[]))
+            .is_none());
+    }
+
+    #[test]
+    fn launch_request_only_carries_the_flag_directories() {
+        // 白名单由 `control::sync_policy` 现场汇总（种子目录 + 旗标 + 设置页），
+        // 启动判定这一层不替它拼。两处各拼一次会有两份真相，而且面板上
+        // 「启动旗标额外放行的（这一趟删不掉）」那一栏会把设置页的目录误报成旗标给的。
+        let req = resolve_control(
+            &argv(&["--control", "--control-dir=/a"]),
+            no_env(),
+            &prefs(false, false, &["/b"]),
+        )
+        .unwrap();
+        assert_eq!(req.cli_dirs, vec![PathBuf::from("/a")]);
+        // 没给旗标时这里就是空的：设置页那栏目录仍然生效，但那是策略层的事。
+        let req = resolve_control(&argv(&[]), env_with(Some("1")), &prefs(false, false, &["/c"]))
+            .unwrap();
+        assert!(req.cli_dirs.is_empty());
+    }
+
+    #[test]
+    fn garbage_env_value_defers_to_settings_page() {
+        // 拼错值时不能默默当成「关」，也不能当成「开」：吼一声（stderr），按没给处理。
+        let req = resolve_control(&argv(&[]), env_with(Some("ture")), &prefs(true, false, &[]))
+            .expect("值认不出来就该退回 prefs，而 prefs 是开的");
+        assert_eq!(req.source, ControlSource::Prefs);
+        assert!(resolve_control(&argv(&[]), env_with(Some("ture")), &prefs(false, false, &[]))
+            .is_none());
+        // 空串也归「认不出来」：它既不是真值也不是假值，猜哪边都可能骗人。
+        assert!(resolve_control(&argv(&[]), env_with(Some("")), &prefs(true, false, &[])).is_some());
+    }
 }

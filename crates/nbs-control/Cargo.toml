@@ -1,0 +1,17 @@
+[package]
+name = "nbs-control"
+description = "nbs-rs 的外部控制通路：线协议、UI 线程收件箱、本地回环服务与后台任务表"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+# 只有 MCP 桥接那侧要 JSON Schema；编辑器链路不引这个依赖，
+# 因为 schemars 会把每个字段的说明编译进二进制。
+schemars = { workspace = true, optional = true }
+
+[features]
+schema = ["dep:schemars"]

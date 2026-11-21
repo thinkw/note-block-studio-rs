@@ -1516,6 +1516,23 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     state.file_dialog = None;
                     state.window = Some(WindowKind::SoundImport);
                 }
+                DialogAction::PickControlDir => {
+                    // 外部控制的白名单：存进 prefs，再让宿主重算策略——加一条当场就该能写，
+                    // 不用等下次启动（和「移除」同一条路子，两个方向都得立刻生效）。
+                    let text = path.to_string_lossy().into_owned();
+                    if !state.prefs.control_dirs.iter().any(|d| d == &text) {
+                        state.prefs.control_dirs.push(text.clone());
+                    }
+                    state.file_dialog = None;
+                    state.window = Some(WindowKind::ExternalControl);
+                    state.control_change = Some(crate::control::ControlChange::Reapply);
+                    state.set_message(if crate::lang() == 1 {
+                        format!("已把 {text} 加入外部控制可读写的目录")
+                    } else {
+                        format!("{text} added to the external control allow-list")
+                    });
+                    state.save_prefs();
+                }
                 DialogAction::ExportAudio => {
                     export_audio(state, &path);
                     state.window = None;

@@ -122,6 +122,10 @@ impl History {
     pub fn cursor(&self) -> usize {
         self.cursor
     }
+    /// 栈容量：超出后最旧的条目会被丢掉，外部调用方用它判断「还能往前退多远」。
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
     pub fn can_undo(&self) -> bool {
         self.cursor > 0
     }
