@@ -5,12 +5,12 @@ use egui::{Context, Frame};
 
 use crate::grid::show_grid;
 use crate::layers_panel::{panel_width, show_layers_panel};
-use crate::piano::show_piano;
+use crate::piano::{show_piano, PANEL_HEIGHT};
 use crate::shortcuts::collect_shortcuts;
 use crate::state::EditorState;
 use crate::statusbar::show_status_bar;
 use crate::toolbar::{show_menu_bar, show_toolbar};
-use crate::viewport::{MENU_HEIGHT, PIANO_HEIGHT, STATUS_HEIGHT, TOOLBAR_HEIGHT};
+use crate::viewport::{MENU_HEIGHT, STATUS_HEIGHT, TOOLBAR_HEIGHT};
 use crate::windows::show_windows;
 
 /// 原版界面全是绝对像素坐标，面板默认的 8×4 内边距会把每个按钮都推歪，
@@ -90,9 +90,13 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
     if state.flags.show_piano && !state.player {
         // 端口自加（用户要求）：琴键面板独立缩放，高度跟 `piano_scale`，
         // 不随 `window_scale`（与 #80「钢琴栏不随界面缩放」一致）。
+        // #109：高度含黑键高出的 7px（见 `piano::PANEL_HEIGHT`），并且关掉 egui 面板
+        // 默认自带的可拖边界和那条分隔线——原版没有，分隔线还会横穿黑键顶部。
         egui::TopBottomPanel::bottom("nbs_piano")
             .frame(tight())
-            .exact_height(PIANO_HEIGHT * state.prefs.piano_scale)
+            .resizable(false)
+            .show_separator_line(false)
+            .exact_height(PANEL_HEIGHT * state.prefs.piano_scale)
             .show(ctx, |ui| show_piano(state, ui));
     } else {
         // 悬停路由用的矩形是每帧由面板写入的；面板关掉后必须清掉，

@@ -15,6 +15,7 @@ use crate::fonts::{bold_font, main_font};
 use crate::icons::{piano_frame, Bank};
 use crate::state::EditorState;
 use crate::theme::{Theme, ThemeKind};
+use crate::viewport::PIANO_HEIGHT;
 
 /// 原版白键步进 `xx + 39 * a`。
 const KEY_W: f32 = 39.0;
@@ -25,6 +26,10 @@ const WHITE_HIT_H: f32 = 128.0;
 /// 黑键画在白键左边 19px、上边 7px 处。
 const BLACK_DRAW_X: f32 = -19.0;
 const BLACK_LIFT: f32 = 7.0;
+/// 琴键面板高度：`viewport::PIANO_HEIGHT` 之外还要算上黑键高出的 `BLACK_LIFT`。
+/// 中央面板（网格 + 横向滚动条）晚于琴键绘制，黑键越界画到面板外只会被滚动条底色
+/// 盖住（用户报告 #109）；面板长高这 7px、白键顶边同步下移，键盘可见位置不变。
+pub const PANEL_HEIGHT: f32 = PIANO_HEIGHT + BLACK_LIFT;
 /// 黑键命中区 `mouse_rectangle(xx + 39a - 12, yy - 7, 25, 71)`：
 /// 帧里不透明的是第 7..31 列，画在 `-19` 处正好落在白键左缘的 `-12..+13`。
 const BLACK_HIT_X: f32 = -12.0;
@@ -195,11 +200,6 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
     );
     // 缩放快捷键按这块矩形判断指针是否悬停在琴键上（先记下来，再谈画不画得成）。
     state.piano_rect = Some(area);
-    // 黑键高出面板顶 7px，画在横向滚动条下方那段空档里；面板默认会把它裁掉。
-    ui.set_clip_rect(Rect::from_min_max(
-        pos2(area.min.x, area.min.y - BLACK_LIFT * u),
-        area.max,
-    ));
     ui.allocate_rect(area, Sense::hover());
 
     let rw = area.width();
@@ -216,7 +216,9 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) {
     // 原版 `sharpkeys`：startkey 之前有几个黑键（白键序号 mod 7 为 1、4 的没有右邻黑键）。
     let sharpkeys = (0..startkey).filter(|a| *a % 7 != 1 && *a % 7 != 4).count();
     let x0 = area.min.x + ((rw - keysshow as f32 * KEY_W * u) / 2.0).floor();
-    let y0 = area.min.y;
+    // 白键顶边下移黑键的那 7px：整排键（含黑键高出的一段）都留在面板内，
+    // 琴键的可见位置与改之前一致（面板同步长高 7px，见 `PANEL_HEIGHT`）。
+    let y0 = area.min.y + BLACK_LIFT * u;
 
     let pointer = ui.input(|i| i.pointer.hover_pos());
     let holding = ui.input(|i| i.pointer.any_down());
