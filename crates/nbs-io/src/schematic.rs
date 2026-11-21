@@ -180,6 +180,16 @@ impl Nbt {
         self.buf.extend_from_slice(&(v.len() as i32).to_be_bytes());
         self.buf.extend_from_slice(v);
     }
+    /// `TAG_Int_Array(name, values)`——结构方块的 `size`/`Offset` 一类用得到。
+    /// 注意这是数组标签（元素类型由标签本身决定），不是 [`Self::list`] 的列表。
+    pub fn int_array(&mut self, name: &str, v: &[i32]) {
+        self.header(12, name);
+        self.buf
+            .extend_from_slice(&(v.len() as i32).to_be_bytes());
+        for x in v {
+            self.item_int(*x);
+        }
+    }
     /// `TAG_List(name, length, type)` —— 参数顺序照原版：先长度后类型。
     pub fn list(&mut self, name: &str, count: i32, element_type: u8) {
         self.header(9, name);
@@ -3381,7 +3391,7 @@ pub struct SchematicInfo {
     pub repeaters: usize,
 }
 
-fn gzip(data: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn gzip(data: &[u8]) -> Result<Vec<u8>, String> {
     let mut enc = GzEncoder::new(Vec::new(), Compression::default());
     enc.write_all(data).map_err(|e| {
         crate::tr(

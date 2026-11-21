@@ -135,6 +135,9 @@ pub struct Preferences {
     pub auto_save_minutes: u8,
     /// 原版 `[schematic_export]` 段：整份导出选项无条件持久化。
     pub schematic: crate::schematic::SchematicOptions,
+    /// 端口自加（用户要求接 MAESTRO 导出）：MAESTRO 机体节目单的导出选项。
+    /// 原版没有这条导出，所以也没有对应的 `[..._export]` 段，键名用 `maestro`。
+    pub maestro: crate::maestro::MaestroOptions,
     /// 原版 `[midi_import]` 段：勾了「记住我的更改」后，导入窗口里改的通道/鼓映射
     /// 会写进 GM 表并持久化到这里。`None` = 没改过，用出厂表。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,6 +148,9 @@ pub struct Preferences {
     pub midi_import: Option<crate::midi::MidiImportPrefs>,
     /// 原版 `[warnings] schematics`：经典格式只兼容 1.12 以下的一次性警告是否已看过。
     pub warning_schematic: bool,
+    /// 端口自加：MAESTRO 那条「节目单要在已建好的机体里才出声」的一次性提示是否已看过。
+    /// 语义同 `warning_schematic`（`false` = 还没提示过）。
+    pub warning_maestro: bool,
     /// 原版 `show_welcome`（出厂 1，`control_create.gml:175`）：开机显示欢迎窗。
     pub show_welcome: bool,
     /// 原版 `check_update`（Windows 直装出厂 1，`control_create.gml:172`）：开机检查更新。
@@ -308,9 +314,11 @@ impl Default for Preferences {
             language: detect_language(),
             auto_save_minutes: 10,
             schematic: crate::schematic::SchematicOptions::default(),
+            maestro: crate::maestro::MaestroOptions::default(),
             midi_gm: None,
             midi_import: None,
             warning_schematic: false,
+            warning_maestro: false,
             // 原版 `control_create.gml:172-175`：check_update = 1（Windows）、
             // check_prerelease = is_prerelease（我们的构建按稳定版算 = 0）、
             // show_welcome = 1；donate_banner = 1、donate_banner_time = −1（:112-113）。
@@ -776,6 +784,26 @@ mod tests {
         assert!(!old.schematic.command_tempo_grid);
         assert_eq!(old.schematic.format, 0);
         assert_eq!(old.theme, 2, "已有的键照常读出来");
+    }
+
+    /// MAESTRO 那条导出（端口自加）：取整模式与一次性提示要能落盘，
+    /// 旧配置里没有这两个键时退回默认（round / 未提示）。
+    #[test]
+    fn maestro_options_and_notice_flag_persist() {
+        let mut p = Preferences::default();
+        p.maestro.timing = crate::maestro::TimingMode::Flexible;
+        p.warning_maestro = true;
+        let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.maestro.timing, crate::maestro::TimingMode::Flexible);
+        assert!(back.warning_maestro);
+
+        let old: Preferences = serde_json::from_str(r#"{"theme":2}"#).unwrap();
+        assert_eq!(
+            old.maestro.timing,
+            crate::maestro::TimingMode::Round,
+            "官方转换器默认 round，老配置缺键时必须退回它"
+        );
+        assert!(!old.warning_maestro);
     }
 
     /// 原版 `control_create.gml` 的出厂值：autosave=0、autosavemins=10、mousewheel=0、
