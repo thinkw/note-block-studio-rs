@@ -166,7 +166,15 @@ impl RemoveFx {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WindowKind {
+    /// 原版 `w_songinfo`（`macros.gml:96`）：只读卡片，脚注是「点击任意位置以关闭」，
+    /// 没有按钮，按左键即关（`draw_window_songinfo.gml:110/138-143`）。
+    /// 打开文件后自动弹的就是这一版（`load_song.gml:64`），播放器档位的工具栏图标
+    /// （`control_draw.gml:2042`）和 `settingsp` 菜单（`menu_click.gml:374`）也开这一版。
     SongInfo,
+    /// 原版 `w_songinfoedit`（`macros.gml:95`）：同一张卡片，脚注换成
+    /// 「此信息在打开文件时显示。」并多一排「修改」「确定」（`:129-136`）。
+    /// 编辑器档位的工具栏信息图标和 `settings` 菜单开的是这一版。
+    SongInfoEdit,
     Properties,
     Statistics,
     Preferences,
@@ -236,7 +244,7 @@ pub enum WindowKind {
 impl WindowKind {
     pub fn title(&self) -> &'static str {
         match self {
-            Self::SongInfo => tr("Song Info", "歌曲信息"),
+            Self::SongInfo | Self::SongInfoEdit => tr("Song Info", "歌曲信息"),
             Self::Properties => tr("Song Properties", "歌曲属性"),
             // 原版 `draw_window_stats`：EN "Song Stats" / CN "歌曲数据"。
             Self::Statistics => tr("Song Stats", "歌曲数据"),
@@ -1111,6 +1119,9 @@ pub struct EditorState {
     pub stereo_width: i32,
     pub stereo_reverse: bool,
     pub midi_options: MidiImportOptions,
+    pub midi_enhanced: nbs_io::midi_enhanced::EnhancedMidiOptions,
+    pub midi_enhanced_options: MidiImportOptions,
+    pub midi_enhanced_check: Option<Result<nbs_io::midi_enhanced::EnhancedImportReport, String>>,
     pub transcription: crate::transcription::TranscriptionState,
     /// 原版 `midi_*` 那一堆全局：解析好的 MIDI。导入窗口只在这有值时才打开——
     /// 原版 `open_midi()` 是先解析、再 `window = w_midi`，没有「先开空窗口」这条路。
@@ -1439,7 +1450,10 @@ impl EditorState {
             pitch_additive: false,
             stereo_width: 50,
             stereo_reverse: false,
+            midi_enhanced_options: midi_options.clone(),
             midi_options,
+            midi_enhanced: nbs_io::midi_enhanced::EnhancedMidiOptions::default(),
+            midi_enhanced_check: None,
             transcription: crate::transcription::TranscriptionState::default(),
             midi_data: None,
             midi_file: String::new(),
@@ -2347,8 +2361,10 @@ impl EditorState {
         }
     }
 
-    /// 有界预算的方案构建（原版 `full_search = false`），供窗口计数/尺寸查询；
-    /// 真正导出用 [`Self::rebuild_command_plan_forced`]（全预算）。
+    /// 有界预算的方案构建（原版 `full_search = false`）。原版把带预算的那一档用在
+    /// 窗口计数上（`schematic_height/length` 走 `get_schematic_plan(false)` 复用缓存），
+    /// 但命令方块模式下窗口画的是「导出时计算」（`draw_window_schematic_export.gml:138-140`），
+    /// 所以端口只有导出这一条路，走 [`Self::rebuild_command_plan_forced`]（全预算）。
     fn build_command_plan(&self, full_search: bool) -> nbs_io::mc_export::Plan {
         use nbs_io::mc_export;
         let o = &self.schematic_options;
@@ -2376,17 +2392,6 @@ impl EditorState {
                     .filter(|d| *d > 0.0)
             },
         )
-    }
-
-    /// 原版 `minecraft_export_get_schematic_plan(false)`：签名没变就复用缓存。
-    pub fn ensure_command_plan(&mut self) -> &nbs_io::mc_export::Plan {
-        let signature = self.command_plan_signature();
-        if self.schematic_command_plan.is_none() || self.schematic_command_signature != signature {
-            let plan = self.build_command_plan(false);
-            self.schematic_command_signature = signature;
-            self.schematic_command_plan = Some(plan);
-        }
-        self.schematic_command_plan.as_ref().unwrap()
     }
 
     /// 原版 `minecraft_export_get_schematic_plan(true)`：导出时全预算重建并替换缓存。

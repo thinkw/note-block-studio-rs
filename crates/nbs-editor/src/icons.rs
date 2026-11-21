@@ -23,6 +23,8 @@ pub mod frame {
     pub const NEW: usize = 0;
     pub const OPEN: usize = 1;
     pub const SAVE: usize = 2;
+    /// 原版只把「另存为」喂给 macOS 原生菜单的图标（`icon_menubar`），端口没有那条菜单，
+    /// 界面上的另存为走的是文件菜单文字项。此常量仅作精灵表镜像。
     pub const SAVE_AS: usize = 3;
     pub const PLAY: usize = 4;
     /// 播放中显示的暂停图标（原版 `icons.PLAY + playing`）。
@@ -36,6 +38,8 @@ pub mod frame {
     /// 同上：拖条手柄用的就是录音图标那一帧。
     pub const DRAG_KNOB: usize = 9;
     pub const LOOP_INACTIVE: usize = 53;
+    /// 原版没有单独取这帧，写的是 `icons.LOOP_INACTIVE + current_song.loop_session`
+    /// （`control_draw.gml:1917`）；端口保持同一个算式，所以这帧靠 +1 走到。
     pub const LOOP: usize = 54;
     pub const METRONOME_INACTIVE: usize = 55;
     pub const METRONOME_1: usize = 56;
@@ -75,7 +79,11 @@ pub mod frame {
     pub const INTERNET: usize = 49;
 }
 
-/// 原版 `spr_layericons` 的帧号（7 个图层按钮 + 全屏两态）。
+/// 原版 `spr_layericons` 的帧号：图层行左侧那 7 个按钮，从左到右就是 0..6。
+///
+/// Fluent 皮的 `spr_layericons_f` 用同一批下标加偏移取帧（`draw_layericon.gml:33` 起
+/// 的 `+ 9` / `+ 18` 两条），换算在 [`Bank::layer_button`] 里做。
+/// 端口调用点以 `layer_icon::` 别名引用（`layers_panel.rs`）。
 pub mod layer {
     pub const LOCK: usize = 0;
     pub const SOLO: usize = 1;
@@ -86,7 +94,9 @@ pub mod layer {
     pub const DOWN: usize = 6;
 }
 
-/// 原版宏条的 15 个图标，间距 25、图标 16×16。
+/// 原版宏条的 15 个图标（`spr_macroicons`），间距 25、图标 16×16。
+///
+/// 帧号顺序 = 宏条从左到右的按钮顺序，见 `layers_panel.rs` 的 `MACRO_BTNS`。
 pub mod macro_icon {
     pub const TREMOLO: usize = 0;
     pub const STEREO: usize = 1;
@@ -107,9 +117,13 @@ pub mod macro_icon {
 
 /// 原版 `spr_piano` 的帧号（每组 40×121）。
 ///
-/// `draw_piano_key` 的换算是 `sprite_offset = 6 * (theme == 3)`，Fluent 深色再 `+6`；
+/// 原版 `draw_piano_key` 的换算是 `sprite_offset = 6 * (theme == 3)`，Fluent 深色再 `+6`；
 /// 但三张淡出蒙版（`3/4/5`）只加 `sprite_offset`、不加深色偏移 —— 原版工程里
 /// Fluent 深色那组确实只有 12/13/14 三帧，蒙版是共用的。
+///
+/// 偏离原版（用户要求，见 `piano.rs` 顶部）：端口去掉了琴键两侧的渐隐，所以
+/// `*_FADE` 三帧和按 `offset + dark` 累加出来的 `DARK_GROUP` 都没有直接调用点，
+/// 只作为精灵表帧号镜像保留。
 pub mod piano_frame {
     pub const WHITE: usize = 0;
     pub const BLACK_FACE: usize = 1;

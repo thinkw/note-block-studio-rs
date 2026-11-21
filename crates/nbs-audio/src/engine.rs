@@ -40,10 +40,6 @@ pub trait AudioEngine {
     fn position_ticks(&self) -> f64;
     fn advance(&mut self, dt: f64);
     fn active_voices(&self) -> usize;
-    fn export_wav(&mut self, path: &Path) -> bool {
-        let _ = path;
-        false
-    }
     fn clock(&self) -> &TransportClock;
     fn clock_mut(&mut self) -> &mut TransportClock;
     fn device_info(&self) -> String;
@@ -416,7 +412,6 @@ pub struct CpalEngine {
     probe_at: Instant,
     tried_default: Option<String>,
     last_song: Option<Song>,
-    export_options: ExportOptions,
 }
 
 impl CpalEngine {
@@ -454,7 +449,6 @@ impl CpalEngine {
             probe_at: Instant::now(),
             tried_default: None,
             last_song: None,
-            export_options: ExportOptions::default(),
         };
         let _ = engine.reconnect();
         // 启动这一趟的成败不进状态栏：那会儿窗口还没画起来，没人看得见。设备那一格
@@ -465,10 +459,6 @@ impl CpalEngine {
 
     pub fn shared(&self) -> &Shared {
         &self.shared
-    }
-
-    pub fn export_with_options(&self, song: &Song, path: &Path) -> Result<ExportStats, String> {
-        export_wav(song, &self.bank, path, &self.export_options)
     }
 
     /// 重新扫描采样目录（首选项里改路径后调用）。
@@ -679,13 +669,6 @@ impl AudioEngine for CpalEngine {
     }
     fn active_voices(&self) -> usize {
         self.shared.lock().mixer.active()
-    }
-    fn export_wav(&mut self, path: &Path) -> bool {
-        if let Some(song) = self.last_song.clone() {
-            self.export_with_options(&song, path).is_ok()
-        } else {
-            false
-        }
     }
     fn clock(&self) -> &TransportClock {
         &self.clock

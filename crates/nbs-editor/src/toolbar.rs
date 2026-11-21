@@ -408,6 +408,8 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
         if state.player {
             ui.menu_button(tr("Settings", "设置"), |ui| {
                 if ui.button(tr("Song info...", "歌曲信息……")).clicked() {
+                    // 原版 `menu_click.gml:374`：播放器档位的 `settingsp` 开的是
+                    // `w_songinfo`（无按钮、点任意处关闭），和编辑器那条不是一个变体。
                     state.emit(Command::ShowWindow(WindowKind::SongInfo));
                     ui.close_menu();
                 }
@@ -462,7 +464,9 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                     ui.close_menu();
                 }
                 if ui.button(tr("Song info...", "歌曲信息…")).clicked() {
-                    state.emit(Command::ShowWindow(WindowKind::SongInfo));
+                    // 原版 `menu_click.gml:197`：编辑器档位的这条开的是带按钮的
+                    // `w_songinfoedit`，不是打开文件时自动弹的那一版。
+                    state.emit(Command::ShowWindow(WindowKind::SongInfoEdit));
                     ui.close_menu();
                 }
                 if ui.button(tr("Song properties...", "歌曲属性…")).clicked() {
@@ -925,7 +929,8 @@ fn sequence(state: &mut EditorState, ui: &mut Ui, bar: &mut Bar, rw: f32) {
         bar.separator_gap(ui);
     }
 
-    // 原版播放器点 INFORMATION 开只读 `w_songinfo`；端口的歌曲信息窗本就只读。
+    // 原版 `control_draw.gml:2042`：`window = w_songinfoedit * !isplayer + w_songinfo * isplayer`
+    // ——编辑器档位点这格开带「修改/确定」的那一版，播放器档位开点了就关的那一版。
     if draw!(
         frame::INFORMATION,
         tr("View song info", "歌曲信息"),
@@ -934,7 +939,11 @@ fn sequence(state: &mut EditorState, ui: &mut Ui, bar: &mut Bar, rw: f32) {
     )
     .clicked
     {
-        state.emit(Command::ShowWindow(WindowKind::SongInfo));
+        state.emit(Command::ShowWindow(if state.player {
+            WindowKind::SongInfo
+        } else {
+            WindowKind::SongInfoEdit
+        }));
     }
     if !state.player {
         if draw!(
@@ -1608,7 +1617,12 @@ fn show_toolbar_text(state: &mut EditorState, ui: &mut Ui) {
         }
         ui.separator();
         if ui.button(tr("Song info", "歌曲信息")).clicked() {
-            state.emit(Command::ShowWindow(WindowKind::SongInfo));
+            // 与上面图标版同源：文字版只是同一格工具栏换画法，变体也跟着档位走。
+            state.emit(Command::ShowWindow(if state.player {
+                WindowKind::SongInfo
+            } else {
+                WindowKind::SongInfoEdit
+            }));
         }
         if ui.button(tr("Song properties", "歌曲属性")).clicked() {
             state.emit(Command::ShowWindow(WindowKind::Properties));

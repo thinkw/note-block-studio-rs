@@ -24,6 +24,7 @@ pub mod icons;
 pub mod interaction;
 pub mod layers_panel;
 pub mod live_midi;
+mod midi_enhanced;
 pub mod piano;
 pub mod shortcuts;
 pub mod sound_import;
@@ -2627,6 +2628,48 @@ mod gui_window_tests {
         assert!(back.marker_end);
     }
 
+    /// 跟随播放头这一组：复选框 + 三档单选（原版 `draw_window_preferences.gml:596-599`，
+    /// 中文 `:648-651`）。出厂 `marker_follow = 1` / `marker_pagebypage = 1`
+    /// （`control_create.gml:379-380`）即「开着、按页」；关掉跟随后三格整体锁定，点不动。
+    /// 档位和开关都得真的落盘，否则重启回到按页等于白设。
+    #[test]
+    fn preferences_follow_rows_pick_the_mode_and_lock_when_off() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.prefs.language = 0;
+        let _en = crate::LangGuard::set(0);
+        state.theme.apply(&ctx);
+        state.marker_follow = true;
+        state.follow_mode = 1;
+        state.window = Some(WindowKind::Preferences);
+        state.prefs_tab = 4;
+        let texts = drawn_texts(&mut state, &ctx);
+        for t in [
+            "Follow marker when playing",
+            "Page by page",
+            "Tick by tick",
+            "Frame by frame",
+        ] {
+            assert!(
+                texts.iter().any(|s| s == t),
+                "播放页缺少「{t}」：{}",
+                texts.join(" | ")
+            );
+        }
+        click_text(&mut state, &ctx, "Tick by tick");
+        assert_eq!(state.follow_mode, 0, "「按刻」没接上 marker_pagebypage = 0");
+        click_text(&mut state, &ctx, "Frame by frame");
+        assert_eq!(state.follow_mode, 2, "「按帧」没接上 marker_pagebypage = 2");
+        click_text(&mut state, &ctx, "Follow marker when playing");
+        assert!(!state.marker_follow, "复选框没接 ToggleFollow");
+        click_text(&mut state, &ctx, "Page by page");
+        assert_eq!(state.follow_mode, 2, "跟随关掉时三格是锁定态，不该被点动");
+        let back = nbs_io::prefs::Preferences::load();
+        assert_eq!(back.follow_mode, 2, "跟随档位要落盘");
+        assert!(!back.follow_marker, "跟随开关要落盘");
+    }
+
     /// 原版页 3「访问」的两组：`draw_areaheader(22, 74, 456, 140, "鼠标滚轮")` 里的
     /// 三个档位 + 「滚动速度」拖拽行（`y1 + 150`，出厂 1）+ 「悬停层预览」
     /// （`y1 + 198`），和 `draw_areaheader(22, 240, 456, 105, "琴键与层")` 组名本身。
@@ -3754,6 +3797,177 @@ mod gui_window_tests {
             Some(WindowKind::SetAccent),
             "原版用完默认值仍停在这扇窗"
         );
+    }
+
+    /// 属性窗的 Information 区（原版 `draw_window_properties.gml:29-66`）：歌曲名 / 作者 /
+    /// 原作者 / 简介四个框。原版是直接写 `cursong.*` 再标一句 `changed = 1`（:42/49/56），
+    /// 不进撤销栈，所以端口也只标脏、不入历史——一次敲字压一条历史反而离原版更远。
+    #[test]
+    fn properties_window_edits_the_song_meta() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.prefs.language = 0;
+        let _en = crate::LangGuard::set(0);
+        state.theme.apply(&ctx);
+        state.doc.song.meta.name.clear();
+        state.doc.song.meta.author.clear();
+        state.doc.song.meta.original_author.clear();
+        state.doc.song.meta.description.clear();
+        state.doc.song.dirty = false;
+        state.window = Some(WindowKind::Properties);
+        let texts = drawn_texts(&mut state, &ctx);
+        for t in [
+            "Song name",
+            "Song author",
+            "Original song author",
+            "Description",
+        ] {
+            assert!(texts.iter().any(|s| s == t), "属性窗缺「{t}」：{texts:?}");
+        }
+        // 空框画的是占位文案，它的中心就落在输入框里，点一下即聚焦。
+        frame_out(&mut state, &ctx, base_input());
+        let out = frame_out(&mut state, &ctx, base_input());
+        let at = text_center_if(&out.shapes, |t| t == "Untitled song");
+        click_pos_at(&mut state, &ctx, at);
+        for chunk in ["O", "de"] {
+            let mut raw = base_input();
+            raw.events.push(egui::Event::Text(chunk.into()));
+            frame_out(&mut state, &ctx, raw);
+        }
+        assert_eq!(state.doc.song.meta.name, "Ode", "敲进去的字没落到歌曲名上");
+        assert!(state.doc.song.dirty, "改元数据要标脏");
+        assert!(
+            !state.doc.history.can_undo(),
+            "原版敲字不进撤销栈（逐字符压历史会把 Ctrl+Z 变成删字）"
+        );
+    }
+
+    /// 歌曲信息窗在原版是**只读**的（`draw_window_songinfo.gml:62-136`）：字段为空整行不画，
+    /// 底部只有「修改」跳属性窗、「确定」关窗两个按钮。端口原来在这儿放了四个输入框，
+    /// 和原版正好反了。
+    #[test]
+    fn song_info_window_is_a_readonly_card() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.prefs.language = 0;
+        let _en = crate::LangGuard::set(0);
+        state.theme.apply(&ctx);
+        state.doc.song.meta.name = "Ring".into();
+        state.doc.song.meta.author = "Notch".into();
+        state.doc.song.meta.original_author.clear();
+        state.doc.song.meta.description.clear();
+        state.doc.song.meta.midi_file = "ring.mid".into();
+        state.window = Some(WindowKind::SongInfoEdit);
+        let texts = drawn_texts(&mut state, &ctx);
+        for t in [
+            "Ring",
+            "Created by Notch",
+            "Imported from ring.mid",
+            "This message is shown when the file is opened.",
+            "Edit",
+            "OK",
+        ] {
+            assert!(texts.iter().any(|s| s == t), "信息窗缺「{t}」：{texts:?}");
+        }
+        for t in ["Originally created by ", "Song name", "Untitled song"] {
+            assert!(
+                !texts.iter().any(|s| s.starts_with(t)),
+                "空字段不该画出来，编辑态标签也不该出现在只读窗里：{t}"
+            );
+        }
+        let mut raw = base_input();
+        raw.events.push(egui::Event::Text("Z".into()));
+        frame_out(&mut state, &ctx, raw);
+        assert_eq!(state.doc.song.meta.name, "Ring", "只读窗不该吃键盘输入");
+        click_text(&mut state, &ctx, "OK");
+        frame(&mut state, &ctx);
+        assert_eq!(state.window, None, "「确定」关窗");
+
+        state.window = Some(WindowKind::SongInfoEdit);
+        click_text(&mut state, &ctx, "Edit");
+        frame(&mut state, &ctx);
+        assert_eq!(
+            state.window,
+            Some(WindowKind::Properties),
+            "「修改」应换到属性窗（原版 :130-133 就是直接切窗）"
+        );
+    }
+
+    /// 原版 `load_song.gml:64`：`if (window != w_instruments && newsong.song_name != "") window = w_songinfo`。
+    /// 拆成三条闸门——歌名非空才弹、音色窗开着不抢、整段又在 `if (!backup)` 里；
+    /// 弹的是没按钮、按左键即关的那一版（`:110/138-143`），不是工具栏开的带按钮版。
+    #[test]
+    fn opening_a_named_song_pops_the_plain_info_card() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let dir = scratch("auto-pop");
+        let named = dir.join("ring.nbs");
+        let blank = dir.join("blank.nbs");
+        let mut song = nbs_core::Song::new();
+        song.set(0, 0, nbs_core::Note::new(0, 40));
+        song.meta.name = "Ring".into();
+        nbs_core::nbs::save(&named, &song, nbs_core::nbs::NBS_VERSION).unwrap();
+        song.meta.name.clear();
+        nbs_core::nbs::save(&blank, &song, nbs_core::nbs::NBS_VERSION).unwrap();
+
+        let mut state = EditorState::for_test();
+        state.prefs.language = 0;
+        let _en = crate::LangGuard::set(0);
+        state.theme.apply(&ctx);
+
+        dispatch(&mut state, commands::Command::OpenPath(named.clone()), &ctx);
+        assert_eq!(
+            state.window,
+            Some(WindowKind::SongInfo),
+            "原版开一首有名字的歌就弹这一版"
+        );
+        let texts = drawn_texts(&mut state, &ctx);
+        assert!(texts.iter().any(|t| t == "Ring"), "卡片要念得出曲名");
+        assert!(
+            texts.iter().any(|t| t == "Click anywhere to dismiss"),
+            "原版这一版的脚注：{texts:?}"
+        );
+        // 「Edit」不算：菜单栏本来就有一格叫 Edit，负向断言只能挑窗口独有的文案。
+        for t in ["OK", "This message is shown when the file is opened."] {
+            assert!(
+                !texts.iter().any(|s| s == t),
+                "自动弹的这一版没有按钮、也不是另一句脚注：{t}"
+            );
+        }
+
+        // 原版 :139 的左键判定是全屏的，落在卡片外照样关；同一帧网格仍被窗口挡着。
+        let notes = state.doc.song.total_blocks;
+        click_pos_at(&mut state, &ctx, egui::pos2(400.0, 400.0));
+        assert_eq!(state.window, None, "按左键即关");
+        assert_eq!(
+            state.doc.song.total_blocks, notes,
+            "关窗那一下不该顺手落音符"
+        );
+
+        dispatch(&mut state, commands::Command::OpenPath(blank.clone()), &ctx);
+        assert_eq!(state.window, None, "原版 song_name 为空时不弹");
+
+        dispatch(
+            &mut state,
+            commands::Command::ShowWindow(WindowKind::Instruments),
+            &ctx,
+        );
+        dispatch(&mut state, commands::Command::OpenPath(named.clone()), &ctx);
+        assert_ne!(
+            state.window,
+            Some(WindowKind::SongInfo),
+            "原版 `window != w_instruments` 是弹出的前提"
+        );
+
+        let before = state.recent_files.len();
+        dispatch(&mut state, commands::Command::RestoreAutosave(named), &ctx);
+        assert_eq!(state.window, None, "备份档在原版 `if (!backup)` 外，不弹");
+        assert_eq!(state.recent_files.len(), before, "原版备份档不写最近列表");
+        assert!(state.doc.song.dirty, "原版 :69 备份档标 changed = 1");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

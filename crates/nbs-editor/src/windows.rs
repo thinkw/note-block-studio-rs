@@ -6,7 +6,7 @@ use egui::{
     UiBuilder, Vec2,
 };
 use nbs_core::instruments::{instrument_name, INSTRUMENTS};
-use nbs_core::model::{key_name, SongMeta};
+use nbs_core::model::key_name;
 use nbs_core::{Macro, TremoloFade};
 
 use crate::commands::Command;
@@ -123,7 +123,8 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         .default_width(default_width)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| match &kind {
-            WindowKind::SongInfo => song_info(state, ui),
+            WindowKind::SongInfo => song_info(state, ui, false),
+            WindowKind::SongInfoEdit => song_info(state, ui, true),
             WindowKind::Properties => properties(state, ui),
             WindowKind::Statistics => statistics(state, ui),
             WindowKind::Preferences => preferences(state, ui),
@@ -992,52 +993,153 @@ fn donate_banner_window(state: &mut EditorState, ctx: &Context) {
     }
 }
 
-fn song_info(state: &mut EditorState, ui: &mut Ui) {
-    let mut changed = false;
-    egui::Grid::new("song_info_grid")
-        .num_columns(2)
-        .show(ui, |ui| {
-            let m: &mut SongMeta = &mut state.doc.song.meta;
-            ui.label(tr("Name", "名称"));
-            if ui.text_edit_singleline(&mut m.name).changed() {
-                changed = true;
-            }
-            ui.end_row();
-            ui.label(tr("Author", "作者"));
-            if ui.text_edit_singleline(&mut m.author).changed() {
-                changed = true;
-            }
-            ui.end_row();
-            ui.label(tr("Original author", "原作者"));
-            if ui.text_edit_singleline(&mut m.original_author).changed() {
-                changed = true;
-            }
-            ui.end_row();
-            ui.label(tr("Description", "描述"));
-            if ui
-                .add(egui::TextEdit::multiline(&mut m.description).desired_rows(3))
-                .changed()
-            {
-                changed = true;
-            }
-            ui.end_row();
-        });
-    if changed {
-        state.doc.song.dirty = true;
+/// 原版 `draw_window_songinfo.gml` 是一张卡片供两扇窗共用：
+/// - `w_songinfo`（`with_buttons = false`）：脚注「点击任意位置以关闭」（`:110`），
+///   没有按钮，全屏任意一处按下左键就关（`:138-143`）。打开文件后自动弹的是这扇。
+/// - `w_songinfoedit`（`true`）：脚注换成「此信息在打开文件时显示。」，底下再加
+///   「修改」→属性窗、「确定」→关窗 两个钮（`:129-136`），窗高也多留 32（`:56-57`）。
+fn song_info(state: &mut EditorState, ui: &mut Ui, with_buttons: bool) {
+    // 原版只把已经存着的元数据念一遍，空的字段整行都不画（:71/84/104 的 `!= ""` 判定）——
+    // 要改字段是在属性窗改，这里没有输入框。
+    let (name, author, orauthor, desc, midi) = {
+        let m = &state.doc.song.meta;
+        (
+            m.name.clone(),
+            m.author.clone(),
+            m.original_author.clone(),
+            m.description.clone(),
+            m.midi_file.clone(),
+        )
+    };
+    ui.vertical_centered(|ui| {
+        ui.label(
+            RichText::new(if name.is_empty() {
+                tr("Untitled song", "无名歌曲").to_string()
+            } else {
+                name
+            })
+            .strong(),
+        );
+        if !author.is_empty() {
+            ui.label(tr("Created by ", "作者：").to_string() + &author);
+        }
+        if !orauthor.is_empty() {
+            ui.label(tr("Originally created by ", "原作者：").to_string() + &orauthor);
+        }
+        if !desc.is_empty() {
+            // 原版把简介画在一块 236 宽（`-118 .. +118`）的框里，按 216 断词（:49）。
+            ui.group(|ui| {
+                ui.allocate_ui_with_layout(
+                    Vec2::new(216.0, 0.0),
+                    egui::Layout::top_down(egui::Align::LEFT),
+                    |ui| {
+                        ui.label(&desc);
+                    },
+                );
+            });
+        }
+        if !midi.is_empty() {
+            ui.label(tr("Imported from ", "导入自：").to_string() + &midi);
+        }
+        if with_buttons {
+            ui.label(
+                RichText::new(tr(
+                    "This message is shown when the file is opened.",
+                    "此信息在打开文件时显示。",
+                ))
+                .small()
+                .weak(),
+            );
+            ui.horizontal(|ui| {
+                if ui.button(tr("Edit", "修改")).clicked() {
+                    state.emit(Command::ShowWindow(WindowKind::Properties));
+                }
+                if ui.button(tr("OK", "确定")).clicked() {
+                    state.emit(Command::CloseWindow);
+                }
+            });
+        } else {
+            ui.label(
+                RichText::new(tr("Click anywhere to dismiss", "点击任意位置以关闭"))
+                    .small()
+                    .weak(),
+            );
+        }
+    });
+    if !with_buttons && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) {
+        // 原版 :139 用的是全屏的左键判定，不要求指针落在卡片里。
+        state.emit(Command::CloseWindow);
     }
-    ui.separator();
-    ui.label(
-        RichText::new(tr(
-            "These fields are saved with the .nbs file.",
-            "这些字段会随 .nbs 一起保存",
-        ))
-        .small()
-        .weak(),
-    );
-    footer(state, ui);
 }
 
 fn properties(state: &mut EditorState, ui: &mut Ui) {
+    // 原版 `draw_window_properties.gml:29-66` 的 Information 区：歌曲名 / 作者 / 原作者 /
+    // 简介四个框。原版是直接写 `cursong.*` 再标一句 `changed = 1`（:42/49/56），不进撤销栈，
+    // 所以这里也不走 `edit_meta`——一次敲字压一条历史反而和原版差得更远。
+    let mut info_dirty = false;
+    egui::Grid::new("properties_info")
+        .num_columns(2)
+        .show(ui, |ui| {
+            let m = &mut state.doc.song.meta;
+            ui.label(tr("Song name", "歌曲名"));
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut m.name)
+                        .hint_text(tr("Untitled song", "无名歌曲"))
+                        .desired_width(240.0),
+                )
+                .on_hover_text(tr("The name of the song.", "歌曲的名称。"))
+                .changed()
+            {
+                info_dirty = true;
+            }
+            ui.end_row();
+            ui.label(tr("Song author", "作者"));
+            if ui
+                .add(egui::TextEdit::singleline(&mut m.author).desired_width(240.0))
+                .on_hover_text(tr(
+                    "The name of the creator of the song.",
+                    "歌曲作者的名称。",
+                ))
+                .changed()
+            {
+                info_dirty = true;
+            }
+            ui.end_row();
+            ui.label(tr("Original song author", "原作者"));
+            if ui
+                .add(egui::TextEdit::singleline(&mut m.original_author).desired_width(240.0))
+                .on_hover_text(tr(
+                    "The name of the creator of the original song\n\
+                     (Leave empty if you composed the song yourself.)",
+                    "歌曲原作者的名称。（如果是自作曲就留空）",
+                ))
+                .changed()
+            {
+                info_dirty = true;
+            }
+            ui.end_row();
+            ui.label(tr("Description", "简介"));
+            if ui
+                .add(
+                    egui::TextEdit::multiline(&mut m.description)
+                        .desired_rows(3)
+                        .desired_width(240.0),
+                )
+                .on_hover_text(tr(
+                    "Enter a description for your song.",
+                    "为你的歌曲输入简介。",
+                ))
+                .changed()
+            {
+                info_dirty = true;
+            }
+            ui.end_row();
+        });
+    if info_dirty {
+        state.doc.song.dirty = true;
+    }
+    ui.separator();
     let mut tempo = state.doc.song.meta.tempo as f64;
     if ui
         .add(egui::Slider::new(&mut tempo, 0.25..=60.0).text(tr("Tempo (tick/s)", "速度 (tick/s)")))
@@ -1954,7 +2056,9 @@ fn prefs_playback(state: &mut EditorState, pg: &mut Page, out_at: &mut Pos2) {
         false,
         false,
     ) {
+        // 同页其他行都是点一下即落盘；这格原来只翻 `marker_follow`，重启后开关白设。
         state.emit(Command::ToggleFollow);
+        state.emit(Command::SavePreferences);
     }
     // 原版 `marker_pagebypage`：1 按页 / 0 按刻 / 2 按帧，跟随关掉时三格都锁定。
     let lock = !state.marker_follow;
@@ -5763,6 +5867,37 @@ fn assign_midi_device(state: &mut EditorState, device: usize, value: i8) {
 }
 
 fn midi_import_window(state: &mut EditorState, ui: &mut Ui) {
+    let previous_mode = state.midi_enhanced.enabled;
+    ui.horizontal(|ui| {
+        ui.selectable_value(&mut state.midi_enhanced.enabled, false, tr("Traditional import", "传统导入"));
+        ui.selectable_value(&mut state.midi_enhanced.enabled, true, tr("Enhanced import", "增强导入"));
+    });
+    if previous_mode != state.midi_enhanced.enabled {
+        if state.midi_enhanced.enabled {
+            state.midi_enhanced_options.perc_ins = state.midi_options.perc_ins.clone();
+            state.midi_enhanced_options.perc_pitch = state.midi_options.perc_pitch.clone();
+        }
+        state.midi_menu = None;
+        state.midi_submenu = None;
+        state.midi_enhanced_check = None;
+    }
+    ui.separator();
+    if state.midi_enhanced.enabled {
+        if let Some(midi) = state.midi_data.as_ref() {
+            if let Some(command) = crate::midi_enhanced::show(
+                ui,
+                midi,
+                &mut state.midi_enhanced_options,
+                &mut state.midi_enhanced,
+                &mut state.midi_enhanced_check,
+            ) {
+                state.emit(command);
+            }
+        } else {
+            ui.label(tr("No parsed MIDI file.", "没有已解析的 MIDI 文件。"));
+        }
+        return;
+    }
     // 原版没有「空白的 MIDI 导入窗口」：`command_open_midi` 一定先解析、解析成功才开窗，
     // 所以这里只在数据被清掉的边缘情况下退回一句说明。
     let Some(midi) = state.midi_data.as_ref() else {

@@ -376,39 +376,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             import_schematic(state, &path);
             state.window = None;
         }
-        Command::OpenPath(path) => match nbs_core::nbs::load(&path) {
-            Ok(song) => {
-                let name = song.meta.name.clone();
-                // 原版 `open_song_nbs.gml:12-13`：文件版本比 `nbs_version` 旧就先警告。
-                // 比它新的文件根本进不来这一支（加载器直接报「不支持的 NBS 版本」，
-                // 对应源码 :14-18 的报错并 return -1）。
-                let old = song.meta.save_version < nbs_core::nbs::NBS_VERSION
-                    && state.prefs.show_old_warning;
-                let text = nbs_io::prefs::old_file_warning("NBS");
-                state.doc.replace_song(song);
-                state.song_session += 1;
-                state.prepare_audio();
-                state.viewport.start_tick = 0;
-                state.viewport.start_layer = 0;
-                state.set_marker(0.0);
-                state.clear_section();
-                state.add_recent(path.clone());
-                state.window = None;
-                if old {
-                    state.modals = ModalQueue::message(tr("Warning", "警告"), &text);
-                }
-                state.set_message(if crate::lang() == 1 {
-                    format!("已打开 {}（{} 个音符）", name, state.doc.song.total_blocks)
-                } else {
-                    format!("Loaded {} ({} notes)", name, state.doc.song.total_blocks)
-                });
-            }
-            Err(e) => state.set_message(if crate::lang() == 1 {
-                format!("打开失败: {e}")
-            } else {
-                format!("Load failed: {e}")
-            }),
-        },
+        Command::OpenPath(path) => open_nbs_at(state, &path, false),
         Command::SavePath(path) => {
             if state.player {
                 return;
@@ -997,9 +965,26 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 state.window = None;
                 return;
             };
-            let song = nbs_io::midi::import_midi_data(&midi, &state.midi_options);
+            let (song, report) = if state.midi_enhanced.enabled {
+                match nbs_io::midi_enhanced::import_midi_enhanced(
+                    &midi,
+                    &state.midi_enhanced_options,
+                    &state.midi_enhanced,
+                ) {
+                    Ok((song, report)) => (song, Some(report)),
+                    Err(error) => {
+                        state.midi_enhanced_check = Some(Err(error.clone()));
+                        state.set_message(error);
+                        return;
+                    }
+                }
+            } else {
+                let song = nbs_io::midi::import_midi_data(&midi, &state.midi_options);
+                state.midi_options.finish_import(&midi, &mut state.midi_gm);
+                (song, None)
+            };
             let n = song.total_blocks;
-            state.midi_options.finish_import(&midi, &mut state.midi_gm);
+            state.midi_enhanced_check = None;
             state.window = None;
             state.midi_data = None;
             state.midi_file.clear();
@@ -1012,10 +997,17 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.set_marker(0.0);
             state.clear_section();
             state.save_prefs();
-            state.set_message(if crate::lang() == 1 {
-                format!("MIDI 导入完成：{n} 个音符")
-            } else {
-                format!("MIDI import finished: {n} notes")
+            state.set_message(match report {
+                Some(report) if crate::lang() == 1 => format!(
+                    "增强 MIDI 导入完成：{n} 个音符，{} 个超出原生音域（key 33..57）",
+                    report.out_of_range,
+                ),
+                Some(report) => format!(
+                    "Enhanced MIDI import: {n} notes, {} outside native range (key 33..57)",
+                    report.out_of_range,
+                ),
+                None if crate::lang() == 1 => format!("MIDI 导入完成：{n} 个音符"),
+                None => format!("MIDI import finished: {n} notes"),
             });
         }
         Command::MidiUseDefaults => {
@@ -1750,6 +1742,9 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     match nbs_io::midi::parse_midi_path(&path) {
                         Ok(midi) => {
                             state.midi_options.reload_tables(&midi, &state.midi_gm);
+                            state.midi_enhanced = nbs_io::midi_enhanced::EnhancedMidiOptions::for_midi(&midi);
+                            state.midi_enhanced_options = state.midi_options.clone();
+                            state.midi_enhanced_check = None;
                             state.midi_data = Some(midi);
                             state.midi_file = path
                                 .file_name()
@@ -1921,7 +1916,8 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.save_prefs();
             state.set_message(crate::tr("Preferences saved", "偏好设置已保存"));
         }
-        Command::RestoreAutosave(path) => dispatch(state, Command::OpenPath(path), ctx),
+        // 原版 `load_song(fn, 1)` 那一档：还原自动备份既不弹歌曲信息，也不写最近列表。
+        Command::RestoreAutosave(path) => open_nbs_at(state, &path, true),
         // 原版 `open_url(url)`：欢迎窗 / 关于窗 / 更新弹窗里所有跳浏览器的链接都走这里。
         // 单测里不真开浏览器，把 url 记进下面的线程局部槽，由用例 `take_open_url()` 取。
         Command::OpenUrl(url) => {
@@ -2121,6 +2117,62 @@ fn open_url(url: &str) {
     #[cfg(not(windows))]
     {
         let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
+}
+
+/// 原版 `load_song.gml:38-70` 的 `.nbs`/`.zip` 落地段。`backup` 就是原版的第二个实参
+/// （`download_song_from_url.gml:65` 那句注释写得很直白：load as backup file —
+/// keep unsaved, don't add to recent etc.）。端口的自动备份还原窗是自加的，
+/// 语义正对得上这一档，所以走 `backup = true`。
+fn open_nbs_at(state: &mut EditorState, path: &std::path::Path, backup: bool) {
+    match nbs_core::nbs::load(path) {
+        Ok(song) => {
+            let name = song.meta.name.clone();
+            // 原版 `open_song_nbs.gml:12-13`：文件版本比 `nbs_version` 旧就先警告。
+            // 比它新的文件根本进不来这一支（加载器直接报「不支持的 NBS 版本」，
+            // 对应源码 :14-18 的报错并 return -1）。
+            let old =
+                song.meta.save_version < nbs_core::nbs::NBS_VERSION && state.prefs.show_old_warning;
+            let text = nbs_io::prefs::old_file_warning("NBS");
+            // 原版 `load_song.gml:64` 的 `window != w_instruments` 判的是换歌**之前**
+            // 开着的那扇窗，所以要在 `replace_song` 前先记下来。
+            let on_instruments = state.window == Some(WindowKind::Instruments);
+            state.doc.replace_song(song);
+            state.song_session += 1;
+            state.prepare_audio();
+            state.viewport.start_tick = 0;
+            state.viewport.start_layer = 0;
+            state.set_marker(0.0);
+            state.clear_section();
+            if backup {
+                // 原版 :68-70：备份档不写最近列表，反而把 `changed` 标成 1（还原出来算未保存）。
+                state.doc.song.dirty = true;
+                state.window = None;
+            } else {
+                state.add_recent(path.to_path_buf());
+                // 原版 `load_song.gml:64`：歌名非空才弹歌曲信息；名字空的原版什么都不弹。
+                // 弹的是 `w_songinfo`（点任意处关闭那一版），不是工具栏开的带按钮版。
+                // 两个条件不满足时端口保持原有行为——把上一扇窗关掉，不留着一窗旧数据。
+                state.window = if !on_instruments && !name.is_empty() {
+                    Some(WindowKind::SongInfo)
+                } else {
+                    None
+                };
+            }
+            if old {
+                state.modals = ModalQueue::message(tr("Warning", "警告"), &text);
+            }
+            state.set_message(if crate::lang() == 1 {
+                format!("已打开 {}（{} 个音符）", name, state.doc.song.total_blocks)
+            } else {
+                format!("Loaded {} ({} notes)", name, state.doc.song.total_blocks)
+            });
+        }
+        Err(e) => state.set_message(if crate::lang() == 1 {
+            format!("打开失败: {e}")
+        } else {
+            format!("Load failed: {e}")
+        }),
     }
 }
 
@@ -2350,6 +2402,68 @@ mod tests {
     use super::*;
     use nbs_core::model::Layer;
     use std::path::Path;
+
+    fn enhanced_import_fixture(note: u8) -> nbs_io::midi::MidiData {
+        use nbs_io::midi::{MidiData, MidiEvent, MidiPart, MidiTrack};
+        MidiData {
+            division: 480, minpos: 0, maxpos: 480, micsecqn: 500_000,
+            tracks: vec![MidiTrack { name: "Piano".into(), events: vec![MidiEvent {
+                pos: 0, channel: 0, note, velocity: 100, patch: 0, part: 0, until: 480,
+            }] }],
+            parts: vec![MidiPart { track: 0, channel: 0, patch: 0, note_duration: true }],
+            ..MidiData::default()
+        }
+    }
+
+    #[test]
+    fn enhanced_import_replaces_song_without_changing_traditional_gm() {
+        let _prefs = crate::isolate_prefs();
+        let _lock = crate::frame_lock();
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        let midi = enhanced_import_fixture(60);
+        state.midi_gm.set_patch(0, 6, -1);
+        let gm_before = state.midi_gm.patch(0);
+        state.midi_options = nbs_io::MidiImportOptions::for_midi(&midi, &state.midi_gm);
+        state.midi_enhanced_options = state.midi_options.clone();
+        state.midi_options.use_velocity = false;
+        let options_before = state.midi_options.clone();
+        state.midi_enhanced = nbs_io::midi_enhanced::EnhancedMidiOptions::for_midi(&midi);
+        state.midi_enhanced.enabled = true;
+        state.midi_data = Some(midi);
+        state.window = Some(WindowKind::MidiImport);
+        dispatch(&mut state, Command::MidiImportRun, &ctx);
+        assert_eq!(state.doc.song.total_blocks, 2);
+        assert!(state.doc.song.iter_notes().all(|(_, _, note)| note.velocity == 78));
+        assert_eq!(state.midi_gm.patch(0), gm_before);
+        assert_eq!(state.midi_options, options_before);
+        assert!(!nbs_io::Preferences::load().midi_import.unwrap().use_velocity);
+        assert!(state.midi_data.is_none());
+        assert!(state.window.is_none());
+    }
+
+    #[test]
+    fn enhanced_import_error_keeps_song_and_dialog() {
+        let _prefs = crate::isolate_prefs();
+        let _lock = crate::frame_lock();
+        let ctx = Context::default();
+        let mut state = state_with(four_case_song(10.0));
+        let before = nbs_core::nbs::save_bytes(&state.doc.song, nbs_core::nbs::NBS_VERSION).unwrap();
+        let midi = enhanced_import_fixture(0);
+        state.midi_options = nbs_io::MidiImportOptions::for_midi(&midi, &state.midi_gm);
+        state.midi_enhanced_options = state.midi_options.clone();
+        state.midi_enhanced = nbs_io::midi_enhanced::EnhancedMidiOptions::for_midi(&midi);
+        state.midi_enhanced.enabled = true;
+        state.midi_enhanced.range_mode = nbs_io::midi_enhanced::RangeMode::Keep;
+        state.midi_enhanced.channels[0].transpose = 0;
+        state.midi_data = Some(midi);
+        state.window = Some(WindowKind::MidiImport);
+        dispatch(&mut state, Command::MidiImportRun, &ctx);
+        assert_eq!(before, nbs_core::nbs::save_bytes(&state.doc.song, nbs_core::nbs::NBS_VERSION).unwrap());
+        assert!(matches!(state.midi_enhanced_check, Some(Err(_))));
+        assert!(state.midi_data.is_some());
+        assert_eq!(state.window, Some(WindowKind::MidiImport));
+    }
 
     /// 固定内容的歌曲：2 八度内一个、外一个、自定义音色一个、带微调一个，
     /// 正好让 `calculate_size()` 的三段提问全部出现且顺序固定。
