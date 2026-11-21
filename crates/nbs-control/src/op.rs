@@ -23,7 +23,7 @@ pub struct CellNote {
     pub layer: u32,
     #[cfg_attr(
         feature = "schema",
-        schemars(description = "音色号：内置 0..=14，自定义从 20 起（先看 get_instruments）")
+        schemars(description = "音色号：内置 0..=19，自定义从 20 起（先看 get_instruments）")
     )]
     pub instrument: u8,
     #[cfg_attr(
@@ -98,7 +98,7 @@ pub enum SelectTarget {
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum BatchField {
-    /// 换音色（内置 0..=14，自定义从 20 起）。
+    /// 换音色（内置 0..=19，自定义从 20 起）。
     Instrument,
     /// 移音高键 0..=87。
     Key,
@@ -250,8 +250,10 @@ pub enum Op {
     /// 工程概览：元数据、图层数、音符数、长度、播放位置、脏标记、兼容性诊断。
     GetSnapshot,
     GetNotes {
-        tick_from: u32,
-        tick_to: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tick_from: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tick_to: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         layer_from: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

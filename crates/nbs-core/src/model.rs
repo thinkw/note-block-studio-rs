@@ -475,6 +475,53 @@ pub fn key_name(key: u8, show_octave: bool, flats: bool) -> String {
     }
 }
 
+/// 音名 → 键号，[`key_name`] 的反向。只收 `key_name(key, true, _)` 编得出的写法：
+/// `A`–`G` + 可选升降号 + 八度，`c4`、`C♯4`、`Bb4` 都认。
+///
+/// 两条刻意收紧的口径，都是为了不让一次拼错变成「写到隔壁键上还成功了」：
+/// - 等音异名（`Cb4`、`B#3`）拒收 —— 它们不是任何键的名字，收下就是两种写法悄悄落到
+///   不同的键上，而导出时只会留下其中一种拼法；
+/// - 八度必写 —— 光一个 `C` 在这台机器上有七个位置，猜错的那个不会报错。
+pub fn key_from_name(name: &str) -> Option<u8> {
+    let text = name.trim();
+    let mut chars = text.chars();
+    let letter = chars.next()?.to_ascii_uppercase();
+    if !matches!(letter, 'A'..='G') {
+        return None;
+    }
+    // 以 C=0 起算的半音序号，按 A B C D E F G 的顺序查。
+    const SEMITONE: [i32; 7] = [9, 11, 0, 2, 4, 5, 7];
+    let mut semitone = SEMITONE[(letter as u32 - 'A' as u32) as usize];
+    // 字母是 ASCII，所以升/降号一定从第 2 个字节开始；没有升降号时这里直接就是八度。
+    let rest = &text[1..];
+    let (delta, octave_text, flats) = match rest
+        .strip_prefix('#')
+        .or_else(|| rest.strip_prefix('♯'))
+    {
+        Some(rest) => (1, rest, false),
+        None => match rest.strip_prefix('b').or_else(|| rest.strip_prefix('♭')) {
+            Some(rest) => (-1, rest, true),
+            None => (0, rest, false),
+        },
+    };
+    semitone += delta;
+    // 剩下必须正好是一个八度数字。
+    let octave: i32 = octave_text.parse().ok()?;
+    // `key_name` 那边是 `3 + 12*(octave-1) + (pc-3)`；这里等价地从 C4 = 39 起算。
+    let key = 12 * octave + semitone - 9;
+    if !(0..=i32::from(KEY_MAX)).contains(&key) {
+        return None;
+    }
+    let key = key as u8;
+    let accidental = match delta {
+        1 => "#",
+        -1 => "b",
+        _ => "",
+    };
+    // 反着编一遍，名字对不上就说明这个拼法不是这个键的名字。
+    (key_name(key, true, flats) == format!("{letter}{accidental}{octave}")).then_some(key)
+}
+
 /// 原版 `draw_block` / `control_step` 都是拿乐器名硬比的两个特殊自定义音色。
 /// 名字由用户自己填，原版用的是 GML 的 `==`，区分大小写，这里也照抄。
 pub const TEMPO_CHANGER_NAME: &str = "Tempo Changer";
@@ -579,6 +626,42 @@ mod tests {
         // Minecraft 音符盒默认音高 key=45 = F#4；33 = F#3（最低），57 = F#5（最高）。
         assert_eq!(key_name(45, true, false), "F#4");
         assert_eq!(key_name(57, true, false), "F#5");
+    }
+
+    /// 音名是给人看的口径，反向必须严格互逆：88 个键、两种拼法全跑一遍。
+    #[test]
+    fn key_names_round_trip() {
+        for key in 0..=KEY_MAX {
+            for flats in [false, true] {
+                let name = key_name(key, true, flats);
+                assert_eq!(
+                    key_from_name(&name),
+                    Some(key),
+                    "{name} 该回到 {key}（flats={flats}）"
+                );
+            }
+        }
+        // 现场会写到的几个，单独钉死（33 / 45 / 57 是 MC 的下限、默认、上限）。
+        assert_eq!(key_from_name("F#3"), Some(33));
+        assert_eq!(key_from_name("C4"), Some(39));
+        assert_eq!(key_from_name("Db4"), Some(40));
+        assert_eq!(key_from_name("Bb4"), Some(49));
+        assert_eq!(key_from_name("F#5"), Some(57));
+    }
+
+    /// 拒收的每一种都是「收下就写到别的键上」或「按猜的八度写」，不是排版洁癖。
+    #[test]
+    fn ambiguous_note_names_are_rejected() {
+        for bad in ["", "C", "c", "Cb4", "B#3", "H4", "C 4", "C4x", "C4.", "D#8", "C9", "A-1", "C##4"]
+        {
+            assert_eq!(key_from_name(bad), None, "{bad:?} 不该收下");
+        }
+        // 大小写和粘贴常见的全角升降号、首尾空格，都算同一种写法。
+        assert_eq!(key_from_name("  C4  "), Some(39));
+        assert_eq!(key_from_name("c#4"), Some(40));
+        assert_eq!(key_from_name("C♯4"), Some(40));
+        assert_eq!(key_from_name("bb4"), Some(49));
+        assert_eq!(key_from_name("B♭4"), Some(49));
     }
 
     #[test]

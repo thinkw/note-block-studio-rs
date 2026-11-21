@@ -127,10 +127,19 @@ fn run(config: &Path, work: &Path) -> i32 {
     show(
         "GetNotes(0..2)",
         client.request(Op::GetNotes {
-            tick_from: 0,
-            tick_to: 2,
+            tick_from: Some(0),
+            tick_to: Some(2),
             layer_from: Some(0),
             layer_to: Some(0),
+        }),
+    );
+    show(
+        "GetNotes(一个参数都不给=全曲)",
+        client.request(Op::GetNotes {
+            tick_from: None,
+            tick_to: None,
+            layer_from: None,
+            layer_to: None,
         }),
     );
     show(
