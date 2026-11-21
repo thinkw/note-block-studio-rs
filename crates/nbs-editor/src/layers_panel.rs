@@ -6,10 +6,13 @@
 //! 右侧 7 个 `draw_layericon`，横坐标 `x1 + 126…234 - !realvolume - realstereo * 10`；
 //! 可视行底部再挂一条 15 个 `draw_macroicon` 的宏条（有选区且显示钢琴键盘时）。
 //!
-//! 原版整个画面按 window_scale 等比放大，图层列也在其中；缩放改造（#80）照抄这一
-//! 语义：面板宽 264×u，内部所有坐标、字号、精灵尺寸一律乘 `u = viewport.u()`。
-//! 拖拽增量同理：原版鼠标坐标在「除以缩放」的房间坐标系里（`control_draw.gml:15-16`），
-//! 这里的 `drag_delta`（屏幕点）先 `/u` 再参与数值。
+//! 原版整个画面按 window_scale 等比放大，图层列也在其中。**#108 把这一条改掉了**：
+//! 侧栏只有纵轴跟缩放（行高 = 32×`u`，`u = viewport.u()`），横轴脱离缩放，宽度由用户拖
+//! 面板右边界调，落在 `prefs.layer_panel_width`（出厂 264 = 原版列宽）。栏内版式一律屏幕
+//! 像素、按宽度自动布局：控件簇贴右边界走，名称区吃剩下的空间，放不下就依次藏掉声像、
+//! 音量。出厂宽度 264 这一档，下面每个坐标都还原成上面那些原版数字。
+//! 拖拽增量：原版鼠标坐标在「除以缩放」的房间坐标系里（`control_draw.gml:15-16`），
+//! 纵向的 `drag_delta`（屏幕点）先 `/u` 再参与数值；横向（拖面板边界）不除。
 
 use egui::{
     pos2, vec2, Align, Align2, Color32, CursorIcon, Id, Key, Layout, PointerButton, Pos2, Rect,
@@ -24,17 +27,260 @@ use crate::state::{ContextKind, ContextMenu, EditorState, LayerDrag, WindowKind}
 use crate::theme::{Theme, ThemeKind};
 use crate::tr;
 use crate::viewport::{bar_thickness, timeline_band, RULER_SCALE};
+use nbs_io::prefs::{LAYER_PANEL_DEFAULT_WIDTH, LAYER_PANEL_MAX_WIDTH, LAYER_PANEL_MIN_WIDTH};
 
 /// 原版图层列内容左边界 `x1`。
 const X1: f32 = 4.0;
 /// 原版行底比整行上移 1px：`spr_layerbox` 高 34，多出的 2px 是它自带的下沿压痕。
 const ROW_LIFT: f32 = 1.0;
 
+/// 原版功能按钮：18px 一档，图标本体 16px（`spr_layericons` 帧宽）。
+const BTN_PITCH: f32 = 18.0;
+const BTN_SIZE: f32 = 16.0;
+/// 7 个按钮占的总宽：`x1 + 126` 到末按钮右沿 `x1 + 250`。
+const CLUSTER_W: f32 = BTN_PITCH * 6.0 + BTN_SIZE;
+/// 原版音量 / 声像判定框：`mouse_rectangle(x1 + 88 / 108, y1 + 5, 16, 25)`。
+const GLYPH_HIT_W: f32 = 16.0;
+const GLYPH_HIT_H: f32 = 25.0;
+/// 原版 `spr_volume` / `spr_stereo` 的帧尺寸（12×10）。
+const GLYPH_W: f32 = 12.0;
+const GLYPH_H: f32 = 10.0;
+/// 原版判定框之间的空隙：声像框右 124 → 首按钮左 126；音量框右 104 → 声像框左 108。
+const PAN_GAP: f32 = 2.0;
+const VOL_GAP: f32 = 4.0;
+/// 原版末按钮右沿 254，列宽 264 → 右边空 10。
+const CLUSTER_PAD: f32 = 10.0;
+/// 右边界拖拽条宽度（#108）：吃的是上面那 10px 右边空，不压任何控件。
+const HANDLE_W: f32 = 5.0;
+/// 原版按偏好藏字形时按钮的左挪补偿：`- !realvolume - realstereo * 10`。
+const VOL_SHIFT: f32 = 1.0;
+const PAN_SHIFT: f32 = 10.0;
+/// 名称文字的左沿（原版 `x1 + 11` = 15）。
+const NAME_TEXT_X: f32 = X1 + 11.0;
+/// 最左控件的判定框到行底名称框右边线的空隙（原版 92 → 89）。
+const NAME_BOX_GAP: f32 = 3.0;
+/// 名称框右边线到文字截断处的内边距（原版 89 → 87，正好是原版的 72 内容宽）。
+const NAME_INNER_PAD: f32 = 2.0;
+/// 名称区窄到这个数就不值得再画字形（依次藏声像、藏音量，按钮永远保留）。
+const NAME_MIN: f32 = 30.0;
+/// 原版宏条：`spr_iconbar` 宽 255，从 `x1` 起，右边空 5。
+const MACRO_W: f32 = 255.0;
+/// 原版头部：小节框 184..248（右边空 16）、速度框判定 (108, 57, 64, 22)、
+/// 时间右对齐 93（都是面板左起、不加 x1）。
+const BARS_RIGHT_PAD: f32 = 16.0;
+const BARS_W: f32 = 64.0;
+const TEMPO_GAP: f32 = 76.0;
+const TIME_GAP: f32 = 15.0;
+const TEMPO_HIT_W: f32 = 64.0;
+/// Fluent 主题的时间左沿（原版 9 / 26，两行错开）。
+const FLUENT_TIME_X: f32 = 9.0;
+const FLUENT_LENGTH_X: f32 = 26.0;
+
+/// 侧栏内部的横向版式（#108）：一律屏幕像素、不随缩放，按面板宽度自动布局。
+/// 出厂宽度 264 下每个数都还原成原版 `control_draw.gml` 的坐标。
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PanelLayout {
+    /// 面板宽度。
+    pw: f32,
+    /// 画不画音量字形（原版 `realvolume`）。
+    volume: bool,
+    /// 画不画声像字形（原版 `!realstereo`）。
+    pan: bool,
+    /// 按偏好藏字形时按钮的左挪补偿，照原版；拥挤降级藏字形不补偿（那是把空间让给名称）。
+    shift: f32,
+}
+
+impl PanelLayout {
+    /// 拥挤降级：名称放不下就依次藏掉音量、声像。顺序按「藏哪个能腾出宽度」定：
+    /// 音量在声像左边，只藏声像并不会让名称区变宽，所以先藏音量。结果只由宽度和两个
+    /// 偏好决定，同一个宽度只有一个解，拖动边界时不会在两种排法之间来回抖。
+    fn new(pw: f32, show_vol: bool, stereo_on: bool) -> Self {
+        let mut l = Self {
+            pw,
+            volume: show_vol,
+            pan: stereo_on,
+            shift: (if show_vol { 0.0 } else { VOL_SHIFT })
+                + (if stereo_on { 0.0 } else { PAN_SHIFT }),
+        };
+        for drop_volume in [true, false] {
+            if l.name_w() >= NAME_MIN {
+                break;
+            }
+            if drop_volume {
+                l.volume = false;
+            } else {
+                l.pan = false;
+            }
+        }
+        l
+    }
+
+    /// 首个功能按钮左沿。原版 `x1 + 126` = 130。
+    fn buttons_x(&self) -> f32 {
+        self.pw - CLUSTER_PAD - CLUSTER_W - self.shift
+    }
+
+    /// 声像判定框左沿。原版 `x1 + 108` = 112。
+    fn pan_x(&self) -> f32 {
+        self.pw - CLUSTER_PAD - CLUSTER_W - PAN_GAP - GLYPH_HIT_W
+    }
+
+    /// 音量判定框左沿。原版 `x1 + 88` = 92。
+    fn vol_x(&self) -> f32 {
+        self.pan_x() - VOL_GAP - GLYPH_HIT_W
+    }
+
+    /// 还在画的最左那个控件的左沿，名称区就到它为止。
+    fn left_edge(&self) -> f32 {
+        if self.volume {
+            self.vol_x()
+        } else if self.pan {
+            self.pan_x()
+        } else {
+            self.buttons_x()
+        }
+    }
+
+    /// 行底名称框的右沿（`spr_layerbox` 里那一格的右边线）。原版 89 = `x1 + 85`。
+    fn name_box_right(&self) -> f32 {
+        self.left_edge() - NAME_BOX_GAP
+    }
+
+    /// 名称可画的宽度。原版 72。
+    fn name_w(&self) -> f32 {
+        (self.name_box_right() - NAME_TEXT_X - NAME_INNER_PAD).max(0.0)
+    }
+
+    /// 行底 `spr_layerbox` 的宽：原版 256，从 `x1 = 4` 画到 260，右边同样留 4px 窗底。
+    /// 宽度可拖之后这条也跟着左右各留 4（264 这一档正好还原成 256）。
+    fn strip_w(&self) -> f32 {
+        (self.pw - X1 * 2.0).max(0.0)
+    }
+
+    /// 宏条的等比缩放：照旧跟 `u`，但整条不许超出面板 —— 放不下就缩，15 个宏不折行。
+    /// 原版 255 宽从 `x1` 起、右边空 5，所以 264 这一档正好是 1.0。
+    fn macro_scale(&self, u: f32) -> f32 {
+        u.min((self.pw - X1 - 5.0) / MACRO_W).max(0.25)
+    }
+}
+
+/// 行内文字的纵向落点（相对行顶）。原版是 `base × u`；字号恒定不跟着缩，
+/// 所以行高不够时先贴到行内可放的最下位置，再挤不下就不画。
+/// `base × u` 与居中取小，保证 100% 缩放时就是原版的数。
+fn text_y(cell: f32, u: f32, base: f32, text_h: f32) -> Option<f32> {
+    if text_h > cell {
+        return None;
+    }
+    Some((base * u).min(cell - text_h))
+}
+
+/// 精灵尺寸：100% 缩放就是原版的 1，行高压不到 16px 才跟着缩，免得压到上下行。
+fn glyph_scale(cell: f32) -> f32 {
+    (1.0f32).min(cell / BTN_SIZE)
+}
+
+/// 头部那一排（时间 / 速度框 / 小节框）的横向版式（#108）：整簇贴右边界走，
+/// 出厂宽度 264 下还原成原版的 184 / 108 / 右对齐 93。时间放不下先换短格式
+/// （去掉小时段），再收起小节框（那格只有悬停说明、没有交互），最后按可视宽度截断。
+/// 时间始终留在侧栏里，不挪到标尺带上。
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct HeaderLayout {
+    /// 速度框判定框左沿。原版 108。
+    tempo_x: f32,
+    /// 小节框左沿。原版 184。
+    bars_x: f32,
+    /// 时间文字的右沿（经典主题右对齐到这里）。原版 93。
+    time_right: f32,
+    /// 画不画小节框。
+    bars: bool,
+    /// 时间用短格式。
+    compact_time: bool,
+}
+
+impl HeaderLayout {
+    /// `full_w` / `compact_w` 是长、短两种格式里较那行的实测宽度。
+    fn new(pw: f32, fluent: bool, full_w: f32, compact_w: f32) -> Self {
+        let bars_x = pw - BARS_RIGHT_PAD - BARS_W;
+        let mut tempo_x = bars_x - TEMPO_GAP;
+        let mut bars = true;
+        let mut compact = false;
+        if full_w > Self::room(tempo_x, fluent) {
+            if compact_w <= Self::room(tempo_x, fluent) {
+                compact = true;
+            } else {
+                bars = false;
+                // 速度框挪到小节框那一格上（右边空 16 照旧），时间区随之变宽。
+                tempo_x += TEMPO_GAP;
+                compact = full_w > Self::room(tempo_x, fluent);
+            }
+        }
+        Self {
+            tempo_x,
+            bars_x,
+            time_right: tempo_x - TIME_GAP,
+            bars,
+            compact_time: compact,
+        }
+    }
+
+    /// 时间能占的宽度：Fluent 左对齐在 9、往右挤到速度框前；经典右对齐在速度框前 15，
+    /// 文字可以一直铺到面板左沿 0（原版 `draw_text_dynamic(93, …)` 的 `fa_right` 正是这样，
+    /// 264 宽 + 原版字体下「00:00:00;000」实测 93px，刚好贴着栏的左边）。
+    fn room(tempo_x: f32, fluent: bool) -> f32 {
+        if fluent {
+            tempo_x - 4.0 - FLUENT_TIME_X
+        } else {
+            tempo_x - TIME_GAP
+        }
+    }
+}
+
+/// 侧栏当前宽度（屏幕像素，#108）：`prefs.layer_panel_width` 夹进最窄 / 最宽一档。
+/// `app.rs` 的 SidePanel 和栏内版式都取这一个数，两边不会打架。
+pub fn panel_width(state: &EditorState) -> f32 {
+    state
+        .prefs
+        .layer_panel_width
+        .clamp(LAYER_PANEL_MIN_WIDTH, LAYER_PANEL_MAX_WIDTH)
+}
+
+/// 面板右边界的拖拽条（#108）：鼠标移到侧栏右边界出现左右箭头，按住拖动改宽度，
+/// 双击回出厂宽度。原版整幅画面等比缩放、没有这一条，是横轴脱离缩放后才需要的。
+/// 宽度只写 `prefs`，松手 / 双击才落盘，避免每帧写配置文件。
+fn panel_resize_handle(state: &mut EditorState, ui: &mut Ui) {
+    let area = ui.max_rect();
+    let rect = Rect::from_min_size(
+        pos2(area.right() - HANDLE_W, area.min.y),
+        vec2(HANDLE_W, area.height()),
+    );
+    let resp = ui.interact(rect, Id::new("layer_panel_resize"), Sense::click_and_drag());
+    let stopped = resp.drag_stopped();
+    // 松手那一帧 egui 已经把 `dragged` 清空（`interaction.rs` 的 Released 分支），指针位置
+    // 却还在。只认 `dragged` 就会丢掉最后一段移动，边界比光标窄几个像素。
+    let live = resp.dragged() || stopped;
+    if resp.double_clicked() {
+        state.prefs.layer_panel_width = LAYER_PANEL_DEFAULT_WIDTH;
+        state.emit(Command::SavePreferences);
+    } else if let (true, Some(p)) = (live, resp.interact_pointer_pos()) {
+        state.prefs.layer_panel_width =
+            (p.x - area.min.x).clamp(LAYER_PANEL_MIN_WIDTH, LAYER_PANEL_MAX_WIDTH);
+    }
+    if stopped {
+        state.emit(Command::SavePreferences);
+    }
+    resp.on_hover_cursor(CursorIcon::ResizeHorizontal)
+        .on_hover_text(tr(
+            "Drag to resize this panel (double-click resets it).",
+            "左右拖动改宽度，双击回默认宽度。",
+        ));
+}
+
 pub fn show_layers_panel(state: &mut EditorState, ui: &mut Ui) {
     let th = state.theme.clone();
     let area = ui.max_rect();
     let Some(bank) = state.icons.bank() else {
         show_layers_text(state, ui);
+        panel_resize_handle(state, ui);
         return;
     };
     let start = area.min;
@@ -44,6 +290,11 @@ pub fn show_layers_panel(state: &mut EditorState, ui: &mut Ui) {
     // 时间轴带和滚动条的厚度都不随缩放（#88 / #90），和网格的 `split()` 取同一个数，
     // 两边算出的行数、宏条位置才对得上。
     let rows_start = pos2(start.x, band + timeline_band());
+    let show_vol = state.prefs.show_layer_volumes;
+    // 原版 `realstereo` 存的是「关闭立体声」那个勾选框（`draw_window_preferences.gml:606`），
+    // 为真时不画声像字形、播放也归到中央。端口里同一个语义是 `prefs.mono`。
+    let stereo_on = !state.prefs.mono;
+    let layout = PanelLayout::new(area.width(), show_vol, stereo_on);
 
     header(state, ui, &bank, &th, start, band, area.width());
 
@@ -59,8 +310,6 @@ pub fn show_layers_panel(state: &mut EditorState, ui: &mut Ui) {
     let layers = state.doc.song.layers.clone();
     let idle = state.window.is_none() && state.context_menu.is_none();
     let shift = ui.input(|i| i.modifiers.shift);
-    let show_vol = state.prefs.show_layer_volumes;
-    let mono = state.prefs.mono;
     let editing = state.editing_layer_name.clone();
 
     for idx in l0..l0 + rows {
@@ -84,8 +333,7 @@ pub fn show_layers_panel(state: &mut EditorState, ui: &mut Ui) {
             &editing,
             idle,
             shift,
-            show_vol,
-            mono,
+            &layout,
             exists,
         );
     }
@@ -100,8 +348,12 @@ pub fn show_layers_panel(state: &mut EditorState, ui: &mut Ui) {
         pos2(start.x, bar_top),
         idle,
         false,
-        u,
+        layout.macro_scale(u),
     );
+
+    // 把手要最后注册：egui 取「同一个点上最后注册的那个控件」，先注册会被行里的
+    // 交互区盖掉，边界就拖不动。
+    panel_resize_handle(state, ui);
 }
 
 /// 图层栏收起时，原版照样在左下角画宏条：`control_draw.gml` 1298-1308 那个行循环并不看
@@ -163,82 +415,111 @@ fn header(
     let total = song.song_length() as f64;
     let fluent = th.kind == ThemeKind::Fluent;
 
-    // 原版：经典主题右对齐到 x=93；Fluent 左对齐到 9 / 26。
-    let elapsed = time_str(marker / shown);
-    let length = format!("/ {}", time_str(total / shown));
+    // 原版：经典主题右对齐到 x=93；Fluent 左对齐到 9 / 26。宽度不够时按
+    // `HeaderLayout` 的降级阶梯走（#108）。
+    let elapsed_font = crate::fonts::scaled(info_med_bold_font(), u);
+    let length_font = crate::fonts::scaled(small_font(), u);
+    let text_w = |text: &str, font: &egui::FontId| {
+        p.layout_no_wrap(text.to_owned(), font.clone(), Color32::WHITE)
+            .size()
+            .x
+    };
+    let full_elapsed = time_str(marker / shown);
+    let full_length = format!("/ {}", time_str(total / shown));
+    let short_elapsed = time_str_short(marker / shown);
+    let short_length = format!("/ {}", time_str_short(total / shown));
+    let full_w = text_w(&full_elapsed, &elapsed_font).max(text_w(&full_length, &length_font));
+    let compact_w = text_w(&short_elapsed, &elapsed_font).max(text_w(&short_length, &length_font));
+    let hl = HeaderLayout::new(width, fluent, full_w, compact_w);
+    let room = HeaderLayout::room(hl.tempo_x, fluent);
+    let (elapsed, length) = if hl.compact_time {
+        (
+            clip_label(p, &short_elapsed, &elapsed_font, room),
+            clip_label(p, &short_length, &length_font, room),
+        )
+    } else {
+        (
+            clip_label(p, &full_elapsed, &elapsed_font, room),
+            clip_label(p, &full_length, &length_font, room),
+        )
+    };
     if fluent {
         p.text(
-            pos2(start.x + 9.0 * u, band - 2.0 * u),
+            pos2(start.x + FLUENT_TIME_X, band - 2.0 * u),
             Align2::LEFT_TOP,
             elapsed,
-            crate::fonts::scaled(info_med_bold_font(), u),
+            elapsed_font,
             th.text,
         );
         p.text(
-            pos2(start.x + 26.0 * u, band + 15.0 * u),
+            pos2(start.x + FLUENT_LENGTH_X, band + 15.0 * u),
             Align2::LEFT_TOP,
             length,
-            crate::fonts::scaled(small_font(), u),
+            length_font,
             th.text,
         );
     } else {
         p.text(
-            pos2(start.x + 93.0 * u, band - 2.0 * u),
+            pos2(start.x + hl.time_right, band - 2.0 * u),
             Align2::RIGHT_TOP,
             elapsed,
-            crate::fonts::scaled(info_med_bold_font(), u),
+            elapsed_font,
             th.text,
         );
         p.text(
-            pos2(start.x + 93.0 * u, band + 15.0 * u),
+            pos2(start.x + hl.time_right, band + 15.0 * u),
             Align2::RIGHT_TOP,
             length,
-            crate::fonts::scaled(small_font(), u),
+            length_font,
             th.text,
         );
     }
 
-    // 小节·拍·十六分：原版只画，不给交互（悬停出说明）。
+    // 小节·拍·十六分：原版只画，不给交互（悬停出说明）。窄到时间放不下时这一格先让位。
     let sig = song.meta.time_signature.max(1) as f64;
-    bank.tempo_box(
-        p,
-        pos2(start.x + 184.0 * u, band + 3.0 * u),
-        false,
-        th,
-        u,
-        state.canvas_hires,
-    );
     let digits = crate::fonts::scaled(main_font(), u);
-    for (x, t) in [
-        (215.0, ".".to_string()),
-        (230.0, ".".to_string()),
-        (
-            210.0,
-            ((marker / (sig * 4.0)).floor() as i64 + 1).to_string(),
-        ),
-        (
-            225.0,
-            (((marker / 4.0) % sig).floor() as i64 + 1).to_string(),
-        ),
-        (240.0, ((marker % 4.0).floor() as i64 + 1).to_string()),
-    ] {
-        p.text(
-            pos2(start.x + x * u, band + 6.0 * u),
-            Align2::RIGHT_TOP,
-            t,
-            digits.clone(),
-            th.text,
+    if hl.bars {
+        bank.tempo_box(
+            p,
+            pos2(start.x + hl.bars_x, band + 3.0 * u),
+            false,
+            th,
+            u,
+            state.canvas_hires,
         );
+        // 原版数字右对齐在 210 / 215 / 225 / 230 / 240，也就是这一格左边 +26 起。
+        for (dx, t) in [
+            (31.0, ".".to_string()),
+            (46.0, ".".to_string()),
+            (
+                26.0,
+                ((marker / (sig * 4.0)).floor() as i64 + 1).to_string(),
+            ),
+            (
+                41.0,
+                (((marker / 4.0) % sig).floor() as i64 + 1).to_string(),
+            ),
+            (56.0, ((marker % 4.0).floor() as i64 + 1).to_string()),
+        ] {
+            p.text(
+                pos2(start.x + hl.bars_x + dx, band + 6.0 * u),
+                Align2::RIGHT_TOP,
+                t,
+                digits.clone(),
+                th.text,
+            );
+        }
     }
 
     // 速度框：精灵宽 74，原版判定和文字定位都用左边 108（BPM 时往左挪 7px 画框）。
     // 就地输入框按单位换几何：t/s 用 (108, 57, 64)，BPM 用 (101, 57, 74)
     // （`draw_window_set_tempo.gml:14-21`）；点击 / 拖拽的判定框固定 (108, 57, 64, 22)。
-    let (box_x, box_w) = if bpm_on { (101.0, 74.0) } else { (108.0, 64.0) };
+    let box_x = hl.tempo_x + if bpm_on { -7.0 } else { 0.0 };
+    let box_w = if bpm_on { 74.0 } else { 64.0 };
     let mult = if bpm_on { 15.0 } else { 1.0 };
     bank.tempo_box(
         p,
-        pos2(start.x + box_x * u, band + 3.0 * u),
+        pos2(start.x + box_x, band + 3.0 * u),
         bpm_on,
         th,
         u,
@@ -253,7 +534,7 @@ fn header(
             format!("{:.2} t / s", shown)
         };
         p.text(
-            pos2(start.x + 136.0 * u, band + 6.0 * u),
+            pos2(start.x + hl.tempo_x + 28.0, band + 6.0 * u),
             Align2::CENTER_TOP,
             value,
             digits.clone(),
@@ -262,21 +543,23 @@ fn header(
     }
 
     let idle = state.window.is_none() && state.context_menu.is_none();
-    let bars_rect = Rect::from_min_size(
-        pos2(start.x + 184.0 * u, band + 3.0 * u),
-        vec2(64.0 * u, 22.0 * u),
-    );
-    ui.interact(bars_rect, Id::new("bars_box"), Sense::hover())
-        .on_hover_text(tr(
-            "Position of the marker in bars, beats and sixteenths.",
-            "歌曲的进度（全音、四分、十六分）",
-        ));
+    if hl.bars {
+        let bars_rect = Rect::from_min_size(
+            pos2(start.x + hl.bars_x, band + 3.0 * u),
+            vec2(BARS_W * u, 22.0 * u),
+        );
+        ui.interact(bars_rect, Id::new("bars_box"), Sense::hover())
+            .on_hover_text(tr(
+                "Position of the marker in bars, beats and sixteenths.",
+                "歌曲的进度（全音、四分、十六分）",
+            ));
+    }
 
     let inline = state.tempo_input.take();
     if let Some(mut text) = inline {
         // 原版 `draw_inputbox(64, xx, 57 + song_tab_offset, w, …)`：框体高 21，
         // 而「上一次按下 / 这次抬手在不在框里」用的是同一条高 22 的矩形。
-        let at = pos2(start.x + box_x * u, band + 3.0 * u);
+        let at = pos2(start.x + box_x, band + 3.0 * u);
         let gate = Rect::from_min_size(at, vec2(box_w * u, 22.0 * u));
         let (pressed, released, esc, hover) = ui.input(|i| {
             (
@@ -355,8 +638,8 @@ fn header(
         return;
     }
     let hit = Rect::from_min_size(
-        pos2(start.x + 108.0 * u, band + 3.0 * u),
-        vec2(64.0 * u, 22.0 * u),
+        pos2(start.x + hl.tempo_x, band + 3.0 * u),
+        vec2(TEMPO_HIT_W * u, 22.0 * u),
     );
     let resp = ui.interact(hit, Id::new("tempo_box"), Sense::click_and_drag());
     let clicked = idle && resp.clicked();
@@ -479,8 +762,9 @@ fn clip_label(p: &egui::Painter, label: &str, font: &egui::FontId, max_w: f32) -
     chars[..lo].iter().collect()
 }
 
-/// 一行图层。`at` 是原版行底左上角（已含 `ROW_LIFT`），内部坐标一律乘 `u`
-/// （`u = cell / BASE_CELL`，与原版「整个画面等比缩放」同构）。
+/// 一行图层。`at` 是原版行底左上角（已含 `ROW_LIFT`）。
+/// **横向坐标一律屏幕像素、由 `layout` 按面板宽度算（#108），不乘 `u`**；
+/// 纵向（行内 y、文字高度、判定框高）仍乘 `u`，跟网格行高一起缩。
 /// `exists` 为 false 表示原版那种「越界初始化出来的空白行」：框和图标照画，但没有图层可改。
 #[allow(clippy::too_many_arguments)]
 fn row(
@@ -496,30 +780,38 @@ fn row(
     editing: &Option<(u32, String)>,
     idle: bool,
     shift: bool,
-    show_vol: bool,
-    mono: bool,
+    layout: &PanelLayout,
     exists: bool,
 ) {
-    let x1 = at.x + X1 * u;
+    let ox = at.x;
+    let x1 = ox + X1;
     let y1 = at.y;
-    // 原版 `draw_sprite(spr_layerbox, …, x1, y1)`，行框同样从 x1 = 4 起。
+    // 精灵尺寸：100% 缩放就是原版的 1，行高压到 16px 以下才跟着缩，不压上下两行。
+    let gs = glyph_scale(cell);
+    // 原版 `draw_sprite(spr_layerbox, …, x1, y1)`，行框同样从 x1 = 4 起；
+    // 名称那一格的右边线按版式走，其余部分按宽度摊开（见 icons::Bank::layer_row）。
     bank.layer_row(
         ui.painter(),
         pos2(x1, y1),
-        vec2(256.0 * u, cell + 2.0 * u),
+        layout.strip_w(),
+        layout.name_box_right() - X1,
+        cell + 2.0 * u,
         th,
     );
 
-    // 原版 `x1 + 126 - !realvolume - realstereo * 10`：藏掉字形时按钮只左挪 1px / 10px。
-    let bx = |base: f32| {
-        x1 + base * u - (if show_vol { 0.0 } else { 1.0 * u }) - (if mono { 0.0 } else { 10.0 * u })
-    };
+    // 原版 `x1 + 126 - !realvolume - realstereo * 10`：按偏好藏字形时按钮只左挪 1px / 10px。
+    let bx = |base: f32| ox + layout.buttons_x() + (base - 126.0);
 
     // ---- 名称：原版的常驻输入框 ----
     let fluent = th.kind == ThemeKind::Fluent;
     let font = crate::fonts::scaled(if fluent { main_font() } else { small_font() }, u);
-    let name_rect =
-        Rect::from_min_size(pos2(x1 + 10.0 * u, y1 + 10.0 * u), vec2(75.0 * u, 13.0 * u));
+    // 行底名称框右边线的绝对坐标（版式里的数一律从面板左沿量）。
+    let box_right = ox + layout.name_box_right();
+    let name_w = layout.name_w();
+    let name_rect = Rect::from_min_size(
+        pos2(x1 + 10.0, y1 + 10.0 * u),
+        vec2((box_right - x1 - 10.0).max(0.0), 13.0 * u),
+    );
     let name_resp = ui.interact(name_rect, Id::new(("layername", idx)), Sense::click());
     let name_clicked = idle && name_resp.clicked();
     let name_right = idle && name_resp.secondary_clicked();
@@ -530,9 +822,9 @@ fn row(
         .map(|(_, s)| s.clone());
     if let Some(text) = buf {
         let (nx, ny, nw, nh) = if fluent {
-            (x1 + 9.0 * u, y1 + 4.0 * u, 72.0 * u, 24.0 * u)
+            (x1 + 9.0, y1 + 4.0 * u, name_w, 24.0 * u)
         } else {
-            (x1 + 11.0 * u, y1 + 10.0 * u, 72.0 * u, 14.0 * u)
+            (x1 + 11.0, y1 + 10.0 * u, name_w, 14.0 * u)
         };
         let focus_id = Id::new(("layername_focus", idx));
         let had_focus = ui
@@ -594,14 +886,27 @@ fn row(
         } else {
             (layer.name.clone(), th.text)
         };
-        let label = clip_label(ui.painter(), &label, &font, 72.0 * u);
-        ui.painter().text(
-            pos2(x1 + 11.0 * u, y1 + 10.0 * u),
-            Align2::LEFT_TOP,
-            label,
-            font,
-            color,
-        );
+        // 栏宽压到下限附近时名称区不足 NAME_MIN：一个字母既读不出名字，又会在行里
+        // 留下无意义的碎片，索性不画。
+        let label = if name_w < NAME_MIN {
+            String::new()
+        } else {
+            clip_label(ui.painter(), &label, &font, name_w)
+        };
+        let h = ui
+            .painter()
+            .layout_no_wrap(label.clone(), font.clone(), Color32::WHITE)
+            .size()
+            .y;
+        if let Some(dy) = text_y(cell, u, 10.0, h) {
+            ui.painter().text(
+                pos2(x1 + 11.0, y1 + dy),
+                Align2::LEFT_TOP,
+                label,
+                font,
+                color,
+            );
+        }
         if exists && name_clicked {
             state.editing_layer_name = Some((idx, layer.name.clone()));
         }
@@ -621,8 +926,11 @@ fn row(
         .filter(|d| d.index == idx && !d.stereo)
         .map(|d| d.value)
         .unwrap_or(layer.volume);
-    if show_vol {
-        let hit = Rect::from_min_size(pos2(x1 + 88.0 * u, y1 + 5.0 * u), vec2(16.0 * u, 25.0 * u));
+    if layout.volume {
+        let hit = Rect::from_min_size(
+            pos2(ox + layout.vol_x(), y1 + 5.0 * u),
+            vec2(GLYPH_HIT_W, GLYPH_HIT_H * u),
+        );
         let resp = ui.interact(hit, Id::new(("layervol", idx)), Sense::drag());
         let active = resp.hovered() || resp.dragged();
         let (started, dragged, stopped, delta) = (
@@ -631,23 +939,34 @@ fn row(
             resp.drag_stopped(),
             resp.drag_delta().y,
         );
+        let gy = y1 + (cell - GLYPH_H * gs) * 0.5;
         bank.volume_glyph(
             ui.painter(),
-            pos2(x1 + 91.0 * u, y1 + 11.0 * u),
+            // 原版字形左边 x1 + 91（判定框左 +3）；缩小后按中心对齐，不偏走。
+            pos2(ox + layout.vol_x() + 3.0 + GLYPH_W * (1.0 - gs) * 0.5, gy),
             vol,
             active,
             th,
-            u,
+            gs,
             state.canvas_hires,
         );
         if active {
-            ui.painter().text(
-                pos2(x1 + 98.0 * u, y1 + 18.0 * u),
-                Align2::CENTER_TOP,
-                format!("{vol}%"),
-                crate::fonts::scaled(small_font(), u),
-                th.text,
-            );
+            let text = format!("{vol}%");
+            let font = crate::fonts::scaled(small_font(), u);
+            let h = ui
+                .painter()
+                .layout_no_wrap(text.clone(), font.clone(), Color32::WHITE)
+                .size()
+                .y;
+            if let Some(dy) = text_y(cell, u, 18.0, h) {
+                ui.painter().text(
+                    pos2(ox + layout.vol_x() + 10.0, y1 + dy),
+                    Align2::CENTER_TOP,
+                    text,
+                    font,
+                    th.text,
+                );
+            }
         }
         if idle && exists && started {
             state.layer_drag = Some(LayerDrag {
@@ -683,12 +1002,15 @@ fn row(
     }
 
     // 原版 `realstereo` 是「关闭立体声」：为真时不画声道字形，播放也归到中央。
-    if !mono {
+    if layout.pan {
         let pan = drag
             .filter(|d| d.index == idx && d.stereo)
             .map(|d| d.value)
             .unwrap_or(layer.stereo);
-        let hit = Rect::from_min_size(pos2(x1 + 108.0 * u, y1 + 5.0 * u), vec2(16.0 * u, 25.0 * u));
+        let hit = Rect::from_min_size(
+            pos2(ox + layout.pan_x(), y1 + 5.0 * u),
+            vec2(GLYPH_HIT_W, GLYPH_HIT_H * u),
+        );
         let resp = ui.interact(hit, Id::new(("layerpan", idx)), Sense::drag());
         let active = resp.hovered() || resp.dragged();
         let (started, dragged, stopped, delta) = (
@@ -699,22 +1021,34 @@ fn row(
         );
         bank.stereo_glyph(
             ui.painter(),
-            pos2(x1 + 110.0 * u, y1 + 11.0 * u),
+            // 原版字形左边 x1 + 110（判定框左 +2，正好居中）；缩小后仍按中心对齐。
+            pos2(
+                ox + layout.pan_x() + (GLYPH_HIT_W - GLYPH_W * gs) * 0.5,
+                y1 + (cell - GLYPH_H * gs) * 0.5,
+            ),
             pan,
             active,
             th,
-            u,
+            gs,
             state.canvas_hires,
         );
         let (tip, label) = pan_label(pan);
         if active {
-            ui.painter().text(
-                pos2(x1 + 116.0 * u, y1 + 18.0 * u),
-                Align2::CENTER_TOP,
-                label,
-                crate::fonts::scaled(small_font(), u),
-                th.text,
-            );
+            let font = crate::fonts::scaled(small_font(), u);
+            let h = ui
+                .painter()
+                .layout_no_wrap(label.clone(), font.clone(), Color32::WHITE)
+                .size()
+                .y;
+            if let Some(dy) = text_y(cell, u, 18.0, h) {
+                ui.painter().text(
+                    pos2(ox + layout.pan_x() + 8.0, y1 + dy),
+                    Align2::CENTER_TOP,
+                    label,
+                    font,
+                    th.text,
+                );
+            }
         }
         if idle && exists && started {
             state.layer_drag = Some(LayerDrag {
@@ -749,7 +1083,8 @@ fn row(
 
     // ---- 7 个功能按钮（原版下标 0..6）----
     // 原版在空白行上同样画全 7 个图标，点了却没有图层可改；只有「新建层」在空白行仍有意义。
-    let by = y1 + 8.0 * u;
+    // 纵向在行内居中：100% 缩放时 (32 - 16) / 2 = 8，正是原版的 `y1 + 8`。
+    let by = y1 + (cell - BTN_SIZE * gs) * 0.5;
     if exists
         && idle
         && bank.layer_button(
@@ -760,7 +1095,7 @@ fn row(
             tr("Lock this layer", "静音本层\n（拖拽可批量操作）"),
             layer.lock == LockMode::Locked,
             th,
-            u,
+            gs,
             state.canvas_hires,
         )
     {
@@ -781,7 +1116,7 @@ fn row(
             tr("Solo this layer", "独奏本层\n（拖拽可批量操作）"),
             layer.lock == LockMode::Solo,
             th,
-            u,
+            gs,
             state.canvas_hires,
         )
     {
@@ -795,7 +1130,7 @@ fn row(
     if exists && idle && bank.layer_button(ui, pos2(bx(162.0), by), layer_icon::SELECT, idx, tr(
         "Select all note blocks in this layer\n(Click and drag to select multiple; click again to deselect)",
         "选择本层所有方块\n（拖拽可批量选择，再次点选取消选择）",
-    ), false, th, u, state.canvas_hires) {
+    ), false, th, gs, state.canvas_hires) {
         state.emit(Command::SelectLayer(idx));
     }
     if idle
@@ -810,7 +1145,7 @@ fn row(
             ),
             false,
             th,
-            u,
+            gs,
             state.canvas_hires,
         )
     {
@@ -829,7 +1164,7 @@ fn row(
             ),
             false,
             th,
-            u,
+            gs,
             state.canvas_hires,
         )
     {
@@ -850,14 +1185,14 @@ fn row(
             ),
             false,
             th,
-            u,
+            gs,
             state.canvas_hires,
         )
     {
         state.emit(Command::MoveLayerUp(idx));
     }
     // 原版在最底层把下移按钮左挪 8px（少画的上移按钮位置就空在那儿）。
-    let down_x = bx(234.0) - if idx == 0 { 8.0 * u } else { 0.0 };
+    let down_x = bx(234.0) - if idx == 0 { 8.0 } else { 0.0 };
     if exists
         && idle
         && bank.layer_button(
@@ -871,7 +1206,7 @@ fn row(
             ),
             false,
             th,
-            u,
+            gs,
             state.canvas_hires,
         )
     {
@@ -892,6 +1227,8 @@ fn pan_label(pan: u8) -> (String, String) {
 
 /// 原版宏条：`spr_iconbar`（经典）或灰色圆角矩形（Fluent）+ 15 个 `draw_macroicon`。
 /// `wide` = 图层栏收起时画在网格上的那种：矮一截、宽 380、按钮贴条顶 +3。
+/// `scale` = 条子整体的缩放：图层栏里传 `PanelLayout::macro_scale`，也就是
+/// 「照旧跟 `u`，但 15 个宏不许出栏」的较小那档（#108，不折行）。
 #[allow(clippy::too_many_arguments)]
 fn macro_bar(
     state: &mut EditorState,
@@ -901,30 +1238,38 @@ fn macro_bar(
     at: Pos2,
     idle: bool,
     wide: bool,
-    u: f32,
+    scale: f32,
 ) {
     if !state.flags.show_piano || state.doc.selection.is_empty() {
         return;
     }
-    let x1 = at.x + X1 * u;
+    let x1 = at.x + X1 * scale;
     let p = ui.painter();
     let fluent = th.kind == ThemeKind::Fluent;
     // 原版 1497-1511：show_layers 时 `y1 + 32`、高 1.3 × 30；收起时 `y1 + 52`、高 0.75 × 30。
     // Fluent 那两个圆角矩形是 38 和 21。宽度按 Fluent 的 255 / 380 取。
     let (w, h, dy) = if wide {
-        (380.0 * u, if fluent { 21.0 * u } else { 22.5 * u }, 3.0 * u)
+        (
+            380.0 * scale,
+            if fluent { 21.0 * scale } else { 22.5 * scale },
+            3.0 * scale,
+        )
     } else {
-        (255.0 * u, if fluent { 38.0 * u } else { 39.0 * u }, 5.0 * u)
+        (
+            255.0 * scale,
+            if fluent { 38.0 * scale } else { 39.0 * scale },
+            5.0 * scale,
+        )
     };
     let bg = Rect::from_min_size(pos2(x1, at.y), vec2(w, h));
     if fluent {
-        p.rect_filled(bg, 2.0 * u, Color32::from_gray(70));
+        p.rect_filled(bg, 2.0 * scale, Color32::from_gray(70));
     } else {
         bank.icon_strip_bg(p, bg);
     }
-    let row1 = pos2(x1 + 6.0 * u, at.y + dy);
-    let row2 = pos2(row1.x, row1.y + 16.0 * u);
-    let step = 25.0 * u;
+    let row1 = pos2(x1 + 6.0 * scale, at.y + dy);
+    let row2 = pos2(row1.x, row1.y + 16.0 * scale);
+    let step = 25.0 * scale;
 
     for btn in MACRO_BTNS {
         let i = btn.index;
@@ -941,7 +1286,7 @@ fn macro_bar(
                 i,
                 tr(btn.tip_en, btn.tip_zh),
                 th,
-                u,
+                scale,
                 state.canvas_hires,
             )
         {
@@ -968,6 +1313,16 @@ pub(crate) fn time_str(sec: f64) -> String {
     let hr = (s / 3600.0).floor() as i64 % 60;
     let sec = s.floor() as i64 % 60;
     format!("{hr:02}:{mi:02}:{sec:02};{msec:03}")
+}
+
+/// 侧栏窄到放不下 `time_str` 时的短格式（#108 的降级第一档）：小时并进分钟，
+/// 只剩 `mm:ss;mmm`。原版不需要这一档（整幅画面等比缩放，从不缺宽）。
+pub(crate) fn time_str_short(sec: f64) -> String {
+    let s = sec.max(0.0);
+    let msec = (s * 1000.0).floor() as i64 % 1000;
+    let min = (s / 60.0).floor() as i64;
+    let sec = s.floor() as i64 % 60;
+    format!("{min:02}:{sec:02};{msec:03}")
 }
 
 #[derive(Clone)]
@@ -1311,5 +1666,98 @@ mod tests {
         assert_eq!(committed("0", 1.0, 10.0), 0.25);
         // 和原值相等时原版不置 changed，端口连命令都不发。
         assert_eq!(committed("10", 1.0, 10.0), 10.0);
+    }
+
+    /// #108 的第一条闸门：出厂宽度 264 这一档，栏内版式必须还原成
+    /// `control_draw.gml` 里那些裸数字（`x1 = 4`，所以 126 → 130）。
+    #[test]
+    fn panel_layout_is_the_original_at_default_width() {
+        let l = PanelLayout::new(264.0, true, true);
+        assert_eq!((l.volume, l.pan), (true, true));
+        assert_eq!(l.buttons_x(), 130.0); // x1 + 126
+        assert_eq!(l.pan_x(), 112.0); // x1 + 108
+        assert_eq!(l.vol_x(), 92.0); // x1 + 88
+        assert_eq!(l.name_box_right(), 89.0); // spr_layerbox 名称格右边线 x1 + 85
+        assert_eq!(l.name_w(), 72.0); // 原版常驻输入框的内容宽
+        assert_eq!(l.strip_w(), 256.0); // spr_layerbox 原宽（渲染转储里量到的行底图正是 256×34）
+        assert_eq!(l.macro_scale(1.0), 1.0); // 宏条 255 宽 + 右边空 5
+    }
+
+    /// 原版 `x1 + 126 - !realvolume - realstereo * 10`：按偏好藏字形时按钮只左挪
+    /// 1px / 10px。端口里 `prefs.mono` 就是那个「关闭立体声」勾选框。
+    #[test]
+    fn panel_layout_keeps_the_original_glyph_shift() {
+        assert_eq!(PanelLayout::new(264.0, false, true).buttons_x(), 129.0);
+        assert_eq!(PanelLayout::new(264.0, true, false).buttons_x(), 120.0);
+        assert_eq!(PanelLayout::new(264.0, false, false).buttons_x(), 119.0);
+    }
+
+    /// 拥挤降级的三档边界（名称区留不住 30px 才动字形），且按钮永远出栏不了。
+    #[test]
+    fn crowded_panel_drops_glyphs_before_buttons() {
+        let l = PanelLayout::new(222.0, true, true);
+        assert_eq!((l.volume, l.pan, l.name_w()), (true, true, 30.0));
+        let l = PanelLayout::new(221.0, true, true);
+        assert_eq!((l.volume, l.pan), (false, true));
+        assert_eq!(l.name_w(), 49.0);
+        let l = PanelLayout::new(201.0, true, true);
+        assert_eq!((l.volume, l.pan), (false, false));
+        assert_eq!(l.name_w(), 47.0);
+        let l = PanelLayout::new(LAYER_PANEL_MIN_WIDTH, true, true);
+        assert!(l.buttons_x() + CLUSTER_W <= LAYER_PANEL_MIN_WIDTH - CLUSTER_PAD);
+        assert!(l.name_w() > 0.0);
+    }
+
+    /// 宽度改的是自动布局，不是把整栏等比拉伸：末按钮右沿始终贴着 `pw - 10`。
+    #[test]
+    fn wider_panel_only_moves_the_name_area() {
+        let l = PanelLayout::new(420.0, true, true);
+        assert_eq!(l.buttons_x() + CLUSTER_W, 410.0);
+        assert_eq!(l.name_box_right(), l.vol_x() - NAME_BOX_GAP);
+        assert_eq!(l.macro_scale(1.0), 1.0); // 富余宽度下宏条不再缩
+    }
+
+    /// 头部那一排同样在 264 还原成原版的 108 / 184 / 右沿 93。
+    #[test]
+    fn header_layout_is_the_original_at_default_width() {
+        let h = HeaderLayout::new(264.0, false, 60.0, 45.0);
+        assert_eq!((h.tempo_x, h.bars_x, h.time_right), (108.0, 184.0, 93.0));
+        assert_eq!((h.bars, h.compact_time), (true, false));
+        assert_eq!(HeaderLayout::room(108.0, false), 93.0);
+        assert_eq!(HeaderLayout::room(108.0, true), 95.0);
+    }
+
+    /// 显示不全的降级阶梯：先换短格式，再收掉只有悬停说明的小节框，最后按可视宽截断；
+    /// 时间始终留在侧栏里（不挪去标尺带），速度框挪进空出来的那一格。
+    #[test]
+    fn header_layout_degrades_in_order() {
+        let h = HeaderLayout::new(264.0, false, 95.0, 80.0);
+        assert_eq!((h.bars, h.compact_time, h.tempo_x), (true, true, 108.0));
+        let h = HeaderLayout::new(264.0, false, 200.0, 150.0);
+        assert_eq!((h.bars, h.compact_time), (false, true));
+        assert_eq!((h.tempo_x, h.time_right), (184.0, 169.0));
+        // Fluent 是左对齐，可用宽从 9 起算；收掉小节框后同样挪到 184。
+        let h = HeaderLayout::new(200.0, true, 300.0, 300.0);
+        assert_eq!((h.bars, h.tempo_x, h.time_right), (false, 120.0, 105.0));
+    }
+
+    /// 行内文字：100% 缩放就是原版的 `y1 + 10` / `y1 + 18`；行高不够先贴到行底，
+    /// 连一行都塞不下就不画（宁可少字，不让它压到上下两行）。
+    #[test]
+    fn row_text_follows_the_row_height() {
+        assert_eq!(text_y(32.0, 1.0, 10.0, 9.0), Some(10.0));
+        assert_eq!(text_y(32.0, 1.0, 18.0, 9.0), Some(18.0));
+        assert_eq!(text_y(16.0, 0.5, 10.0, 9.0), Some(5.0));
+        assert_eq!(text_y(8.0, 0.25, 10.0, 9.0), None);
+        assert_eq!(glyph_scale(32.0), 1.0);
+        assert_eq!(glyph_scale(8.0), 0.5);
+    }
+
+    #[test]
+    fn short_time_format_drops_the_hours() {
+        assert_eq!(time_str(3723.241), "01:02:03;241");
+        assert_eq!(time_str_short(3723.241), "62:03;241");
+        assert_eq!(time_str_short(9.05), "00:09;050");
+        assert_eq!(time_str_short(-1.0), "00:00;000");
     }
 }

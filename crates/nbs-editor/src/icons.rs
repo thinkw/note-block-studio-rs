@@ -222,6 +222,30 @@ impl Strip {
         self.blit(p, at, index, Vec2::new(self.fw, self.fh), tint);
     }
 
+    /// 只取源图的一段列区间画到 `rect`（行底要按面板宽分段拉伸用，见 `layer_row`）。
+    fn blit_cols(
+        &self,
+        p: &egui::Painter,
+        rect: Rect,
+        index: usize,
+        cols: (f32, f32),
+        tint: Color32,
+    ) {
+        if rect.width() <= 0.0 || cols.1 <= cols.0 {
+            return;
+        }
+        let index = index.min(self.count.saturating_sub(1));
+        let total = self.count as f32 * self.fw;
+        let u0 = (index as f32 * self.fw + cols.0) / total;
+        let u1 = (index as f32 * self.fw + cols.1) / total;
+        p.image(
+            self.tex.id(),
+            rect,
+            Rect::from_min_max(egui::pos2(u0, 0.0), pos2(u1, 1.0)),
+            tint,
+        );
+    }
+
     /// 按 `u` 等比缩放绘制（琴键面板独立缩放用；贴图拉伸，与方块精灵缩放同法）。
     fn draw_scaled(&self, p: &egui::Painter, at: Pos2, index: usize, u: f32, tint: Color32) {
         self.blit(p, at, index, Vec2::new(self.fw * u, self.fh * u), tint);
@@ -342,6 +366,9 @@ const LAYER_ICON: f32 = 16.0;
 /// 原版 `spr_volume` / `spr_stereo` 的字形尺寸。
 const GLYPH_W: f32 = 12.0;
 const GLYPH_H: f32 = 10.0;
+/// 原版 `spr_layerbox`（256×34）里名称框那一格占的列：第 9..85 列，左右各一条 1px 竖线。
+const LAYERBOX_BOX_LEFT: f32 = 9.0;
+const LAYERBOX_BOX_RIGHT: f32 = 85.0;
 
 fn theme_index(kind: ThemeKind) -> usize {
     match kind {
@@ -831,13 +858,50 @@ impl Bank {
 
     /// 原版 `spr_layerbox` 的行底：0 经典浅色、1 经典暗黑、2/3 Fluent 浅/深。
     /// 原始图 256×34，比行高多出的 2px 是原版自带的下边压痕。
-    pub fn layer_row(&self, p: &egui::Painter, at: Pos2, size: Vec2, th: &Theme) {
+    ///
+    /// 侧栏宽度可以拖（#108），所以按列分三段画：源图第 0..9 列是左边框、第 9..85 列是
+    /// 名称框那一格、第 85..256 列是右边空白加右边框。整张一起拉会把名称框一起拉长，
+    /// 分段拉才是「名称框变宽、右边空白跟着变宽」。`w = 256`、`box_right = 85` 就是原版。
+    pub fn layer_row(
+        &self,
+        p: &egui::Painter,
+        at: Pos2,
+        w: f32,
+        box_right: f32,
+        h: f32,
+        th: &Theme,
+    ) {
         let index = match th.kind {
             ThemeKind::Dark => 1,
             ThemeKind::Fluent => 2 + th.dark as usize,
             _ => 0,
         };
-        self.layerbox.blit(p, at, index, size, Color32::WHITE);
+        let box_right = box_right.clamp(LAYERBOX_BOX_LEFT, LAYERBOX_BOX_RIGHT.min(w));
+        let tint = Color32::WHITE;
+        self.layerbox.blit_cols(
+            p,
+            Rect::from_min_size(at, Vec2::new(9.0, h)),
+            index,
+            (0.0, LAYERBOX_BOX_LEFT),
+            tint,
+        );
+        self.layerbox.blit_cols(
+            p,
+            Rect::from_min_size(
+                pos2(at.x + LAYERBOX_BOX_LEFT, at.y),
+                Vec2::new(box_right - LAYERBOX_BOX_LEFT, h),
+            ),
+            index,
+            (LAYERBOX_BOX_LEFT, LAYERBOX_BOX_RIGHT),
+            tint,
+        );
+        self.layerbox.blit_cols(
+            p,
+            Rect::from_min_size(pos2(at.x + box_right, at.y), Vec2::new(w - box_right, h)),
+            index,
+            (LAYERBOX_BOX_RIGHT, 256.0),
+            tint,
+        );
     }
 
     /// 原版 `spr_iconbar`：工具栏底的左右端帽 + 横向拉伸的中间条

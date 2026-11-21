@@ -8,6 +8,13 @@ use serde::{Deserialize, Serialize};
 
 const APP_DIR: &str = "nbs-rust";
 
+/// 图层栏出厂宽度 = 原版列宽 264（`x1 = 4` + `spr_layerbox` 宽 256）。
+pub const LAYER_PANEL_DEFAULT_WIDTH: f32 = 264.0;
+/// 图层栏最窄一档：再窄的话 7 个功能按钮（18px 一档、末档宽 16）就出栏了。
+pub const LAYER_PANEL_MIN_WIDTH: f32 = 160.0;
+/// 图层栏最宽一档：再宽就把网格挤得太狠。
+pub const LAYER_PANEL_MAX_WIDTH: f32 = 420.0;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
@@ -99,6 +106,11 @@ pub struct Preferences {
     /// 不跟随 `window_scale`（工具栏 / 钢琴栏不随界面缩放）——这里同样独立，
     /// 只在鼠标悬停琴键面板时用 Ctrl+滚轮 / Ctrl+± 调整。
     pub piano_scale: f32,
+    /// 端口自加（用户要求 #108）：图层栏宽度，屏幕像素，**不随 `window_scale`**。
+    /// 原版整幅画面等比缩放，列宽 = 264 × `window_scale`，缩到 50% 时栏里只剩 132px，
+    /// 头部那条时间、速度框、小节框全被挤出栏外压到标尺上。现在改成：网格照旧横竖一起缩，
+    /// 侧栏只有纵轴（行高）跟缩放，横轴由用户拖右边界手动调，栏内版式按这个宽度自动布局。
+    pub layer_panel_width: f32,
     /// 端口自加（用户要求 #92）：界面缩放低于这个百分比时，音符方块上的字（序号和键名）
     /// 一律不画。原版没有这一项 —— 原版缩放最低只到 50%，字挤成一坨也照样画；
     /// 我们把下限放开到 10% 后，用户要求低缩放时把字收掉只留方块。
@@ -281,6 +293,7 @@ impl Default for Preferences {
             refresh_rate: 0,
             window_scale: None,
             piano_scale: 1.0,
+            layer_panel_width: LAYER_PANEL_DEFAULT_WIDTH,
             note_text_min_percent: 50,
             // 原版 `control_create.gml:59`：window_icon = 0，即用程序自带的图标。
             window_icon: false,
@@ -408,10 +421,20 @@ impl Preferences {
 
     pub fn load() -> Self {
         let path = Self::config_path();
-        match std::fs::read_to_string(&path) {
+        let mut p = match std::fs::read_to_string(&path) {
             Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
             Err(_) => Self::default(),
-        }
+        };
+        // 手改过的宽度按最窄 / 最宽一档收回来，和拖动边界用的是同一条夹。
+        p.clamp_layer_panel_width();
+        p
+    }
+
+    /// 图层栏宽度夹进 #108 定的两档（拖动边界和读文件走同一条夹）。
+    pub fn clamp_layer_panel_width(&mut self) {
+        self.layer_panel_width = self
+            .layer_panel_width
+            .clamp(LAYER_PANEL_MIN_WIDTH, LAYER_PANEL_MAX_WIDTH);
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -551,6 +574,27 @@ mod tests {
     use super::*;
     use nbs_core::model::Note;
 
+    /// #108：图层栏宽度用户可拖，读文件时按同一条夹收回来；旧配置文件没这一项
+    /// 也照样能读（`#[serde(default)]`），读进来就是出厂的 264。
+    #[test]
+    fn layer_panel_width_defaults_and_clamps() {
+        assert_eq!(
+            Preferences::default().layer_panel_width,
+            LAYER_PANEL_DEFAULT_WIDTH
+        );
+        let p: Preferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(p.layer_panel_width, LAYER_PANEL_DEFAULT_WIDTH);
+        for (raw, want) in [
+            ("264.0", LAYER_PANEL_DEFAULT_WIDTH),
+            ("100.0", LAYER_PANEL_MIN_WIDTH),
+            ("900.0", LAYER_PANEL_MAX_WIDTH),
+        ] {
+            let json = format!("{{\"layer_panel_width\": {raw}}}");
+            let mut p: Preferences = serde_json::from_str(&json).unwrap();
+            p.clamp_layer_panel_width();
+            assert_eq!(p.layer_panel_width, want, "raw={raw}");
+        }
+    }
     /// 原版 `os_get_language() = "zh" && os_get_region() = "CN"`：
     /// 语言 zh 且地区 CN 同时成立才算中文，zh-tw / 裸 zh / 英文都不算。
     #[test]

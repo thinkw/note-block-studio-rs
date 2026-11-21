@@ -4,15 +4,13 @@
 use egui::{Context, Frame};
 
 use crate::grid::show_grid;
-use crate::layers_panel::show_layers_panel;
+use crate::layers_panel::{panel_width, show_layers_panel};
 use crate::piano::show_piano;
 use crate::shortcuts::collect_shortcuts;
 use crate::state::EditorState;
 use crate::statusbar::show_status_bar;
 use crate::toolbar::{show_menu_bar, show_toolbar};
-use crate::viewport::{
-    LAYER_PANEL_WIDTH, MENU_HEIGHT, PIANO_HEIGHT, STATUS_HEIGHT, TOOLBAR_HEIGHT,
-};
+use crate::viewport::{MENU_HEIGHT, PIANO_HEIGHT, STATUS_HEIGHT, TOOLBAR_HEIGHT};
 use crate::windows::show_windows;
 
 /// 原版界面全是绝对像素坐标，面板默认的 8×4 内边距会把每个按钮都推歪，
@@ -106,9 +104,15 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
     // 信息区包在 `!fullscreen && show_layers` 门里（:2341），所以 show_layers
     // 开关本身仍要参与播放器分支的判定。
     if state.flags.show_layers && !state.player {
+        // #108：侧栏横轴脱离界面缩放 —— 宽度取 `prefs.layer_panel_width`（屏幕像素，
+        // 拖面板右边界改，双击回 264），只有栏内行高跟缩放；原版是整幅画面等比缩放。
         egui::SidePanel::left("nbs_layers")
             .frame(tight())
-            .exact_width(LAYER_PANEL_WIDTH * state.viewport.scale)
+            .exact_width(panel_width(state))
+            // egui 自己的那条边界分隔条默认就能拖（`SidePanel::resizable` 默认 true），
+            // 且比我们的把手晚注册，会把这 5 px 的命中抢走。宽度既然由首选项说了算，
+            // 就把它的拖拽关掉，只留我们这一条。
+            .resizable(false)
             .show(ctx, |ui| show_layers_panel(state, ui));
     }
 
