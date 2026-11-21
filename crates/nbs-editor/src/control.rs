@@ -26,7 +26,9 @@ use nbs_control::{
     JobRegistry, JobStatus, LayerInfo, NoteCell, Op, Outcome, Playback, Scope, SelectTarget,
     SelectionInfo, ServerConfig, SetMeta, Snapshot, PROTOCOL_VERSION,
 };
-use nbs_core::model::{Note, Song, FIRST_CUSTOM_INDEX, KEY_MAX, PAN_MAX, PIT_MAX, VEL_MAX};
+use nbs_core::model::{
+    Note, Song, FIRST_CUSTOM_INDEX, KEY_MAX, MC_KEY_MAX, MC_KEY_MIN, PAN_MAX, PIT_MAX, VEL_MAX,
+};
 
 use crate::commands::Command;
 use crate::state::{EditorState, Flag};
@@ -319,6 +321,7 @@ fn execute(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op)
             state,
             Data::Instruments {
                 instruments: instrument_infos(state),
+                mc_key_range: [MC_KEY_MIN, MC_KEY_MAX],
             },
             String::new(),
         ),
@@ -419,10 +422,10 @@ fn gate(state: &EditorState, op: &Op) -> Result<(), ErrorInfo> {
             ErrorCode::ModalOpen,
             say(
                 format!(
-                    "界面上还挂着没答完的确认框（{titles}）。外部写操作会被界面丢掉，先读 GetSnapshot，再用 RunAction answer_modal 回答，或者让人处理。"
+                    "界面上还挂着没答完的确认框（{titles}）。外部写操作会被界面丢掉，先读 get_snapshot，再用 run_action 的 answer_modal 回答，或者让人处理。"
                 ),
                 format!(
-                    "Unanswered dialog(s) on screen ({titles}); writes would be dropped by the UI. Read GetSnapshot, then RunAction answer_modal, or let a human handle it."
+                    "Unanswered dialog(s) on screen ({titles}); writes would be dropped by the UI. Read get_snapshot, then run_action answer_modal, or let a human handle it."
                 ),
             ),
         ));
@@ -582,7 +585,7 @@ fn rev_check(expect: Option<u64>, rev: u64) -> Result<(), ErrorInfo> {
         Some(want) if want != rev => Err(ErrorInfo::new(
             ErrorCode::RevConflict,
             say(
-                format!("工程已经变了：你给的 expect_rev={want}，现在 rev={rev}。重新 GetNotes/GetSnapshot 再决定。"),
+                format!("工程已经变了：你给的 expect_rev={want}，现在 rev={rev}。重新 get_notes / get_snapshot 再决定。"),
                 format!("Song changed under you: expect_rev={want} but rev={rev}. Re-read before retrying."),
             ),
         )
@@ -1150,7 +1153,30 @@ fn write(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op) -
             rev_check(*expect_rev, state.doc.song.rev)?;
             keep_or_replace(state, *discard_changes, ("清空", "Clearing the song"))?;
             run_command(state, ctx, Command::ClearSong);
-            Ok((None, say("音符已全部清空", "All notes cleared")))
+            // 清掉的只有音符，图层一格都没动。不说清这一点，调用方就会按「空工程 = 一层」
+            // 去配器，多出来的层还得再发一次 layer_remove 收——现场真踩过。
+            let layers = state.doc.song.layers.len();
+            let mut names: Vec<String> = state
+                .doc
+                .song
+                .layers
+                .iter()
+                .take(12)
+                .map(|l| l.name.clone())
+                .collect();
+            if layers > names.len() {
+                names.push(say("…", "…"));
+            }
+            let joined = names.join(" / ");
+            Ok((
+                Some(Data::Layers {
+                    layers: layer_infos(state),
+                }),
+                say(
+                    format!("音符已全部清空；图层没动，还是 {layers} 层：{joined}"),
+                    format!("All notes cleared; the {layers} layers are untouched: {joined}"),
+                ),
+            ))
         }
         Op::Playback(action) => playback(state, ctx, action),
         Op::OpenPath {
@@ -1345,11 +1371,11 @@ fn check_instrument(state: &EditorState, instrument: u8) -> Result<(), ErrorInfo
     }
     Err(out_of_range(
         format!(
-            "音色 {instrument} 不存在：内置 0..{}，自定义从 {FIRST_CUSTOM_INDEX} 起，本工程只有 {customs} 个自定义音色。先 GetInstruments。",
+            "音色 {instrument} 不存在：内置 0..{}，自定义从 {FIRST_CUSTOM_INDEX} 起，本工程只有 {customs} 个自定义音色。先 get_instruments。",
             FIRST_CUSTOM_INDEX - 1
         ),
         format!(
-            "Instrument {instrument} does not exist: built-ins 0..{}, customs start at {FIRST_CUSTOM_INDEX} and this song has {customs}. Call GetInstruments first.",
+            "Instrument {instrument} does not exist: built-ins 0..{}, customs start at {FIRST_CUSTOM_INDEX} and this song has {customs}. Call get_instruments first.",
             FIRST_CUSTOM_INDEX - 1
         ),
     ))
@@ -1797,14 +1823,18 @@ fn format_tag(format: &nbs_control::ExportFormat) -> &'static str {
 /// 截断必须显式，否则调用方会把前 2 万格当成整首歌。
 fn read_notes(
     state: &EditorState,
-    tick_from: u32,
-    tick_to: u32,
+    tick_from: Option<u32>,
+    tick_to: Option<u32>,
     layer_from: Option<u32>,
     layer_to: Option<u32>,
 ) -> Result<(Data, String), ErrorInfo> {
     let song = &state.doc.song;
     let layers = song.layers.len() as u32;
-    if tick_to < tick_from {
+    let tf = tick_from.unwrap_or(0);
+    let end = song.song_length().saturating_sub(1);
+    // 省略 tick_to = 读到歌尾。起点已经在歌尾之外时读空，而不是报一个自相矛盾的区间错。
+    let tt = tick_to.unwrap_or_else(|| tf.max(end));
+    if tt < tf {
         return Err(bad(
             "tick_to 不能小于 tick_from",
             "tick_to must be >= tick_from",
@@ -1821,7 +1851,7 @@ fn read_notes(
             ),
         ));
     }
-    let raw = song.notes_in_rect(tick_from, lf, tick_to, lt);
+    let raw = song.notes_in_rect(tf, lf, tt, lt);
     let total = raw.len();
     let truncated = total > MAX_CELLS_RETURNED;
     let cells = raw
@@ -1829,14 +1859,23 @@ fn read_notes(
         .take(MAX_CELLS_RETURNED)
         .map(|(tick, layer, note)| note_cell(tick, layer, note))
         .collect();
-    let message = if truncated {
-        say(
+    let mut message = String::new();
+    // 省略的边界要说清算成了什么，否则调用方分不清「这段本来就空」和「我少读了」。
+    if tick_from.is_none() || tick_to.is_none() {
+        message.push_str(&say(
+            format!("tick 范围按全曲算：{tf}..={tt}"),
+            format!("tick range resolved from the song: {tf}..={tt}"),
+        ));
+    }
+    if truncated {
+        if !message.is_empty() {
+            message.push_str(if crate::lang() == 1 { "；" } else { "; " });
+        }
+        message.push_str(&say(
             format!("范围里共 {total} 格，只回了前 {MAX_CELLS_RETURNED} 格"),
             format!("Range holds {total} cells, returning the first {MAX_CELLS_RETURNED}"),
-        )
-    } else {
-        String::new()
-    };
+        ));
+    }
     Ok((
         Data::Notes {
             cells,
@@ -2508,8 +2547,8 @@ fn run_action(
 ) -> Written {
     let Some(spec) = find_action(name) else {
         return Err(bad(
-            format!("未知动作 {name:?}。用 ListActions 看可用动作。"),
-            format!("Unknown action {name:?}. See ListActions."),
+            format!("未知动作 {name:?}。用 list_actions 看可用动作。"),
+            format!("Unknown action {name:?}. See list_actions."),
         ));
     };
     if spec.danger && !policy_allow(ch, |policy| policy.allow_danger) {
@@ -2863,12 +2902,12 @@ fn export_job(
         Some(Data::Job(Box::new(info))),
         say(
             format!(
-                "已起 {fmt} 导出任务（快照 {notes} 个音符）→ {}；用 JobStatus 轮询",
+                "已起 {fmt} 导出任务（快照 {notes} 个音符）→ {}；用 job_status 轮询",
                 target.display(),
                 fmt = format_tag(format)
             ),
             format!(
-                "Export job started ({notes} notes snapshotted) → {}; poll with JobStatus",
+                "Export job started ({notes} notes snapshotted) → {}; poll with job_status",
                 target.display()
             ),
         ),
@@ -3016,6 +3055,37 @@ mod tests {
         out.error.as_ref().expect("失败回执必带错误码").code
     }
 
+    /// 只报音色不报音域，调用方还是会往 33..=57 外面写，导出成一片静音音符盒。
+    /// 这里钉的是「说出去的上下界」和「编辑器自己判超窗用的那一把尺」是同一对数。
+    #[test]
+    fn instruments_carry_the_playable_key_range() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        let out = h.run(&Op::GetInstruments);
+        assert!(out.ok, "{:?}", out.error);
+        let Some(Data::Instruments {
+            instruments,
+            mc_key_range,
+        }) = out.data
+        else {
+            panic!("GetInstruments 该回 Instruments，实际 {:?}", out.data);
+        };
+        assert!(!instruments.is_empty(), "音色表空了就是 bank 没接上");
+        let [low, high] = mc_key_range;
+        for key in [low.saturating_sub(1), high.saturating_add(1)] {
+            assert!(
+                Note::new(0, key).is_out_of_range(),
+                "{key} 在 {low}..={high} 之外，回执却把它算作可播"
+            );
+        }
+        for key in [low, high] {
+            assert!(
+                !Note::new(0, key).is_out_of_range(),
+                "{key} 是承诺的可播边界，编辑器却说它超窗"
+            );
+        }
+    }
+
     #[test]
     fn set_notes_is_one_undo_step() {
         let _prefs = crate::isolate_prefs();
@@ -3040,6 +3110,111 @@ mod tests {
             h.note(0, 0).is_none() && h.note(1, 0).is_none(),
             "两条音符要一起退回"
         );
+    }
+
+    /// 清空只动音符，层一格没动。回执要把留下的层报出来——现场真有人按
+    /// 「空工程 = 一层」配器，写完才发现多出一层空轨，还得再发一次 layer_remove 收。
+    #[test]
+    fn clear_song_reports_the_layers_it_leaves_behind() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        h.ensure_layers(3);
+        for index in 0..3u32 {
+            let out = h.run(&Op::LayerUpdate {
+                index,
+                set: LayerSet {
+                    name: Some(format!("谱{index}")),
+                    ..Default::default()
+                },
+                expect_rev: None,
+            });
+            assert!(out.ok, "{:?}", out.error);
+        }
+        assert!(h
+            .run(&Op::SetNotes {
+                cells: vec![cell(0, 0, 1, 36)],
+                label: None,
+                expect_rev: None,
+            })
+            .ok);
+
+        let out = h.run(&Op::ClearSong {
+            expect_rev: None,
+            discard_changes: true,
+        });
+        assert!(out.ok, "{:?}", out.error);
+        assert_eq!(out.report.cells_changed, 1, "这次只清掉一枚音符");
+        let names: Vec<String> = match out
+            .data
+            .as_ref()
+            .expect("清空要顺带把层报出来，省一次 get_layers")
+        {
+            Data::Layers { layers } => layers.iter().map(|l| l.name.clone()).collect(),
+            other => panic!("形状不对：{other:?}"),
+        };
+        assert_eq!(names, vec!["谱0", "谱1", "谱2"], "层必须原样还在");
+        for name in &names {
+            assert!(
+                out.report.message.contains(name.as_str()),
+                "message 要点名留下的层：{}",
+                out.report.message
+            );
+        }
+        assert_eq!(h.state.doc.song.total_blocks, 0, "音符确实清干净了");
+    }
+
+    /// 省略的边界要按全曲算，并且要在回执里说清算成了什么——调用方分不清
+    /// 「这段本来就空」和「我少读了」的时候，这一句就是它唯一的依据。
+    #[test]
+    fn get_notes_without_bounds_reads_the_whole_song() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        assert!(h
+            .run(&Op::SetNotes {
+                cells: vec![cell(0, 0, 1, 36), cell(40, 0, 1, 40), cell(80, 1, 2, 44)],
+                label: None,
+                expect_rev: None,
+            })
+            .ok);
+
+        let out = h.run(&Op::GetNotes {
+            tick_from: None,
+            tick_to: None,
+            layer_from: None,
+            layer_to: None,
+        });
+        assert!(out.ok, "{:?}", out.error);
+        let cells = match out.data.as_ref().expect("读音符必带 data") {
+            Data::Notes { cells, .. } => cells,
+            other => panic!("形状不对：{other:?}"),
+        };
+        assert_eq!(cells.len(), 3, "一个参数都不给要读回整首，含最后一层");
+        assert!(!out.report.message.is_empty(), "省略的边界要说明算成了什么");
+
+        // 起点在歌尾之外：读空，而不是报一个自相矛盾的区间错。
+        let out = h.run(&Op::GetNotes {
+            tick_from: Some(9_000),
+            tick_to: None,
+            layer_from: None,
+            layer_to: None,
+        });
+        assert!(out.ok, "{:?}", out.error);
+        assert!(
+            matches!(out.data.as_ref(), Some(Data::Notes { cells, .. }) if cells.is_empty()),
+            "歌尾之外读空"
+        );
+
+        // 两个都给且倒过来，仍然要拦住。
+        let out = h.run(&Op::GetNotes {
+            tick_from: Some(10),
+            tick_to: Some(2),
+            layer_from: None,
+            layer_to: None,
+        });
+        assert!(!out.ok, "显式给反的区间不能静默读空");
+        assert_eq!(code(&out), ErrorCode::BadArgument);
     }
 
     #[test]

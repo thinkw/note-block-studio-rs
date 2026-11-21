@@ -271,6 +271,10 @@ pub enum Data {
     Selection(Box<SelectionInfo>),
     Instruments {
         instruments: Vec<InstrumentInfo>,
+        /// Minecraft 原生可播的键号闭区间 `[min, max]`。放在这而不是让调用方去查文档：
+        /// 「能不能在 MC 里响」的决定权和音色表同时在手里，才不会有人拿 33..=57 之外的
+        /// 键号导出一堆静音音符盒。这里给的是编辑器自己判 `out_of_range` 用的同一对数。
+        mc_key_range: [u8; 2],
     },
     Diagnostics(Box<Diagnostics>),
     History(Box<HistoryInfo>),

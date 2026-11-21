@@ -8,7 +8,9 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use nbs_control::{BatchField, CellNote, ExportFormat, LayerSet, Op, Scope, SelectTarget, SetMeta};
+use nbs_control::{
+    BatchField, CellNote, ExportFormat, LayerSet, Op, Playback, Scope, SelectTarget, SetMeta,
+};
 
 /// `run_action` 逃生舱的一条调用：动作名 + 它的参数原样。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -42,6 +44,113 @@ pub struct CellRef {
     pub layer: u32,
 }
 
+/// 音高入参：键号 `45` 和音名 `"F#4"` 都收，解析时就折成键号，后面全是搬运。
+///
+/// 收音名是为了让「把这段移到高八度」这种话不必先心算 12 进制偏移，但**服务端那套
+/// `0..=87` 校验仍是唯一裁判**：这里只负责把写法认出来，不负责判它合不合法。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pitch(pub u8);
+
+impl<'de> serde::Deserialize<'de> for Pitch {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        // MCP 的入参本来就是 JSON，所以中间借一次 `Value`；换来的是「说得出为什么不行」，
+        // 而 `#[serde(untagged)]` 只会吐一句「哪个变体都不匹配」。
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::Number(n) => match n.as_u64() {
+                Some(n) if n <= u64::from(nbs_core::KEY_MAX) => Ok(Self(n as u8)),
+                Some(n) => Err(D::Error::custom(format!(
+                    "键号 {n} 超出 0..={}",
+                    nbs_core::KEY_MAX
+                ))),
+                None => Err(D::Error::custom(format!("键号要是整数，实际是 {n}"))),
+            },
+            serde_json::Value::String(text) => nbs_core::key_from_name(&text)
+                .map(Self)
+                .ok_or_else(|| {
+                    D::Error::custom(format!(
+                        "音名 {text:?} 认不出来：要字母 A–G、可选升降号（# ♯ b ♭）、再跟八度数字，\
+                         例如 \"C4\"、\"F#3\"、\"Bb4\"；等音异名（\"Cb4\"）和不写八度（\"C\"）一律拒收，\
+                         因为它们在键盘上没有唯一位置"
+                    ))
+                }),
+            other => Err(D::Error::custom(format!(
+                "音高要么给 0..={} 的整数，要么给音名字符串，实际是 {other}",
+                nbs_core::KEY_MAX
+            ))),
+        }
+    }
+}
+
+/// 手写而不是 derive：`anyOf` 的两种写法各自要带一句说明，derive 给不出这个形状。
+impl JsonSchema for Pitch {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Pitch".into()
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "音高：键号数字或音名字符串，两种写法等价",
+            "anyOf": [
+                {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": nbs_core::KEY_MAX,
+                    "description": "键号 0..=87；Minecraft 原生音符盒只播 33..=57，超出的会标 out_of_range"
+                },
+                {
+                    "type": "string",
+                    "description": "音名：字母 A–G + 可选升降号（# ♯ b ♭）+ 八度数字，如 \"C4\"、\"F#3\"、\"Bb4\"。等音异名与省略八度会被拒而不是被猜"
+                }
+            ]
+        })
+    }
+}
+
+/// `set_notes` 的一格。字段和 [`CellNote`] 一一对应，只差音高允许用音名写。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct CellInput {
+    #[schemars(description = "tick 列号，从 0 起算，和 .nbs 文件一致")]
+    pub tick: u32,
+    #[schemars(description = "层号，从 0 起算")]
+    pub layer: u32,
+    #[schemars(description = "音色号：内置 0..=19，自定义从 20 起（先看 get_instruments）")]
+    pub instrument: u8,
+    #[schemars(description = "音高：键号数字或音名，例如 45 与 \"F#4\" 等价")]
+    pub key: Pitch,
+    #[schemars(description = "音量 0..=100，省略取 100")]
+    #[serde(default)]
+    pub velocity: Option<u8>,
+    #[schemars(description = "左右声道 0..=200，100 = 中央，省略取 100")]
+    #[serde(default)]
+    pub panning: Option<u8>,
+    #[schemars(description = "音分偏移 ±1200，省略取 0")]
+    #[serde(default)]
+    pub pitch: Option<i16>,
+}
+
+impl From<CellInput> for CellNote {
+    fn from(c: CellInput) -> Self {
+        Self {
+            tick: c.tick,
+            layer: c.layer,
+            instrument: c.instrument,
+            key: c.key.0,
+            velocity: c.velocity,
+            panning: c.panning,
+            pitch: c.pitch,
+        }
+    }
+}
+
 /// 只带 `expect_rev` 的写操作（把浮动选区落回歌曲）。
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct RevOnly {
@@ -52,12 +161,22 @@ pub struct RevOnly {
     pub expect_rev: Option<u64>,
 }
 
+impl From<RevOnly> for Op {
+    fn from(a: RevOnly) -> Self {
+        Op::PlaceSelection {
+            expect_rev: a.expect_rev,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct GetNotes {
-    #[schemars(description = "起始 tick，含")]
-    pub tick_from: u32,
-    #[schemars(description = "结束 tick，含")]
-    pub tick_to: u32,
+    #[schemars(description = "起始 tick，含；省略 = 0")]
+    #[serde(default)]
+    pub tick_from: Option<u32>,
+    #[schemars(description = "结束 tick，含；省略 = 歌尾。整首读回是允许的，超上限会显式标 truncated")]
+    #[serde(default)]
+    pub tick_to: Option<u32>,
     #[schemars(description = "起始层号，含；省略 = 0")]
     #[serde(default)]
     pub layer_from: Option<u32>,
@@ -66,12 +185,23 @@ pub struct GetNotes {
     pub layer_to: Option<u32>,
 }
 
+impl From<GetNotes> for Op {
+    fn from(a: GetNotes) -> Self {
+        Op::GetNotes {
+            tick_from: a.tick_from,
+            tick_to: a.tick_to,
+            layer_from: a.layer_from,
+            layer_to: a.layer_to,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct SetNotes {
     #[schemars(
         description = "要写的格子。一次调用 = 一次撤销；整批要么全收要么全拒（先校验后落笔）"
     )]
-    pub cells: Vec<CellNote>,
+    pub cells: Vec<CellInput>,
     #[schemars(description = "写进撤销历史的那句话，省略则用默认描述")]
     #[serde(default)]
     pub label: Option<String>,
@@ -85,7 +215,7 @@ pub struct SetNotes {
 impl From<SetNotes> for Op {
     fn from(a: SetNotes) -> Self {
         Op::SetNotes {
-            cells: a.cells,
+            cells: a.cells.into_iter().map(CellNote::from).collect(),
             label: a.label,
             expect_rev: a.expect_rev,
         }
@@ -297,6 +427,7 @@ impl From<SetMetaArgs> for Op {
     }
 }
 
+/// `undo` / `redo` 共用：一个形状对应两个方向，所以转成哪个 `Op` 由调用处定。
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct Steps {
     #[schemars(description = "步数；省略 = 1 步")]
@@ -331,10 +462,22 @@ pub struct Seek {
     pub tick: f64,
 }
 
+impl From<Seek> for Op {
+    fn from(a: Seek) -> Self {
+        Op::Playback(Playback::Seek { tick: a.tick })
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct SetLoop {
     #[schemars(description = "循环开关；只改这一项，不动其他元数据")]
     pub enabled: bool,
+}
+
+impl From<SetLoop> for Op {
+    fn from(a: SetLoop) -> Self {
+        Op::Playback(Playback::SetLoop { enabled: a.enabled })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -434,8 +577,81 @@ impl From<Export> for Op {
     }
 }
 
+/// `job_status` / `job_cancel` 共用：同一个 id 对应两个动作，转成哪个 `Op` 由调用处定。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct JobId {
     #[schemars(description = "export 回执里带回来的任务句柄")]
     pub id: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn cell(key: serde_json::Value) -> Result<CellInput, serde_json::Error> {
+        serde_json::from_value(json!({
+            "tick": 12, "layer": 1, "instrument": 0, "key": key
+        }))
+    }
+
+    /// 音名这条路的存在理由就是「不必先算键号」，所以两种写法必须落到同一个键上；
+    /// 只测能过的写法等于没测——真正会出事的是那些看着像音名的拼法。
+    #[test]
+    fn note_names_and_numbers_land_on_the_same_key() {
+        for (text, want) in [
+            ("F#4", 45),
+            ("C4", 39),
+            ("Bb4", 49),
+            ("F♯3", 33),
+            ("B♭4", 49),
+            ("c4", 39),
+            (" C4 ", 39),
+        ] {
+            assert_eq!(cell(json!(text)).unwrap().key.0, want, "{text:?}");
+        }
+        assert_eq!(cell(json!(45)).unwrap().key.0, 45);
+        // 边界：0 和 KEY_MAX 都收。
+        assert_eq!(cell(json!(0)).unwrap().key.0, 0);
+        assert_eq!(cell(json!(87)).unwrap().key.0, 87);
+
+        // 折出来的键号和 `Op` 那侧一致，音名不会在搬运时掉回默认键。
+        let Op::SetNotes { cells, .. } = Op::from(SetNotes {
+            cells: vec![cell(json!("F#4")).unwrap()],
+            label: None,
+            expect_rev: None,
+        }) else {
+            panic!()
+        };
+        assert_eq!(cells[0].key, 45);
+    }
+
+    /// 每一条都要能读出一句人话：这些字符串是 AI 唯一能拿到的纠错依据。
+    #[test]
+    fn unreadable_pitches_are_rejected_not_guessed() {
+        for bad in ["Cb4", "B#3", "C", "H4", "C4x", "D#8", "A-1"] {
+            let err = cell(json!(bad)).unwrap_err().to_string();
+            assert!(err.contains("认不出来"), "{bad:?} → {err}");
+            assert!(err.contains(bad), "报错要原样引用收到的写法：{err}");
+        }
+        // 数字超窗、小数、以及既不是数也不是串。
+        let err = cell(json!(88)).unwrap_err().to_string();
+        assert!(err.contains("超出 0..=87"), "{err}");
+        assert!(cell(json!(3.5)).unwrap_err().to_string().contains("整数"));
+        for bad in [json!(null), json!(true), json!([39])] {
+            let err = cell(bad.clone()).unwrap_err().to_string();
+            assert!(err.contains("要么给"), "{bad} → {err}");
+        }
+    }
+
+    /// AI 是先读 schema 再拼参数的，所以 schema 必须同时把两种写法说出来；
+    /// 只在描述里写「也收音名」而 `anyOf` 缺席，客户端的校验会先把字符串拒了。
+    #[test]
+    fn pitch_schema_offers_both_spellings() {
+        let schema = serde_json::to_string(&schemars::schema_for!(SetNotes)).unwrap();
+        assert!(schema.contains("\"anyOf\""), "{schema}");
+        assert!(schema.contains("\"maximum\":87"), "{schema}");
+        assert!(schema.contains("音名"), "{schema}");
+        assert!(schema.contains("C4"), "schema 里要有能照抄的例子：{schema}");
+    }
 }
