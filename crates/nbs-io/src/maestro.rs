@@ -745,7 +745,10 @@ pub(crate) fn tempo_delta(tempo: f64, timing: TimingMode) -> f64 {
 }
 
 /// 曲子里所有 Tempo Changer 的乐器索引（官方按乐器名判断，不看采样文件）。
-fn tempo_changer_ids(song: &Song) -> Vec<u8> {
+///
+/// [`crate::machine`] 也用它：换算 game tick 平面时 tempo 段的口径必须与这里一致，
+/// 所以这两个函数不另写一份。
+pub(crate) fn tempo_changer_ids(song: &Song) -> Vec<u8> {
     song.custom_instruments
         .iter()
         .enumerate()
@@ -756,7 +759,7 @@ fn tempo_changer_ids(song: &Song) -> Vec<u8> {
 }
 
 /// `getTempoSegments`：tick -> 该 tick 起生效的速度（同一 tick 取更靠上的图层）。
-fn tempo_segments(song: &Song, changers: &[u8]) -> BTreeMap<u32, f64> {
+pub(crate) fn tempo_segments(song: &Song, changers: &[u8]) -> BTreeMap<u32, f64> {
     let mut seg: BTreeMap<u32, f64> = BTreeMap::new();
     if !changers.is_empty() {
         for layer in (0..song.layers.len()).rev() {
@@ -777,7 +780,7 @@ fn tempo_segments(song: &Song, changers: &[u8]) -> BTreeMap<u32, f64> {
 }
 
 /// `getTickMap`：原 tick -> 换算后的浮点 tick（0 号固定为 0）。
-fn tick_map(song: &Song, seg: &BTreeMap<u32, f64>) -> Vec<f64> {
+pub(crate) fn tick_map(song: &Song, seg: &BTreeMap<u32, f64>) -> Vec<f64> {
     let mut current = song.meta.tempo as f64;
     let mut map = vec![0.0f64];
     for tick in 1..=song.song_length() {
