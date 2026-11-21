@@ -1,3 +1,6 @@
+# This file is ours; it drives the third-party MuScriptor package
+# (https://github.com/muscriptor/muscriptor, MIT, license: ../MUSCRIPTOR-LICENSE).
+# MuScriptor's model weights are CC BY-NC 4.0 and are downloaded by the user, never shipped.
 import contextlib
 import importlib
 import importlib.metadata

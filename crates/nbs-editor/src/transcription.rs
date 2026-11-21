@@ -645,6 +645,7 @@ pub fn show(state: &mut EditorState, ui: &mut egui::Ui) {
                 });
             });
             ui.small(tr("Requires uv on PATH. First setup downloads several GB. Official Hugging Face weights require accepting the model license and authentication; a local safetensors file may also be selected.", "需要 PATH 中可用的 uv；首次配置可能下载数 GB。Hugging Face 官方权重需要接受许可并认证，也可选择本地 safetensors 文件。"));
+            ui.small(tr("Transcription calls the third-party MuScriptor package (MIT, Kyutai x Mirelo; license text: crates/nbs-io/MUSCRIPTOR-LICENSE). Its CC BY-NC 4.0 weights are downloaded onto this machine and are never redistributed with this app.", "识别功能调用第三方 MuScriptor 包（MIT，Kyutai x Mirelo；许可全文见 crates/nbs-io/MUSCRIPTOR-LICENSE）。其 CC BY-NC 4.0 权重只下载到本机，不随本应用分发。"));
             if let Some(info) = &t.info {
                 ui.small(format!("Python {} · PyTorch {} · MuScriptor {} · {}", info.python_version, info.torch_version, info.muscriptor_version, info.gpu_name.as_deref().unwrap_or("CPU")));
                 if let Some(bytes) = info.gpu_memory_bytes { ui.small(format!("{} {:.1} GiB", tr("GPU memory", "显存"), bytes as f64 / 1024f64.powi(3))); }
