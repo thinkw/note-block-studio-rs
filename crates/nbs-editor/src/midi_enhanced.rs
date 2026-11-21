@@ -164,6 +164,39 @@ pub(crate) fn show(
                     });
                 });
             });
+            ui.collapsing(tr("Sustain, voices and duplicates", "长音、声部与重复音"), |ui| {
+                ui.checkbox(&mut enhanced.sustain, tr("Retrain held notes every measured decay", "按实测衰减重敲长音"));
+                ui.add_enabled_ui(enhanced.sustain, |ui| {
+                    ui.indent("enhanced_sustain_fade", |ui| {
+                        ui.checkbox(&mut enhanced.sustain_fade, tr("Taper retriggers along the envelope", "重敲沿包络渐弱"));
+                    });
+                });
+                if enhanced.sustain && !options.note_duration {
+                    ui.colored_label(ui.visuals().warn_fg_color, tr(
+                        "Sustain needs the note-duration tail in \"Timing and note generation\"; held notes stay one block without it.",
+                        "延音依赖上方「时序与音符生成」的音符时长尾音；未勾选时长时不会有重敲。",
+                    ));
+                }
+                ui.label(RichText::new(tr(
+                    "Retriggers are placed on each instrument's measured sample decay, converted with the estimated tempo; the sample table is measured from the bundled assets, not FluidR3.",
+                    "重敲间隔 = 该乐器在自带采样上实测的衰减时长，按预估速度换算成 tick；包络来自实测，不是 FluidR3。",
+                )).small());
+                ui.checkbox(&mut enhanced.separate_voices, tr("Split a channel into two voices", "同通道拆成两个声部"));
+                ui.add_enabled_ui(enhanced.separate_voices, |ui| {
+                    ui.indent("enhanced_voice_meta", |ui| {
+                        ui.checkbox(&mut enhanced.voice_ignore_metadata, tr("Ignore MIDI track metadata", "无视 MIDI 轨道元数据，只按音高聚类"));
+                    });
+                });
+                ui.label(RichText::new(tr(
+                    "Voices get their own layer block, ordered high voice first and named after the channel; channels that fail the complexity gates are left single-layer.",
+                    "声部各占一段连续层，高声部排在前面，层名跟在通道名后；没通过复杂度门槛的通道不拆。",
+                )).small());
+                ui.checkbox(&mut enhanced.dedupe_notes, tr("Drop notes repeating instrument and key on one tick", "删除同 tick 同乐器同音高的重复音"));
+                ui.label(RichText::new(tr(
+                    "The first block wins; emptied layers keep their names in place, and nothing is shifted up to fill holes.",
+                    "只留最先写入的一块；腾空的层保留层名不回收，也不向上回填补位。",
+                )).small());
+            });
             ui.collapsing(tr("Minecraft output and volume", "Minecraft 输出与音量"), |ui| {
                 ui.label(tr(
                     "Note volume = MIDI volume / 127 × slot volume. Layer volume is applied during playback/export; no velocity-dependent timbre model is used.",
@@ -198,6 +231,13 @@ pub(crate) fn show(
                     report.substituted,
                     tr("Folded slot events:", "折叠槽位事件："),
                     report.folded
+                ));
+                ui.label(format!(
+                    "{} {} · {} {}",
+                    tr("Notes tagged with a voice:", "带声部标记的音符："),
+                    report.voiced_notes,
+                    tr("Removed duplicates:", "删除的重复音符："),
+                    report.deduped
                 ));
                 if report.out_of_range > 0 {
                     ui.colored_label(ui.visuals().warn_fg_color, tr(
@@ -366,6 +406,39 @@ mod tests {
             harness.click("Cancel"),
             Some(Command::MidiImportCancel)
         ));
+    }
+
+    #[test]
+    fn sustain_voice_and_dedupe_toggles_feed_the_live_options_and_report() {
+        let _lock = crate::frame_lock();
+        let _lang = crate::LangGuard::set(0);
+        let mut harness = Harness::new();
+        harness.options.note_duration = true;
+        harness.click("Sustain, voices and duplicates");
+        harness.click("Check result");
+        let dense = harness.checked.clone().unwrap().unwrap();
+        // 长音 4 tick × 双槽组合的默认配器，尾音应把每 tick 都铺满。
+        assert!(dense.notes >= 8, "原版尾音每 tick 一块，实得 {}", dense.notes);
+
+        harness.click("Retrain held notes every measured decay");
+        assert!(harness.enhanced.sustain);
+        assert!(harness.enhanced.sustain_fade, "渐弱默认跟随开着的延音");
+        harness.click("Taper retriggers along the envelope");
+        assert!(!harness.enhanced.sustain_fade);
+        harness.click("Check result");
+        let held = harness.checked.clone().unwrap().unwrap();
+        assert!(held.notes < dense.notes, "重敲应比每 tick 一块稀：{:?}", held.notes);
+        assert_eq!(held.voiced_notes, 0);
+
+        harness.click("Split a channel into two voices");
+        harness.click("Ignore MIDI track metadata");
+        harness.click("Drop notes repeating instrument and key on one tick");
+        assert!(harness.enhanced.separate_voices);
+        assert!(harness.enhanced.voice_ignore_metadata);
+        assert!(harness.enhanced.dedupe_notes);
+        harness.click("Check result");
+        let report = harness.checked.clone().unwrap().unwrap();
+        assert_eq!(report.deduped, 0, "单音文件没有可删的重复");
     }
 
     #[test]

@@ -26,6 +26,7 @@ use nbs_core::model::{
     MC_KEY_MIN,
 };
 
+use crate::midi_decay::{gain_at, SAMPLE_DECAYS};
 use crate::midi_gm::{is_note_fade, MidiGmTable};
 
 const PPQ: u16 = 480;
@@ -710,6 +711,9 @@ pub(super) struct Resolved {
     pub(super) stop: bool,
     pub(super) include_duration: bool,
     pub(super) vel: u8,
+    /// 声部标记（Miau `event._voice`）：`Some(0)` 低声部、`Some(1)` 高声部，`None` 不参与拆分。
+    /// 只有增强导入会填，传统路径恒为 `None`，层号因此保持原样。
+    pub(super) voice: Option<u8>,
 }
 
 pub(super) fn resolve(midi: &MidiData, opts: &MidiImportOptions, ev: &MidiEvent, dpt: f64) -> Resolved {
@@ -756,7 +760,7 @@ pub(super) fn resolve(midi: &MidiData, opts: &MidiImportOptions, ev: &MidiEvent,
             note -= 12;
         }
     }
-    Resolved { channel, pos, until, note, ins, stop, include_duration, vel }
+    Resolved { channel, pos, until, note, ins, stop, include_duration, vel, voice: None }
 }
 
 /// 原版第一遍扫描里 `channel_events[channel]` 的一项。
@@ -803,13 +807,120 @@ fn assign_layers(
     channel_height
 }
 
+/// 声部重排的一个输入：已经拿到通道内层号、准备落块的事件。
+struct VoiceRef {
+    channel: usize,
+    /// `None` = Miau 的 `_voice === undefined`，该音符不参与拆分。
+    voice: Option<u8>,
+    /// 量化后的 NBS tick，压紧时按它分单元。
+    tick: i64,
+    /// `eventlayer` 给出的通道内层号。
+    slot: usize,
+    /// NBS 音高，只用来在「同 tick 同层」时复现 Miau 和弦按音高降序的稳定次序。
+    key: i32,
+}
+
+/// 一个「通道 × 声部」组：按顺序连续占用 `need` 层。
+pub(super) struct VoiceGroup {
+    pub(super) channel: usize,
+    /// `None` = 该组没有声部（打击乐，或本通道无人参与拆分），整段沿用原有层结构。
+    pub(super) voice: Option<u8>,
+    pub(super) need: usize,
+}
+
+/// Miau `hasVoiceSplit` 分支：把层号按 (通道, 声部) 重新排成连续区段。
+/// 声部组内按 tick 压紧（同 tick 不撞层），未拆分组与打击乐保持原来的相对层号。
+/// 返回每个输入音符的新层号（不含速度变化层的那位偏移）与按新层顺序排列的组。
+fn voice_layout(notes: &[VoiceRef], channel_height: &[usize]) -> (Vec<usize>, Vec<VoiceGroup>) {
+    let mut keys: Vec<(usize, Option<u8>)> = Vec::new();
+    let mut members: Vec<Vec<usize>> = Vec::new();
+    for (i, n) in notes.iter().enumerate() {
+        // 打击乐永远自成一格，Miau 用固定键 '9'。
+        let group_voice = if n.channel == 9 { None } else { n.voice };
+        let at = match keys.iter().position(|&(c, v)| c == n.channel && v == group_voice) {
+            Some(at) => at,
+            None => {
+                keys.push((n.channel, group_voice));
+                members.push(Vec::new());
+                keys.len() - 1
+            }
+        };
+        members[at].push(i);
+    }
+    // 通道升序；同通道内 高声部 → 未拆分 → 低声部。
+    let rank = |v: Option<u8>| match v {
+        Some(1) => 0,
+        None => 1,
+        _ => 2,
+    };
+    let mut seq: Vec<usize> = (0..keys.len()).collect();
+    seq.sort_by_key(|&g| (keys[g].0, rank(keys[g].1)));
+
+    let mut layers = vec![0usize; notes.len()];
+    let mut groups: Vec<VoiceGroup> = Vec::new();
+    let mut cursor = 0usize;
+    for g in seq {
+        let (channel, voice) = keys[g];
+        let mut need = 0usize;
+        match voice {
+            None => {
+                // 未参与拆分：层数仍按该通道原来的需求算，含延音与槽位的层复用。
+                need = channel_height.get(channel).copied().unwrap_or(0);
+                for &i in &members[g] {
+                    layers[i] = cursor + notes[i].slot;
+                }
+            }
+            Some(_) => {
+                let mut idx = members[g].clone();
+                idx.sort_by_key(|&i| (notes[i].tick, notes[i].slot, -notes[i].key));
+                let mut used: Vec<(i64, usize)> = Vec::new();
+                for &i in &idx {
+                    let rel = match used.iter().position(|&(t, _)| t == notes[i].tick) {
+                        Some(at) => {
+                            used[at].1 += 1;
+                            used[at].1
+                        }
+                        None => {
+                            used.push((notes[i].tick, 1));
+                            1
+                        }
+                    };
+                    layers[i] = cursor + rel - 1;
+                    need = need.max(rel);
+                }
+            }
+        }
+        groups.push(VoiceGroup { channel, voice, need });
+        cursor += need;
+    }
+    (layers, groups)
+}
+
 /// 逐条对应装机版的 `import_midi.gml`。
 pub fn import_midi_data(midi: &MidiData, opts: &MidiImportOptions) -> Song {
     let dpt = midi.deltapertick(opts.precision).max(1e-9);
     let events: Vec<Vec<(Resolved, u16)>> = midi.tracks.iter().map(|track| {
         track.events.iter().map(|ev| (resolve(midi, opts, ev, dpt), ev.patch)).collect()
     }).collect();
-    import_resolved(midi, opts, &events)
+    import_resolved(midi, opts, &events, None)
+}
+
+/// 原版 `w_midi_tempo` 两个分支的统一出口；`enda` 未知时传预估长度。`None` = 保持 `Song` 出厂速度。
+fn suggested_tempo(midi: &MidiData, opts: &MidiImportOptions, seconds: f32, enda: u32) -> Option<f32> {
+    if opts.tempo_changer && !midi.tempo_changers.is_empty() {
+        return Some((midi.tempo_changers[0].1 * (opts.precision as f32 + 1.0)) / 15.0);
+    }
+    if opts.tempo_from_file && enda > 0 && seconds > 0.0 {
+        return Some((10.0 / (seconds / (enda as f32 / 10.0))).clamp(0.25, 1000.0));
+    }
+    None
+}
+
+/// 增强导入的持音重敲方案；`None` 保持原版「每 tick 一块」的尾音。
+#[derive(Clone, Copy, Debug)]
+pub(super) struct SustainTail {
+    /// 重敲音量沿该乐器实测包络渐弱，关掉就是等音量持续。
+    pub fade: bool,
 }
 
 /// 共用量化后事件的层分配、尾音、速度变化和层名逻辑。事件保持原轨/事件/槽顺序。
@@ -817,6 +928,7 @@ pub(super) fn import_resolved(
     midi: &MidiData,
     opts: &MidiImportOptions,
     events: &[Vec<(Resolved, u16)>],
+    sustain: Option<SustainTail>,
 ) -> Song {
     let mut song = Song::new();
     let dpt = midi.deltapertick(opts.precision).max(1e-9);
@@ -837,17 +949,59 @@ pub(super) fn import_resolved(
         events.iter().map(|track| vec![-1; track.len()]).collect();
 
     // 第一遍：只登记事件并算出每个通道要占几层。
+    let mut tail_ticks: i64 = 0;
+    let mut first_patch: Vec<Option<u8>> = vec![None; last_channel + 1];
     for (t, track) in events.iter().enumerate() {
-        for (e, (r, _)) in track.iter().enumerate() {
+        for (e, (r, patch)) in track.iter().enumerate() {
             if r.channel > last_channel || r.stop || r.pos < 0 {
                 continue;
             }
+            if let Some(slot) = first_patch.get_mut(r.channel) {
+                slot.get_or_insert(*patch as u8);
+            }
             let finish = if r.include_duration { r.until } else { r.pos + 1 };
+            tail_ticks = tail_ticks.max(finish);
             let order = per_channel[r.channel].len();
             per_channel[r.channel].push(EvRef { track: t, index: e, start: r.pos, finish, order });
         }
     }
     let channel_height = assign_layers(&mut per_channel, &mut eventlayer, opts.max_height);
+
+    // 声部拆分：Miau 先给音符打上 `_voice`，落块前再按 (通道, 声部) 把层号重排成连续区段。
+    let mut voice_notes: Vec<VoiceRef> = Vec::new();
+    let mut voice_ids: Vec<(usize, usize)> = Vec::new();
+    for (t, track) in events.iter().enumerate() {
+        for (e, (r, _)) in track.iter().enumerate() {
+            if r.channel > last_channel || r.ins < 0 || r.pos < 0 || eventlayer[t][e] < 0 {
+                continue;
+            }
+            voice_notes.push(VoiceRef {
+                channel: r.channel,
+                voice: r.voice,
+                tick: r.pos,
+                slot: eventlayer[t][e] as usize,
+                key: r.note,
+            });
+            voice_ids.push((t, e));
+        }
+    }
+    let layout = voice_notes.iter().any(|n| n.voice.is_some()).then(|| {
+        let (layers, groups) = voice_layout(&voice_notes, &channel_height);
+        let mut map: Vec<Vec<i32>> = events.iter().map(|track| vec![-1; track.len()]).collect();
+        for (&(t, e), layer) in voice_ids.iter().zip(layers) {
+            map[t][e] = layer as i32;
+        }
+        (map, groups)
+    });
+
+    // 原版要落完块才拿得到 enda，重敲间隔得先用同一个公式预推 tempo，免得两遍算出两个值。
+    // `tail_ticks` 是松开 tick（不含），减一才是「最后一个能落块的 tick」，与原版 enda 同口径。
+    let geometry_end = (tail_ticks - 1).clamp(1, u32::MAX as i64) as u32;
+    let ms_per_tick = 1000.0
+        / f64::from(
+            suggested_tempo(midi, opts, seconds, geometry_end).unwrap_or(song.meta.tempo),
+        )
+        .max(0.25);
 
     // 第二遍：落块。层号 = 该事件在通道内的声部 + 前面所有通道的层数之和（开速度变化再 +1）。
     for (t, track) in events.iter().enumerate() {
@@ -855,8 +1009,13 @@ pub(super) fn import_resolved(
             if r.channel > last_channel || r.ins < 0 || eventlayer[t][e] < 0 {
                 continue;
             }
-            let mut yy = eventlayer[t][e] as usize;
-            yy += channel_height[..r.channel].iter().sum::<usize>();
+            let mut yy = match &layout {
+                // 拆分后层号已按声部重排，不再叠加通道偏移。
+                Some((map, _)) => map[t][e] as usize,
+                None => {
+                    eventlayer[t][e] as usize + channel_height[..r.channel].iter().sum::<usize>()
+                }
+            };
             if opts.tempo_changer {
                 yy += 1;
             }
@@ -874,13 +1033,34 @@ pub(super) fn import_resolved(
                 }
             }
 
+            // 包络延音：重敲间隔 = 该乐器实测「还能听多久」，音量把同一条包络拉伸到整段持音时长上。
+            let envelope = match sustain {
+                Some(plan) if r.include_duration => SAMPLE_DECAYS.get(r.ins as usize).map(|decay| {
+                    (
+                        decay,
+                        plan.fade,
+                        (f64::from(decay.decay_ms) / ms_per_tick).round().max(1.0) as i64,
+                    )
+                }),
+                _ => None,
+            };
+
             let mut i = r.pos;
             while i < forvalue {
                 let at = i - r.pos;
                 let mut tempvel = r.vel as i32;
                 let mut temppan: u8 = 100;
                 let span = (r.until - r.pos) as f64;
-                if fade_mode == 1 {
+                if let Some((decay, fade, _)) = envelope {
+                    // 音头保持原音量；渐弱时按拉伸后的包络取值，衰减到 0 就不再补块（同 Miau 的 break 口径）。
+                    if fade && at > 0 {
+                        let progress = at as f64 / (forvalue - r.pos - 1).max(1) as f64;
+                        tempvel = (f64::from(r.vel) * gain_at(&decay.env, progress)).round() as i32;
+                        if tempvel <= 0 {
+                            break;
+                        }
+                    }
+                } else if fade_mode == 1 {
                     tempvel = (r.vel as f64 * (at as f64 / span)).floor() as i32;
                 } else if fade_mode == 2 {
                     tempvel = (r.vel as f64 * ((r.until - i) as f64 / span)).floor() as i32;
@@ -914,7 +1094,7 @@ pub(super) fn import_resolved(
                         },
                     );
                 }
-                i += 1;
+                i += envelope.map(|(_, _, step)| step).unwrap_or(1);
             }
         }
     }
@@ -957,16 +1137,18 @@ pub(super) fn import_resolved(
     }
 
     // 速度：原版两个分支，用的秒数来自时长缓存。
-    if !opts.tempo_changer || midi.tempo_changers.is_empty() {
-        if opts.tempo_from_file && song.enda > 0 && seconds > 0.0 {
-            song.meta.tempo =
-                (10.0 / (seconds / (song.enda as f32 / 10.0))).clamp(0.25, 1000.0);
-        }
+    // 延音只是把尾音块摊稀，写的块少几 tick 不该改变播放速度，所以按持音几何末端估。
+    let tempo_end = if sustain.is_some() {
+        song.enda.max(geometry_end)
     } else {
-        song.meta.tempo = (midi.tempo_changers[0].1 * (opts.precision as f32 + 1.0)) / 15.0;
+        song.enda
+    };
+    if let Some(tempo) = suggested_tempo(midi, opts, seconds, tempo_end) {
+        song.meta.tempo = tempo;
     }
 
-    // 层名：原版 `w_midi_name` 分支，每个通道按它占的层数重复同一个名字。
+    // 层名：原版 `w_midi_name` 分支，每个通道按它占的层数重复同一个名字；
+    // 声部拆分后改成逐组命名，Miau 在通道名后面加「· 右手/左手」（钢琴族）或「· 高声部/低声部」。
     if opts.name_layers {
         let mut yy: usize = 0;
         if opts.tempo_changer {
@@ -974,31 +1156,69 @@ pub(super) fn import_resolved(
             song.layers[0].name = "TempoChgr".into();
             yy = 1;
         }
-        for a in 0..=last_channel {
-            for _ in 0..channel_height[a] {
-                grow_layers(&mut song, yy + 1);
-                let mut name = format!("Channel {}", a + 1);
-                if opts.name_after_patch {
-                    let patch = midi.channel_patch[a] as usize;
-                    name = if patch >= 128 {
-                        "Unknown".into()
-                    } else {
-                        let short = MidiGmTable::patch_short(patch as u8);
-                        if short.is_empty() {
-                            MidiGmTable::patch_name(patch as u8).into()
-                        } else {
-                            short.into()
-                        }
-                    };
-                    if a == 9 {
-                        name = "Percussion".into();
+        let channel_name = |a: usize| -> String {
+            if !opts.name_after_patch {
+                return format!("Channel {}", a + 1);
+            }
+            if a == 9 {
+                return "Percussion".into();
+            }
+            let patch = midi.channel_patch[a] as usize;
+            if patch >= 128 {
+                return "Unknown".into();
+            }
+            let short = MidiGmTable::patch_short(patch as u8);
+            if short.is_empty() {
+                MidiGmTable::patch_name(patch as u8).into()
+            } else {
+                short.into()
+            }
+        };
+        let mut fill = |yy: &mut usize, name: String| {
+            grow_layers(&mut song, *yy + 1);
+            song.layers[*yy].name = name;
+            song.layers[*yy].lock = LockMode::Normal;
+            song.layers[*yy].volume = 100;
+            song.layers[*yy].stereo = 100;
+            *yy += 1;
+        };
+        match &layout {
+            None => {
+                for a in 0..=last_channel {
+                    for _ in 0..channel_height[a] {
+                        fill(&mut yy, channel_name(a));
                     }
                 }
-                song.layers[yy].name = name;
-                song.layers[yy].lock = LockMode::Normal;
-                song.layers[yy].volume = 100;
-                song.layers[yy].stereo = 100;
-                yy += 1;
+            }
+            Some((_, groups)) => {
+                for group in groups {
+                    let base = channel_name(group.channel);
+                    let piano = matches!(group.voice, Some(_))
+                        && first_patch
+                            .get(group.channel)
+                            .copied()
+                            .flatten()
+                            .is_some_and(|patch| (0..=7).contains(&patch));
+                    for sub in 0..group.need {
+                        let name = match group.voice {
+                            None => base.clone(),
+                            Some(voice) => {
+                                let suffix = match (piano, voice) {
+                                    (true, 1) => "右手",
+                                    (true, _) => "左手",
+                                    (false, 1) => "高声部",
+                                    (false, _) => "低声部",
+                                };
+                                if sub > 0 {
+                                    format!("{base} · {suffix} {}", sub + 1)
+                                } else {
+                                    format!("{base} · {suffix}")
+                                }
+                            }
+                        };
+                        fill(&mut yy, name);
+                    }
+                }
             }
         }
         grow_layers(&mut song, yy);
