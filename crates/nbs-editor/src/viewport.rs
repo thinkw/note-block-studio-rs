@@ -10,8 +10,6 @@ use egui::{Pos2, Rect, Vec2};
 
 /// 原版每格 32px。
 pub const BASE_CELL: f32 = 32.0;
-/// 原版图层栏：x1 = 4，`spr_layerbox` 宽 256 → 列宽 264。
-pub const LAYER_PANEL_WIDTH: f32 = 264.0;
 /// 原版时间轴带：y1+2 .. y1+34（画布内，跟缩放走）。
 pub const TIMELINE_HEIGHT: f32 = 32.0;
 /// 原版滚动条厚度 32（画布内，跟缩放走）。

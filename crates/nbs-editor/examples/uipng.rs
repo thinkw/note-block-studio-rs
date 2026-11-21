@@ -19,6 +19,11 @@
 //! `NBS_UIPNG_PREFS_MENU=theme|rate|output` 把首选项页里的某个下拉摆成打开状态
 //! （前两个在「界面」页，`output` 在「播放」页）。
 //! `NBS_UIPNG_WALLPAPER=<图片路径>` 先导入这张背景图片再渲染（原版「导入背景图片」那条路）。
+//! `NBS_UIPNG_ZOOM=<倍>` 设界面缩放档（走 prefs，下一帧换算成 viewport.scale）；
+//! `NBS_UIPNG_PANEL=<px>` 设图层栏宽度（#108：侧栏横轴不跟缩放，只能拖）；
+//! `NBS_UIPNG_SELECT=1` 把第一个音符摘进浮动选区（宏条只在有选区时出现）。
+//! `NBS_UIPNG_DRAG=x0,y0,x1,y1` / `NBS_UIPNG_DBLCLICK=x,y` 补一段鼠标事件（拖动 /
+//! 双击），用来验证图层栏右边界把手，跑完打印结果宽度。
 //! ```
 //!
 //! 走的是和 GUI 完全相同的一条路：`Context::run` → `tessellate` → 三角形。
@@ -165,6 +170,45 @@ fn main() -> Result<(), String> {
     state.theme = Theme::new(kind);
     // `NBS_UIPNG_FDARK=1`：Fluent 的「暗色模式」（原版 `fdark`，和 state.rs 一样只对 theme 3 生效）。
     state.theme.fdark = kind == ThemeKind::Fluent && std::env::var("NBS_UIPNG_FDARK").is_ok();
+
+    // `NBS_UIPNG_ZOOM=<倍>`：界面缩放档（走 prefs，`tick_transport` 每帧换算成 viewport.scale
+    // 和 hires 贴图档）；`NBS_UIPNG_PANEL=<px>`：图层栏宽度（#108 的横轴脱离缩放）。
+    if let Ok(z) = std::env::var("NBS_UIPNG_ZOOM") {
+        state.prefs.window_scale = z.parse::<f32>().ok();
+    }
+    if let Ok(w) = std::env::var("NBS_UIPNG_PANEL") {
+        state.prefs.layer_panel_width = w.parse::<f32>().unwrap_or(264.0);
+    }
+    // `NBS_UIPNG_MONO=1`：关掉立体声（原版 `realstereo = 0`），声像图标消失、按钮整簇左移 10px。
+    if std::env::var("NBS_UIPNG_MONO").is_ok() {
+        state.prefs.mono = true;
+    }
+
+    // `NBS_UIPNG_SELECT=1`：把曲子里第一个音符按原版语义摘进浮动选区。
+    // 宏条（图层栏底部那 15 个按钮）的显示条件是「有选区 + 显示琴键」（原版同语义），
+    // 而 prefs 里琴键可能是关的，所以这里一并打开。
+    if std::env::var("NBS_UIPNG_SELECT").is_ok() {
+        state.prefs.show_piano = true;
+        state.flags.show_piano = true;
+        // 行上的 7 个按钮和宏条都要求「没有弹窗挡着」（原版同一个 `idle` 门），
+        // 而载入歌曲可能按首选项自动弹出歌曲信息窗，这里一并关掉。
+        state.window = None;
+        let first = state.doc.song.iter_notes().next();
+        if let Some((t, l, n)) = first {
+            state.doc.song.remove(t, l);
+            state.doc.selection = nbs_core::Selection {
+                x: t as i64,
+                y: l as i64,
+                width: 1,
+                height: 1,
+                notes: vec![nbs_core::SelectionNote {
+                    dx: 0,
+                    dy: 0,
+                    note: n,
+                }],
+            };
+        }
+    }
 
     // `NBS_UIPNG_SCROLL=<tick>:<layer>`：网格左上角（原版 `starta`/`startb`）。
     if let Ok(spec) = std::env::var("NBS_UIPNG_SCROLL") {
@@ -346,18 +390,78 @@ fn main() -> Result<(), String> {
             it.next()?.parse().ok()?,
         ))
     });
+    // `NBS_UIPNG_DRAG=x0,y0,x1,y1` / `NBS_UIPNG_DBLCLICK=x,y`：在第 2..6 帧里喂一段
+    // 按住左键的拖动 / 两次快速点击。#108 的图层栏右边界把手只有这两条路径能改宽度，
+    // 光靠静态一帧截不出来，所以在这里把鼠标事件补上，跑完打印结果宽度。
+    let drag = std::env::var("NBS_UIPNG_DRAG").ok().and_then(|s| {
+        let v: Vec<f32> = s.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        (v.len() == 4).then_some((egui::pos2(v[0], v[1]), egui::pos2(v[2], v[3])))
+    });
+    let dblclick = std::env::var("NBS_UIPNG_DBLCLICK").ok().and_then(|s| {
+        let mut it = s.split(',');
+        Some(egui::pos2(
+            it.next()?.parse().ok()?,
+            it.next()?.parse().ok()?,
+        ))
+    });
+    let btn = egui::PointerButton::Primary;
+    let no_mod = egui::Modifiers::NONE;
     // 第一帧只为了建立布局（滚动条、面板尺寸），后面几帧才是稳定画面。
     // 必须把虚拟时间推过 egui 的 animation_time（0.1s）：Area 对刚打开的窗口做淡入，
     // 整个窗口子树会被乘上一个不到 1 的不透明度（area.rs 的 multiply_opacity），
     // 只渲染两帧 16ms 的话窗口底色会变成半透明，看起来就像「底色没画」。
     const FRAMES: u32 = 8;
     for frame in 0..FRAMES {
+        let mut events: Vec<egui::Event> = pointer
+            .map(|p| vec![egui::Event::PointerMoved(p)])
+            .unwrap_or_default();
+        if let Some((a, b)) = drag {
+            events.push(egui::Event::PointerMoved(a));
+            let t = ((frame as f32 - 2.0) / 3.0).clamp(0.0, 1.0);
+            let p = egui::pos2(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+            if frame == 2 {
+                events.push(egui::Event::PointerButton {
+                    pos: a,
+                    button: btn,
+                    pressed: true,
+                    modifiers: no_mod,
+                });
+            }
+            if (2..6).contains(&frame) {
+                events.push(egui::Event::PointerMoved(p));
+            }
+            if frame == 5 {
+                events.push(egui::Event::PointerButton {
+                    pos: p,
+                    button: btn,
+                    pressed: false,
+                    modifiers: no_mod,
+                });
+            }
+        }
+        if let Some(p) = dblclick {
+            // 两次按下间隔 0.1s（< egui 的 0.3s 双击窗口），第二次会被判成 double_clicked。
+            if matches!(frame, 2 | 4) {
+                events.push(egui::Event::PointerMoved(p));
+                events.push(egui::Event::PointerButton {
+                    pos: p,
+                    button: btn,
+                    pressed: true,
+                    modifiers: no_mod,
+                });
+            } else if matches!(frame, 3 | 5) {
+                events.push(egui::Event::PointerButton {
+                    pos: p,
+                    button: btn,
+                    pressed: false,
+                    modifiers: no_mod,
+                });
+            }
+        }
         let input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(w, h))),
             time: Some(0.05 * (frame + 1) as f64),
-            events: pointer
-                .map(|p| vec![egui::Event::PointerMoved(p)])
-                .unwrap_or_default(),
+            events,
             ..Default::default()
         };
         // 时间戳按本帧的虚拟时间倒推，绘制侧 `played_key(本帧 time - 时间戳)` 才落在窗口里。
@@ -449,6 +553,10 @@ fn main() -> Result<(), String> {
                 mesh.texture_id,
             );
         }
+    }
+
+    if drag.is_some() || dblclick.is_some() {
+        eprintln!("图层栏宽度 = {:.1}", state.prefs.layer_panel_width);
     }
 
     let (mut pw, mut ph) = ((w * ppp) as usize, (h * ppp) as usize);
