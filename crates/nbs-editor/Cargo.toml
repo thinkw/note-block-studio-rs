@@ -9,6 +9,7 @@ rust-version.workspace = true
 nbs-core = { workspace = true }
 nbs-audio = { workspace = true }
 nbs-io = { workspace = true }
+nbs-control = { workspace = true }
 egui = { workspace = true }
 image = { workspace = true }
 serde = { workspace = true }

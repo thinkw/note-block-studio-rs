@@ -1,0 +1,22 @@
+[package]
+name = "nbs-mcp"
+description = "MCP 桥接：把 nbs-rs 正在跑的那个编辑器窗口暴露成 AI 可调的工具面"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+nbs-control = { workspace = true, features = ["schema"] }
+# 只要 `paths::config_dir` 那一条规则，和编辑器共用同一份；nbs-core 没有 GUI 依赖。
+nbs-core = { workspace = true }
+rmcp = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[[bin]]
+name = "nbs-mcp"
+path = "src/main.rs"
