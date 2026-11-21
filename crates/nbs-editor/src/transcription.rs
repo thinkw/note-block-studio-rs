@@ -15,7 +15,7 @@ use crate::commands::Command;
 use crate::state::{DialogAction, EditorState, WindowKind};
 use crate::tr;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TranscriptionAction {
     PrepareRuntime,
     Probe,
@@ -23,6 +23,8 @@ pub enum TranscriptionAction {
     Run,
     Cancel,
     Play,
+    /// Drag the preview scrub bar: restart the stream at this position.
+    Seek(f64),
     PauseResume,
     Stop,
     Import,
@@ -58,6 +60,7 @@ pub struct TranscriptionState {
     pub import_from_preview: bool,
     messages: VecDeque<String>,
     preview_loading: Option<mpsc::Receiver<Result<MidiPreviewAsset, String>>>,
+    scrub: Option<f64>,
     source_name: String,
     cancel_requested: bool,
 }
@@ -87,6 +90,7 @@ impl Default for TranscriptionState {
             import_from_preview: false,
             messages: VecDeque::new(),
             preview_loading: None,
+            scrub: None,
             source_name: String::new(),
             cancel_requested: false,
         }
@@ -372,29 +376,13 @@ pub fn handle(state: &mut EditorState, action: TranscriptionAction) {
                 t.status = tr("Preview loading cancelled.", "已取消读取预览。").into();
             }
         }
-        TranscriptionAction::Play => {
-            let Some(asset) = &t.preview else {
-                return;
-            };
-            let font = PathBuf::from(t.soundfont_path.trim());
-            if !font.is_file() {
-                t.error = Some(
-                    tr(
-                        "Choose a GM SoundFont (.sf2) for MIDI playback. NBS samples are not used.",
-                        "请先选择用于 MIDI 试听的 GM SoundFont（.sf2），不会使用 NBS 采样代替。",
-                    )
-                    .into(),
-                );
-                return;
-            }
-            let device = state.audio.output_name();
-            state.audio.clock_mut().pause();
-            let player = t.player.get_or_insert_with(MidiPreviewPlayer::new);
-            player.set_volume(t.volume);
-            match player.play(asset.bytes.clone(), font, device) {
-                Ok(()) => t.error = None,
-                Err(error) => t.error = Some(error),
-            }
+        TranscriptionAction::Play => start_playback(state, 0.0, false),
+        TranscriptionAction::Seek(at) => {
+            let start_paused = t
+                .player
+                .as_ref()
+                .is_some_and(|p| p.snapshot().state == MidiPlaybackState::Paused);
+            start_playback(state, at, start_paused);
         }
         TranscriptionAction::PauseResume => {
             if let Some(player) = &t.player {
@@ -448,6 +436,37 @@ pub fn handle(state: &mut EditorState, action: TranscriptionAction) {
                 Err(error) => t.error = Some(error),
             }
         }
+    }
+}
+
+/// Starts the preview stream, optionally at a scrubbed position. The player keeps the
+/// decoded SoundFont and MIDI between requests, so only the first start pays for the load.
+fn start_playback(state: &mut EditorState, from_seconds: f64, start_paused: bool) {
+    let t = &mut state.transcription;
+    let Some(asset) = &t.preview else {
+        return;
+    };
+    let font = PathBuf::from(t.soundfont_path.trim());
+    if !font.is_file() {
+        t.error = Some(
+            tr(
+                "Choose a GM SoundFont (.sf2) for MIDI playback. NBS samples are not used.",
+                "请先选择用于 MIDI 试听的 GM SoundFont（.sf2），不会使用 NBS 采样代替。",
+            )
+            .into(),
+        );
+        return;
+    }
+    let from = from_seconds.clamp(0.0, asset.data.duration_seconds.max(0.0));
+    let bytes = asset.bytes.clone();
+    let device = state.audio.output_name();
+    state.audio.clock_mut().pause();
+    t.scrub = None;
+    let player = t.player.get_or_insert_with(MidiPreviewPlayer::new);
+    player.set_volume(t.volume);
+    match player.play_at(bytes, font, device, from, start_paused) {
+        Ok(()) => t.error = None,
+        Err(error) => t.error = Some(error),
     }
 }
 
@@ -715,8 +734,32 @@ pub fn show(state: &mut EditorState, ui: &mut egui::Ui) {
                 tr("notes", "音符"),
                 asset.data.duration_seconds
             ));
-            piano_roll(ui, &asset.data);
             let playback = t.player.as_ref().map(MidiPreviewPlayer::snapshot);
+            let duration = asset.data.duration_seconds.max(0.0);
+            let live = playback
+                .as_ref()
+                .map(|p| p.position_seconds)
+                .unwrap_or(0.0)
+                .clamp(0.0, duration);
+            let mut at = t.scrub.unwrap_or(live);
+            piano_roll(ui, &asset.data, at);
+            let scrub = ui.add_enabled(
+                !busy && duration > 0.0,
+                egui::Slider::new(&mut at, 0.0..=duration)
+                    .text(tr("Position", "播放位置"))
+                    .custom_formatter(|seconds, _| clock_position(seconds)),
+            );
+            if scrub.changed() {
+                if scrub.dragged() {
+                    t.scrub = Some(at);
+                } else {
+                    actions.push(Command::Transcription(TranscriptionAction::Seek(at)));
+                }
+            } else if scrub.drag_stopped() {
+                if let Some(target) = t.scrub.take() {
+                    actions.push(Command::Transcription(TranscriptionAction::Seek(target)));
+                }
+            }
             ui.horizontal_wrapped(|ui| {
                 if ui
                     .add_enabled(!busy, egui::Button::new(tr("Play from start", "从头试听")))
@@ -767,8 +810,10 @@ pub fn show(state: &mut EditorState, ui: &mut egui::Ui) {
             });
             if let Some(playback) = playback {
                 ui.small(format!(
-                    "{:?} · {:.2} / {:.2} s",
-                    playback.state, playback.position_seconds, playback.duration_seconds
+                    "{:?} · {} / {}",
+                    playback.state,
+                    clock_position(playback.position_seconds),
+                    clock_position(playback.duration_seconds.max(duration))
                 ));
                 if let Some(error) = playback.error {
                     ui.colored_label(Color32::from_rgb(195, 55, 45), error);
@@ -826,7 +871,13 @@ pub fn show(state: &mut EditorState, ui: &mut egui::Ui) {
     }
 }
 
-fn piano_roll(ui: &mut egui::Ui, midi: &MidiPreview) {
+fn clock_position(seconds: f64) -> String {
+    let minutes = (seconds / 60.0).floor().max(0.0) as u32;
+    let rest = (seconds - minutes as f64 * 60.0).clamp(0.0, 59.95);
+    format!("{minutes}:{rest:04.1}")
+}
+
+fn piano_roll(ui: &mut egui::Ui, midi: &MidiPreview, position_seconds: f64) {
     let width = ui.available_width().max(200.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 125.0), Sense::hover());
     let painter = ui.painter_at(rect);
@@ -864,6 +915,15 @@ fn piano_roll(ui: &mut egui::Ui, midi: &MidiPreview) {
             colors[note.track % colors.len()],
         );
     }
+    let playhead = rect.left()
+        + rect.width() * (position_seconds / duration).clamp(0.0, 1.0) as f32;
+    painter.line_segment(
+        [
+            egui::pos2(playhead, rect.top()),
+            egui::pos2(playhead, rect.bottom()),
+        ],
+        Stroke::new(1.5_f32, Color32::from_rgb(240, 205, 90)),
+    );
     painter.rect_stroke(
         rect,
         2.0,

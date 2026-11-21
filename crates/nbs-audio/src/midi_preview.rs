@@ -77,18 +77,36 @@ impl MidiPreviewPlayer {
         soundfont: PathBuf,
         output_device: Option<String>,
     ) -> Result<(), String> {
+        self.play_at(midi_bytes, soundfont, output_device, 0.0, false)
+    }
+
+    /// `start_paused` lets a scrub move the position without starting audible playback.
+    pub fn play_at(
+        &mut self,
+        midi_bytes: Vec<u8>,
+        soundfont: PathBuf,
+        output_device: Option<String>,
+        start_seconds: f64,
+        start_paused: bool,
+    ) -> Result<(), String> {
         let generation = {
             let mut control = self.shared.control.lock();
             control.generation = control.generation.wrapping_add(1);
             control.pending = None;
-            control.paused = false;
+            control.paused = start_paused;
             control.snapshot = MidiPlaybackSnapshot {
                 state: MidiPlaybackState::Loading,
+                position_seconds: start_seconds.max(0.0),
                 ..MidiPlaybackSnapshot::default()
             };
             control.generation
         };
         self.shared.changed.notify_all();
+        if !start_seconds.is_finite() || start_seconds < 0.0 {
+            let error = format!("MIDI playback cannot start at {start_seconds} seconds");
+            self.shared.fail(generation, error.clone());
+            return Err(error);
+        }
         if midi_bytes.is_empty() || midi_bytes.len() > MAX_MIDI_BYTES {
             let error = format!("MIDI playback requires 1..={MAX_MIDI_BYTES} bytes");
             self.shared.fail(generation, error.clone());
@@ -129,6 +147,7 @@ impl MidiPreviewPlayer {
             midi_bytes,
             soundfont,
             output_device,
+            start_seconds,
         });
         self.shared.changed.notify_all();
         Ok(())
@@ -162,6 +181,9 @@ impl MidiPreviewPlayer {
         let mut control = self.shared.control.lock();
         control.generation = control.generation.wrapping_add(1);
         control.pending = None;
+        // Stopping means the listener is done, so the decoded SoundFont goes back;
+        // a scrub keeps it and only re-opens the output stream.
+        control.assets = None;
         control.paused = false;
         control.snapshot = MidiPlaybackSnapshot::default();
         self.shared.changed.notify_all();
@@ -203,12 +225,29 @@ struct PlayRequest {
     midi_bytes: Vec<u8>,
     soundfont: PathBuf,
     output_device: Option<String>,
+    start_seconds: f64,
+}
+
+/// Decoded assets a seek can reuse instead of re-reading a 100 MB SoundFont.
+struct CachedAssets {
+    soundfont: Arc<SoundFont>,
+    soundfont_path: PathBuf,
+    midi: Arc<MidiFile>,
+    midi_bytes: Vec<u8>,
+    duration_seconds: f64,
+}
+
+impl CachedAssets {
+    fn matches(&self, request: &PlayRequest) -> bool {
+        self.soundfont_path == request.soundfont && self.midi_bytes == request.midi_bytes
+    }
 }
 
 #[derive(Default)]
 struct Control {
     generation: u64,
     pending: Option<PlayRequest>,
+    assets: Option<Arc<CachedAssets>>,
     paused: bool,
     shutdown: bool,
     snapshot: MidiPlaybackSnapshot,
@@ -269,6 +308,15 @@ impl Shared {
         };
         self.changed.notify_all();
         true
+    }
+
+    /// Caches decoded assets so a scrub does not re-read the SoundFont, but only while
+    /// this request is still the one the caller is waiting on.
+    fn publish_assets(&self, generation: u64, assets: Arc<CachedAssets>) {
+        let mut control = self.control.lock();
+        if !control.shutdown && control.generation == generation {
+            control.assets = Some(assets);
+        }
     }
 }
 
@@ -347,31 +395,8 @@ fn run_worker(shared: &Arc<Shared>, prepare: &Arc<Prepare>) {
 }
 
 fn prepare_playback(request: &PlayRequest, shared: &Arc<Shared>) -> Result<Prepared, String> {
-    validate_midi(&request.midi_bytes)?;
-    shared.check_current(request.generation)?;
-    let midi = MidiFile::new(&mut CancelReader::new(
-        Cursor::new(&request.midi_bytes),
-        shared,
-        request.generation,
-    ))
-    .map_err(|e| format!("Cannot load MIDI: {e}"))?;
-    let duration_seconds = midi.get_length();
-    if !duration_seconds.is_finite() || duration_seconds < 0.0 {
-        return Err("MIDI has an invalid playback duration".into());
-    }
-    let bytes = read_soundfont(&request.soundfont, shared, request.generation)?;
-    validate_soundfont(&bytes)?;
-    let soundfont = SoundFont::new(&mut CancelReader::new(
-        Cursor::new(&bytes),
-        shared,
-        request.generation,
-    ))
-    .map_err(|e| format!("Cannot load SoundFont {}: {e}", request.soundfont.display()))?;
-    if soundfont.get_presets().is_empty() || soundfont.get_wave_data().is_empty() {
-        return Err("SoundFont contains no playable presets or samples".into());
-    }
-    drop(bytes);
-    shared.check_current(request.generation)?;
+    let assets = load_assets(request, shared)?;
+    let duration_seconds = assets.duration_seconds;
     let device = open_output_device(request.output_device.as_deref())?;
     let supported = device
         .default_output_config()
@@ -388,11 +413,19 @@ fn prepare_playback(request: &PlayRequest, shared: &Arc<Shared>) -> Result<Prepa
     }
     let mut settings = SynthesizerSettings::new(config.sample_rate as i32);
     settings.maximum_polyphony = 256;
-    let synthesizer = Synthesizer::new(&Arc::new(soundfont), &settings)
+    let synthesizer = Synthesizer::new(&assets.soundfont, &settings)
         .map_err(|e| format!("Cannot initialise GM synthesizer: {e}"))?;
     let mut sequencer = MidiFileSequencer::new(synthesizer);
-    sequencer.play(&Arc::new(midi), false);
-    let renderer = Renderer::new(sequencer, config.sample_rate, duration_seconds);
+    sequencer.play(&assets.midi, false);
+    let start_seconds = request.start_seconds.min(duration_seconds);
+    fast_forward_to(&mut sequencer, start_seconds, shared, request.generation)?;
+    let reached_seconds = sequencer.position_seconds().clamp(0.0, duration_seconds);
+    let renderer = Renderer::new(
+        sequencer,
+        config.sample_rate,
+        duration_seconds,
+        reached_seconds,
+    );
     shared.check_current(request.generation)?;
     let stream = match supported.sample_format() {
         cpal::SampleFormat::I8 => {
@@ -437,6 +470,83 @@ fn prepare_playback(request: &PlayRequest, shared: &Arc<Shared>) -> Result<Prepa
         stream: Box::new(stream),
         duration_seconds,
     })
+}
+
+fn load_assets(request: &PlayRequest, shared: &Arc<Shared>) -> Result<Arc<CachedAssets>, String> {
+    let reused = shared
+        .control
+        .lock()
+        .assets
+        .clone()
+        .filter(|assets| assets.matches(request));
+    if let Some(assets) = reused {
+        return Ok(assets);
+    }
+    validate_midi(&request.midi_bytes)?;
+    shared.check_current(request.generation)?;
+    let midi = Arc::new(
+        MidiFile::new(&mut CancelReader::new(
+            Cursor::new(&request.midi_bytes),
+            shared,
+            request.generation,
+        ))
+        .map_err(|e| format!("Cannot load MIDI: {e}"))?,
+    );
+    let duration_seconds = midi.get_length();
+    if !duration_seconds.is_finite() || duration_seconds < 0.0 {
+        return Err("MIDI has an invalid playback duration".into());
+    }
+    let bytes = read_soundfont(&request.soundfont, shared, request.generation)?;
+    validate_soundfont(&bytes)?;
+    let soundfont = Arc::new(
+        SoundFont::new(&mut CancelReader::new(
+            Cursor::new(&bytes),
+            shared,
+            request.generation,
+        ))
+        .map_err(|e| format!("Cannot load SoundFont {}: {e}", request.soundfont.display()))?,
+    );
+    if soundfont.get_presets().is_empty() || soundfont.get_wave_data().is_empty() {
+        return Err("SoundFont contains no playable presets or samples".into());
+    }
+    drop(bytes);
+    shared.check_current(request.generation)?;
+    let assets = Arc::new(CachedAssets {
+        soundfont,
+        soundfont_path: request.soundfont.clone(),
+        midi,
+        midi_bytes: request.midi_bytes.clone(),
+        duration_seconds,
+    });
+    shared.publish_assets(request.generation, assets.clone());
+    Ok(assets)
+}
+
+/// Advances the synthesizer to a scrub target by rendering the skipped audio and dropping
+/// it; rustysynth exposes no locate call, so this is what makes the note tails at the
+/// target match continuous playback.
+fn fast_forward_to<S: Sequence>(
+    sequence: &mut S,
+    target_seconds: f64,
+    shared: &Shared,
+    generation: u64,
+) -> Result<(), String> {
+    let mut left = [0.0_f32; RENDER_BLOCK];
+    let mut right = [0.0_f32; RENDER_BLOCK];
+    let mut blocks_since_check = 0_u32;
+    while sequence.position_seconds() < target_seconds {
+        let before = sequence.position_seconds();
+        sequence.render(&mut left, &mut right);
+        if sequence.position_seconds() <= before {
+            break;
+        }
+        blocks_since_check += 1;
+        if blocks_since_check == 64 {
+            blocks_since_check = 0;
+            shared.check_current(generation)?;
+        }
+    }
+    Ok(())
 }
 
 fn open_output_device(wanted: Option<&str>) -> Result<cpal::Device, String> {
@@ -503,6 +613,7 @@ where
 trait Sequence {
     fn render(&mut self, left: &mut [f32], right: &mut [f32]);
     fn stop(&mut self);
+    fn position_seconds(&self) -> f64;
 }
 
 impl Sequence for MidiFileSequencer {
@@ -512,6 +623,10 @@ impl Sequence for MidiFileSequencer {
 
     fn stop(&mut self) {
         MidiFileSequencer::stop(self);
+    }
+
+    fn position_seconds(&self) -> f64 {
+        MidiFileSequencer::get_position(self)
     }
 }
 
@@ -524,12 +639,15 @@ struct Renderer<S> {
 }
 
 impl<S: Sequence> Renderer<S> {
-    fn new(sequence: S, sample_rate: u32, duration_seconds: f64) -> Self {
+    fn new(sequence: S, sample_rate: u32, duration_seconds: f64, start_seconds: f64) -> Self {
+        let total_frames = (duration_seconds * sample_rate as f64).ceil() as u64;
         Self {
             sequence,
             sample_rate,
-            total_frames: (duration_seconds * sample_rate as f64).ceil() as u64,
-            rendered_frames: 0,
+            total_frames,
+            rendered_frames: (start_seconds * sample_rate as f64)
+                .round()
+                .clamp(0.0, total_frames as f64) as u64,
             stopped: false,
         }
     }
@@ -912,6 +1030,7 @@ mod tests {
         stops: usize,
         left: f32,
         right: f32,
+        position_seconds: f64,
     }
 
     impl Default for FakeSequence {
@@ -921,6 +1040,7 @@ mod tests {
                 stops: 0,
                 left: 0.8,
                 right: -0.4,
+                position_seconds: 0.0,
             }
         }
     }
@@ -928,25 +1048,34 @@ mod tests {
     impl Sequence for FakeSequence {
         fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
             self.rendered += left.len();
+            self.position_seconds += left.len() as f64 / 100.0;
             left.fill(self.left);
             right.fill(self.right);
         }
         fn stop(&mut self) {
             self.stops += 1;
         }
+        fn position_seconds(&self) -> f64 {
+            self.position_seconds
+        }
     }
 
     fn render_fixture(duration: f64) -> (MidiPreviewPlayer, Renderer<FakeSequence>) {
+        render_fixture_at(duration, 0.0)
+    }
+
+    fn render_fixture_at(duration: f64, start: f64) -> (MidiPreviewPlayer, Renderer<FakeSequence>) {
         let player = MidiPreviewPlayer::new();
         {
             let mut control = player.shared.control.lock();
             control.generation = 1;
             control.snapshot.state = MidiPlaybackState::Loading;
+            control.snapshot.position_seconds = start;
         }
         assert!(player.shared.ready(1, duration));
         (
             player,
-            Renderer::new(FakeSequence::default(), 100, duration),
+            Renderer::new(FakeSequence::default(), 100, duration, start),
         )
     }
 
@@ -1026,6 +1155,169 @@ mod tests {
         renderer.render(&mut output, 2, &player.shared, 1);
         assert_eq!(player.snapshot().state, MidiPlaybackState::Finished);
         assert!(output.iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
+    fn a_scrub_reports_absolute_time_and_still_ends_at_the_original_end() {
+        let (player, mut renderer) = render_fixture_at(1.0, 0.6);
+        assert_eq!(renderer.sequence.rendered, 0);
+        let mut output = [0.0f32; 40];
+        renderer.render(&mut output, 2, &player.shared, 1);
+        assert_eq!(player.snapshot().position_seconds, 0.8);
+        assert_eq!(renderer.sequence.rendered, 20);
+        renderer.render(&mut output, 2, &player.shared, 1);
+        assert_eq!(player.snapshot().state, MidiPlaybackState::Finished);
+        assert_eq!(player.snapshot().position_seconds, 1.0);
+        assert_eq!(renderer.sequence.rendered, 40);
+    }
+
+    #[test]
+    fn fast_forward_renders_up_to_the_target() {
+        let shared = Shared::default();
+        shared.control.lock().generation = 7;
+        let mut sequence = FakeSequence::default();
+        fast_forward_to(&mut sequence, 0.5, &shared, 7).unwrap();
+        assert_eq!(sequence.rendered, 64);
+        assert!(sequence.position_seconds() >= 0.5);
+    }
+
+    #[test]
+    fn fast_forward_gives_up_when_the_clock_stops_instead_of_spinning() {
+        struct Stalled;
+        impl Sequence for Stalled {
+            fn render(&mut self, _left: &mut [f32], _right: &mut [f32]) {}
+            fn stop(&mut self) {}
+            fn position_seconds(&self) -> f64 {
+                3.0
+            }
+        }
+        let shared = Shared::default();
+        shared.control.lock().generation = 7;
+        fast_forward_to(&mut Stalled, 60.0, &shared, 7).unwrap();
+    }
+
+    #[test]
+    fn a_replaced_request_cancels_a_seek_early() {
+        let shared = Shared::default();
+        shared.control.lock().generation = 7;
+        let mut sequence = FakeSequence::default();
+        assert_eq!(
+            fast_forward_to(&mut sequence, 60.0, &shared, 8).unwrap_err(),
+            "MIDI playback cancelled"
+        );
+        assert_eq!(sequence.rendered, 64 * 64);
+    }
+
+    #[test]
+    fn a_scrub_while_paused_holds_the_requested_position() {
+        let (mut player, events) = fake_player();
+        player
+            .play_at(midi(), "fake.sf2".into(), None, 1.25, true)
+            .unwrap();
+        wait_state(&player, MidiPlaybackState::Paused);
+        assert_eq!(player.snapshot().position_seconds, 1.25);
+        assert_eq!(receive(&events).0, "load");
+    }
+
+    #[test]
+    fn an_out_of_range_start_never_reaches_the_worker() {
+        let (mut player, events) = fake_player();
+        for start in [-0.5, f64::NAN, f64::INFINITY] {
+            assert!(player
+                .play_at(midi(), "fake.sf2".into(), None, start, false)
+                .is_err());
+            assert_eq!(player.snapshot().state, MidiPlaybackState::Error);
+        }
+        assert!(events.try_recv().is_err());
+    }
+
+    fn vlq(mut value: u32) -> Vec<u8> {
+        let mut bytes = vec![(value & 0x7f) as u8];
+        value >>= 7;
+        while value > 0 {
+            bytes.push(((value & 0x7f) as u8) | 0x80);
+            value >>= 7;
+        }
+        bytes.reverse();
+        bytes
+    }
+
+    /// Four piano notes over ~6 s: non-silent material on both sides of a seek.
+    fn four_notes() -> Vec<u8> {
+        let mut track = Vec::new();
+        track.extend_from_slice(&vlq(0));
+        track.extend_from_slice(&[0xff, 0x51, 0x03, 0x07, 0xa1, 0x20]);
+        track.extend_from_slice(&vlq(0));
+        track.extend_from_slice(&[0xc0, 0x00]);
+        for key in [60, 64, 67, 72] {
+            track.extend_from_slice(&vlq(960));
+            track.extend_from_slice(&[0x90, key, 100]);
+            track.extend_from_slice(&vlq(480));
+            track.extend_from_slice(&[0x80, key, 0]);
+        }
+        track.extend_from_slice(&vlq(0));
+        track.extend_from_slice(&[0xff, 0x2f, 0x00]);
+        let mut bytes = b"MThd\0\0\0\x06\0\0\0\x01\x01\xe0MTrk".to_vec();
+        bytes.extend_from_slice(&(track.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&track);
+        bytes
+    }
+
+    /// Renders from `start_seconds` to the end, reporting where the seek actually landed.
+    fn render_from(
+        soundfont: &Arc<SoundFont>,
+        midi: &Arc<MidiFile>,
+        duration: f64,
+        start_seconds: f64,
+    ) -> (Vec<f32>, u64) {
+        let sample_rate = 44_100_u32;
+        let mut settings = SynthesizerSettings::new(sample_rate as i32);
+        settings.maximum_polyphony = 256;
+        let mut sequence = MidiFileSequencer::new(Synthesizer::new(soundfont, &settings).unwrap());
+        sequence.play(midi, false);
+        let shared = Shared::default();
+        shared.control.lock().generation = 1;
+        fast_forward_to(&mut sequence, start_seconds, &shared, 1).unwrap();
+        let landed = sequence.position_seconds().clamp(0.0, duration);
+        let landed_frames = (landed * sample_rate as f64).round() as u64;
+        let total_frames = (duration * sample_rate as f64).ceil() as u64;
+        let mut renderer = Renderer::new(sequence, sample_rate, duration, landed);
+        {
+            let mut control = shared.control.lock();
+            control.snapshot.state = MidiPlaybackState::Playing;
+            control.snapshot.duration_seconds = duration;
+        }
+        let mut output = vec![0.0_f32; (total_frames - landed_frames) as usize * 2];
+        renderer.render(&mut output, 2, &shared, 1);
+        (output, landed_frames)
+    }
+
+    #[test]
+    #[ignore = "needs a real GM SoundFont at .work/transcription/soundfonts/preview.sf2"]
+    fn a_scrub_lands_on_the_samples_continuous_playback_would_have_reached() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.work/transcription/soundfonts/preview.sf2");
+        let mut bytes = Vec::new();
+        File::open(&path)
+            .and_then(|mut file| file.read_to_end(&mut bytes))
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let soundfont = Arc::new(SoundFont::new(&mut Cursor::new(bytes)).unwrap());
+        let midi = Arc::new(MidiFile::new(&mut Cursor::new(four_notes())).unwrap());
+        let duration = midi.get_length();
+
+        let (whole, _) = render_from(&soundfont, &midi, duration, 0.0);
+        let (seeked, landed_frames) = render_from(&soundfont, &midi, duration, duration * 0.5);
+        assert!(landed_frames > 0 && landed_frames * 2 < whole.len() as u64);
+        let tail = &whole[landed_frames as usize * 2..];
+        assert_eq!(seeked.len(), tail.len());
+        assert!(seeked.iter().any(|value| *value != 0.0));
+        assert!(
+            seeked
+                .iter()
+                .zip(tail)
+                .all(|(seeked, continuous)| seeked == continuous),
+            "seeking changed the rendered audio"
+        );
     }
 
     #[test]
