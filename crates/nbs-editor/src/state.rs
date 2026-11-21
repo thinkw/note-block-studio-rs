@@ -204,6 +204,7 @@ pub enum WindowKind {
     AudioSettings,
     DatapackExport,
     MidiImport,
+    Transcription,
     /// 原版 `w_mididevices`（`draw_window_mididevices.gml`）：实时 MIDI 输入的
     /// 设备管理器，500×350，设备名 + 指派音色两列。
     MidiDevices,
@@ -289,6 +290,7 @@ impl WindowKind {
             Self::DatapackExport => tr("Data Pack Export", "导出数据包"),
             // 原版 `draw_window_midi_import.gml` 中文分支画的是 `"导入MIDI"`。
             Self::MidiImport => tr("MIDI Import", "导入MIDI"),
+            Self::Transcription => tr("Audio to MIDI / preview", "音频转 MIDI／预览"),
             // 原版 draw_window_mididevices.gml:11-12：窗口标题就在框里。
             Self::MidiDevices => tr("MIDI device manager", "MIDI 设备管理器"),
             Self::SoundImport => tr("Import sounds", "导入音效"),
@@ -515,6 +517,11 @@ pub enum DialogAction {
     /// 端口自加：MAESTRO 机体节目单的保存框，扩展名 `.schem`（WorldEdit gzip 格式）。
     ExportMaestro,
     ImportMidi,
+    TranscriptionAudio,
+    TranscriptionMidi,
+    TranscriptionModel,
+    TranscriptionSoundFont,
+    SaveTranscriptionMidi,
     ImportPattern,
     ImportSchematic,
     /// 原版「导入背景图片」：`menu_click.gml:57-58` / `:367-368`，选完直接 `wallpaper_init(temppath)`。
@@ -543,6 +550,7 @@ impl DialogAction {
                 | Self::ExportPattern
                 | Self::ExportMaestro
                 | Self::SaveExtraNotes
+                | Self::SaveTranscriptionMidi
                 // 原版选文件夹走的是 `get_save_filename_ext`（见 `picker_spec` 里那条），
                 // 不是目录选择器，所以这里也算「保存」式对话框。
                 | Self::PickFolder(_)
@@ -555,7 +563,10 @@ impl DialogAction {
             Self::ExportAudio => "mp3",
             // 原版 dat_usezip 默认开，对话框就是 *.zip；关掉时改成选目录（见 set_ext("")）。
             Self::ExportDatapack => "zip",
-            Self::ExportMidi | Self::ImportMidi => "mid",
+            Self::ExportMidi | Self::ImportMidi | Self::TranscriptionMidi | Self::SaveTranscriptionMidi => "mid",
+            Self::TranscriptionAudio => "wav",
+            Self::TranscriptionModel => "safetensors",
+            Self::TranscriptionSoundFont => "sf2",
             Self::ExportPng => "png",
             // 原版：get_open_filename_ext("Minecraft Schematics (*.schematic)|*.schematic", …)。
             Self::ExportSchematic | Self::ImportSchematic => "schematic",
@@ -668,9 +679,10 @@ impl FileDialog {
 
     pub fn refresh(&mut self) {
         let ext = self.ext;
-        // 原版背景图那条过滤器一次放行三个扩展名（`Image Files (*.png, *.jpg, *.jpeg)`），
-        // 端口其余对话框都是单扩展名，所以只在这一条上放宽。
         let image_exts = matches!(self.action, DialogAction::ImportBackground);
+        let audio_exts = matches!(self.action, DialogAction::TranscriptionAudio);
+        let midi_exts = matches!(self.action, DialogAction::TranscriptionMidi);
+        let transcription_file = matches!(self.action, DialogAction::TranscriptionModel | DialogAction::TranscriptionSoundFont);
         self.entries = std::fs::read_dir(&self.dir)
             .ok()
             .into_iter()
@@ -684,6 +696,9 @@ impl FileDialog {
                     || p.is_dir()
                     || got == ext
                     || (image_exts && matches!(got, "png" | "jpg" | "jpeg"))
+                    || (audio_exts && matches!(got.to_ascii_lowercase().as_str(), "wav" | "flac" | "mp3" | "ogg" | "m4a" | "aac" | "aif" | "aiff" | "opus" | "webm"))
+                    || (midi_exts && matches!(got.to_ascii_lowercase().as_str(), "mid" | "midi"))
+                    || (transcription_file && got.eq_ignore_ascii_case(ext))
             })
             .map(|e| e.path())
             .collect();
@@ -794,6 +809,26 @@ impl FileDialog {
             DialogAction::ImportMidi => (
                 tr("Import from MIDI", "从 MIDI 导入"),
                 vec![filter("MIDI Sequences (*.mid)", "*.midi;*.mid")],
+            ),
+            DialogAction::TranscriptionAudio => (
+                tr("Choose audio to transcribe", "选择待识别的音频"),
+                vec![filter("Audio files", "*.wav;*.flac;*.mp3;*.ogg;*.m4a;*.aac;*.aif;*.aiff;*.opus;*.webm")],
+            ),
+            DialogAction::TranscriptionMidi => (
+                tr("Preview original MIDI", "预览原始 MIDI"),
+                vec![filter("MIDI Sequences", "*.mid;*.midi")],
+            ),
+            DialogAction::TranscriptionModel => (
+                tr("Choose local model weights", "选择本地模型权重"),
+                vec![filter("SafeTensors weights", "*.safetensors")],
+            ),
+            DialogAction::TranscriptionSoundFont => (
+                tr("Choose GM SoundFont", "选择 GM 音色库"),
+                vec![filter("SoundFont 2", "*.sf2")],
+            ),
+            DialogAction::SaveTranscriptionMidi => (
+                tr("Save original MIDI", "保存原始 MIDI"),
+                vec![filter("MIDI Sequences", "*.mid")],
             ),
             // 原版 `pattern_import.gml:23`。
             DialogAction::ImportPattern => (
@@ -1134,6 +1169,7 @@ pub struct EditorState {
     pub midi_enhanced: nbs_io::midi_enhanced::EnhancedMidiOptions,
     pub midi_enhanced_options: MidiImportOptions,
     pub midi_enhanced_check: Option<Result<nbs_io::midi_enhanced::EnhancedImportReport, String>>,
+    pub transcription: crate::transcription::TranscriptionState,
     /// 原版 `midi_*` 那一堆全局：解析好的 MIDI。导入窗口只在这有值时才打开——
     /// 原版 `open_midi()` 是先解析、再 `window = w_midi`，没有「先开空窗口」这条路。
     pub midi_data: Option<nbs_io::midi::MidiData>,
@@ -1477,6 +1513,7 @@ impl EditorState {
             midi_options,
             midi_enhanced: nbs_io::midi_enhanced::EnhancedMidiOptions::default(),
             midi_enhanced_check: None,
+            transcription: crate::transcription::TranscriptionState::default(),
             midi_data: None,
             midi_file: String::new(),
             midi_tab: 0,

@@ -17,6 +17,7 @@
 //! 无音频设备时 `CpalEngine` 自动降级为纯时钟，编辑器仍可完整使用。
 
 pub mod engine;
+pub mod midi_preview;
 pub mod mixer;
 pub mod samples;
 pub mod scheduler;

@@ -458,7 +458,7 @@ fn handle_timeline_input(state: &mut EditorState, input: &InputSnapshot, rect: R
     let Some(pos) = input.pointer.filter(|p| rect.union(grid).contains(*p)) else {
         return;
     };
-    if state.window.is_some() || state.is_playing() || state.interaction.mode != DragMode::None {
+    if canvas_blocked(state) || state.is_playing() || state.interaction.mode != DragMode::None {
         return;
     }
     // 原版 `:132/141/148`：三个 16px 命中框，播放头优先、区间两端让位（`cursmarker`）。
@@ -511,6 +511,15 @@ fn handle_timeline_input(state: &mut EditorState, input: &InputSnapshot, rect: R
     }
 }
 
+/// 原版用一个全局 `window` 变量表示「最前面有东西挡着」，画布侧的每一段输入都带
+/// `window = 0` 这道门：滚轮换音色/换键在 `control_draw.gml:227`、悬停音符改属性在
+/// :125 的总闸里、滚动条的滚轮和拖拽在 `draw_scrollbar.gml:22/51/161/188`、
+/// 标尺手柄在 `:132-151`；工具栏音色框展开也写成 `window = w_insbox`（:1975）。
+/// 端口把这几样拆成了三个字段，这里合成回同一个判断。
+fn canvas_blocked(state: &EditorState) -> bool {
+    state.window.is_some() || state.insbox_open || state.context_menu.is_some()
+}
+
 fn handle_grid_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect) {
     state.interaction.click_in_grid = false;
 
@@ -521,13 +530,17 @@ fn handle_grid_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect)
     state.hover_cell = pointer_cell.map(|(t, l)| (t, l));
     let hover = pointer_cell.map(|(t, l)| (t as i64, l as i64));
 
-    let interactive = hover.is_some() && state.window.is_none() && state.context_menu.is_none();
+    let blocked = canvas_blocked(state);
+    let interactive = hover.is_some() && !blocked;
     let pointer_in_grid = input.pointer.is_some_and(|p| rect.contains(p));
 
     // 滚轮：悬停音符调属性 / 按 `mousewheel` 档位决定是平移、换音色还是换键。
     // Ctrl+滚轮不在这里处理——原版把它归在键盘快捷键段（`control_draw.gml:736-751`），
     // 改的是整窗口缩放，见 `shortcuts.rs`。
-    if pointer_in_grid && !input.ctrl && (input.scroll.x.abs() > 0.0 || input.scroll.y.abs() > 0.0)
+    if !blocked
+        && pointer_in_grid
+        && !input.ctrl
+        && (input.scroll.x.abs() > 0.0 || input.scroll.y.abs() > 0.0)
     {
         let delta = input.scroll.y + input.scroll.x;
         let d = if delta > 0.0 { 1 } else { -1 };
@@ -1011,6 +1024,11 @@ fn scroll_bars(state: &mut EditorState, input: &InputSnapshot, cell: f32, axis: 
 
 fn handle_scrollbar_input(state: &mut EditorState, input: &InputSnapshot, hbar: Rect, vbar: Rect) {
     let Some(pos) = input.pointer else { return };
+    // 原版 `draw_scrollbar.gml` 的滚轮段和拖拽段都带 `(window = 0 || win = 1)`，
+    // 而主界面两根条传的 `win` 恒为 0，所以有窗口挡着时条既不能滚也不能点。
+    if canvas_blocked(state) {
+        return;
+    }
     let (hm, hmax, ht) = h_geometry(state, hbar);
     let (vm, vmax, vt) = v_geometry(state, vbar);
 
@@ -2130,6 +2148,9 @@ mod tests {
     /// 一根滚得动的条：320×128 的网格（11 列 × 5 行）配 200 刻 / 40 层的歌。
     fn scroll_state() -> EditorState {
         let mut st = EditorState::for_test();
+        // 出厂 `for_test` 带着欢迎窗，而窗口挡在最前面时画布不接输入（见
+        // `canvas_blocked`）——这里要的是没遮挡的界面。
+        st.window = None;
         st.doc.song.enda = 200;
         st.doc.song.endb = 40;
         st.viewport.origin = Pos2::ZERO;
@@ -2240,6 +2261,117 @@ mod tests {
             st.doc.song.enda - 1,
             "反向四帧（每帧 1/4 格）= 退一格，不能把攒着的 20 帧一次退光"
         );
+    }
+
+    /// 前台有东西挡着时，滚轮和滚动条点击都不许落到背后的画布。原版的门是
+    /// `window = 0`：画布滚轮段 `control_draw.gml:227` 自带、音符改属性在 :125 的
+    /// 总闸里、`draw_scrollbar.gml:22/51` 的滚轮和拖拽都带、音色框展开即
+    /// `control_draw.gml:1975` 的 `window = w_insbox`。
+    #[test]
+    fn a_front_overlay_keeps_the_wheel_and_clicks_off_the_canvas() {
+        let _prefs = crate::isolate_prefs();
+        let grid = Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 128.0));
+        let hbar = Rect::from_min_size(pos2(0.0, 128.0), Vec2::new(320.0, 16.0));
+        let vbar = Rect::from_min_size(pos2(320.0, 0.0), Vec2::new(16.0, 128.0));
+
+        // 一帧滚轮（向下一格）：返回视口位置和这一帧新发了几条命令。
+        let roll = |st: &mut EditorState, at: Pos2| -> (u32, u32, usize) {
+            let mut input = wheel(0.0, -1.0);
+            input.pointer = Some(at);
+            input.hover = Some(at);
+            let before = st.pending.len();
+            handle_grid_input(st, &input, grid);
+            handle_scrollbar_input(st, &input, hbar, vbar);
+            (
+                st.viewport.start_tick,
+                st.viewport.start_layer,
+                st.pending.len() - before,
+            )
+        };
+
+        // 遮挡的三种形态：窗口在最上层、右键菜单、展开的音色框。
+        let block = |st: &mut EditorState, which: u8| match which {
+            0 => st.window = Some(crate::state::WindowKind::Preferences),
+            1 => {
+                st.context_menu = Some(ContextMenu {
+                    pos: pos2(100.0, 64.0),
+                    cell: (3, 2),
+                    kind: ContextKind::Grid,
+                })
+            }
+            _ => st.insbox_open = true,
+        };
+
+        // 没遮挡时这三条必须真的会动，否则下面的断言是空的。
+        let mut st = scroll_state();
+        assert_eq!(
+            roll(&mut st, pos2(100.0, 64.0)),
+            (0, 1, 0),
+            "画布上的滚轮要平移视口"
+        );
+        let mut st = scroll_state();
+        assert_eq!(
+            roll(&mut st, pos2(328.0, 64.0)),
+            (0, 1, 0),
+            "滚动条上的滚轮要平移视口"
+        );
+        let mut st = scroll_state();
+        st.prefs.changepitch = true;
+        st.doc.song.set(3, 2, nbs_core::model::Note::new(0, 45));
+        assert_eq!(
+            roll(&mut st, pos2(100.0, 64.0)).2,
+            1,
+            "停在音符上要发改属性命令"
+        );
+        let mut st = scroll_state();
+        st.prefs.mousewheel = 1;
+        assert_eq!(
+            roll(&mut st, pos2(100.0, 64.0)).2,
+            1,
+            "mousewheel=1 时要发换音色命令"
+        );
+        // 点在滚动条滑块上：把 start_layer 顶到某个值（下面遮挡版必须纹丝不动）。
+        let mut st = scroll_state();
+        st.viewport.start_layer = 12;
+        let mut click = mouse_xy(328.0, 64.0, true, true, false);
+        click.scroll = Vec2::ZERO;
+        handle_scrollbar_input(&mut st, &click, hbar, vbar);
+        assert_ne!(st.viewport.start_layer, 12, "点滑轨空白处要跳过去");
+
+        for which in 0..3 {
+            let mut st = scroll_state();
+            block(&mut st, which);
+            assert_eq!(
+                roll(&mut st, pos2(100.0, 64.0)),
+                (0, 0, 0),
+                "第 {which} 种遮挡下，画布还吃了滚轮"
+            );
+            let mut st = scroll_state();
+            block(&mut st, which);
+            assert_eq!(
+                roll(&mut st, pos2(328.0, 64.0)),
+                (0, 0, 0),
+                "第 {which} 种遮挡下，滚动条还吃了滚轮"
+            );
+            let mut st = scroll_state();
+            block(&mut st, which);
+            st.prefs.changepitch = true;
+            st.doc.song.set(3, 2, nbs_core::model::Note::new(0, 45));
+            assert_eq!(
+                roll(&mut st, pos2(100.0, 64.0)).2,
+                0,
+                "第 {which} 种遮挡下，滚轮还能改到背后的音符"
+            );
+            let mut st = scroll_state();
+            block(&mut st, which);
+            let mut click = mouse_xy(328.0, 64.0, true, true, false);
+            click.scroll = Vec2::ZERO;
+            handle_scrollbar_input(&mut st, &click, hbar, vbar);
+            assert_eq!(
+                st.viewport.start_layer, 0,
+                "第 {which} 种遮挡下，点背后的滚动条仍然生效"
+            );
+        }
     }
 
     /// #93.1 + #93.4：滑块按住哪儿就贴在哪儿（指针位移 = 滑块位移，一像素不差），
