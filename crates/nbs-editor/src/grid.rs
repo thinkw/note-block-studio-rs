@@ -1380,22 +1380,33 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
         if blackout { Color32::BLACK } else { th.grid_bg },
     ));
 
-    // 竖线：原版只有三种 —— 小节线（2px、alpha 0.3）、整 4 tick（1px、0.25）、其余（1px、0.1），
-    // 颜色一律是黑。原版没有横线。
+    // 竖线：原版 `control_draw.gml:311-321` 只有三种 —— 小节线 alpha 0.3、整 4 tick 0.25、
+    // 其余 0.1，颜色一律是黑。原版没有横线。
+    // 宽度按缩放换算，但钳到不低于 1 物理像素：原版整幅画在固定分辨率贴图上再缩放，
+    // 亚像素的线被过滤摊开（淡，但看得见）；端口直接按物理坐标画，egui 无圆角填矩形
+    // 的边走硬采样，宽度不足 1px 会让整条线一个像素都不落地（实测 50% 档 83 条只剩 5 条）。
     if state.flags.show_grid_lines && !blackout {
+        let small = u < 1.0;
+        // 原版 `:314`：缩放小于 1 时小节线提到 alpha 0.5（Issue #254）。
+        let bar = if small {
+            th.grid_bar_small
+        } else {
+            th.grid_bar
+        };
+        // 原版 `:315-316`：播放中 + 按帧跟随 + 缩放小于 1 时小节线改画 1px 的线，不再加粗。
+        let thin_bar = small && state.follow_mode == 2 && state.is_playing();
         for tick in t0..t1 {
             let x = vp.tick_x(tick as i64);
             if x < rect.min.x - 1.0 || x > rect.max.x + 1.0 {
                 continue;
             }
             let is_bar = tick % ts == 0;
-            let is_beat = tick % 4 == 0;
             let (w, c) = if is_bar {
-                (2.0 * u, th.grid_bar)
-            } else if is_beat {
-                (1.0 * u, th.grid_beat)
+                (if thin_bar { 1.0 } else { (2.0 * u).max(1.0) }, bar)
+            } else if tick % 4 == 0 {
+                (u.max(1.0), th.grid_beat)
             } else {
-                (1.0 * u, th.grid_line)
+                (u.max(1.0), th.grid_line)
             };
             shapes.push(Shape::rect_filled(
                 Rect::from_min_size(pos2(x, rect.min.y), Vec2::new(w, rect.height())),
@@ -2700,6 +2711,78 @@ mod tests {
             .position(|s| matches!(&s.shape, egui::Shape::Text(_)))
             .expect("标尺文字");
         assert!(idx < txt, "背景矩形 #{idx} 必须排在文字 #{txt} 之前");
+    }
+
+    /// #113：缩放小于 1 时竖线宽度不能跟着往 1 物理像素以下走。egui 无圆角填矩形的边
+    /// 是硬采样，宽度不足 1px 的线只有相位撞上像素中心才落地 —— 实测 50% 档 83 条
+    /// 只剩 5 条小节线。顺带钉住原版 `control_draw.gml:314` 的提亮和 `:315-316` 那条
+    /// 「播放中 + 按帧跟随 + 缩放 <1 改画 1px」的分支。
+    #[test]
+    fn the_grid_vlines_stay_one_pixel_wide_when_scaled_down() {
+        let _prefs = crate::isolate_prefs();
+
+        // 取本帧所有竖线矩形：黑、又细（<8px）又顶满网格高，按 alpha 档认线。
+        let vlines = |scale: f32, follow: u8, playing: bool| -> Vec<(f32, u8)> {
+            let mut st = ruler_state();
+            st.viewport.scale = scale;
+            st.follow_mode = follow;
+            if playing {
+                st.begin_playback();
+            }
+            let out = {
+                let ctx = egui::Context::default();
+                crate::fonts::install(&ctx);
+                ctx.run(egui::RawInput::default(), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        draw_grid(&mut st, ui, grid_rect());
+                    });
+                })
+            };
+            if playing {
+                st.audio.stop();
+            }
+            out.shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::Shape::Rect(r)
+                        if (r.fill.r(), r.fill.g(), r.fill.b()) == (0, 0, 0)
+                            && r.rect.width() < 8.0
+                            && r.rect.height() > 100.0
+                            && matches!(r.fill.a(), 26 | 64 | 77 | 128) =>
+                    {
+                        Some((r.rect.width(), r.fill.a()))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // 网格宽 320：条数 = floor(320 / 格距) + 1。
+        let full = vlines(1.0, 0, false);
+        assert_eq!(full.len(), 11, "100% 档每条竖线都要提交");
+        assert!(full.iter().any(|&(_, a)| a == 77), "小节线用 alpha 0.3");
+
+        let half = vlines(0.5, 0, false);
+        assert_eq!(half.len(), 21, "50% 档每条竖线都要提交");
+        assert!(
+            half.iter().all(|&(w, _)| w >= 1.0),
+            "50% 档有不足 1 像素的竖线：{half:?}"
+        );
+        assert!(half.iter().any(|&(_, a)| a == 128), "原版 `:314`");
+        assert!(!half.iter().any(|&(_, a)| a == 77), "缩放 <1 不再用 0.3");
+
+        // 0.75 档小节线本征宽 1.5px，播放 + 按帧跟随时按原版 `:315` 退回 1px。
+        let still = vlines(0.75, 0, false);
+        assert_eq!(still.len(), 14);
+        assert!(
+            still.iter().any(|&(w, a)| a == 128 && w > 1.001),
+            "非播放态小节线保持加粗：{still:?}"
+        );
+        let played = vlines(0.75, 2, true);
+        assert!(
+            played.iter().all(|&(w, _)| w <= 1.001),
+            "原版 `:315-316`：{played:?}"
+        );
     }
 
     /// #95：网格里空格是箭头（原版 `cr_cross` 全文没用过，`control_draw.gml:125-129`
