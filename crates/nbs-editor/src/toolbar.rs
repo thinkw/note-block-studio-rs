@@ -254,6 +254,14 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                         state.emit(Command::ShowWindow(WindowKind::DatapackExport));
                         ui.close_menu();
                     }
+                    // 端口自加：MAESTRO 音乐机的节目单（.schem），要在已建好的机体里才出声。
+                    if ui
+                        .button(tr("MAESTRO machine sheet...", "MAESTRO 机体节目单…"))
+                        .clicked()
+                    {
+                        state.emit(Command::OpenMaestroExport);
+                        ui.close_menu();
+                    }
                     if ui.button(tr("Pattern...", "片段 (.nbp)…")).clicked() {
                         state.emit(Command::OpenDialog(
                             crate::state::DialogAction::ExportPattern,

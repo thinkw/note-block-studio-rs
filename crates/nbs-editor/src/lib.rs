@@ -1399,6 +1399,104 @@ mod gui_window_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// MAESTRO 那条导出（端口自加）走完整链路：菜单入口 → 一次性提示 → 窗口 →
+    /// 保存框扩展名 → 真落盘。断言的是磁盘上的字节头与报告，不是内部函数返回值。
+    #[test]
+    fn maestro_menu_entry_notice_dialog_and_file_are_real() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.window = None; // for_test() 带着开机欢迎窗，先关掉再走入口
+        state.prefs.warning_maestro = false;
+
+        dispatch(&mut state, commands::Command::OpenMaestroExport, &ctx);
+        assert_eq!(state.modals.items.len(), 1, "第一次用要先提示机器依赖");
+        assert_eq!(state.window, None, "提示没答完之前不开窗");
+        assert!(state.maestro_report.is_some(), "开窗前先算好改写清单");
+
+        dispatch(&mut state, commands::Command::AnswerModal(true), &ctx);
+        assert_eq!(state.window, Some(WindowKind::MaestroExport));
+        assert!(
+            state.prefs.warning_maestro,
+            "提示看过就落盘，同 warning_schematic 的规矩"
+        );
+
+        // 上屏检查（「代码里有 ≠ 看得见」）：四档模式、清单标题、按钮都要真画出来。
+        let _zh = crate::LangGuard::set(1);
+        state.prefs.language = 1;
+        let painted: Vec<String> = settle(&mut state, &ctx)
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        for want in [
+            "MAESTRO 机体节目单",
+            "时间轴模式",
+            "对歌曲的改写",
+            "round",
+            "approximate",
+            "flexible",
+            "none",
+            "导出",
+            "关闭",
+        ] {
+            assert!(
+                painted.iter().any(|t| t == want),
+                "窗口里应画得出「{want}」: {painted:?}"
+            );
+        }
+
+        dispatch(&mut state, commands::Command::CloseWindow, &ctx);
+        dispatch(&mut state, commands::Command::OpenMaestroExport, &ctx);
+        assert!(state.modals.is_empty(), "第二次不再提示");
+        assert_eq!(state.window, Some(WindowKind::MaestroExport));
+
+        // 换取整模式：清单跟着重算，出厂档是 round。
+        assert_eq!(state.maestro_options.timing, nbs_io::TimingMode::Round);
+        state.maestro_options.timing = nbs_io::TimingMode::None;
+        state.refresh_maestro_preview();
+        frame(&mut state, &ctx);
+        state.maestro_options.timing = nbs_io::TimingMode::Round;
+        state.refresh_maestro_preview();
+
+        // 空歌要像 Schematic 窗口那样被闸门拦下：只报错，不弹保存框。
+        let demo = state.doc.song.clone();
+        state.doc.replace_song(nbs_core::model::Song::new());
+        state.refresh_maestro_preview();
+        dispatch(&mut state, commands::Command::ExportMaestroChecked, &ctx);
+        assert_eq!(state.modals.items.len(), 1, "空歌该被闸门拦下");
+        assert!(state.file_dialog.is_none(), "拦下之后不该有保存框");
+        dispatch(&mut state, commands::Command::AnswerModal(true), &ctx);
+        state.doc.replace_song(demo);
+        state.refresh_maestro_preview();
+
+        // 保存框：扩展名与默认名都要是 .schem（默认名取当前文件名，未存过的歌是 untitled）。
+        state.doc.song.filename = Some(PathBuf::from("Rust Rewrite Demo.nbs"));
+        dispatch(
+            &mut state,
+            commands::Command::OpenDialog(state::DialogAction::ExportMaestro),
+            &ctx,
+        );
+        let dialog = state.file_dialog.as_ref().expect("对话框已打开");
+        assert_eq!(dialog.ext, "schem", "机体吃的是 WorldEdit 的 .schem");
+        assert!(dialog.save);
+        assert_eq!(dialog.name, "Rust Rewrite Demo.schem");
+
+        let dir = scratch("maestro");
+        let out = dir.join("sheet.schem");
+        dispatch(&mut state, commands::Command::DialogConfirm(out.clone()), &ctx);
+        let bytes = std::fs::read(&out).expect("节目单已落盘");
+        assert_eq!(&bytes[..2], &[0x1f, 0x8b], "gzip 魔数");
+        assert!(state.export_status.is_some(), "窗口里要能看到这次改写了什么");
+        assert_eq!(state.window, Some(WindowKind::MaestroExport), "导出完窗口留着");
+        assert!(state.maestro_report.unwrap().streams > 0, "示例歌该有声音流");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 空名称必须像原版一样报错，并且不留半成品。
     #[test]
     fn datapack_export_refuses_an_empty_name() {

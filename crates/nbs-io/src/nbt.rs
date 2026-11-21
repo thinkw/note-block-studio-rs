@@ -345,6 +345,40 @@ mod tests {
     }
 
     #[test]
+    fn int_and_short_arrays_come_back_as_typed_lists() {
+        // MAESTRO 的 .schem 里 Offset 与 BlockEntities.Pos 是 TAG_Int_Array，
+        // 解析后统一收成 List(元素类型, ...)，读侧按 as_list 取即可。
+        let mut buf: Vec<u8> = vec![10, 0, 0];
+        buf.push(12);
+        buf.extend_from_slice(&(4u16).to_be_bytes());
+        buf.extend_from_slice(b"ints");
+        buf.extend_from_slice(&2i32.to_be_bytes());
+        buf.extend_from_slice(&7i32.to_be_bytes());
+        buf.extend_from_slice(&(-3i32).to_be_bytes());
+        buf.push(11);
+        buf.extend_from_slice(&(6u16).to_be_bytes());
+        buf.extend_from_slice(b"shorts");
+        buf.extend_from_slice(&2i32.to_be_bytes());
+        buf.extend_from_slice(&1i16.to_be_bytes());
+        buf.extend_from_slice(&(-2i16).to_be_bytes());
+        buf.push(0);
+
+        let root = parse(&buf).unwrap();
+        let (ty, items) = root.get("ints").unwrap().as_list().unwrap();
+        assert_eq!(ty, 3);
+        assert_eq!(
+            items.iter().map(Value::as_i32).collect::<Vec<_>>(),
+            [Some(7), Some(-3)]
+        );
+        let (ty, items) = root.get("shorts").unwrap().as_list().unwrap();
+        assert_eq!(ty, 2);
+        assert_eq!(
+            items.iter().map(Value::as_i16).collect::<Vec<_>>(),
+            [Some(1), Some(-2)]
+        );
+    }
+
+    #[test]
     fn truncated_and_oversized_input_fail_cleanly() {
         assert!(parse(&[10, 0, 3, b'A', 2, 0]).is_err());
         // list 声明 100 万个元素但后面没数据

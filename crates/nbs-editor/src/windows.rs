@@ -74,6 +74,8 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         WindowKind::SchematicExport => 560.0,
         // 原版 `draw_window_track_export` 也是 550×400。
         WindowKind::TrackExport => 560.0,
+        // 端口自加：MAESTRO 节目单窗口，改写清单最长，给到 600。
+        WindowKind::MaestroExport => 600.0,
         // 原版 `draw_window(x1, y1, x1 + 490, y1 + 450)`。
         WindowKind::MinecraftCompat => 490.0,
         // 原版 `draw_window(x1, y1, x1 + 600, y1 + 400 + navigation_space)`。
@@ -155,6 +157,7 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::SoundImport => sound_import_window(state, ui),
             WindowKind::SchematicExport => schematic_export_window(state, ui),
             WindowKind::TrackExport => track_export_window(state, ui),
+            WindowKind::MaestroExport => maestro_export_window(state, ui),
             WindowKind::DatapackExport => datapack_export_window(state, ui),
             WindowKind::PngExport => png_export_window(state, ui),
             WindowKind::Autosaves => autosaves_window(state, ui),
@@ -8472,6 +8475,87 @@ fn datapack_export_window(state: &mut EditorState, ui: &mut Ui) {
             state.set_message(tr(
                 "Data pack export defaults restored",
                 "已恢复数据包导出默认设置",
+            ));
+        }
+        if ui.button(tr("Close", "关闭")).clicked() {
+            state.emit(Command::CloseWindow);
+        }
+    });
+}
+
+/// 端口自加（用户要求「导出那一栏多加个 MAESTRO 格式」）：MAESTRO 机体节目单导出。
+/// 原版没有这一档，布局照数据包导出窗口：选项在上、说明贴着选项、底部三个按钮。
+fn maestro_export_window(state: &mut EditorState, ui: &mut Ui) {
+    ui.label(tr(
+        "This file is the instruction sheet for an already built MAESTRO music machine.\nIt carries no sound of its own and it does not build the machine.",
+        "这份文件是给已建好的 MAESTRO 音乐机读的节目单：\n它本身不含声音，也不会把机体搭出来。",
+    ));
+    ui.separator();
+
+    let timing = state.maestro_options.timing;
+    ui.label(tr("Timing mode", "时间轴模式"));
+    let mut picked: Option<nbs_io::TimingMode> = None;
+    for m in nbs_io::TimingMode::ALL {
+        if ui
+            .radio(timing == m, m.label())
+            .on_hover_text(m.hint())
+            .clicked()
+        {
+            picked = Some(m);
+        }
+    }
+    ui.label(RichText::new(timing.hint()).small().weak());
+    if let Some(m) = picked {
+        state.maestro_options.timing = m;
+        // 换模式即换改写结果，清单要跟着重算（用户要求「自动改写 + 看得见」）。
+        state.refresh_maestro_preview();
+    }
+
+    ui.separator();
+    ui.label(tr("Changes to the song", "对歌曲的改写"));
+    if let Some(e) = &state.maestro_error {
+        ui.label(RichText::new(e.replace('\n', " ")).small().color(Color32::from_rgb(200, 90, 90)));
+    } else if let Some(r) = &state.maestro_report {
+        let lines = r.lines();
+        if lines.is_empty() {
+            ui.label(RichText::new(tr(
+                "Nothing needs rewriting: this song already fits the machine.",
+                "无需改写：这首歌本就符合机体的范围。",
+            )));
+        }
+        for line in lines {
+            ui.label(RichText::new(format!("· {line}")).small());
+        }
+        let stats = if crate::lang() == 1 {
+            format!(
+                "产出：{} 条声音流，{} 组箱子（{} 组装了物品）。",
+                r.streams, r.chest_pairs, r.block_entities
+            )
+        } else {
+            format!(
+                "Output: {} sound streams, {} chest pairs ({} with contents).",
+                r.streams, r.chest_pairs, r.block_entities
+            )
+        };
+        ui.label(RichText::new(stats).small().weak());
+    }
+
+    if let Some(s) = &state.export_status {
+        ui.separator();
+        ui.label(RichText::new(s).small());
+    }
+    ui.separator();
+    ui.horizontal(|ui| {
+        if ui.button(tr("Export", "导出")).clicked() {
+            state.emit(Command::ExportMaestroChecked);
+        }
+        if ui.button(tr("Use default", "使用默认值")).clicked() {
+            state.maestro_options = nbs_io::MaestroOptions::default();
+            state.export_status = None;
+            state.refresh_maestro_preview();
+            state.set_message(tr(
+                "MAESTRO export defaults restored",
+                "已恢复 MAESTRO 导出默认设置",
             ));
         }
         if ui.button(tr("Close", "关闭")).clicked() {
