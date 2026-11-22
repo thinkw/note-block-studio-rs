@@ -54,6 +54,7 @@ fn fx_input(state: &EditorState, ctx: &Context, area: Rect) -> FxInput {
         speed: clock.speed(),
         scale,
         accent: state.theme.accent,
+        backdrop: state.theme.grid_bg,
         area,
         keyboard,
     }

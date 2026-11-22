@@ -12,11 +12,14 @@ use serde::{Deserialize, Serialize};
 
 use egui::{Color32, Pos2, Rect, Ui, Vec2};
 
+use super::blockrow::BlockRow;
 use super::keyboard::{is_white_key, KeyboardLayout, BLACK_LIFT, WHITE_HIT_H};
 use super::stage::Frame;
-use super::tiles::instrument_color;
+use super::tiles::{instrument_color, tile_size};
 use super::timeline::FxNote;
-use super::{EffectInfo, FxContext, PlaybackEffect, Surface};
+use super::{
+    fade, is_light, note_block, EffectInfo, FxContext, PlaybackEffect, Surface, STAGE_BACKDROP,
+};
 use crate::tr;
 
 /// 一屏最多留多少粒子。真曲子的密集段落一秒能进上百枚音符，每枚 6 粒，
@@ -42,6 +45,11 @@ pub struct Params {
     pub particles: bool,
     /// 胶囊按乐器上色（关掉就全用主题强调色，回到 Synthesia 那种单色瀑布）。
     pub color_by_instrument: bool,
+    /// 轨道里摆乐器方块而不是胶囊：方块排那套画法搬进瀑布（同一条键道、同一个落点，
+    /// 只是形状换成方块 + 贴图/乐器色）。
+    pub blocks: bool,
+    /// 舞台底色用黑色（`STAGE_BACKDROP`）；关掉就用主界面编辑区那块底色（浅色主题是白）。
+    pub dark_background: bool,
 }
 
 impl Default for Params {
@@ -52,6 +60,8 @@ impl Default for Params {
             lanes: true,
             particles: true,
             color_by_instrument: true,
+            blocks: false,
+            dark_background: false,
         }
     }
 }
@@ -212,6 +222,12 @@ impl PlaybackEffect for Synthesia {
                 tr("Color by instrument", "按乐器上色"),
             )
             .changed();
+        changed |= ui
+            .checkbox(&mut p.blocks, tr("Instrument blocks", "乐器方块"))
+            .changed();
+        changed |= ui
+            .checkbox(&mut p.dark_background, tr("Black background", "黑色背景"))
+            .changed();
         changed
     }
 
@@ -225,16 +241,26 @@ impl PlaybackEffect for Synthesia {
         let hit_y = layout.origin.y;
         let top_y = cx.area.min.y;
 
+        // 舞台底色：默认跟主界面编辑区同色（浅色主题就是那块白），勾上「黑色背景」
+        // 才回到原来那块。参考线和键位高亮的明暗跟着它翻，否则白底上整条线看不见。
+        let back = if self.params.dark_background {
+            STAGE_BACKDROP
+        } else {
+            cx.backdrop
+        };
+        let light = is_light(back);
+        out.rect(cx.area, back, 0.0);
+
         if self.params.lanes {
             // 轨道线从键盘上缘拉到屏幕顶，间距就是白键宽。
+            let guide = if light {
+                Color32::from_black_alpha(20)
+            } else {
+                Color32::from_white_alpha(14)
+            };
             for a in 0..=layout.slots {
                 let x = layout.slot_x(a);
-                out.line(
-                    Pos2::new(x, top_y),
-                    Pos2::new(x, hit_y),
-                    1.0 * scale,
-                    Color32::from_white_alpha(14),
-                );
+                out.line(Pos2::new(x, top_y), Pos2::new(x, hit_y), 1.0 * scale, guide);
             }
         }
 
@@ -272,27 +298,59 @@ impl PlaybackEffect for Synthesia {
             let center_y = Self::capsule_y(top_y, hit_y, ahead, self.params.fall_seconds);
             let capsule_w = rect.width() * 0.82;
             let capsule_h = layout.lane_width(note.key) * 1.15;
-            let body = Rect::from_center_size(
-                Pos2::new(rect.center().x, center_y),
-                Vec2::new(capsule_w, capsule_h),
-            );
+            let center = Pos2::new(rect.center().x, center_y);
             let color = capsule_color(
                 self.capsule_base(cx, note),
                 note.key,
                 note.velocity,
                 ahead,
             );
-            out.rect(body, color, capsule_w / 2.0);
+            // 两种画法摆在同一条轨道、同一个落点：胶囊（默认），或把方块排那套乐器方块
+            // 搬进来。方块边长照 `BlockRow::block_extent` 按本枚键道夹，和方块排一致，
+            // 免得同一条道上两种特效给出两个宽度互相盖住邻道。
+            let body = if self.params.blocks {
+                let (side, _) = BlockRow::block_extent(tile_size(scale), layout.lane_width(note.key));
+                Rect::from_center_size(center, Vec2::new(side, side))
+            } else {
+                Rect::from_center_size(center, Vec2::new(capsule_w, capsule_h))
+            };
+            if self.params.blocks {
+                let blk = note_block(cx, note.instrument, true);
+                let alpha = body_alpha(note.velocity, ahead);
+                match blk.texture {
+                    Some(tex) => {
+                        out.image(body, tex, Color32::from_white_alpha((255.0 * alpha) as u8))
+                    }
+                    None => {
+                        let tint = if self.params.color_by_instrument {
+                            blk.color
+                        } else {
+                            cx.accent
+                        };
+                        out.rect(body, fade(tint, alpha), 2.0 * scale);
+                        out.outlined(
+                            body,
+                            Color32::TRANSPARENT,
+                            (1.0 * scale, fade(Color32::from_gray(20), alpha)),
+                            2.0 * scale,
+                        );
+                    }
+                }
+            } else {
+                out.rect(body, color, capsule_w / 2.0);
+            }
             if ahead <= 0.0 {
                 // 刚落下的几枚：在击中线上发一束，并把对应琴键点亮。
-                let fade = (1.0 + ahead / TAIL_SECONDS).clamp(0.0, 1.0);
-                out.glow(body, self.params.glow_px * scale * fade, color);
+                let lit = (1.0 + ahead / TAIL_SECONDS).clamp(0.0, 1.0);
+                out.glow(body, self.params.glow_px * scale * lit, color);
                 if let Some(key_rect) = layout.rect_of_key(note.key) {
-                    out.glow(
-                        key_rect,
-                        self.params.glow_px * scale * 0.6 * fade,
-                        Color32::from_white_alpha((140.0 * fade) as u8),
-                    );
+                    // 白底上白 alpha 等于没画，浅底改用这枚音自己的颜色点亮。
+                    let key_glow = if light {
+                        fade(color, lit)
+                    } else {
+                        Color32::from_white_alpha((140.0 * lit) as u8)
+                    };
+                    out.glow(key_rect, self.params.glow_px * scale * 0.6 * lit, key_glow);
                 }
             }
         }
@@ -316,6 +374,18 @@ impl PlaybackEffect for Synthesia {
     }
 }
 
+/// 力度 + 击中后淡出决定的不透明度：胶囊和「乐器方块」两种画法共用这一条，
+/// 换形状不该换淡出速度。
+fn body_alpha(velocity: u8, ahead: f32) -> f32 {
+    let v = 0.45 + 0.55 * (velocity.min(100) as f32 / 100.0);
+    let fade = if ahead <= 0.0 {
+        (1.0 + ahead / TAIL_SECONDS).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    v * fade
+}
+
 fn capsule_color(base: Color32, key: u8, velocity: u8, ahead: f32) -> Color32 {
     // 黑键道稍暗：底色（乐器色或强调色）之上再分黑白键两档明度，
     // 一眼能看出音符落在哪一族键上。
@@ -324,13 +394,12 @@ fn capsule_color(base: Color32, key: u8, velocity: u8, ahead: f32) -> Color32 {
     } else {
         base.linear_multiply(0.72)
     };
-    let v = 0.45 + 0.55 * (velocity.min(100) as f32 / 100.0);
-    let fade = if ahead <= 0.0 {
-        (1.0 + ahead / TAIL_SECONDS).clamp(0.0, 1.0)
-    } else {
-        1.0
-    };
-    Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), (255.0 * v * fade) as u8)
+    Color32::from_rgba_unmultiplied(
+        base.r(),
+        base.g(),
+        base.b(),
+        (255.0 * body_alpha(velocity, ahead)) as u8,
+    )
 }
 
 #[cfg(test)]
@@ -392,6 +461,7 @@ mod tests {
                 speed: 1.0,
                 scale: 1.0,
                 accent: Color32::from_rgb(80, 160, 255),
+                backdrop: Color32::WHITE,
                 area: stage(),
                 keyboard: None,
                 timeline: &self.timeline,
@@ -554,6 +624,9 @@ mod tests {
         let value = fx.params();
         assert_eq!(value["fall_seconds"].as_f64(), Some(3.5));
         assert_eq!(value["lanes"].as_bool(), Some(false));
+        // 两条新档出厂都是「原来的样子」：方块样式关着、底色跟主题走。
+        assert_eq!(value["blocks"].as_bool(), Some(false));
+        assert_eq!(value["dark_background"].as_bool(), Some(false));
         let mut back = Synthesia::default();
         back.set_params(&value);
         assert_eq!(back.params(), fx.params());
@@ -565,6 +638,117 @@ mod tests {
         let before = back.params();
         back.set_params(&serde_json::json!(42));
         assert_eq!(back.params(), before);
+    }
+
+    /// 第一条竖线就是轨道参考线（击中线是横的，粒子是小方块）。
+    fn guide_color(frame: &Frame) -> Color32 {
+        frame
+            .prims
+            .iter()
+            .find_map(|p| match p {
+                Primitive::Line { from, to, color, .. } if (from.x - to.x).abs() < 0.01 => {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .expect("一条竖线都没有（轨道参考线没画）")
+    }
+
+    /// 底色默认跟主界面编辑区同色（浅色主题就是那块白），勾上「黑色背景」才回到原来
+    /// 那块。参考线必须跟着翻：`Color32` 的白 alpha 铺在白底上等于没画。
+    #[test]
+    fn the_backdrop_follows_the_theme_and_the_guides_flip_with_it() {
+        let rig = Rig::new(&[(3, 0, 60)]);
+        let cx = rig.cx(0.0, 0.0, false);
+        assert_eq!(cx.backdrop, Color32::WHITE, "Rig 摆的是浅色主题那块底");
+
+        let mut fx = Synthesia::default();
+        let mut light = Frame::default();
+        fx.draw(&cx, &mut light);
+        let back = match &light.prims[0] {
+            Primitive::Rect {
+                rect,
+                fill,
+                rounding,
+                ..
+            } => {
+                assert_eq!(*rect, stage(), "底色要铺满整块舞台");
+                assert_eq!(*rounding, 0.0);
+                *fill
+            }
+            other => panic!("第一笔该是底色，实际是 {other:?}"),
+        };
+        assert_eq!(back, cx.backdrop, "默认就该是主界面那种白");
+        assert_eq!(guide_color(&light).to_srgba_unmultiplied()[0], 0);
+
+        let mut dark = Synthesia::default();
+        dark.params.dark_background = true;
+        let mut black = Frame::default();
+        dark.draw(&cx, &mut black);
+        let back = match &black.prims[0] {
+            Primitive::Rect { fill, .. } => *fill,
+            other => panic!("第一笔该是底色，实际是 {other:?}"),
+        };
+        assert_eq!(back, STAGE_BACKDROP, "勾了黑色背景才回到原来那块");
+        // 反预乘会有 1 的舍入（白 alpha 14 解出来是 254），只看是不是那一族颜色。
+        assert!(guide_color(&black).to_srgba_unmultiplied()[0] >= 250);
+    }
+
+    /// 「乐器方块」样式就是把方块排那套搬进轨道：形状是正方形、边长照同一口径夹键道，
+    /// 颜色查的是同一张表（[`note_block`]），不是胶囊那条配色。
+    #[test]
+    fn the_block_style_drops_instrument_blocks_into_the_lanes() {
+        let rig = Rig::new(&[(3, 0, 60), (4, 13, 62)]);
+        let cx = rig.cx(0.0, 0.0, false);
+        let mut fx = Synthesia::default();
+        let mut soft = Frame::default();
+        fx.draw(&cx, &mut soft);
+        let capsules = soft
+            .prims
+            .iter()
+            .filter(|p| {
+                matches!(p, Primitive::Rect { rounding, rect, fill, .. }
+                    if *fill != Color32::TRANSPARENT && (*rounding - rect.width() / 2.0).abs() < 0.01)
+            })
+            .count();
+        assert_eq!(capsules, 2, "出厂还是两枚胶囊");
+
+        fx.params.blocks = true;
+        let mut frame = Frame::default();
+        fx.draw(&cx, &mut frame);
+        let blocks: Vec<(Rect, Color32)> = frame
+            .prims
+            .iter()
+            .filter_map(|p| match p {
+                Primitive::Rect {
+                    rect,
+                    fill,
+                    rounding,
+                    stroke,
+                } if *fill != Color32::TRANSPARENT
+                    && stroke.is_none()
+                    && *rounding > 0.0
+                    && *rounding < rect.width() / 3.0 =>
+                {
+                    Some((*rect, *fill))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(blocks.len(), 2, "两枚音符该摆两个方块：{}", blocks.len());
+        // 边长按本枚键道夹，口径和方块排同一条（`BlockRow::block_extent`）：
+        // 宽过道就会盖住邻道，那正是用户报过的「都叠在一起」。
+        let layout = Synthesia::fallback_keyboard(stage(), cx.scale);
+        for (note, (r, _)) in cx.timeline.notes().iter().zip(&blocks) {
+            let (side, _) = BlockRow::block_extent(tile_size(cx.scale), layout.lane_width(note.key));
+            assert!(
+                (r.width() - side).abs() < 0.01 && (r.height() - side).abs() < 0.01,
+                "方块该是 {side} 见方，实测 {r:?}"
+            );
+        }
+        // 查表同源：方块样式用的色 = 方块排给同一件乐器算出的色。
+        let want = note_block(&cx, cx.timeline.notes()[0].instrument, true).color;
+        assert_eq!(blocks[0].1, want, "两条特效对同一件乐器必须同色");
     }
 
     /// 瀑布原本只按黑白键分两档，看不出这枚音是哪件乐器弹的：底色要跟着乐器走。

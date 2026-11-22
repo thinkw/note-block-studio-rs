@@ -19,15 +19,16 @@ use egui::{Color32, Pos2, Rect, Ui, Vec2};
 
 use super::keyboard::{KeyboardLayout, WHITE_HIT_H};
 use super::stage::Frame;
-use super::tiles::{fallback_color, instrument_color, tile_size};
-use super::{EffectInfo, FxContext, PlaybackEffect, Surface};
+use super::tiles::tile_size;
+use super::{fade, note_block, EffectInfo, FxContext, PlaybackEffect, Surface};
 use crate::tr;
 use nbs_core::model::KEY_MAX;
 
 /// 一帧最多摆几个方块。密集段落一秒能进几十个音，超出的按「只留最新的」截。
 pub const MAX_BLOCKS: usize = 240;
 
-/// 同一枚键上一共叠几个方块封顶：再多的音只留最新这一摞，不然塔会一路长出画面。
+/// 同一枚键上一共叠几个方块封顶（出厂默认，可改见 [`Params::max_stack`]）：再多的音
+/// 只留最新这一摞，不然塔会一路长出画面。
 pub const MAX_STACK: usize = 12;
 
 /// 方块边长占所在键道的比例。留的两成缝既是邻道之间的间隔，也是位移能摆的横向余量
@@ -51,6 +52,9 @@ pub struct Params {
     pub tile_scale: f32,
     /// 用方块贴图；关掉或素材没扒到时用稳定色块。
     pub use_tiles: bool,
+    /// 一条键道上最多摞几个方块（塔高上限）。密集颤音一屏能摞十几层，
+    /// 想要「一眼只看到刚响过的那几枚」就往小调；调大只影响摞塔，不影响同时摆几枚。
+    pub max_stack: u32,
 }
 
 impl Default for Params {
@@ -61,6 +65,7 @@ impl Default for Params {
             nudge_hz: 1.5,
             tile_scale: 1.0,
             use_tiles: true,
+            max_stack: MAX_STACK as u32,
         }
     }
 }
@@ -128,17 +133,6 @@ impl BlockRow {
     pub fn stack_offset(k: usize, tile: f32) -> (f32, f32) {
         (0.0, -1.05 * k as f32 * tile)
     }
-
-    fn fade(color: Color32, k: f32) -> Color32 {
-        // 只压 alpha：`from_rgba_premultiplied` 就是「按这 4 个数存」，
-        // RGB 不动才不会淡出的同时把方块颜色也压暗。
-        Color32::from_rgba_premultiplied(
-            color.r(),
-            color.g(),
-            color.b(),
-            (color.a() as f32 * k.clamp(0.0, 1.0)) as u8,
-        )
-    }
 }
 
 impl PlaybackEffect for BlockRow {
@@ -191,6 +185,14 @@ impl PlaybackEffect for BlockRow {
         changed |= ui
             .add(egui::Slider::new(&mut p.tile_scale, 0.5..=2.5).text(tr("Block size", "方块大小")))
             .changed();
+        let mut cap = i64::from(p.max_stack);
+        changed |= ui
+            .add(
+                egui::Slider::new(&mut cap, 1..=24)
+                    .text(tr("Blocks per key", "每键摞上限")),
+            )
+            .changed();
+        p.max_stack = cap.clamp(1, 24) as u32;
         changed |= ui
             .checkbox(&mut p.use_tiles, tr("Block textures", "方块贴图"))
             .changed();
@@ -274,7 +276,7 @@ impl PlaybackEffect for BlockRow {
                 }
                 None => 0,
             };
-            if stack >= MAX_STACK {
+            if stack >= self.params.max_stack.max(1) as usize {
                 // 同一枚键上摞到顶了：再多只留最新那一摞，不然塔会一路长出画面。
                 self.capped = true;
                 continue;
@@ -293,33 +295,18 @@ impl PlaybackEffect for BlockRow {
 
             // 只有导出表里真配了方块的乐器才走贴图；没配过的（自定义乐器默认全是石头）
             // 用乐器色，否则一整排方块全同，看着就是「不随乐器变」。
-            let has_block = cx.blocks.has_block(note.instrument);
-            unconfigured |= !has_block;
-            let texture = if self.params.use_tiles && has_block {
-                cx.tiles
-                    .and_then(|tiles| tiles.texture_for(cx.tex, cx.blocks, note.instrument))
-            } else {
-                None
-            };
-            match texture {
+            // 这一条和瀑布的「乐器方块」样式共用（[`super::note_block`]），两边必须同图同色。
+            let blk = note_block(cx, note.instrument, self.params.use_tiles);
+            unconfigured |= blk.unconfigured;
+            match blk.texture {
                 Some(tex) => out.image(rect, tex, Color32::from_white_alpha((255.0 * alpha) as u8)),
                 None => {
-                    if has_block && self.params.use_tiles {
-                        missing = true;
-                    }
-                    let color = if has_block {
-                        fallback_color(cx.blocks.name(note.instrument))
-                    } else {
-                        instrument_color(
-                            cx.timeline.instrument_name(note.instrument),
-                            note.instrument,
-                        )
-                    };
-                    out.rect(rect, Self::fade(color, alpha), 2.0 * scale);
+                    missing |= blk.missing;
+                    out.rect(rect, fade(blk.color, alpha), 2.0 * scale);
                     out.outlined(
                         rect,
                         Color32::TRANSPARENT,
-                        (1.0 * scale, Self::fade(Color32::from_gray(20), alpha)),
+                        (1.0 * scale, fade(Color32::from_gray(20), alpha)),
                         2.0 * scale,
                     );
                 }
@@ -415,6 +402,7 @@ mod tests {
                 speed: 1.0,
                 scale: 1.0,
                 accent: Color32::from_rgb(80, 160, 255),
+                backdrop: crate::fx::STAGE_BACKDROP,
                 area: Rect::from_min_size(Pos2::ZERO, Vec2::new(2200.0, 800.0)),
                 keyboard: self.layout,
                 timeline: &self.timeline,
@@ -669,6 +657,31 @@ mod tests {
         );
     }
 
+    /// 摞塔上限是个设置：往小调就只留刚响过的那几枚，多出来的算截断并说一句。
+    #[test]
+    fn the_stack_cap_is_a_setting() {
+        let notes: Vec<(u32, u32, u8, u8)> = (0..20u32).map(|t| (t, 0, 0, 60)).collect();
+        let rig = Rig::new(&notes).with_keyboard();
+        let mut fx = BlockRow::default();
+        fx.params.max_stack = 4;
+        let mut frame = Frame::default();
+        fx.draw(&rig.cx(15.5, 0.0), &mut frame);
+        let got = blocks(&frame);
+        assert_eq!(got.len(), 4, "上限 4 就该只摆最新 4 枚：{:?}", got.len());
+        assert!(
+            fx.note()
+                .map(|m| m.contains("只画了") || m.contains("newest"))
+                .unwrap_or(false),
+            "摞到顶截断要有一句说明：{:?}",
+            fx.note()
+        );
+        // 上限调到比窗口还大就等于不截断，塔跟着音数长。
+        fx.params.max_stack = 24;
+        let mut wide = Frame::default();
+        fx.draw(&rig.cx(15.5, 0.0), &mut wide);
+        assert_eq!(blocks(&wide).len(), 16, "1.6 秒窗口里 16 列全该摆出来");
+    }
+
     #[test]
     fn same_key_on_two_layers_stays_visible() {
         let rig = Rig::new(&[(8, 0, 0, 60), (8, 1, 7, 60), (8, 2, 3, 60)]).with_keyboard();
@@ -732,11 +745,18 @@ mod tests {
         let value = fx.params();
         assert_eq!(value["nudge_px"].as_f64(), Some(3.0));
         assert_eq!(value["use_tiles"].as_bool(), Some(true));
+        assert_eq!(
+            value["max_stack"].as_u64(),
+            Some(MAX_STACK as u64),
+            "出厂摞塔上限就是原来写死那个数"
+        );
         let mut back = BlockRow::default();
         back.set_params(&serde_json::json!({ "life_seconds": 2.5, "nudge_hz": 3.0 }));
         assert_eq!(back.params.life_seconds, 2.5);
         assert_eq!(back.params.nudge_hz, 3.0);
         assert_eq!(back.params.nudge_px, 3.0, "缺的字段走默认");
+        back.set_params(&serde_json::json!({ "max_stack": 4 }));
+        assert_eq!(back.params.max_stack, 4);
         let before = back.params();
         back.set_params(&serde_json::json!("nope"));
         assert_eq!(back.params(), before, "读不出来就不能把参数改掉");

@@ -22,13 +22,14 @@ pub mod synthesia;
 pub mod tiles;
 pub mod timeline;
 
-use egui::{Color32, Context, Id, LayerId, Order, Painter, Rect, Ui};
+use egui::{Color32, Context, Id, LayerId, Order, Painter, Rect, TextureHandle, Ui};
 use nbs_core::model::Song;
+use std::sync::Arc;
 
 use keyboard::{KeyboardLayout, BLACK_LIFT};
 use stage::Frame;
 use timeline::FxTimeline;
-use tiles::{BlockTiles, InstrumentBlocks, NotePalette};
+use tiles::{fallback_color, instrument_color, BlockTiles, InstrumentBlocks, NotePalette};
 
 /// 特效画在哪一层。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +70,8 @@ pub struct FxInput {
     /// 像素倍率：琴键几何那些常量是屏幕像素（#80 起不随界面缩放），所以传 `piano_scale`。
     pub scale: f32,
     pub accent: Color32,
+    /// 主界面编辑区那一块的底色（`theme.grid_bg`）：舞台特效想「和编辑区同色」就取这里。
+    pub backdrop: Color32,
     /// 这一帧可画的区域：舞台给中央面板那块，叠加给整个窗口内容区。
     pub area: Rect,
     pub keyboard: Option<KeyboardLayout>,
@@ -90,6 +93,8 @@ pub struct FxContext<'a> {
     pub scale: f32,
     /// 主题强调色（跟随主题与彩虹循环）。
     pub accent: Color32,
+    /// 主界面编辑区的底色（`FxInput::backdrop`），舞台底色跟着主题走时用。
+    pub backdrop: Color32,
     /// 可画区域。舞台 = 中央面板那块；叠加 = 整个窗口。
     pub area: Rect,
     /// 底部钢琴栏的摆放。钢琴栏关掉时是 `None`，舞台特效自己 `KeyboardLayout::fit`。
@@ -406,6 +411,62 @@ impl FxStack {
 /// 舞台底色：不用纯黑，免得强调色在上面刺眼。
 pub const STAGE_BACKDROP: Color32 = Color32::from_rgb(12, 12, 16);
 
+/// 底色算不算「浅」：舞台特效要在浅底上把参考线从白 alpha 换成黑 alpha，
+/// 否则整条线看不见。按 0.299/0.587/0.114 加权（`Color32` 存的是预乘色，
+/// 底色都是不透明的，这里直接拿通道比就行），和主题是不是 dark 无关 —— 用户可以把
+/// 浅色主题的舞台切成黑底，那时该用白线。
+pub fn is_light(color: Color32) -> bool {
+    (color.r() as u32 * 299 + color.g() as u32 * 587 + color.b() as u32 * 114) >= 128 * 1000 / 2
+}
+
+/// 只压 alpha：`from_rgba_premultiplied` 就是「按这 4 个数存」，
+/// RGB 不动才不会淡出的同时把颜色也压暗。
+pub fn fade(color: Color32, k: f32) -> Color32 {
+    Color32::from_rgba_premultiplied(
+        color.r(),
+        color.g(),
+        color.b(),
+        (color.a() as f32 * k.clamp(0.0, 1.0)) as u8,
+    )
+}
+
+/// 一枚音符在画面上该用什么表示。方块排和瀑布的「乐器方块」样式共用这一条，
+/// 所以同一件乐器在两条特效里必须同图同色。
+pub struct NoteBlock {
+    /// 有贴图就走贴图；`None` 且 `missing` 为真 = 该有贴图但素材没扒到，下面用兜底色。
+    pub texture: Option<Arc<TextureHandle>>,
+    /// 没贴图时用的色：配过方块但缺素材 → 按方块名兜底色；压根没配方块（自定义
+    /// 乐器出厂全是同一块石头）→ 按乐器名哈希色，否则一整排同色就看不出「响的是哪件」。
+    pub color: Color32,
+    /// 该有贴图却没读到（用来提一句「记得扒贴图」）。
+    pub missing: bool,
+    /// 导出表里没给这件乐器配方块（用来指一句去哪儿配）。
+    pub unconfigured: bool,
+}
+
+/// 按导出方块表 + 贴图目录查一枚音符的方块长相。`use_tiles` 关掉时只给色。
+pub fn note_block(cx: &FxContext, instrument: u8, use_tiles: bool) -> NoteBlock {
+    let has_block = cx.blocks.has_block(instrument);
+    let texture = if use_tiles && has_block {
+        cx.tiles
+            .and_then(|tiles| tiles.texture_for(cx.tex, cx.blocks, instrument))
+    } else {
+        None
+    };
+    let missing = texture.is_none() && use_tiles && has_block;
+    let color = if has_block {
+        fallback_color(cx.blocks.name(instrument))
+    } else {
+        instrument_color(cx.timeline.instrument_name(instrument), instrument)
+    };
+    NoteBlock {
+        texture,
+        color,
+        missing,
+        unconfigured: !has_block,
+    }
+}
+
 /// 状态里攒着的那份时间轴：曲子一改就重烘。
 pub struct FxState {
     pub timeline: FxTimeline,
@@ -542,6 +603,7 @@ fn fx_context<'a>(
         speed: input.speed,
         scale: input.scale,
         accent: input.accent,
+        backdrop: input.backdrop,
         area: input.area,
         keyboard: input.keyboard,
         timeline,
@@ -685,6 +747,7 @@ mod tests {
             speed: 1.0,
             scale: 1.0,
             accent: Color32::LIGHT_GRAY,
+            backdrop: STAGE_BACKDROP,
             area: Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0)),
             keyboard: None,
             timeline: &timeline,
@@ -784,6 +847,7 @@ mod tests {
             speed: 1.5,
             scale: 1.25,
             accent: Color32::from_rgb(1, 2, 3),
+            backdrop: STAGE_BACKDROP,
             area: Rect::from_min_size(egui::pos2(4.0, 6.0), egui::vec2(640.0, 480.0)),
             keyboard: Some(layout),
         };
@@ -819,6 +883,7 @@ mod tests {
             speed: 1.0,
             scale: 1.0,
             accent: Color32::LIGHT_GRAY,
+            backdrop: STAGE_BACKDROP,
             area,
             keyboard: None,
         };
