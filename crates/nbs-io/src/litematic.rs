@@ -206,6 +206,11 @@ impl Region {
         self.cells.iter().filter(|&&c| c != 0).count()
     }
 
+    /// 这一臂上的容器格，按放入顺序。
+    pub fn chests(&self) -> &[Chest] {
+        &self.chests
+    }
+
     /// palette 长度；空区域（只有空气）也要写得出。
     pub fn palette_len(&self) -> usize {
         self.palette.len()
@@ -237,14 +242,14 @@ pub struct Litematic {
 }
 
 impl Litematic {
-    fn volume(&self) -> i64 {
+    pub(crate) fn volume(&self) -> i64 {
         self.regions
             .iter()
             .map(|r| r.size[0] as i64 * r.size[1] as i64 * r.size[2] as i64)
             .sum()
     }
 
-    fn enclosing(&self) -> ([i32; 3], [i32; 3]) {
+    pub(crate) fn enclosing(&self) -> ([i32; 3], [i32; 3]) {
         let mut min = [i32::MAX; 3];
         let mut max = [i32::MIN; 3];
         for r in &self.regions {
