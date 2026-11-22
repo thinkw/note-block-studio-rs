@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use egui::Context;
 use nbs_audio::{export_wav, ExportOptions, DEFAULT_MAX_VOICES, EXTENDED_MAX_VOICES};
+use nbs_core::document::SelProp;
 use nbs_core::model::{
     panning_velocity_to_short, short_to_panning_velocity, LockMode, Note, Song, SongMeta, KEY_MAX,
     PAN_MAX, PIT_MAX, VEL_MAX,
@@ -98,6 +99,9 @@ pub enum Command {
     SetVel(i32),
     SetPan(i32),
     SetPit(i32),
+    /// 原版 `mode_action.gml:7-50`：1~6 号「按当前编辑模式」的动作，键盘 Ctrl+E/D/R/F/T/G
+    /// 与音符右键菜单共用同一份（标签来自 `get_mode_actions.gml`）。
+    ModeAction(u8),
     /// 原版 `control_draw.gml:736-751`：Ctrl+滚轮 / Ctrl+± 沿固定档位改整窗口缩放
     /// （`window_scale`）。端口按用户要求只缩画布：倍率落到 `viewport.scale`
     /// （每格 `32 × scale` px），菜单 / 工具栏 / 状态栏 / 钢琴栏不动。
@@ -770,6 +774,40 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.current.pitch =
                 (state.current.pitch as i32 + d).clamp(-PIT_MAX as i32, PIT_MAX as i32) as i16;
         }
+        // 原版 `mode_action.gml`：六条全部作用在**选区**上（`selection_change*` 系），
+        // 不碰画笔值。1~4 是步进（音高模式一大步 = 12 半音，其余三种模式源码写的是 10，
+        // 小步一律 1），5 打开该属性的批量设置窗，6 把它设回出厂值（音量/声道 100、微调 0）。
+        // 音高模式（m_key）没有 5、6：原版 `control_draw.gml:644-645` 用
+        // `editmode != m_key` 把这两条整个跳过，这里同样什么都不做。
+        Command::ModeAction(n) => match (state.tool, n) {
+            (EditMode::Key, 1) => state.doc.selection_change(SelProp::Key, 12, true),
+            (EditMode::Key, 2) => state.doc.selection_change(SelProp::Key, -12, true),
+            (EditMode::Key, 3) => state.doc.selection_change(SelProp::Key, 1, true),
+            (EditMode::Key, 4) => state.doc.selection_change(SelProp::Key, -1, true),
+            (EditMode::Velocity, 1) => state.doc.selection_change(SelProp::Velocity, 10, true),
+            (EditMode::Velocity, 2) => state.doc.selection_change(SelProp::Velocity, -10, true),
+            (EditMode::Velocity, 3) => state.doc.selection_change(SelProp::Velocity, 1, true),
+            (EditMode::Velocity, 4) => state.doc.selection_change(SelProp::Velocity, -1, true),
+            (EditMode::Panning, 1) => state.doc.selection_change(SelProp::Panning, 10, true),
+            (EditMode::Panning, 2) => state.doc.selection_change(SelProp::Panning, -10, true),
+            (EditMode::Panning, 3) => state.doc.selection_change(SelProp::Panning, 1, true),
+            (EditMode::Panning, 4) => state.doc.selection_change(SelProp::Panning, -1, true),
+            (EditMode::Pitch, 1) => state.doc.selection_change(SelProp::Pitch, 10, true),
+            (EditMode::Pitch, 2) => state.doc.selection_change(SelProp::Pitch, -10, true),
+            (EditMode::Pitch, 3) => state.doc.selection_change(SelProp::Pitch, 1, true),
+            (EditMode::Pitch, 4) => state.doc.selection_change(SelProp::Pitch, -1, true),
+            (EditMode::Velocity, 5) => {
+                dispatch(state, Command::ShowWindow(WindowKind::SetVelocity), ctx)
+            }
+            (EditMode::Panning, 5) => {
+                dispatch(state, Command::ShowWindow(WindowKind::SetPanning), ctx)
+            }
+            (EditMode::Pitch, 5) => dispatch(state, Command::ShowWindow(WindowKind::SetPitch), ctx),
+            (EditMode::Velocity, 6) => state.doc.selection_change(SelProp::Velocity, 100, false),
+            (EditMode::Panning, 6) => state.doc.selection_change(SelProp::Panning, 100, false),
+            (EditMode::Pitch, 6) => state.doc.selection_change(SelProp::Pitch, 0, false),
+            _ => {}
+        },
         Command::WindowScaleUp => state.step_window_scale(ctx, true),
         Command::WindowScaleDown => state.step_window_scale(ctx, false),
         Command::WindowScaleReset => state.reset_window_scale(ctx),
@@ -3562,6 +3600,71 @@ mod tests {
         state.vsync_request = None;
         dispatch(&mut state, Command::SetVsync(false), &ctx);
         assert_eq!(state.vsync_request, Some(false));
+    }
+
+    /// 用户要求 #120a：那六条走原版的选区语义 —— 改的是选区里每条音符，画笔值不动；
+    /// 音高模式的大步是一个八度，且没有 5、6 号。
+    #[test]
+    fn mode_action_steps_the_selection_not_the_brush() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        let mut n = Note::new(0, 48);
+        n.velocity = 50;
+        state.doc.place_note(0, 0, n);
+        state.doc.select_rect(0, 0, 0, 0, false, false, false);
+        state.current.velocity = 77;
+        state.tool = EditMode::Velocity;
+        dispatch(&mut state, Command::ModeAction(1), &ctx);
+        assert_eq!(
+            state.doc.selection.at(0, 0).unwrap().velocity,
+            60,
+            "1 号 = 选区音量 +10"
+        );
+        assert_eq!(state.current.velocity, 77, "原版 mode_action 从不改画笔值");
+        dispatch(&mut state, Command::ModeAction(3), &ctx);
+        assert_eq!(
+            state.doc.selection.at(0, 0).unwrap().velocity,
+            61,
+            "3 号 = 小步 +1"
+        );
+        // 5 号开该模式的批量设置窗，6 号设回出厂值。
+        dispatch(&mut state, Command::ModeAction(5), &ctx);
+        assert_eq!(state.window, Some(WindowKind::SetVelocity));
+        state.window = None;
+        dispatch(&mut state, Command::ModeAction(6), &ctx);
+        assert_eq!(
+            state.doc.selection.at(0, 0).unwrap().velocity,
+            100,
+            "6 号 = 直接设成 100"
+        );
+        // 音高模式：1 号是一个八度，5、6 号原版没有。
+        state.doc.deselect();
+        state.tool = EditMode::Key;
+        state.doc.place_note(2, 0, Note::new(0, 48));
+        state.doc.select_rect(2, 0, 2, 0, false, false, false);
+        dispatch(&mut state, Command::ModeAction(1), &ctx);
+        assert_eq!(
+            state.doc.selection.at(0, 0).unwrap().key,
+            60,
+            "1 号 = 升八度"
+        );
+        dispatch(&mut state, Command::ModeAction(5), &ctx);
+        assert_eq!(state.window, None, "音高模式没有第 5 条");
+        dispatch(&mut state, Command::ModeAction(6), &ctx);
+        assert_eq!(
+            state.doc.selection.at(0, 0).unwrap().key,
+            60,
+            "音高模式没有第 6 条"
+        );
+        // 空选区：六条都点不动，也不给历史添步子。
+        state.doc.deselect();
+        let steps = state.doc.history.len();
+        for slot in 1..=6 {
+            dispatch(&mut state, Command::ModeAction(slot), &ctx);
+        }
+        assert_eq!(state.doc.history.len(), steps, "空选区不该留历史");
+        assert_eq!(state.window, None);
     }
 
     /// 跑一帧，取这一帧交给平台层的窗口图标命令。

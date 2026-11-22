@@ -14,6 +14,7 @@ use egui::{pos2, Align2, Color32, Id, OpenUrl, Pos2, Rect, Sense, Ui, Vec2};
 
 use crate::commands::Command;
 use crate::fonts::bold_font;
+use crate::grid::{mode_action_hotkey, mode_action_label};
 use crate::icons::{frame, Bank, IconHit};
 use crate::state::{EditMode, EditorState, WindowKind};
 use crate::theme::{Theme, ThemeKind};
@@ -364,27 +365,19 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                 // 判空（宏窗口和宏本体各自在 `selected = 0` 时早退）。
                 // 原版这里没有「移调…」窗口，也没有「批量设置」二级菜单——三个
                 // Set velocity / panning / pitch... 都在 `Macros...` 子菜单里。
+                // 原版顶部「编辑」菜单与右键菜单用的是同一份标签表
+                // （`control_draw.gml:1741-1746`）：六条跟着编辑模式变、都带
+                // `inactive(selected = 0)`，音高模式下第 5、6 项整条不画。
                 let has_sel = !state.doc.selection.is_empty();
-                let (up_oct, down_oct) = match state.tool {
-                    crate::state::EditMode::Key => (
-                        tr("Transpose one octave up", "升八度"),
-                        tr("Transpose one octave down", "降八度"),
-                    ),
-                    _ => (tr("Increase by 10", "升 10"), tr("Decrease by 10", "降 10")),
-                };
-                if ui
-                    .add_enabled(has_sel, egui::Button::new(format!("{up_oct} +12")))
-                    .clicked()
-                {
-                    state.emit(Command::Transpose(12));
-                    ui.close_menu();
-                }
-                if ui
-                    .add_enabled(has_sel, egui::Button::new(format!("{down_oct} -12")))
-                    .clicked()
-                {
-                    state.emit(Command::Transpose(-12));
-                    ui.close_menu();
+                for slot in 1..=6u8 {
+                    let Some((en, zh)) = mode_action_label(state.tool, slot) else {
+                        continue;
+                    };
+                    let label = format!("{}  {}", tr(en, zh), mode_action_hotkey(slot));
+                    if ui.add_enabled(has_sel, egui::Button::new(&label)).clicked() {
+                        state.emit(Command::ModeAction(slot));
+                        ui.close_menu();
+                    }
                 }
                 ui.separator();
                 instrument_menus(state, ui);

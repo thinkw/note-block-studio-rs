@@ -127,6 +127,16 @@ impl<'a> Tx<'a> {
     }
 }
 
+/// 原版 `selection_change.gml` 的 `property` 参数（`macros.gml` 里 m_key/m_vel/m_pan/m_pit）：
+/// 四种编辑模式各自要改的那一条属性。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelProp {
+    Key,
+    Velocity,
+    Panning,
+    Pitch,
+}
+
 impl Document {
     pub fn new() -> Self {
         Self {
@@ -561,6 +571,39 @@ impl Document {
         tx.commit();
     }
 
+    /// 原版 `selection_change(property, amount, add)`（`selection_change.gml:11-55`）：
+    /// 逐条把选区里的某个属性「加上 amount」或「直接设成 amount」。
+    /// 关键是**算出界的那条保持原值**：源码是 `if (val >= 0 && val <= 87)` 才写回，
+    /// 不是夹到边界 —— 一支 95 音量的音符按「+10」之后还是 95，不是 100。
+    /// 整批只进一次历史（原版末尾一句 `history_set`），空选区由 `batch_change` 挡住。
+    pub fn selection_change(&mut self, prop: SelProp, amount: i32, add: bool) {
+        let label = match prop {
+            SelProp::Key => crate::tr("Change key", "改音高"),
+            SelProp::Velocity => crate::tr("Change velocity", "改力度"),
+            SelProp::Panning => crate::tr("Change panning", "改声像"),
+            SelProp::Pitch => crate::tr("Change pitch", "改微调"),
+        };
+        let pit = crate::model::PIT_MAX as i32;
+        self.batch_change(label, |n| {
+            let (cur, min, max) = match prop {
+                SelProp::Key => (n.key as i32, 0, crate::model::KEY_MAX as i32),
+                SelProp::Velocity => (n.velocity as i32, 0, crate::model::VEL_MAX as i32),
+                SelProp::Panning => (n.panning as i32, 0, crate::model::PAN_MAX as i32),
+                SelProp::Pitch => (n.pitch as i32, -pit, pit),
+            };
+            let next = if add { cur + amount } else { amount };
+            if next < min || next > max {
+                return;
+            }
+            match prop {
+                SelProp::Key => n.key = next as u8,
+                SelProp::Velocity => n.velocity = next as u8,
+                SelProp::Panning => n.panning = next as u8,
+                SelProp::Pitch => n.pitch = next as i16,
+            }
+        });
+    }
+
     pub fn transpose(&mut self, semitones: i32) {
         self.batch_change(crate::tr("Transpose", "移调"), |n| {
             n.key = (n.key as i32 + semitones).clamp(0, 87) as u8;
@@ -916,6 +959,53 @@ mod tests {
         doc.batch_change("升八度", |n| n.key += 12);
         assert_eq!(doc.history.len(), before + 1);
         assert_eq!(doc.selection.at(0, 0).unwrap().key, 57);
+    }
+
+    /// 用户要求 #120a：`selection_change` 的出界语义是「保原值」而不是夹到边界
+    /// （原版 `selection_change.gml:22` 的 `if (val >= 0 && val <= 100)` 才写回）。
+    #[test]
+    fn selection_change_keeps_out_of_range_notes() {
+        let mut doc = Document::new();
+        let mut hot = Note::new(0, 48);
+        hot.velocity = 95;
+        let mut cool = Note::new(0, 50);
+        cool.velocity = 50;
+        doc.place_note(0, 0, hot);
+        doc.place_note(1, 0, cool);
+        doc.select_rect(0, 0, 1, 0, false, false, false);
+        let before = doc.history.len();
+        doc.selection_change(SelProp::Velocity, 10, true);
+        assert_eq!(
+            doc.selection.at(0, 0).unwrap().velocity,
+            95,
+            "95 + 10 出界，原版保持 95 而不是夹成 100"
+        );
+        assert_eq!(doc.selection.at(1, 0).unwrap().velocity, 60);
+        assert_eq!(doc.history.len(), before + 1, "整批改动只进一次历史");
+        // add = false 是「直接设成」：界内照改，出界同样保原值。
+        doc.selection_change(SelProp::Velocity, 30, false);
+        assert_eq!(doc.selection.at(0, 0).unwrap().velocity, 30);
+        assert_eq!(doc.selection.at(1, 0).unwrap().velocity, 30);
+        doc.selection_change(SelProp::Velocity, 250, false);
+        assert_eq!(
+            doc.selection.at(0, 0).unwrap().velocity,
+            30,
+            "250 超出 100 上限，两条都不该动"
+        );
+        // 微调的界是 ±1200：越下界也一样保原值。
+        doc.selection_change(SelProp::Pitch, -1195, true);
+        assert_eq!(doc.selection.at(0, 0).unwrap().pitch, -1195);
+        doc.selection_change(SelProp::Pitch, -20, true);
+        assert_eq!(
+            doc.selection.at(0, 0).unwrap().pitch,
+            -1195,
+            "-1215 越下界，该保持不动"
+        );
+        // 空选区不进历史（与批量入口同一道闸）。
+        doc.deselect();
+        let n = doc.history.len();
+        doc.selection_change(SelProp::Velocity, 10, true);
+        assert_eq!(doc.history.len(), n, "空选区不该留下一步记录");
     }
 
     /// 原版 `selection_change.gml:8`：`if (selected = 0) return 0`。空选区时

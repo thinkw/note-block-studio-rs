@@ -172,55 +172,21 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
                     out.push(Command::ShowWindow(WindowKind::Preferences));
                 }
 
-                // `mode_action(1..4)`：E / D 走大步，R / F 走 ±1。音高模式的大步是一个
-                // 八度（12 半音），力度 / 声像 / 微调三种模式源码里都写的是 10。
-                let (big, small) = match state.tool {
-                    EditMode::Key => (12, 1),
-                    EditMode::Velocity | EditMode::Panning | EditMode::Pitch => (10, 1),
-                };
-                let step_cmd = |delta: i32| -> Command {
-                    match state.tool {
-                        EditMode::Key => Command::SetKey(delta),
-                        EditMode::Velocity => Command::SetVel(delta),
-                        EditMode::Panning => Command::SetPan(delta),
-                        EditMode::Pitch => Command::SetPit(delta),
-                    }
-                };
-                if !state.player && p(Key::E) {
-                    out.push(step_cmd(big));
-                }
-                if !state.player && p(Key::D) {
-                    out.push(step_cmd(-big));
-                }
-                if !state.player && p(Key::R) {
-                    out.push(step_cmd(small));
-                }
-                if !state.player && p(Key::F) {
-                    out.push(step_cmd(-small));
-                }
-                // `mode_action(5)`：按当前模式打开批量设置窗口。原版调用点写死
-                // `editmode != m_key`：音高模式（Key）没有 T/G；微调模式有，
-                // 打开的是 w_setpitch（v3.12 的 mode_action 已补齐 m_pit 分支）。
-                let batch_window = match state.tool {
-                    EditMode::Key => None,
-                    EditMode::Velocity => Some(WindowKind::SetVelocity),
-                    EditMode::Panning => Some(WindowKind::SetPanning),
-                    EditMode::Pitch => Some(WindowKind::SetPitch),
-                };
-                if !state.player && p(Key::T) {
-                    if let Some(kind) = batch_window {
-                        out.push(Command::ShowWindow(kind));
-                    }
-                }
-                // `mode_action(6)`：把当前模式的属性恢复默认（力度 / 声像 100、微调 0）。
-                // 空选区时 selection_change 直接 return，这里靠 batch_change 的
-                // 空选区早退对齐。
-                if !state.player && p(Key::G) {
-                    match state.tool {
-                        EditMode::Key => {}
-                        EditMode::Velocity => out.push(Command::BatchVelocity(100)),
-                        EditMode::Panning => out.push(Command::BatchPanning(100)),
-                        EditMode::Pitch => out.push(Command::BatchPitch(0)),
+                // 原版 `control_draw.gml:640-645`：这六个键就是 `mode_action(1..6)`，
+                // 与右键菜单、顶部「编辑」菜单共用同一份实现 —— 只发槽位号，
+                // 做什么（改选区哪条属性、开哪个批量窗）在 `Command::ModeAction` 里。
+                // 音高模式没有 5、6：原版那两行外面套着 `editmode != m_key`。
+                for (k, slot) in [
+                    (Key::E, 1u8),
+                    (Key::D, 2),
+                    (Key::R, 3),
+                    (Key::F, 4),
+                    (Key::T, 5),
+                    (Key::G, 6),
+                ] {
+                    if !state.player && p(k) && !(slot >= 5 && matches!(state.tool, EditMode::Key))
+                    {
+                        out.push(Command::ModeAction(slot));
                     }
                 }
             }
@@ -462,14 +428,14 @@ pub fn shortcut_help() -> Vec<(&'static str, &'static str)> {
         (
             "Ctrl+E / D",
             "Ctrl+E / D",
-            "Current mode ±large step (pitch ±12, others ±10)",
-            "按当前模式 ±大步（音高 ±12，其余 ±10）",
+            "Step the selection ±large in the current mode (pitch ±12, others ±10)",
+            "按当前模式给选区 ±大步（音高 ±12，其余 ±10）",
         ),
         (
             "Ctrl+R / F",
             "Ctrl+R / F",
-            "Current mode ±1",
-            "按当前模式 ±1",
+            "Step the selection by 1 in the current mode",
+            "按当前模式给选区 ±1",
         ),
         (
             "Ctrl+T / Ctrl+G",
@@ -656,8 +622,12 @@ mod tests {
     }
 
     fn cmds(events: Vec<Event>) -> Vec<Command> {
+        cmds_in(&fresh_state(), events)
+    }
+
+    /// 同上，但要指定起始状态（编辑模式、选区一类的门槛得由用例自己钉）。
+    fn cmds_in(state: &EditorState, events: Vec<Event>) -> Vec<Command> {
         let ctx = Context::default();
-        let state = fresh_state();
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -668,8 +638,53 @@ mod tests {
             ..Default::default()
         };
         let mut out = Vec::new();
-        let _ = ctx.run(raw, |c| out = collect_shortcuts(&state, c));
+        let _ = ctx.run(raw, |c| out = collect_shortcuts(state, c));
         out
+    }
+
+    /// 用户要求 #120a：Ctrl+E/D/R/F/T/G 在原版是 `mode_action(1..6)`，走的是选区那条路
+    /// （`selection_change*`），端口此前发的是改画笔值的 `SetKey/SetVel/SetPan/SetPit`；
+    /// 这里钉住六条都发 `ModeAction(n)`（音高模式下的 5、6 号什么都不发），
+    /// 具体行为由 commands.rs 的用例负责。
+    #[test]
+    fn ctrl_mode_keys_emit_mode_actions() {
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        for mode in EditMode::ALL {
+            let mut state = fresh_state();
+            state.tool = mode;
+            for (k, slot) in [
+                (Key::E, 1u8),
+                (Key::D, 2),
+                (Key::R, 3),
+                (Key::F, 4),
+                (Key::T, 5),
+                (Key::G, 6),
+            ] {
+                let got = cmds_in(&state, vec![key(k, true, ctrl)]);
+                let steps: Vec<Command> = got
+                    .iter()
+                    .filter(|c| matches!(c, Command::ModeAction(_)))
+                    .cloned()
+                    .collect();
+                if matches!(mode, EditMode::Key) && slot >= 5 {
+                    // 音高模式没有第 5、6 条：原版 `control_draw.gml:644-645`
+                    // 那两行外面套着 `editmode != m_key`。
+                    assert!(
+                        steps.is_empty(),
+                        "{mode:?} 模式按 Ctrl+{k:?} 不该出 ModeAction，实际 {got:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        steps,
+                        vec![Command::ModeAction(slot)],
+                        "{mode:?} 模式按 Ctrl+{k:?} 应出 ModeAction({slot})，实际 {got:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// 快速点按 Ctrl+P 也要开首选项 —— 帧率上限 30 时人手点快了就是这样一帧。

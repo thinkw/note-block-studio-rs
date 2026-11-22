@@ -2847,6 +2847,173 @@ mod gui_window_tests {
 
     /// 用户要求 #119：首选项「帧率限制」那一组里要有「垂直同步」这颗勾，
     /// 并且点下去真的生效（改设置 + 落盘 + 把切换请求交给宿主），不是画个样子。
+    /// 用户要求 #120a：顶部「编辑」菜单里那六条和右键菜单是同一份标签表
+    /// （原版 `control_draw.gml:1741-1746`），也要跟着编辑模式变、真的改选区。
+    #[test]
+    fn the_edit_menu_mode_actions_follow_the_edit_mode() {
+        let ctx = egui::Context::default();
+        let mut state = state_with_selection();
+        state.theme.apply(&ctx);
+        // 音高模式：四条移调，没有 5、6 号。
+        state.tool = crate::state::EditMode::Key;
+        click_text(&mut state, &ctx, "编辑");
+        let texts = drawn_texts(&mut state, &ctx);
+        for t in [
+            "升八度  Ctrl+E",
+            "降八度  Ctrl+D",
+            "升半音  Ctrl+R",
+            "降半音  Ctrl+F",
+        ] {
+            assert!(texts.iter().any(|s| s == t), "编辑菜单缺「{t}」");
+        }
+        assert!(
+            !texts.iter().any(|s| s.contains("设定音量") || s.contains("重置音量")),
+            "音高模式不该有第 5、6 条"
+        );
+        click_text(&mut state, &ctx, "升八度  Ctrl+E");
+        for dx in 0..3u32 {
+            assert_eq!(
+                state.doc.selection.at(dx, 0).unwrap().key,
+                [62u8, 64, 67][dx as usize],
+                "选区里每条都要升一个八度（不是只动画笔）"
+            );
+        }
+        // 声道模式：六条换成声道的叫法，点第 1 条真的把选区声像 +10。
+        state.doc.place_selection();
+        state.doc.select_all();
+        state.tool = crate::state::EditMode::Panning;
+        click_text(&mut state, &ctx, "编辑");
+        let texts = drawn_texts(&mut state, &ctx);
+        for t in [
+            "向右声道移动 10  Ctrl+E",
+            "设定音符声道……  Ctrl+T",
+            "重置立体声  Ctrl+G",
+        ] {
+            assert!(texts.iter().any(|s| s == t), "声道模式的编辑菜单缺「{t}」");
+        }
+        assert!(
+            !texts.iter().any(|s| s.contains("升八度")),
+            "声道模式不该还挂着升八度"
+        );
+        click_text(&mut state, &ctx, "向右声道移动 10  Ctrl+E");
+        assert_eq!(
+            state.doc.selection.at(0, 0).unwrap().panning,
+            110,
+            "第 1 条 = 选区声像 +10"
+        );
+    }
+
+    /// 用户要求 #120a：音符右键菜单里那几条要跟着编辑模式变（原版
+    /// `get_mode_actions.gml` 出标签，`control_draw.gml:550-555` 在音高模式下整条
+    /// 不画第 5、6 项），音量模式下不该还是「升八度 / 降八度」。
+    #[test]
+    fn the_grid_context_menu_items_follow_the_edit_mode() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        let mut song = nbs_core::model::Song::new();
+        let mut n = nbs_core::model::Note::new(0, 48);
+        n.velocity = 50;
+        song.set(4, 0, n);
+        state.doc.replace_song(song);
+        state.doc.select_rect(4, 0, 4, 0, false, false, false);
+        let open_menu = |state: &mut EditorState| {
+            state.context_menu = Some(crate::state::ContextMenu {
+                pos: egui::pos2(300.0, 300.0),
+                cell: (4, 0),
+                kind: crate::state::ContextKind::Grid,
+            });
+        };
+        let has = |texts: &[String], t: &str| texts.iter().any(|s| s == t);
+
+        // 音高模式：四条移调，没有第 5、6 条。
+        state.tool = crate::state::EditMode::Key;
+        open_menu(&mut state);
+        let texts = drawn_texts(&mut state, &ctx);
+        for t in [
+            "升八度  Ctrl+E",
+            "降八度  Ctrl+D",
+            "升半音  Ctrl+R",
+            "降半音  Ctrl+F",
+        ] {
+            assert!(has(&texts, t), "音高模式菜单缺「{t}」：{}", texts.join(" | "));
+        }
+        assert!(
+            !texts.iter().any(|s| s.contains("设定音量") || s.contains("重置音量")),
+            "音高模式不该有第 5、6 条：{}",
+            texts.join(" | ")
+        );
+
+        // 力度模式：原版那六条，且不该再挂移调。
+        state.tool = crate::state::EditMode::Velocity;
+        open_menu(&mut state);
+        let texts = drawn_texts(&mut state, &ctx);
+        for t in [
+            "增加 10 音量  Ctrl+E",
+            "减小 10 音量  Ctrl+D",
+            "增加音量  Ctrl+R",
+            "减小音量  Ctrl+F",
+            "设定音量……  Ctrl+T",
+            "重置音量  Ctrl+G",
+        ] {
+            assert!(has(&texts, t), "音量模式菜单缺「{t}」：{}", texts.join(" | "));
+        }
+        assert!(
+            !texts.iter().any(|s| s.contains("升八度")),
+            "音量模式不该还是升八度：{}",
+            texts.join(" | ")
+        );
+
+        // 点「增加 10 音量」：动的是选区里那条音符的力度，画笔值不碰，菜单收起。
+        let brush = state.current.velocity;
+        click_text(&mut state, &ctx, "增加 10 音量  Ctrl+E");
+        assert_eq!(
+            state.doc.selection.at(0, 0).unwrap().velocity,
+            60,
+            "音量模式第 1 条要把选区音量 +10"
+        );
+        assert_eq!(state.current.velocity, brush, "原版 mode_action 不动画笔值");
+        assert!(state.context_menu.is_none(), "点中条目要收菜单");
+
+        // 声道 / 微调模式各用各的标签。
+        state.tool = crate::state::EditMode::Panning;
+        open_menu(&mut state);
+        let texts = drawn_texts(&mut state, &ctx);
+        for t in [
+            "向右声道移动 10  Ctrl+E",
+            "向左声道移动 10  Ctrl+D",
+            "向右声道移动  Ctrl+R",
+            "向左声道移动  Ctrl+F",
+            "设定音符声道……  Ctrl+T",
+            "重置立体声  Ctrl+G",
+        ] {
+            assert!(has(&texts, t), "声道模式菜单缺「{t}」：{}", texts.join(" | "));
+        }
+        state.tool = crate::state::EditMode::Pitch;
+        open_menu(&mut state);
+        let texts = drawn_texts(&mut state, &ctx);
+        for t in [
+            "上调 10 微分  Ctrl+E",
+            "下调 10 微分  Ctrl+D",
+            "上调 1 微分  Ctrl+R",
+            "下调 1 微分  Ctrl+F",
+            "设定音高……  Ctrl+T",
+            "重置音高  Ctrl+G",
+        ] {
+            assert!(has(&texts, t), "微调模式菜单缺「{t}」：{}", texts.join(" | "));
+        }
+
+        // 没有选区时六条整条点不动（原版 `inactive(current_song.selected = 0)`）。
+        state.tool = crate::state::EditMode::Velocity;
+        state.doc.deselect();
+        open_menu(&mut state);
+        click_text(&mut state, &ctx, "增加 10 音量  Ctrl+E");
+        assert!(state.context_menu.is_some(), "置灰条目点不动，菜单不该收");
+    }
+
     #[test]
     fn the_preferences_page_has_a_working_vsync_toggle() {
         let _prefs = isolate_prefs();
