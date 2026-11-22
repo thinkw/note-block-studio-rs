@@ -113,9 +113,9 @@ pub enum Command {
     PianoScaleDown,
     /// 原版 `control_draw.gml:732-735`：Ctrl+0 回到出厂缩放 `get_default_window_scale()`。
     WindowScaleReset,
-    /// 按页平移视口（Home/End/PageUp/PageDown）。
-    PageHorizontal(i32),
-    PageVertical(i32),
+    /// 原版 `control_draw.gml:684-704`：Home / End / PageUp / PageDown 翻的是
+    /// 「最后碰过的那根滚动条」（`sb_sel`）指向的那一轴，播放头不动。
+    ScrollAxis(crate::state::AxisScroll),
     PlayPause,
     Stop,
     SeekHome,
@@ -129,6 +129,9 @@ pub enum Command {
     ToggleFlag(Flag),
     /// 原版 Ctrl+Shift+F5（仅 theme 3）：切换界面强调色彩虹循环。
     ToggleRainbow,
+    /// 原版 F7（`control_draw.gml:840-867`）：帧率上限 30→60→120→144→240→30 循环。
+    /// 原版这段在 `window = 0` 闸门之外，只受 `playing = 0` 约束。
+    CycleRefreshRate,
     /// 原版 F11：`fullscreen = !fullscreen`（`control_draw.gml:122-134`）。
     ToggleFullscreen,
     Transpose(i32),
@@ -813,18 +816,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         Command::WindowScaleReset => state.reset_window_scale(ctx),
         Command::PianoScaleUp => state.step_piano_scale(ctx, true),
         Command::PianoScaleDown => state.step_piano_scale(ctx, false),
-        Command::PageHorizontal(d) => {
-            let cols = state.viewport.columns() as i64;
-            let max = state.doc.song.enda.max(64) as i64;
-            state.viewport.start_tick =
-                (state.viewport.start_tick as i64 + d as i64 * cols).clamp(0, max) as u32;
-        }
-        Command::PageVertical(d) => {
-            let rows = state.viewport.rows() as i64;
-            let max = state.doc.song.layer_count().max(8) as i64;
-            state.viewport.start_layer =
-                (state.viewport.start_layer as i64 + d as i64 * rows).clamp(0, max) as u32;
-        }
+        Command::ScrollAxis(op) => state.scroll_axis(op),
         Command::PlayPause => {
             state.transcription.stop_preview();
             let playing = state.is_playing();
@@ -1207,6 +1199,11 @@ the machine in your world before pasting this structure.\n\nThis warning will ne
         Command::ToggleRainbow => {
             state.toggle_rainbow();
             state.theme.apply(ctx);
+        }
+        Command::CycleRefreshRate => {
+            // 原版 F7（`control_draw.gml:840-866`）只 game_set_speed + set_msg，不写
+            // settings.ini；写盘归首选项「确定」那条路。落盘的顺序问题也就不存在了。
+            state.cycle_refresh_rate();
         }
         Command::ToggleFullscreen => {
             // 原版把全屏记在自己的 `fullscreen` 变量上，这里同理：egui 的
@@ -3542,6 +3539,67 @@ mod tests {
         }
         step(true, &mut state);
         assert_eq!(state.prefs.piano_scale, 4.0, "琴键上界与窗口一致为 4");
+    }
+
+    /// 原版 Home / End / PageUp / PageDown 只翻最后碰过的那根条：横向条被点过时，
+    /// 四个键全走列；换成纵向条后全走层；PageUp 朝曲尾、PageDown 朝曲首。
+    #[test]
+    fn home_end_page_keys_move_only_the_touched_bar() {
+        use crate::state::AxisScroll;
+        let ctx = Context::default();
+        let mut song = Song::new();
+        song.enda = 300;
+        song.endb = 18;
+        let mut state = state_with(song);
+        state.viewport.size = egui::vec2(320.0, 320.0); // 10 列 × 10 行
+        state.sb_sel = 0;
+        dispatch(&mut state, Command::ScrollAxis(AxisScroll::Page(1)), &ctx);
+        let cols = state.viewport.columns();
+        assert_eq!(state.viewport.start_tick, cols, "PageUp 往曲尾翻一页");
+        assert_eq!(state.viewport.start_layer, 0, "另一轴不该跟着动");
+        dispatch(&mut state, Command::ScrollAxis(AxisScroll::Page(-1)), &ctx);
+        assert_eq!(state.viewport.start_tick, 0, "PageDown 翻回来");
+        dispatch(&mut state, Command::ScrollAxis(AxisScroll::End), &ctx);
+        assert_eq!(
+            state.viewport.start_tick, state.doc.song.enda,
+            "End = 原版 starta = enda"
+        );
+        assert_eq!(state.viewport.start_layer, 0);
+        dispatch(&mut state, Command::ScrollAxis(AxisScroll::Home), &ctx);
+        assert_eq!(state.viewport.start_tick, 0, "Home = 原版 starta = 0");
+
+        state.sb_sel = 1;
+        let rows = state.viewport.rows();
+        dispatch(&mut state, Command::ScrollAxis(AxisScroll::Page(1)), &ctx);
+        assert_eq!(state.viewport.start_layer, rows, "纵向条被碰过，翻页走层");
+        assert_eq!(state.viewport.start_tick, 0, "列轴保持不动");
+        dispatch(&mut state, Command::ScrollAxis(AxisScroll::End), &ctx);
+        assert_eq!(state.viewport.start_layer, 18, "End = 原版 startb = endb");
+    }
+
+    /// 原版 F7（`control_draw.gml:840-866`）：档位 0→1→2→3→4→0，每档把帧数写进状态栏，
+    /// 而且只改运行值、不写 settings.ini —— 落盘留给首选项「确定」。
+    #[test]
+    fn f7_cycles_the_frame_cap_and_reports_it() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        state.prefs.refresh_rate = 3;
+        state.save_prefs();
+        for (want_rate, want_fps) in [(4u8, 240u32), (0, 30), (1, 60), (2, 120)] {
+            dispatch(&mut state, Command::CycleRefreshRate, &ctx);
+            assert_eq!(state.prefs.refresh_rate, want_rate, "F7 档位循环顺序");
+            assert_eq!(
+                state.active_message(),
+                Some(format!("帧数上限 => {want_fps} FPS").as_str()),
+                "F7 要回显当前上限"
+            );
+        }
+        assert_eq!(
+            nbs_io::prefs::Preferences::load().refresh_rate,
+            3,
+            "原版 F7 不写盘：设置文件应停在上一次「确定」时那一档"
+        );
     }
 
     /// 原版 `game_set_speed(N, gamespeed_fps)`：帧数上限压的是整个程序的步进，

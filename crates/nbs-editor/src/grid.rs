@@ -1034,6 +1034,9 @@ fn handle_scrollbar_input(state: &mut EditorState, input: &InputSnapshot, hbar: 
 
     if input.primary_pressed {
         if hbar.contains(pos) {
+            // 原版 `draw_scrollbar.gml:54`：按到哪根条就把 `sb_sel` 置成那条的号，之后
+            // Home / End / PageUp / PageDown 一直翻这一根，直到碰到另一根。
+            state.sb_sel = 0;
             if ht.contains(pos) {
                 state.interaction.mode = DragMode::DragScrollbarH {
                     grab: pos.x - ht.min.x,
@@ -1043,6 +1046,7 @@ fn handle_scrollbar_input(state: &mut EditorState, input: &InputSnapshot, hbar: 
                 state.viewport.start_tick = bar_value(ratio, hm, hmax);
             }
         } else if vbar.contains(pos) {
+            state.sb_sel = 1;
             if vt.contains(pos) {
                 state.interaction.mode = DragMode::DragScrollbarV {
                     grab: pos.y - vt.min.y,

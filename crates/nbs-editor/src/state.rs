@@ -11,7 +11,7 @@ use nbs_core::Document;
 use nbs_io::datapack::DatapackOptions;
 use nbs_io::image_export::ImageOptions;
 use nbs_io::midi::MidiImportOptions;
-use nbs_io::prefs::{Preferences, RecentFile};
+use nbs_io::prefs::{Preferences, RecentFile, REFRESH_RATES};
 use nbs_io::schematic::SchematicOptions;
 
 use crate::commands::Command;
@@ -39,6 +39,16 @@ impl EditMode {
             Self::Pitch => tr("Pitch", "微调"),
         }
     }
+}
+
+/// 原版 Home / End / PageUp / PageDown 对「最后碰过的那根滚动条」做的三种动作
+/// （`control_draw.gml:684-704`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AxisScroll {
+    Home,
+    End,
+    /// ±多少个可见页；原版 PageUp = +1，PageDown = -1。
+    Page(i32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1051,6 +1061,12 @@ pub struct EditorState {
     pub dialog_return: Option<WindowKind>,
     /// 原版的全屏开关（F11）。
     pub fullscreen: bool,
+    /// 原版 `sb_sel`（初值 0，`draw_scrollbar.gml` 里按到哪根条就置成那条的号）：
+    /// 最后一次碰过的滚动条，0 = 横向、1 = 纵向。原版 Home / End / PageUp / PageDown
+    /// 只翻这一根指向的轴，且按下后不复位。端口只有主界面两根条参与（窗口内的列表
+    /// 条是 egui 自绘的，原版那些条被按下时会把 `sb_sel` 抢走、导致编辑器按键空转，
+    /// 这个副作用不复刻）。
+    pub sb_sel: u8,
     /// 原版 `isplayer`（`control_create.gml:28-32`）：`-player` / `--protocol-launcher`
     /// 启动或欢迎窗按钮进入的只读播放档位。运行时标志不进 prefs。
     pub player: bool,
@@ -1457,6 +1473,7 @@ impl EditorState {
             flags,
             theme,
             fullscreen: false,
+            sb_sel: 0,
             player: false,
             window: None,
             window_prev: None,
@@ -1733,6 +1750,24 @@ impl EditorState {
         true
     }
 
+    /// 原版 `draw_windows.gml:31-38`：Escape 先把展开的下拉收掉，并且把
+    /// `window_escape_pressed` 清成 0 —— 同一次按键不许既收下拉又关窗。
+    /// 返回这一次有没有落到下拉上。
+    ///
+    /// 顶部菜单栏是 egui 自己的 popup（egui 在 `menu.rs:366` 就地把 Escape 吃掉了），
+    /// 这里只负责「看见它开着」；首选项里那四个下拉是端口自绘的 Area，
+    /// 状态记在开关上，得由这里关掉。MIDI 窗的两个菜单归 #122b：那个窗口
+    /// 至今没有任何 Escape 路径，先不凭空加行为。
+    pub fn close_prefs_dropdowns(&mut self, ctx: &Context) -> bool {
+        let egui_popup = ctx.memory(|m| m.any_popup_open());
+        // 按位或：四个开关都要被清一遍，不能被短路跳过。
+        let mine = std::mem::take(&mut self.prefs_theme_menu)
+            | std::mem::take(&mut self.prefs_rate_menu)
+            | std::mem::take(&mut self.prefs_language_menu)
+            | std::mem::take(&mut self.prefs_output_menu);
+        egui_popup | mine
+    }
+
     pub fn set_message(&mut self, text: impl Into<String>) {
         self.message = Some((text.into(), Instant::now()));
     }
@@ -1800,6 +1835,49 @@ impl EditorState {
     /// 下一个（上一个）固定档位，档位表就是那串 `else if` 里的数，两端是 0.5 和 4。
     /// 网格本身恒 32px，缩放的是整块界面。
     /// 偏离原版：用户要求下界放开到 10%，低档 0.1–0.4 是自加的（原版止步 0.5）。
+    /// 原版 `control_draw.gml:684-704`：翻的是 `sb_sel` 那一根，夹在 `0..=enda`
+    /// （纵向 `0..=endb`）之间，播放头不动。
+    pub fn scroll_axis(&mut self, op: AxisScroll) {
+        let vertical = self.sb_sel == 1;
+        // 上限取 enda / endb：和那两根条自己的上限（bar_metrics 的 tail）是同一个数，
+        // 原版也是夹到这两个值（median(0, starta, enda)）。
+        let (total, max) = if vertical {
+            (self.viewport.rows() as i64, self.doc.song.endb as i64)
+        } else {
+            (self.viewport.columns() as i64, self.doc.song.enda as i64)
+        };
+        let cur = if vertical {
+            self.viewport.start_layer as i64
+        } else {
+            self.viewport.start_tick as i64
+        };
+        let next = match op {
+            AxisScroll::Home => 0,
+            AxisScroll::End => max,
+            // 原版 PageUp 是 `starta += totalcols`（往曲尾走），PageDown 反向。
+            AxisScroll::Page(d) => (cur + i64::from(d) * total).clamp(0, max),
+        } as u32;
+        if vertical {
+            self.viewport.start_layer = next;
+        } else {
+            self.viewport.start_tick = next;
+        }
+    }
+
+    /// 原版 F7（`control_draw.gml:840-867`）：0→1→2→3→4→0 循环，每档回显一句
+    /// 「帧数上限 => N FPS」。原版只改内存里的 `refreshrate`（退出时才统一
+    /// `save_settings`），这里立刻落盘，理由是端口把帧率上限当成偏好项，
+    /// 首选项下拉和它是同一份数据，不落盘就会出现「界面显示 144、重启回到 30」。
+    pub fn cycle_refresh_rate(&mut self) {
+        let next = (self.prefs.refresh_rate as usize + 1) % REFRESH_RATES.len();
+        self.prefs.refresh_rate = next as u8;
+        self.set_message(format!(
+            "{} => {} FPS",
+            tr("Max framerate", "帧数上限"),
+            REFRESH_RATES[next]
+        ));
+    }
+
     pub fn step_window_scale(&mut self, ctx: &Context, up: bool) {
         let cur = self
             .prefs

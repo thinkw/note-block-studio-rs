@@ -1405,6 +1405,8 @@ fn preferences(state: &mut EditorState, ui: &mut Ui) {
                 i.key_released(egui::Key::Escape),
             )
         });
+        // 原版 `draw_windows.gml:31-38`：下拉正展开时这一下归下拉，窗口留住。
+        let esc = esc && !state.close_prefs_dropdowns(pg.ui.ctx());
         if esc || (ctrl_p && state.window_prev == state.window) {
             state.emit(Command::CloseWindow);
         }
@@ -8588,6 +8590,17 @@ fn vis_types() -> [(&'static str, &'static str); 7] {
 }
 
 fn datapack_export_window(state: &mut EditorState, ui: &mut Ui) {
+    // 原版 `draw_window_datapack_export.gml:89-91`：← / → 在两页之间绕圈。
+    let (left, right) = ui.input(|i| {
+        (
+            i.key_pressed(egui::Key::ArrowLeft),
+            i.key_pressed(egui::Key::ArrowRight),
+        )
+    });
+    if left || right {
+        let step = right as i32 - left as i32;
+        state.datapack_tab = (state.datapack_tab as i32 + step).rem_euclid(2) as u8;
+    }
     ui.horizontal(|ui| {
         for (i, tab) in [tr("Settings", "设置"), tr("Visualizer", "效果")]
             .iter()

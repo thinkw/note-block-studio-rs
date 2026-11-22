@@ -1977,9 +1977,9 @@ mod gui_window_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 音色窗口：v6 起列出 20 种内置乐器，但快捷键只印原版真绑了的那 16 个
-    /// （`control_draw.gml:822-843`：Ctrl+1..9 → 0..8，Ctrl+Shift+1..7 → 9..15）。
-    /// 铜块一族按了没反应，就不许在界面上给它们编一个组合键。
+    /// 音色窗口：v6 起列出 20 种内置乐器，但快捷键只印原版真绑了的那 18 个
+    /// （`control_draw.gml:735-757`：Ctrl+1..9 → 0..8，Ctrl+Shift+1..9 → 9..17）。
+    /// 铜块一族的后两个按了没反应，就不许在界面上给它们编一个组合键。
     #[test]
     fn instruments_window_lists_twenty_and_advertises_only_real_bindings() {
         let ctx = egui::Context::default();
@@ -2019,8 +2019,8 @@ mod gui_window_tests {
                 .iter()
                 .filter(|t| t.starts_with("Ctrl+Shift+"))
                 .count(),
-            7,
-            "Ctrl+Shift+数字应当只有 7 个"
+            9,
+            "Ctrl+Shift+数字应当只有 9 个（#122：原版到索引 17）"
         );
         assert_eq!(
             texts
@@ -2487,6 +2487,79 @@ mod gui_window_tests {
         assert!(!state.prefs.check_prerelease, "答之前不能先改值");
         click_text(&mut state, &ctx, "是");
         assert!(state.prefs.check_prerelease, "答「是」要真的打开");
+    }
+
+    /// #122：原版 `draw_windows.gml:31-38` —— Escape 先收展开的下拉，同一帧不再
+    /// 关窗。端口原先是「下拉开合不管，Escape 一律关窗」。
+    #[test]
+    fn escape_in_preferences_closes_the_dropdown_before_the_window() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = Some(WindowKind::Preferences);
+        state.prefs_tab = 1;
+        frame(&mut state, &ctx);
+        state.prefs_language_menu = true;
+        frame(&mut state, &ctx);
+        press_key(&mut state, &ctx, egui::Key::Escape);
+        assert_eq!(
+            state.window,
+            Some(WindowKind::Preferences),
+            "下拉开着时 Escape 不该把窗口一起关掉"
+        );
+        assert!(!state.prefs_language_menu, "Escape 要把下拉收掉");
+        press_key(&mut state, &ctx, egui::Key::Escape);
+        assert_eq!(state.window, None, "没有下拉时 Escape 照常关窗");
+    }
+
+    /// #122：数据打包窗的 ← / → 翻页签（`draw_window_datapack_export.gml:89-91`），
+    /// 两页之间绕圈。原版另有五扇窗同款，端口早已实现，这里补上漏掉的这一扇。
+    #[test]
+    fn datapack_window_pages_tabs_with_arrow_keys() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = Some(WindowKind::DatapackExport);
+        frame(&mut state, &ctx);
+        assert_eq!(state.datapack_tab, 0, "开窗固定在设置页");
+        press_key(&mut state, &ctx, egui::Key::ArrowRight);
+        assert_eq!(state.datapack_tab, 1, "→ 翻到效果页");
+        press_key(&mut state, &ctx, egui::Key::ArrowRight);
+        assert_eq!(state.datapack_tab, 0, "两页之间绕圈");
+        press_key(&mut state, &ctx, egui::Key::ArrowLeft);
+        assert_eq!(state.datapack_tab, 1, "← 反向绕圈");
+    }
+
+    /// #122：F1「快捷键一览」这张表此前没有任何用例碰过，先证明它真画得出来。
+    /// 表格比窗口高，可见的只有开头几行；新补的 PageUp / F7 两行落在滚动区下面，
+    /// 由 `shortcuts::tests::help_table_lists_the_newly_ported_keys` 在数据面钉住。
+    #[test]
+    fn shortcuts_window_renders_the_help_table() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        dispatch(
+            &mut state,
+            commands::Command::ShowWindow(WindowKind::Shortcuts),
+            &ctx,
+        );
+        let t = drawn_texts(&mut state, &ctx);
+        for want in [
+            "左键单击",
+            "放置 / 覆盖音符",
+            "整窗口缩放（原版档位 0.5..4）",
+        ] {
+            assert!(
+                t.iter().any(|x| x == want),
+                "F1 窗没把表格画出来，缺「{want}」"
+            );
+        }
     }
 
     /// 原版 draw_window_preferences.gml:412-421：界面页的语言下拉。

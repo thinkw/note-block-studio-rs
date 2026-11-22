@@ -1,11 +1,22 @@
-//! 全局快捷键。原版 `control_draw.gml:708-924` 那一整段键盘判定被
+//! 全局快捷键。原版 `control_draw.gml:623-839` 那一整段键盘判定被
 //! `window = 0 && text_focus = -1` 包着：窗口开着或光标停在输入框里时，编辑器按键
 //! 一律不响应（窗口自己只认 ←/→ 翻页签、Escape、Ctrl+P）。其中 Ctrl+ 字母、Delete、
-//! Home/End 又再被 `playing = 0` 包一层，空格 / Enter / F10 / F11 不受此限。
+//! Home/End/PageUp/PageDown 又再被 `playing = 0` 包一层。
 //!
-//! 与原版的已知差异：PageUp/PageDown 原版是把播放头推到曲尾 / 曲首（要先用 Tab 把标尺
-//! 焦点切过去 `sb_sel`），我们按视口翻页，标尺焦点没实现。
-//! F1 原版是打开教学视频链接，这里指向本端口自建的「快捷键一览」窗口。
+//! 三把键原版本来就在那道闸门外，窗口挡着也生效：F10 / F11 写在
+//! `control_step.gml:218-241`（F11 有 `!isplayer`，F10 没有），F7 写在
+//! `control_draw.gml:840`（只卡 `playing = 0`）。空格 / Enter 同理不受播放状态限制。
+//!
+//! 与原版的已知差异：
+//! - F1 原版是打开教学视频链接，这里指向本端口自建的「快捷键一览」窗口（用户定案 #71）。
+//! - Ctrl+W 关当前文件（`get_hotkey.gml` 的 close_song → `control_draw.gml:647`）不接：
+//!   端口是单文档，没有「关掉这一首」这一步，绑上去只能是一个不做事的假动作。
+//! - F3 一族（调试浮层、日志浮层、强切窗口，`control_draw.gml:868-899`）不接：原版的
+//!   调试后门，界面上没有任何入口、帮助页也不列，普通用户按不到也不该按到。
+//! - 参考音频静音 / 独奏 / 混音（`control_step.gml:36-48`）与琴键改键
+//!   （`control_step.gml:190-203`）不接：端口没有这两个功能面。
+//! - `control_draw.gml:632` 的 Ctrl+Shift+A 写在 `if (check_ctrl() && !keyboard_check(vk_shift))`
+//!   里面，自己又要求按下 Shift，永远走不到 —— 原版的死代码，不移植。
 //! Escape 在原版只有三处：键位重设框取消（`control_draw.gml:87`）、首选项关窗
 //! （`draw_window_preferences.gml:596`，取松开沿）、设置速度关窗
 //! （`draw_window_set_tempo.gml:47`）——原版编辑器本身没有「按 Escape 取消选择」。
@@ -16,15 +27,20 @@ use egui::{Context, Event, Key};
 use nbs_core::Macro;
 
 use crate::commands::Command;
+use crate::state::AxisScroll;
 use crate::state::EditorState;
 use crate::state::{EditMode, Flag, WindowKind};
 use crate::theme::ThemeKind;
 use crate::tr;
 
-/// 原版 `control_draw.gml:822-843` 的数字快捷键只覆盖前 16 个乐器：
-/// Ctrl+1..9 → 0..8，Ctrl+Shift+1..7 → 9..15。v6 新增的铜块一族（16..19）
-/// 在原版里没有按键，所以这里不绑，`instruments_window` 也不给它们印提示。
-pub const INSTRUMENT_HOTKEYS: usize = 16;
+/// 原版 `control_draw.gml:735-757` 的数字快捷键覆盖前 18 个乐器：
+/// Ctrl+1..9 → 0..8，Ctrl+Shift+1..9 → 9..17。第 19、20 号（铜块一族的后两个）
+/// 原版没有按键，`instruments_window` 也不给它们印提示。
+///
+/// 原版菜单里印的提示文字和这套按键对不上（英文页印 `Ctrl+Shift+(a+2)%10`、中文页印
+/// `Ctrl+Shift+(a+1)%10`，两版差一位，且 18 号印了键却按不到），端口按「按键真实覆盖
+/// 0..17」印提示。见 #122。
+pub const INSTRUMENT_HOTKEYS: usize = 18;
 
 /// 本帧有没有「带着 Ctrl 按下某个键」。
 ///
@@ -68,12 +84,23 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
     let typing = ctx.memory(|m| m.focused().is_some());
     ctx.input(|i| {
         let mut out = Vec::new();
+        let p = |k: Key| i.key_pressed(k);
+        // F10 / F11 在 `control_step.gml:218-241`、F7 在 `control_draw.gml:840`，三处都
+        // 写在 `window = 0` 那道闸门外：窗口开着、光标停在输入框里也照样响应。
+        if p(Key::F10) {
+            out.push(Command::ToggleFlag(Flag::Blackout));
+        }
+        if p(Key::F11) && !state.player {
+            out.push(Command::ToggleFullscreen);
+        }
+        if p(Key::F7) && !state.is_playing() {
+            out.push(Command::CycleRefreshRate);
+        }
         if state.window.is_some() || typing {
             return out;
         }
         let ctrl = ctrl_chord(i);
         let shift = shift_chord(i);
-        let p = |k: Key| i.key_pressed(k);
 
         // 系统剪贴板粘贴（可能来自其它程序的 OpenNBS selection_code 文本）。
         // 播放器是只读档位，不接粘贴（原版也没有这条路径）。
@@ -86,6 +113,11 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
         }
 
         if p(Key::Escape) {
+            // 右键菜单还开着时这一下归菜单（`grid.rs` 的 `draw_context_menu` 自己关），
+            // 不该顺手把选区也清了 —— 和原版「先收菜单再动别的」同一个次序。
+            if state.context_menu.is_some() {
+                return out;
+            }
             if !state.doc.selection.is_empty() {
                 out.push(Command::Deselect);
             }
@@ -103,12 +135,6 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
         if p(Key::F1) {
             out.push(Command::ShowWindow(WindowKind::Shortcuts));
         }
-        if p(Key::F10) {
-            out.push(Command::ToggleFlag(Flag::Blackout));
-        }
-        if p(Key::F11) {
-            out.push(Command::ToggleFullscreen);
-        }
         // 原版 720 行：Ctrl+Shift+F5 仅 theme 3，开/关彩虹。开只发消息，
         // 关再 draw_accent_init（消息在 toggle_rainbow 里，原版 language=0 的
         // 英文文案是 "Rainbow mode => ON/OFF"，界面沿用中文分支）。
@@ -120,22 +146,25 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
         // 播放器档位：Delete / Home / End / PageUp / PageDown 与下面 Ctrl 族里
         // 除 O/P/W 之外的全部按键都带 `&& !isplayer`（control_draw.gml:628-700）。
         if !state.is_playing() {
-            if !state.player && (p(Key::Delete) || p(Key::Backspace)) {
+            // 原版 `control_draw.gml:681`：Windows / Linux 只认 Delete，退格挂在
+            // `os_type = os_macosx` 那一支。
+            let del = p(Key::Delete) || (cfg!(target_os = "macos") && p(Key::Backspace));
+            if !state.player && del {
                 out.push(Command::Delete);
             }
+            // 原版 `control_draw.gml:684-704`：这四个键翻「最后碰过的那根滚动条」
+            // （`sb_sel`）指向的那一轴，播放头不动；PageUp 朝曲尾 / 下层，PageDown 反向。
             if !state.player && p(Key::Home) {
-                out.push(Command::SeekHome);
+                out.push(Command::ScrollAxis(AxisScroll::Home));
             }
             if !state.player && p(Key::End) {
-                out.push(Command::SeekEnd);
+                out.push(Command::ScrollAxis(AxisScroll::End));
             }
             if !state.player && p(Key::PageUp) {
-                out.push(Command::PageHorizontal(-1));
-                out.push(Command::PageVertical(-1));
+                out.push(Command::ScrollAxis(AxisScroll::Page(1)));
             }
             if !state.player && p(Key::PageDown) {
-                out.push(Command::PageHorizontal(1));
-                out.push(Command::PageVertical(1));
+                out.push(Command::ScrollAxis(AxisScroll::Page(-1)));
             }
             if ctrl && !shift {
                 if !state.player && p(Key::N) {
@@ -245,8 +274,9 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
                     }
                 }
             } else {
-                // 原版 `instrument_list[| a + 8]`，a 只到 7 → 索引 9..15。
-                for (idx, k) in digits.iter().enumerate().take(7) {
+                // 原版 `control_draw.gml:750-757`：`instrument_list[| a + 8]`，a = 1..9
+                // → 索引 9..17。
+                for (idx, k) in digits.iter().enumerate() {
                     if p(*k) {
                         out.push(Command::SetInstrument((9 + idx) as u8));
                     }
@@ -511,8 +541,20 @@ pub fn shortcut_help() -> Vec<(&'static str, &'static str)> {
         (
             "Home / End",
             "Home / End",
-            "Playhead to start / end",
-            "播放头到开头 / 结尾",
+            "Scroll the last-touched bar to the start / end",
+            "把最后碰过的那根滚动条挪到开头 / 结尾",
+        ),
+        (
+            "PageUp / PageDown",
+            "PageUp / PageDown",
+            "Page the same bar toward the end / the start",
+            "同一根条往曲尾 / 曲首翻一页",
+        ),
+        (
+            "F7",
+            "F7",
+            "Cycle the frame-rate cap (30 / 60 / 120 / 144 / 240, while stopped)",
+            "循环切换帧数上限（30 / 60 / 120 / 144 / 240，停止播放时）",
         ),
         (
             "F10 / F11",
@@ -531,8 +573,8 @@ pub fn shortcut_help() -> Vec<(&'static str, &'static str)> {
         (
             "Escape",
             "Escape",
-            "Close the preferences window / cancel selection",
-            "关闭首选项窗口 / 取消选择",
+            "Close a drop-down first, then the window / cancel selection",
+            "先关掉展开的下拉，其次关窗 / 取消选择",
         ),
     ]
     .into_iter()
@@ -685,6 +727,185 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// #122：原版 `control_draw.gml:684-704` 的四个翻页键翻的是「最后碰过的那根
+    /// 滚动条」（`sb_sel`）指向的那一轴，播放头不动。快捷键侧只负责发 ScrollAxis，
+    /// 挪哪一轴由 commands.rs 的用例钉。
+    #[test]
+    fn paging_keys_scroll_the_touched_bar_not_the_playhead() {
+        let none = egui::Modifiers::NONE;
+        for (k, want) in [
+            (Key::Home, AxisScroll::Home),
+            (Key::End, AxisScroll::End),
+            (Key::PageUp, AxisScroll::Page(1)),
+            (Key::PageDown, AxisScroll::Page(-1)),
+        ] {
+            let got = cmds(vec![key(k, true, none)]);
+            assert_eq!(got, vec![Command::ScrollAxis(want)], "{k:?} 实际 {got:?}");
+        }
+    }
+
+    /// #122：F10 / F11 写在 `control_step.gml:218-241`、F7 写在
+    /// `control_draw.gml:840`，三处都在 `window = 0` 那道闸门外，窗口和输入框挡不住；
+    /// 其中 F11 原版另有一道 `!isplayer`。
+    #[test]
+    fn f7_f10_fire_with_a_window_open_and_f11_respects_player_mode() {
+        let none = egui::Modifiers::NONE;
+        for player in [false, true] {
+            for window in [
+                None,
+                Some(WindowKind::Preferences),
+                Some(WindowKind::DatapackExport),
+            ] {
+                let mut st = EditorState::for_test();
+                let label = format!("{window:?}");
+                st.window = window;
+                st.player = player;
+                let got = cmds_in(
+                    &st,
+                    vec![
+                        key(Key::F10, true, none),
+                        key(Key::F11, true, none),
+                        key(Key::F7, true, none),
+                    ],
+                );
+                let mut want = vec![Command::ToggleFlag(Flag::Blackout)];
+                if !player {
+                    want.push(Command::ToggleFullscreen);
+                }
+                want.push(Command::CycleRefreshRate);
+                assert_eq!(got, want, "窗口 {label} 播放器档 {player}: {got:?}");
+            }
+        }
+    }
+
+    /// #122：原版 `control_draw.gml:681` 的退格只挂在 macOS 那一支，
+    /// Windows / Linux 上退格不删音符。
+    #[test]
+    fn backspace_deletes_only_where_the_original_allows_it() {
+        let none = egui::Modifiers::NONE;
+        let got = cmds(vec![key(Key::Backspace, true, none)]);
+        if cfg!(target_os = "macos") {
+            assert_eq!(got, vec![Command::Delete], "macOS 上退格应等同 Delete");
+        } else {
+            assert!(got.is_empty(), "非 macOS 上退格不该删音符: {got:?}");
+        }
+        assert_eq!(
+            cmds(vec![key(Key::Delete, true, none)]),
+            vec![Command::Delete],
+            "Delete 本身要照常删"
+        );
+    }
+
+    /// #122：原版 Ctrl+Shift+1..9 → `instrument_list[| a + 8]`，即索引 9..17；
+    /// 端口原来只做到 15，第 16、17 号按不到。
+    #[test]
+    fn ctrl_shift_digits_cover_the_whole_nine_to_seventeen_run() {
+        let cs = egui::Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Default::default()
+        };
+        for (k, idx) in [
+            (Key::Num1, 9u8),
+            (Key::Num7, 15),
+            (Key::Num8, 16),
+            (Key::Num9, 17),
+        ] {
+            let got = cmds(vec![key(k, true, cs)]);
+            let picked: Vec<Command> = got
+                .iter()
+                .filter(|c| matches!(c, Command::SetInstrument(_)))
+                .cloned()
+                .collect();
+            assert_eq!(
+                picked,
+                vec![Command::SetInstrument(idx)],
+                "Ctrl+Shift+{k:?} 应选到索引 {idx}: {got:?}"
+            );
+        }
+    }
+
+    /// #122：帮助表跟着这次追平的按键一起改 —— Home / End 的说法换成「翻最后碰过的
+    /// 那根条」、补上 PageUp / PageDown 与 F7、Escape 说明加「先收下拉」。
+    /// 表里的说明按全局语言取，用例两边都认，免得和并行用例抢那把语言开关。
+    #[test]
+    fn help_table_lists_the_newly_ported_keys() {
+        let rows = shortcut_help();
+        let has = |k: &str, zh: &str, en: &str| {
+            rows.iter()
+                .any(|row| row.0 == k && (row.1 == zh || row.1 == en))
+        };
+        assert!(
+            has(
+                "Home / End",
+                "把最后碰过的那根滚动条挪到开头 / 结尾",
+                "Scroll the last-touched bar to the start / end"
+            ),
+            "Home / End 的说明没跟上"
+        );
+        assert!(
+            has(
+                "PageUp / PageDown",
+                "同一根条往曲尾 / 曲首翻一页",
+                "Page the same bar toward the end / the start"
+            ),
+            "缺 PageUp / PageDown 行"
+        );
+        assert!(
+            has(
+                "F7",
+                "循环切换帧数上限（30 / 60 / 120 / 144 / 240，停止播放时）",
+                "Cycle the frame-rate cap (30 / 60 / 120 / 144 / 240, while stopped)"
+            ),
+            "缺 F7 行"
+        );
+        assert!(
+            has(
+                "Escape",
+                "先关掉展开的下拉，其次关窗 / 取消选择",
+                "Close a drop-down first, then the window / cancel selection"
+            ),
+            "Escape 行没提下拉"
+        );
+        assert_eq!(
+            rows.iter().filter(|r| r.0 == "F7").count(),
+            1,
+            "F7 只该有一行"
+        );
+        assert!(
+            !rows.iter().any(|r| {
+                r.1.contains("Playhead to start") || r.1.contains("播放头到开头")
+            }),
+            "旧的「播放头到开头」说法要清干净"
+        );
+    }
+
+    /// 端口自加的「Escape 取消选择」（原版没这条键，见模块头注）在右键菜单开着时让位：
+    /// 那一下归菜单自己关，不该连着把选区清了。
+    #[test]
+    fn escape_yields_to_the_open_context_menu() {
+        let none = egui::Modifiers::NONE;
+        let mut st = fresh_state();
+        let picked = nbs_core::selection::SelectionNote {
+            dx: 0,
+            dy: 0,
+            note: nbs_core::model::Note::new(0, 48),
+        };
+        st.doc.selection.notes.push(picked);
+        assert_eq!(
+            cmds_in(&st, vec![key(Key::Escape, true, none)]),
+            vec![Command::Deselect],
+            "没有菜单时 Escape 仍取消选择"
+        );
+        st.context_menu = Some(crate::state::ContextMenu {
+            pos: egui::Pos2::ZERO,
+            cell: (0, 0),
+            kind: crate::state::ContextKind::Grid,
+        });
+        let got = cmds_in(&st, vec![key(Key::Escape, true, none)]);
+        assert!(got.is_empty(), "菜单还开着时 Escape 不该清选区: {got:?}");
     }
 
     /// 快速点按 Ctrl+P 也要开首选项 —— 帧率上限 30 时人手点快了就是这样一帧。
