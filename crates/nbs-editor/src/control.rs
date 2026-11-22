@@ -2012,7 +2012,15 @@ fn midi_effective(
         }
         enh.smart_substitute = e.smart_substitute.unwrap_or(enh.smart_substitute);
         enh.force_fold = e.force_fold.unwrap_or(enh.force_fold);
-        enh.sustain = e.sustain.unwrap_or(enh.sustain);
+        // MCP 契约里 sustain 还是 bool（origin/main 已发布）：true = 所有轨道都重敲。
+        // 三态的「只重敲选中的轨道」和白名单只在界面里给，MCP 读回统一报 true。
+        if let Some(on) = e.sustain {
+            enh.sustain = if on {
+                nbs_io::midi_enhanced::SustainMode::All
+            } else {
+                nbs_io::midi_enhanced::SustainMode::Off
+            };
+        }
         enh.sustain_fade = e.sustain_fade.unwrap_or(enh.sustain_fade);
         enh.separate_voices = e.separate_voices.unwrap_or(enh.separate_voices);
         enh.voice_ignore_metadata = e
@@ -2267,7 +2275,7 @@ fn midi_echo_enhanced(enh: &nbs_io::midi_enhanced::EnhancedMidiOptions) -> Impor
         }),
         smart_substitute: Some(enh.smart_substitute),
         force_fold: Some(enh.force_fold),
-        sustain: Some(enh.sustain),
+        sustain: Some(enh.sustain != nbs_io::midi_enhanced::SustainMode::Off),
         sustain_fade: Some(enh.sustain_fade),
         separate_voices: Some(enh.separate_voices),
         voice_ignore_metadata: Some(enh.voice_ignore_metadata),

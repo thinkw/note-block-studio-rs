@@ -140,6 +140,10 @@ pub struct Preferences {
     /// 端口自加（用户要求接 MAESTRO 导出）：MAESTRO 机体节目单的导出选项。
     /// 原版没有这条导出，所以也没有对应的 `[..._export]` 段，键名用 `maestro`。
     pub maestro: crate::maestro::MaestroOptions,
+    /// 端口自加（用户要求接 nbs-fractal 机体导出）：`.litematic` 整机投影的导出选项。
+    pub fractal: crate::fractal::FractalOptions,
+    /// 端口自加（用户要求接唱片工坊那一档）：编码唱片数据箱 `.litematic` 的导出选项。
+    pub disc_chest: crate::disc_chest::DiscChestOptions,
     /// 原版 `[midi_import]` 段：勾了「记住我的更改」后，导入窗口里改的通道/鼓映射
     /// 会写进 GM 表并持久化到这里。`None` = 没改过，用出厂表。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -153,6 +157,11 @@ pub struct Preferences {
     /// 端口自加：MAESTRO 那条「节目单要在已建好的机体里才出声」的一次性提示是否已看过。
     /// 语义同 `warning_schematic`（`false` = 还没提示过）。
     pub warning_maestro: bool,
+    /// 端口自加：fractal 那条「这份投影自带红石、贴下去就能响，不需要先建机体」的一次性提示。
+    pub warning_fractal: bool,
+    /// 端口自加：编码唱片那条「只是数据箱，得贴在已建好的机体里才出声」的一次性提示。
+    /// 语义同 `warning_maestro`（`false` = 还没提示过）。
+    pub warning_disc_chest: bool,
     /// 原版 `show_welcome`（出厂 1，`control_create.gml:175`）：开机显示欢迎窗。
     pub show_welcome: bool,
     /// 原版 `check_update`（Windows 直装出厂 1，`control_create.gml:172`）：开机检查更新。
@@ -185,6 +194,15 @@ pub struct Preferences {
     /// 危险动作（退出程序、替你答确认框、打开外链）是否可调。
     /// **独立**开关：勾「启用外部控制」绝不会把这条一起打开，取消勾选也不会清掉它。
     pub control_danger: bool,
+    /// 播放特效：每个特效一份参数，键 = 特效的稳定 id（不是显示名，改名不冲存档）。
+    /// 老存档没这条 → 空表，各特效由自己参数结构上的 `#[serde(default)]` 补出厂值。
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub fx: std::collections::HashMap<String, serde_json::Value>,
+    /// 启用中的特效 id。出厂全关：没人要特效时播放路径不该多出任何绘制。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fx_active: Vec<String>,
+    /// 叠加类特效的整体透明度（舞台类独占画面，不看这条）。
+    pub fx_opacity: f32,
 }
 
 /// 最近歌曲一条：路径 + 上次打开的时间（unix 秒，原版 `date_current_datetime()`）。
@@ -332,10 +350,14 @@ impl Default for Preferences {
             auto_save_minutes: 10,
             schematic: crate::schematic::SchematicOptions::default(),
             maestro: crate::maestro::MaestroOptions::default(),
+            fractal: crate::fractal::FractalOptions::default(),
+            disc_chest: crate::disc_chest::DiscChestOptions::default(),
             midi_gm: None,
             midi_import: None,
             warning_schematic: false,
             warning_maestro: false,
+            warning_fractal: false,
+            warning_disc_chest: false,
             // 原版 `control_create.gml:172-175`：check_update = 1（Windows）、
             // check_prerelease = is_prerelease（我们的构建按稳定版算 = 0）、
             // show_welcome = 1；donate_banner = 1、donate_banner_time = −1（:112-113）。
@@ -349,6 +371,11 @@ impl Default for Preferences {
             control_enabled: false,
             control_dirs: Vec::new(),
             control_danger: false,
+            // 播放特效出厂全关、参数用各特效自己的默认值（这里留空表，
+            // 设置文件里也就不多写这两段）。
+            fx: std::collections::HashMap::new(),
+            fx_active: Vec::new(),
+            fx_opacity: 0.85,
         }
     }
 }
@@ -821,6 +848,59 @@ mod tests {
             "官方转换器默认 round，老配置缺键时必须退回它"
         );
         assert!(!old.warning_maestro);
+    }
+
+    /// fractal 那条导出（端口自加）：布局族、奇偶分道与一次性提示要能落盘，
+    /// 老配置里没有这几个键时退回出厂档（Linear / 20 t/s / 未提示）。
+    #[test]
+    fn fractal_options_and_notice_flag_persist() {
+        let mut p = Preferences::default();
+        p.fractal.layout = crate::fractal::FractalLayout::Compact;
+        p.fractal.twenty_hz = false;
+        p.fractal.wrap = 16;
+        p.warning_fractal = true;
+        let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.fractal.layout, crate::fractal::FractalLayout::Compact);
+        assert!(!back.fractal.twenty_hz);
+        assert_eq!(back.fractal.wrap, 16);
+        assert!(back.warning_fractal);
+
+        let old: Preferences = serde_json::from_str(r#"{"theme":2}"#).unwrap();
+        assert_eq!(
+            old.fractal.layout,
+            crate::fractal::FractalLayout::Linear,
+            "老配置缺键时得退回上游 CLI 的出厂档"
+        );
+        assert!(old.fractal.twenty_hz);
+        assert!(!old.warning_fractal);
+    }
+
+    /// 编码唱片数据箱那条导出（端口自加）：机体档、时间处理方式、层高与一次性提示要能
+    /// 落盘；老配置里没有这几个键时退回上游的出厂档（20 t/s / resample / 层高 8 / 未提示）。
+    #[test]
+    fn disc_chest_options_and_notice_flag_persist() {
+        let mut p = Preferences::default();
+        p.disc_chest.machine = crate::disc_chest::Machine::TenHz;
+        p.disc_chest.timing = crate::disc_chest::Timing::KeepTicks;
+        p.disc_chest.layer_height = 4;
+        p.disc_chest.stackable_rests = false;
+        p.warning_disc_chest = true;
+        let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.disc_chest.machine, crate::disc_chest::Machine::TenHz);
+        assert_eq!(back.disc_chest.timing, crate::disc_chest::Timing::KeepTicks);
+        assert_eq!(back.disc_chest.layer_height, 4);
+        assert!(!back.disc_chest.stackable_rests);
+        assert!(back.warning_disc_chest);
+
+        let old: Preferences = serde_json::from_str(r#"{"theme":2}"#).unwrap();
+        assert_eq!(
+            old.disc_chest.machine,
+            crate::disc_chest::Machine::TwentyHz,
+            "老配置缺键时得退回上游 `defaultConfig` 那台 20 音/秒"
+        );
+        assert_eq!(old.disc_chest.layer_height, 8);
+        assert!(old.disc_chest.stackable_rests);
+        assert!(!old.warning_disc_chest);
     }
 
     /// 外部控制这三条是我们自己加的（原版没有对应物），所以对旧文件的口径是「全关」：

@@ -14,6 +14,8 @@
 //! `NBS_UIPNG_POINTER=x,y` 每帧往该逻辑坐标发一次鼠标移动，用来渲染悬停态；
 //! `NBS_UIPNG_FDARK=1` 打开 Fluent 的暗色模式；
 //! `NBS_UIPNG_SCROLL=<tick>:<layer>` 把网格左上角滚到指定位置，验证可视区外的内容；
+//! `NBS_UIPNG_FX=<id[,id]>[:<播放头列号>]` 摆开播放特效（`synthesia` 舞台 / `block_row` 叠加），
+//! 播放头停在哪一列一起给，否则只画得出半截。
 //! `NBS_UIPNG_KEY_PLAYED=<键号>:<秒>` 给某个琴键盖上「演奏后过了这么多秒」的时间戳，
 //! 用来截图验证播放时琴键跟着弹下（染黄 + `floor(7*down)` 位移）。
 //! `NBS_UIPNG_PREFS_MENU=theme|rate|output` 把首选项页里的某个下拉摆成打开状态
@@ -235,6 +237,23 @@ fn main() -> Result<(), String> {
         state.viewport.start_layer = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     }
 
+    // `NBS_UIPNG_FX=<id[,id]>[:<播放头列号>]`：摆开播放特效再渲染。特效按播放头算
+    // 可见窗口，停在第 0 列只能看到半截，所以播放头也一起给。id 见 `FxStack::ids()`。
+    if let Ok(spec) = std::env::var("NBS_UIPNG_FX") {
+        let (ids, tick) = match spec.split_once(':') {
+            Some((a, b)) => (a, b.parse::<f64>().unwrap_or(0.0)),
+            None => (spec.as_str(), 0.0),
+        };
+        for id in ids.split(',').filter(|s| !s.is_empty()) {
+            if let Some(msg) = state.fx.stack.set_active(id, true) {
+                println!("FX: {msg}");
+            }
+        }
+        state.audio.clock_mut().seek(tick);
+        // 载歌与否都会先摆着开机欢迎窗，它正好压在舞台那块上，截图什么都看不见。
+        state.window = None;
+    }
+
     // `NBS_UIPNG_KEY_PLAYED=<键号>:<过了多少秒>`：给某个琴键盖「演奏后过了这么多秒」的
     // 时间戳。渲染循环每帧的 `input.time` 是自己给的（0.05s 递增），所以这里只解析，
     // 真正盖章要等到帧里知道 time 之后再做（见下面的循环）。
@@ -278,6 +297,8 @@ fn main() -> Result<(), String> {
             "datapack" => WindowKind::DatapackExport,
             "schematic" => WindowKind::SchematicExport,
             "minecraft-compat" => WindowKind::MinecraftCompat,
+            // 端口自加的那扇：播放特效清单。
+            "playback-effects" => WindowKind::PlaybackEffects,
             // 事件乐器编辑窗：草稿值按原版落格默认摆好（tempo=10 t/s → 150；消音器层 2 → 3）。
             "edit-tempo" => {
                 state.event_edit.tempo = "150".into();

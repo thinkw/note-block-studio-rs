@@ -1,0 +1,36 @@
+本目录里逐张用 `!assets/Blocks/<名>.png` 白名单放行的贴图是 Mojang Studios / Microsoft
+的版权素材，不是我们的著作物。这段说明随目录一起走，整仓库口径见仓库根的
+THIRD-PARTY-NOTICES.md。
+
+入库范围
+    20 张 16×16 PNG，合计 4147 字节，正好是 20 个内置乐器在播放特效里会画到的那几张方块：
+    dirt, oak_planks, cobblestone, sand, glass, white_wool, clay, gold_block,
+    packed_ice, bone_block_side, iron_block, soul_sand, pumpkin_side, emerald_block,
+    hay_block_side, glowstone, copper_block, exposed_copper, weathered_copper,
+    oxidized_copper。
+    名单不是手抄的：crates/nbs-editor/src/fx/tiles.rs 里的测试拿出厂表
+    INSTRUMENT_BLOCKS / COPPER_INS_BLOCKS 现算 resolve_file 的结果核对，改了出厂乐器表
+    却没补白名单，那条测试就红。
+    抓取工具一次会落 1039 张，其余 1019 张跟乐器无关，仍被 .gitignore 忽略，只留在跑过
+    脚本的机器上。
+
+来路
+    Mojang 官方客户端 jar 里的 assets/minecraft/textures/block/。版本号、jar 的 sha1、
+    抓取时间记在同目录 PROVENANCE.json；抓取工具 tools/fetch_block_textures.py
+    （下载前后都校验 sha1）。
+    装机版或开发版找不到目录、或某个方块在 1.21 资源里换了名，播放特效自动退回按方块名
+    哈希出的稳定色块（fx::tiles::fallback_color）：画面失真但不缺格，也不会因为素材缺失
+    就整条特效不可用。
+
+条款口径
+    Minecraft EULA 明文保留方块贴图及其衍生的所有权，并把这类使用限定在「粉丝与创作者」
+    那档用途（原文引用见 THIRD-PARTY-NOTICES.md 第二节）。我们不主张对这些像素有任何
+    权利，也不通过 AGPL-3.0-only 授予额外许可 —— 本仓库的 AGPL 只处分我们自己写的代码
+    与文档。要把这几张图用在 Mojang 指引之外的场景（商用分发、二次打包成自己的素材库、
+    训练用数据），请直接向 Mojang / Microsoft 取授权，或者改用无素材包：
+    `python tools/strip_mojang_assets.py`。
+
+投诉处理
+    若 Mojang / Microsoft 认为这几张贴图不该出现在本仓库：提 issue 或直接联系维护者，
+    收到即移除。移除只需要删掉 .gitignore 里那 20 行 `!`，代码一行都不用改，特效自己
+    退回色块路径（这条兜底在 tiles.rs 的 fallback 逻辑里，不是为下架特写的）。

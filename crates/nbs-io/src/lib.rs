@@ -4,13 +4,19 @@
 //! - [`pattern`]       `.nbp` 选区片段（含 zlib+base64 剪贴板兼容）
 //! - [`schematic`]     `.schematic` / 结构方块 `.nbt`（大端 NBT + gzip）
 //! - [`maestro`]       MAESTRO 音乐机节目单（`.schem`，需已建好的机体才出声）
+//! - [`fractal`]       nbs-fractal 机体投影（`.litematic`，自带红石的整机）
+//! - [`litematic`]     自写的 Litematica 写出器（多子区域 + 箱内物品，给编码唱片那一档用）
 //! - [`datapack`]      Minecraft 数据包（mcfunction + 二分 tick 查找树）
+//! - [`disc_chest`]    唱片工坊那一档的编码唱片数据箱（`.litematic`，需已建好的机体才出声）
 //! - [`image_export`]  PNG 谱面导出
 //! - [`prefs`]         JSON 偏好、最近文件、原子保存、自动备份
 
 pub mod audio_export;
 pub mod datapack;
+pub mod disc_chest;
+pub mod fractal;
 pub mod image_export;
+pub mod litematic;
 pub mod maestro;
 pub mod mc_export;
 pub mod midi;
@@ -34,6 +40,14 @@ pub use nbs_core::{lang, set_language, tr};
 #[cfg(test)]
 pub(crate) static TEST_LANG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+pub use disc_chest::{
+    export as export_disc_chest, preview as preview_disc_chest, DiscChestOptions,
+    DiscChestReport, Machine as DiscChestMachine, Timing as DiscChestTiming,
+};
+pub use fractal::{
+    export as export_fractal, preview as preview_fractal, FractalLayout, FractalOptions,
+    FractalReport,
+};
 pub use image_export::{export_png, render_image, ImageOptions};
 pub use maestro::{
     export as export_maestro, preview as preview_maestro, MaestroOptions, MaestroReport, TimingMode,
@@ -43,8 +57,9 @@ pub use midi::{
     parse_midi, MidiData, MidiEvent, MidiImportOptions, MidiImportPrefs, MidiPart, MidiTrack,
 };
 pub use midi_enhanced::{
-    import_midi_enhanced, ChannelCombination, EnhancedImportReport, EnhancedMidiOptions,
-    InstrumentSubstitution, MidiSlot, RangeMode,
+    import_midi_enhanced, sustain_candidate_tracks, track_length_stats, ChannelCombination,
+    EnhancedImportReport, EnhancedMidiOptions, InstrumentSubstitution, MidiSlot, RangeMode,
+    SustainDensity, SustainMode, TrackLengthStats,
 };
 pub use midi_gm::{MidiDrum, MidiGmPersist, MidiGmTable, MidiPatch, MIDI_DRUMS, MIDI_PATCHES};
 pub use pattern::{

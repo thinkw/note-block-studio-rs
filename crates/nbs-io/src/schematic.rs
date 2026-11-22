@@ -107,7 +107,10 @@ const INS_NAMES: [&str; 20] = [
 /// 这 4 个方块是 1.17+ 的，1.12 数字 id 表里没有，所以 `INSTRUMENT_BLOCKS`
 /// 那套数字表（`.schematic` 路径用）填不进去；.nbt 路径直接按名字写。
 /// 取值逐字来自装机版自己导出的参照文件 palette[19..23]。
-const COPPER_INS_BLOCKS: [&str; 4] = [
+///
+/// 公开给编辑器：`.nbt` 导出对这四格不看 `ins_block`（用户配了也不生效），
+/// 播放特效要画得和机体一致就只能跟着这张表走。
+pub const COPPER_INS_BLOCKS: [&str; 4] = [
     "waxed_copper_block",
     "waxed_exposed_copper",
     "waxed_weathered_copper",
@@ -163,6 +166,11 @@ impl Nbt {
         self.header(3, name);
         self.buf.extend_from_slice(&v.to_be_bytes());
     }
+    /// `TAG_Long(name, value)`——投影模组的 `TimeCreated` / `BlockStates` 元素用得到。
+    pub fn long(&mut self, name: &str, v: i64) {
+        self.header(4, name);
+        self.buf.extend_from_slice(&v.to_be_bytes());
+    }
     /// `TAG_Float(name, value)`
     pub fn float(&mut self, name: &str, v: f32) {
         self.header(5, name);
@@ -192,6 +200,17 @@ impl Nbt {
             .extend_from_slice(&(v.len() as i32).to_be_bytes());
         for x in v {
             self.item_int(*x);
+        }
+    }
+    /// `TAG_Long_Array(name, values)`——投影模组（Litematica）的 `BlockStates` 用的正是这一档。
+    /// 与 [`Self::int_array`] 只差元素宽度（8 字节），同样属数组标签：元素类型由标签本身决定，
+    /// 每个元素前面不再写类型字节。
+    pub fn long_array(&mut self, name: &str, v: &[i64]) {
+        self.header(12, name);
+        self.buf
+            .extend_from_slice(&(v.len() as i32).to_be_bytes());
+        for x in v {
+            self.buf.extend_from_slice(&x.to_be_bytes());
         }
     }
     /// `TAG_List(name, length, type)` —— 参数顺序照原版：先长度后类型。

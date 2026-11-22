@@ -761,7 +761,8 @@ impl Document {
     pub fn replace_song(&mut self, song: Song) {
         // rev 只增不减，且换歌也要推进它（在旧值上 +1，而不是沿用载入值）：两首新载入的
         // 歌都带 rev=0，沿用就会撞在同一个数上，凡是拿 rev 当缓存键的下游（右上角兼容
-        // 徽标、MCP 的 expect_rev）都会把上一首的结论留给下一首。
+        // 徽标、特效时间轴、导出方块表、MCP 的 expect_rev）都会把上一首的结论留给下一首
+        // ——特效那条最显眼：开机烘的是演示曲，开档后于是一直在画演示曲的音符。
         let next = self.song.rev.saturating_add(1);
         self.song = song;
         self.song.rev = next;
@@ -1069,5 +1070,22 @@ mod tests {
         assert_eq!(doc.song.get(0, 0).unwrap().key, 33);
         assert_eq!(doc.song.get(1, 0).unwrap().key, 45);
         assert_eq!(doc.song.get(2, 0).unwrap().key, 46);
+    }
+
+    /// 换歌 = 内容变了：`rev` 必须递增，否则按 rev 缓存的东西（特效时间轴）会留着上一首。
+    /// 解析出来的曲子 rev 恒为 0，这里不递增就撞车。
+    #[test]
+    fn replacing_the_song_moves_rev() {
+        let mut doc = Document::new();
+        assert_eq!(doc.song.rev, 0);
+        let mut loaded = Song::new();
+        loaded.set(2, 0, Note::new(3, 50));
+        loaded.recalculate();
+        doc.replace_song(loaded);
+        assert_eq!(doc.song.rev, 1, "开档后要和开档前区分得开");
+        doc.replace_song(Song::new());
+        assert_eq!(doc.song.rev, 2, "连续换歌每首都得是自己的版本号");
+        doc.place_note(0, 0, Note::new(0, 45));
+        assert_eq!(doc.song.rev, 3, "换歌之后照常继续递增");
     }
 }

@@ -220,6 +220,16 @@ pub enum Command {
     OpenMaestroExport,
     /// 端口自加：MAESTRO 窗口「导出」按钮——预览报错就不弹保存框。
     ExportMaestroChecked,
+    /// 端口自加：nbs-fractal 整机投影入口（导出菜单）。第一次用先提示
+    /// 「这份投影自带红石，贴下去就能响，不需要机体」，随后算一遍预览再开窗口。
+    OpenFractalExport,
+    /// 端口自加：fractal 窗口「导出」按钮——预览报错就不弹保存框。
+    ExportFractalChecked,
+    /// 端口自加：唱片工坊那一档的编码唱片数据箱入口（导出菜单）。第一次用先提示
+    /// 「这份投影只是箱子，要贴在已建好的机体里才出声」，随后算一遍预览再开窗口。
+    OpenDiscChestExport,
+    /// 端口自加：编码唱片窗口「导出」按钮——预览报错就不弹保存框。
+    ExportDiscChestChecked,
     /// 原版导入窗口的「导入」= `import_midi()`，随后 `save_settings()`。
     MidiImportRun,
     /// 原版导入窗口「使用默认值」答「是」之后那一大段：`midi_instruments()`
@@ -1046,6 +1056,118 @@ the machine in your world before pasting this structure.\n\nThis warning will ne
                 Some(msg) => {
                     state.modals = ModalQueue::message(
                         tr("MAESTRO machine sheet", "MAESTRO 机体节目单"),
+                        &msg,
+                    );
+                }
+            }
+        }
+        // ------------------------------------- Fractal 机体投影（端口自加）
+        Command::OpenFractalExport => {
+            // 与 MAESTRO 相反：这份 .litematic 自带红石，贴下去就能响，不需要先搭机体。
+            // 第一次用把这一点说清楚，规矩照 warning_maestro：提示完就落盘，不再重复。
+            let mut items: std::collections::VecDeque<Modal> = std::collections::VecDeque::new();
+            if !state.prefs.warning_fractal {
+                items.push_back(Modal {
+                    title: tr("Fractal machine projection", "Fractal 机体投影"),
+                    text: if crate::lang() == 1 {
+                        "导出的 .litematic 是一台完整的红石音乐机：音符盒、中继器、\
+活塞和线路都摆在里面，贴下去就能响，不需要事先搭好机体。\n\n此提示将不再提示。"
+                            .into()
+                    } else {
+                        "The exported .litematic is a complete redstone music machine: note \
+blocks, repeaters, pistons and wiring are all inside it, so it plays once pasted and you do not \
+need a prebuilt machine.\n\nThis warning will never be shown again."
+                            .into()
+                    },
+                    yes_no: false,
+                });
+                state.prefs.warning_fractal = true;
+                let _ = state.prefs.save();
+            }
+            // 开窗前先算一遍预览，让「速度装不下」这类拒绝在窗口打开时就看得见。
+            state.refresh_fractal_preview();
+            state.modals = ModalQueue {
+                items,
+                then: Some(Command::ShowWindow(WindowKind::FractalExport)),
+            };
+            if state.modals.is_empty() {
+                dispatch(state, Command::ShowWindow(WindowKind::FractalExport), ctx);
+            }
+        }
+        Command::ExportFractalChecked => {
+            // 闸门照 Schematic/直轨窗口那条「没有方块就别弹保存框」的规矩。
+            let blocked = if let Some(e) = &state.fractal_error {
+                Some(e.clone())
+            } else if state
+                .fractal_report
+                .as_ref()
+                .map(|r| r.notes_kept == 0)
+                .unwrap_or(false)
+            {
+                Some(tr("There are no notes to export!", "没有音符可以导出！").to_string())
+            } else {
+                None
+            };
+            match blocked {
+                None => dispatch(state, Command::OpenDialog(DialogAction::ExportFractal), ctx),
+                Some(msg) => {
+                    state.modals =
+                        ModalQueue::message(tr("Fractal machine projection", "Fractal 机体投影"), &msg);
+                }
+            }
+        }
+        // ------------------------------------- 编码唱片数据箱（端口自加）
+        Command::OpenDiscChestExport => {
+            // 与 Fractal 相反、与 MAESTRO 同族：这份 .litematic 只有箱子，机体得先建好。
+            let mut items: std::collections::VecDeque<Modal> = std::collections::VecDeque::new();
+            if !state.prefs.warning_disc_chest {
+                items.push_back(Modal {
+                    title: tr("Encoded disc chests", "编码唱片数据箱"),
+                    text: if crate::lang() == 1 {
+                        "导出的 .litematic 只是数据箱：25 行编码箱格里装哪几只唱片、哪一格是空拍，\
+全在里面，红石一根都没有。\n要贴在已经建好的唱片工坊机体里才会响；换机体或换机器速度，\
+这份箱子就对不上了。\n\n此提示将不再提示。"
+                            .into()
+                    } else {
+                        "The exported .litematic holds only the chests: which discs sit in each of \
+the 25 coded rows and which slot is a rest - no redstone at all.\nPaste it into a disc-chest \
+machine that is already built; change the machine or its speed and these chests no longer fit.\
+\n\nThis warning will never be shown again."
+                            .into()
+                    },
+                    yes_no: false,
+                });
+                state.prefs.warning_disc_chest = true;
+                let _ = state.prefs.save();
+            }
+            // 开窗前先算一遍预览，让「没有可编码的音符」这类拒绝在窗口打开时就看得见。
+            state.refresh_disc_chest_preview();
+            state.modals = ModalQueue {
+                items,
+                then: Some(Command::ShowWindow(WindowKind::DiscChestExport)),
+            };
+            if state.modals.is_empty() {
+                dispatch(state, Command::ShowWindow(WindowKind::DiscChestExport), ctx);
+            }
+        }
+        Command::ExportDiscChestChecked => {
+            let blocked = if let Some(e) = &state.disc_chest_error {
+                Some(e.clone())
+            } else if state
+                .disc_chest_report
+                .as_ref()
+                .map(|r| r.notes_kept == 0)
+                .unwrap_or(false)
+            {
+                Some(tr("There are no notes to export!", "没有音符可以导出！").to_string())
+            } else {
+                None
+            };
+            match blocked {
+                None => dispatch(state, Command::OpenDialog(DialogAction::ExportDiscChest), ctx),
+                Some(msg) => {
+                    state.modals = ModalQueue::message(
+                        tr("Encoded disc chests", "编码唱片数据箱"),
                         &msg,
                     );
                 }
@@ -1901,6 +2023,101 @@ the machine in your world before pasting this structure.\n\nThis warning will ne
                     }
                     // 导出完把窗口留着（同数据包那条路），失败时人也能看到原因。
                     state.window = Some(WindowKind::MaestroExport);
+                }
+                DialogAction::ExportFractal => {
+                    // 端口自加：按界面上的布局与折返真导出，并把「这台机器多久响一声、
+                    // 改写了什么」写进状态区——报告口径与预览完全一致。
+                    let opts = state.fractal_options.clone();
+                    match nbs_io::export_fractal(&state.doc.song, &path, &opts) {
+                        Ok(report) => {
+                            let kept = report.notes_kept;
+                            let grid = report.grid_label();
+                            let head = if crate::lang() == 1 {
+                                format!(
+                                    "机体投影已保存到 {}\n\n{} 个音符进了这台机器。",
+                                    path.display(),
+                                    kept
+                                )
+                            } else {
+                                format!(
+                                    "Projection saved to {}\n\n{} notes went into this machine.",
+                                    path.display(),
+                                    kept
+                                )
+                            };
+                            let mut status = vec![head];
+                            status.extend(report.lines());
+                            state.export_status = Some(status.join("\n"));
+                            state.fractal_report = Some(report);
+                            state.fractal_error = None;
+                            state.set_message(if crate::lang() == 1 {
+                                format!("Fractal 机体投影已导出：{kept} 个音符，{grid} 音/秒")
+                            } else {
+                                format!("Fractal projection exported: {kept} notes, {grid} notes/s")
+                            });
+                            state.save_prefs();
+                        }
+                        Err(e) => {
+                            state.export_status = None;
+                            state.fractal_error = Some(e.clone());
+                            state.fractal_report = None;
+                            state.set_message(if crate::lang() == 1 {
+                                format!("导出机体投影失败: {e}")
+                            } else {
+                                format!("Fractal projection export failed: {e}")
+                            });
+                        }
+                    }
+                    // 导出完把窗口留着（同节目单那条路），失败时人也能看到原因。
+                    state.window = Some(WindowKind::FractalExport);
+                }
+                DialogAction::ExportDiscChest => {
+                    // 端口自加：按界面上的机体档与时间处理方式真导出，报告口径与预览一致。
+                    let opts = state.disc_chest_options;
+                    match nbs_io::export_disc_chest(&state.doc.song, &path, &opts) {
+                        Ok(report) => {
+                            let kept = report.notes_kept;
+                            let grid = report.grid_label();
+                            let head = if crate::lang() == 1 {
+                                format!(
+                                    "编码唱片数据箱已保存到 {}\n\n{} 个音符进了这 {} 只潜影盒。",
+                                    path.display(),
+                                    kept,
+                                    report.boxes
+                                )
+                            } else {
+                                format!(
+                                    "Disc chests saved to {}\n\n{} notes went into {} shulker boxes.",
+                                    path.display(),
+                                    kept,
+                                    report.boxes
+                                )
+                            };
+                            let mut status = vec![head];
+                            status.extend(report.lines());
+                            state.export_status = Some(status.join("\n"));
+                            state.disc_chest_report = Some(report);
+                            state.disc_chest_error = None;
+                            state.set_message(if crate::lang() == 1 {
+                                format!("编码唱片数据箱已导出：{kept} 个音符，{grid} 音/秒")
+                            } else {
+                                format!("Encoded disc chests exported: {kept} notes, {grid} notes/s")
+                            });
+                            state.save_prefs();
+                        }
+                        Err(e) => {
+                            state.export_status = None;
+                            state.disc_chest_error = Some(e.clone());
+                            state.disc_chest_report = None;
+                            state.set_message(if crate::lang() == 1 {
+                                format!("导出编码唱片数据箱失败: {e}")
+                            } else {
+                                format!("Encoded disc chest export failed: {e}")
+                            });
+                        }
+                    }
+                    // 导出完把窗口留着（同节目单那条路），失败时人也能看到原因。
+                    state.window = Some(WindowKind::DiscChestExport);
                 }
                 DialogAction::ExportPattern => {
                     let sel = if state.doc.selection.is_empty() {

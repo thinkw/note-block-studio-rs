@@ -20,6 +20,8 @@ pub mod background;
 pub mod commands;
 pub mod control;
 pub mod fonts;
+/// 播放特效底座与内置特效（`Surface::Overlay` 叠加 / `Surface::Stage` 独占中央面板）。
+pub mod fx;
 pub mod grid;
 pub mod icons;
 pub mod interaction;
@@ -1524,6 +1526,253 @@ mod gui_window_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Fractal 那条导出（端口自加）走完整链路：菜单入口 → 一次性提示 → 窗口上屏 →
+    /// 换布局重算 → 空歌闸门 → 保存框扩展名 → 真落盘。断言的是磁盘字节与报告，
+    /// 不是内部函数返回值。
+    #[test]
+    fn fractal_menu_entry_notice_dialog_and_file_are_real() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.window = None; // for_test() 带着开机欢迎窗，先关掉再走入口
+        state.prefs.warning_fractal = false;
+
+        dispatch(&mut state, commands::Command::OpenFractalExport, &ctx);
+        assert_eq!(
+            state.modals.items.len(),
+            1,
+            "第一次用要先说明「这是自带红石的整机」"
+        );
+        assert_eq!(state.window, None, "提示没答完之前不开窗");
+        assert!(state.fractal_report.is_some(), "开窗前先算好机体与清单");
+
+        dispatch(&mut state, commands::Command::AnswerModal(true), &ctx);
+        assert_eq!(state.window, Some(WindowKind::FractalExport));
+        assert!(
+            state.prefs.warning_fractal,
+            "提示看过就落盘，同 warning_maestro 的规矩"
+        );
+
+        // 演示曲 tempo 10、音符全在偶数 tick ⇒ 折算到 game tick 后每个时刻都能被 4 整除，
+        // 上游 Linear 取「能整除全部时刻的最粗档」= Scale4：每 4 gt 一格、5 音/秒。
+        // 这一档是这首歌的性质，不是我们选的，所以断言钉在这里防它悄悄变。
+        let lin = state.fractal_report.clone().unwrap();
+        assert_eq!(
+            (lin.layout, lin.cell_gt, lin.notes_per_sec()),
+            (nbs_io::FractalLayout::Linear, 4, 5.0)
+        );
+
+        // 上屏检查（「代码里有 ≠ 看得见」）：两档布局、20 t/s 开关、按钮都要真画出来。
+        let _zh = crate::LangGuard::set(1);
+        state.prefs.language = 1;
+        let painted: Vec<String> = settle(&mut state, &ctx)
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        for want in [
+            "机体布局",
+            "Linear（主干＋支道）",
+            "Compact（变长紧凑）",
+            "每 game tick 一音（20 t/s）",
+            "机体与改写",
+            "导出",
+            "关闭",
+        ] {
+            assert!(
+                painted.iter().any(|t| t == want),
+                "窗口里应画得出「{want}」: {painted:?}"
+            );
+        }
+
+        dispatch(&mut state, commands::Command::CloseWindow, &ctx);
+        dispatch(&mut state, commands::Command::OpenFractalExport, &ctx);
+        assert!(state.modals.is_empty(), "第二次不再提示");
+        assert_eq!(state.window, Some(WindowKind::FractalExport));
+
+        // 换 Compact：每格间隔与道数都要跟着重算。
+        state.fractal_options.layout = nbs_io::FractalLayout::Compact;
+        state.refresh_fractal_preview();
+        let com = state.fractal_report.clone().unwrap();
+        // 演示曲没有奇数 tick 的音符 ⇒ 奇道整条是空的 ⇒ 只剩一条 2 gt 一格的道。
+        // 20 t/s 开关亮着也不许把这台机器报成每刻一音（对照：两条反相道都用上才是 1 gt）。
+        assert_eq!(
+            (com.layout, com.tracks, com.cell_gt, com.notes_per_sec()),
+            (nbs_io::FractalLayout::Compact, 1, 2, 10.0),
+            "只用上一条反相道时报错：{com:?}"
+        );
+        state.fractal_options.layout = nbs_io::FractalLayout::Linear;
+        state.refresh_fractal_preview();
+
+        // 空歌要像节目单窗口那样被闸门拦下：只报错，不弹保存框。
+        let demo = state.doc.song.clone();
+        state.doc.replace_song(nbs_core::model::Song::new());
+        state.refresh_fractal_preview();
+        dispatch(&mut state, commands::Command::ExportFractalChecked, &ctx);
+        assert_eq!(state.modals.items.len(), 1, "空歌该被闸门拦下");
+        assert!(state.file_dialog.is_none(), "拦下之后不该有保存框");
+        dispatch(&mut state, commands::Command::AnswerModal(true), &ctx);
+        state.doc.replace_song(demo);
+        state.refresh_fractal_preview();
+
+        // 保存框：扩展名与默认名都要是 .litematic（默认名取当前文件名）。
+        state.doc.song.filename = Some(PathBuf::from("Rust Rewrite Demo.nbs"));
+        dispatch(
+            &mut state,
+            commands::Command::OpenDialog(state::DialogAction::ExportFractal),
+            &ctx,
+        );
+        let dialog = state.file_dialog.as_ref().expect("对话框已打开");
+        assert_eq!(dialog.ext, "litematic", "Litematica 吃的是 .litematic");
+        assert!(dialog.save);
+        assert_eq!(dialog.name, "Rust Rewrite Demo.litematic");
+
+        let dir = scratch("fractal");
+        let out = dir.join("machine.litematic");
+        dispatch(&mut state, commands::Command::DialogConfirm(out.clone()), &ctx);
+        let bytes = std::fs::read(&out).expect("机体投影已落盘");
+        assert_eq!(&bytes[..2], &[0x1f, 0x8b], "gzip 魔数");
+        assert!(state.export_status.is_some(), "窗口里要能看到这台机器的口径");
+        assert_eq!(state.window, Some(WindowKind::FractalExport), "导出完窗口留着");
+        let rep = state.fractal_report.clone().unwrap();
+        assert!(rep.notes_kept > 0, "示例歌该有音符进机体");
+        let status = state.export_status.clone().unwrap_or_default();
+        assert!(
+            status.contains("game tick"),
+            "状态区要写出实际时间基：{status}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 编码唱片数据箱那条导出（端口自加）走完整链路：菜单入口 → 一次性提示 → 窗口上屏 →
+    /// 换机体重算 → 空歌闸门 → 保存框扩展名 → 真落盘。断言的是磁盘字节与报告。
+    #[test]
+    fn disc_chest_menu_entry_notice_dialog_and_file_are_real() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.window = None; // for_test() 带着开机欢迎窗，先关掉再走入口
+        state.prefs.warning_disc_chest = false;
+
+        dispatch(&mut state, commands::Command::OpenDiscChestExport, &ctx);
+        assert_eq!(
+            state.modals.items.len(),
+            1,
+            "第一次用要先说明「这只是数据箱，得贴在已建好的机体里」"
+        );
+        assert_eq!(state.window, None, "提示没答完之前不开窗");
+        assert!(state.disc_chest_report.is_some(), "开窗前先算好箱子与清单");
+
+        dispatch(&mut state, commands::Command::AnswerModal(true), &ctx);
+        assert_eq!(state.window, Some(WindowKind::DiscChestExport));
+        assert!(
+            state.prefs.warning_disc_chest,
+            "提示看过就落盘，同 warning_maestro / warning_fractal 的规矩"
+        );
+
+        // 出厂档 = 上游 defaultConfig 的 20 音/秒：每件乐器偶/奇两条臂 ⇒ 20 轨 40 个子区域。
+        let twenty = state.disc_chest_report.clone().unwrap();
+        assert_eq!(
+            (twenty.machine(), twenty.lanes, twenty.regions, twenty.grid_rate),
+            (nbs_io::DiscChestMachine::TwentyHz, 2, 40, 20.0)
+        );
+
+        // 上屏检查（「代码里有 ≠ 看得见」）：两档机体、两种刻号处理、层高与三个按钮都要真画出来。
+        let _zh = crate::LangGuard::set(1);
+        state.prefs.language = 1;
+        let painted: Vec<String> = settle(&mut state, &ctx)
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        for want in [
+            "机体",
+            "20 t/s 机体（20 轨，偶/奇双臂）",
+            "10 t/s 机体（20 轨，每件乐器一条臂）",
+            "折算到机器网格",
+            "保留 NBS 刻号",
+            "层高",
+            "数据箱与改写",
+            "导出",
+            "关闭",
+        ] {
+            assert!(
+                painted.iter().any(|t| t == want),
+                "窗口里应画得出「{want}」: {painted:?}"
+            );
+        }
+
+        dispatch(&mut state, commands::Command::CloseWindow, &ctx);
+        dispatch(&mut state, commands::Command::OpenDiscChestExport, &ctx);
+        assert!(state.modals.is_empty(), "第二次不再提示");
+        assert_eq!(state.window, Some(WindowKind::DiscChestExport));
+
+        // 换 10 音/秒：一条臂一件乐器，子区域数减半，网格速度也跟着减半。
+        state.disc_chest_options.machine = nbs_io::DiscChestMachine::TenHz;
+        state.refresh_disc_chest_preview();
+        let ten = state.disc_chest_report.clone().unwrap();
+        assert_eq!(
+            (ten.machine(), ten.lanes, ten.regions, ten.grid_rate),
+            (nbs_io::DiscChestMachine::TenHz, 1, 20, 10.0),
+            "换机体后清单要跟着重算：{ten:?}"
+        );
+        state.disc_chest_options.machine = nbs_io::DiscChestMachine::TwentyHz;
+        state.refresh_disc_chest_preview();
+
+        // 空歌：这条路的编码端会直接拒绝（没有可编码的音符），闸门照样拦下且不弹保存框。
+        let demo = state.doc.song.clone();
+        state.doc.replace_song(nbs_core::model::Song::new());
+        state.refresh_disc_chest_preview();
+        assert!(state.disc_chest_error.is_some(), "空歌预览就该报错");
+        dispatch(&mut state, commands::Command::ExportDiscChestChecked, &ctx);
+        assert_eq!(state.modals.items.len(), 1, "空歌该被闸门拦下");
+        assert!(state.file_dialog.is_none(), "拦下之后不该有保存框");
+        dispatch(&mut state, commands::Command::AnswerModal(true), &ctx);
+        state.doc.replace_song(demo);
+        state.refresh_disc_chest_preview();
+
+        // 保存框：扩展名与默认名都要是 .litematic（同 Fractal 那条，容器就是 Litematica）。
+        state.doc.song.filename = Some(PathBuf::from("Rust Rewrite Demo.nbs"));
+        dispatch(
+            &mut state,
+            commands::Command::OpenDialog(state::DialogAction::ExportDiscChest),
+            &ctx,
+        );
+        let dialog = state.file_dialog.as_ref().expect("对话框已打开");
+        assert_eq!(dialog.ext, "litematic", "Litematica 吃的是 .litematic");
+        assert!(dialog.save);
+        assert_eq!(dialog.name, "Rust Rewrite Demo.litematic");
+
+        let dir = scratch("disc_chest");
+        let out = dir.join("disc-chests.litematic");
+        dispatch(&mut state, commands::Command::DialogConfirm(out.clone()), &ctx);
+        let bytes = std::fs::read(&out).expect("数据箱已落盘");
+        assert_eq!(&bytes[..2], &[0x1f, 0x8b], "gzip 魔数");
+        assert!(state.export_status.is_some(), "窗口里要能看到这批箱子的口径");
+        assert_eq!(
+            state.window,
+            Some(WindowKind::DiscChestExport),
+            "导出完窗口留着"
+        );
+        let rep = state.disc_chest_report.clone().unwrap();
+        assert!(rep.notes_kept > 0, "示例歌该有音符进数据箱");
+        assert!(rep.chests > 0 && rep.boxes > 0, "箱子与潜影盒要真放进去");
+        let status = state.export_status.clone().unwrap_or_default();
+        assert!(
+            status.contains("game tick") && status.contains("已经建好的机体"),
+            "状态区要写出时间基和「要先有机体」：{status}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 空名称必须像原版一样报错，并且不留半成品。
     #[test]
     fn datapack_export_refuses_an_empty_name() {
@@ -2940,7 +3189,9 @@ mod gui_window_tests {
             assert!(texts.iter().any(|s| s == t), "编辑菜单缺「{t}」");
         }
         assert!(
-            !texts.iter().any(|s| s.contains("设定音量") || s.contains("重置音量")),
+            !texts
+                .iter()
+                .any(|s| s.contains("设定音量") || s.contains("重置音量")),
             "音高模式不该有第 5、6 条"
         );
         click_text(&mut state, &ctx, "升八度  Ctrl+E");
@@ -3012,10 +3263,16 @@ mod gui_window_tests {
             "升半音  Ctrl+R",
             "降半音  Ctrl+F",
         ] {
-            assert!(has(&texts, t), "音高模式菜单缺「{t}」：{}", texts.join(" | "));
+            assert!(
+                has(&texts, t),
+                "音高模式菜单缺「{t}」：{}",
+                texts.join(" | ")
+            );
         }
         assert!(
-            !texts.iter().any(|s| s.contains("设定音量") || s.contains("重置音量")),
+            !texts
+                .iter()
+                .any(|s| s.contains("设定音量") || s.contains("重置音量")),
             "音高模式不该有第 5、6 条：{}",
             texts.join(" | ")
         );
@@ -3032,7 +3289,11 @@ mod gui_window_tests {
             "设定音量……  Ctrl+T",
             "重置音量  Ctrl+G",
         ] {
-            assert!(has(&texts, t), "音量模式菜单缺「{t}」：{}", texts.join(" | "));
+            assert!(
+                has(&texts, t),
+                "音量模式菜单缺「{t}」：{}",
+                texts.join(" | ")
+            );
         }
         assert!(
             !texts.iter().any(|s| s.contains("升八度")),
@@ -3063,7 +3324,11 @@ mod gui_window_tests {
             "设定音符声道……  Ctrl+T",
             "重置立体声  Ctrl+G",
         ] {
-            assert!(has(&texts, t), "声道模式菜单缺「{t}」：{}", texts.join(" | "));
+            assert!(
+                has(&texts, t),
+                "声道模式菜单缺「{t}」：{}",
+                texts.join(" | ")
+            );
         }
         state.tool = crate::state::EditMode::Pitch;
         open_menu(&mut state);
@@ -3076,7 +3341,11 @@ mod gui_window_tests {
             "设定音高……  Ctrl+T",
             "重置音高  Ctrl+G",
         ] {
-            assert!(has(&texts, t), "微调模式菜单缺「{t}」：{}", texts.join(" | "));
+            assert!(
+                has(&texts, t),
+                "微调模式菜单缺「{t}」：{}",
+                texts.join(" | ")
+            );
         }
 
         // 没有选区时六条整条点不动（原版 `inactive(current_song.selected = 0)`）。
@@ -4878,5 +5147,154 @@ mod gui_piano_tests {
             !images(&out).iter().any(|r| (r.width() - 320.0).abs() < 0.6),
             "开关关闭时不应出现五线谱面板"
         );
+    }
+}
+
+/// 播放特效的接线：`app::show` 里那三扇「谁占中央面板 / 琴键面板开不开 / 全都不开」
+/// 的门，以及启用状态与调参的落盘回读。要跑整帧，所以放在这里而不是 `fx/`。
+#[cfg(test)]
+mod fx_wiring_tests {
+    use super::*;
+
+    /// 跑一帧并把画到的文字全捞出来：菜单项、特效清单这些只能这样查。
+    fn frame(state: &mut EditorState, ctx: &egui::Context) -> Vec<String> {
+        crate::fonts::warm_up(ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1440.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let out = ctx.run(input, |ctx| {
+            let _lock = frame_lock();
+            crate::show(ctx, state)
+        });
+        assert!(!out.shapes.is_empty(), "窗口应当真的画出内容");
+        out.shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `visible_notes` 只有 `draw_grid` 会写，正好当「这一帧网格跑没跑」的探针。
+    #[test]
+    fn a_stage_effect_takes_the_center_panel_and_keeps_the_piano_panel() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+
+        frame(&mut state, &ctx);
+        assert!(
+            state.interaction.visible_notes > 0,
+            "一条特效都没开时网格照跑"
+        );
+        assert!(state.piano_rect.is_some(), "show_piano 出厂为真，琴键面板要上报矩形");
+
+        state.interaction.visible_notes = 0;
+        state.fx.stack.set_active("synthesia", true);
+        frame(&mut state, &ctx);
+        assert_eq!(
+            state.interaction.visible_notes, 0,
+            "舞台接管中央面板后 draw_grid 不该再跑"
+        );
+        let panel = state
+            .piano_rect
+            .expect("瀑布的键盘就是底部那条面板，舞台期间它照样要画");
+        assert!(
+            !state.fx.stack.frame().is_empty(),
+            "舞台那一帧要真的排出图元"
+        );
+        // 「音符刚好落到琴键上」的口径：击中线压在面板的白键面沿，不是区域下缘。
+        let hit = panel.min.y + fx::keyboard::BLACK_LIFT * state.prefs.piano_scale.max(0.1);
+        assert!(
+            state
+                .fx
+                .stack
+                .frame()
+                .prims
+                .iter()
+                .any(|prim| matches!(prim,
+                    fx::stage::Primitive::Line { from, to, .. }
+                        if (from.y - hit).abs() < 0.5 && (to.y - hit).abs() < 0.5)),
+            "瀑布的击中线没压在琴键面沿 {hit} 上"
+        );
+    }
+
+    /// 叠加类特效不动网格，但 `wants_piano` 会把用户关掉的琴键面板顶回来。
+    #[test]
+    fn an_overlay_effect_keeps_the_grid_and_demands_the_piano_panel() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.flags.show_piano = false;
+
+        frame(&mut state, &ctx);
+        assert!(state.piano_rect.is_none(), "琴键面板关掉后矩形要清空");
+        assert!(state.interaction.visible_notes > 0, "网格照跑");
+
+        state.fx.stack.set_active("block_row", true);
+        frame(&mut state, &ctx);
+        assert!(state.fx.wants_piano(), "乐器方块排要求底部有琴键");
+        assert!(
+            state.piano_rect.is_some(),
+            "开着 wants_piano 的特效时琴键面板要被顶回来"
+        );
+        assert!(
+            state.interaction.visible_notes > 0,
+            "叠加类特效不接管中央面板"
+        );
+    }
+
+    #[test]
+    fn fx_prefs_survive_a_restart() {
+        let _prefs = isolate_prefs();
+        let mut state = EditorState::for_test();
+        state.fx.stack.set_active("synthesia", true);
+        state.fx.stack.set_opacity(0.4);
+        state.sync_prefs();
+        assert_eq!(state.prefs.fx_active, vec!["synthesia".to_owned()]);
+        assert!((state.prefs.fx_opacity - 0.4).abs() < 1e-6);
+        assert!(
+            state.prefs.fx.contains_key("synthesia"),
+            "参数快照要和启用状态一起存"
+        );
+        state.save_prefs();
+
+        let back = EditorState::new();
+        assert!(back.fx.stack.is_active("synthesia"), "重启后勾选状态要回来");
+        assert!(
+            (back.fx.stack.opacity() - 0.4).abs() < 1e-3,
+            "透明度落在 prefs.fx_opacity 那一档"
+        );
+    }
+
+    /// 「设置 → 播放特效…」那扇窗：清单是全量枚举注册表来的，两条内置特效各带
+    /// 自己的身份（舞台 / 叠加）。底座不该认识任何一条具体特效。
+    #[test]
+    fn the_effects_window_lists_every_registered_effect() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        assert_eq!(state.fx.stack.ids().len(), 2, "内置两条特效");
+
+        state.window = Some(WindowKind::PlaybackEffects);
+        // 两帧：egui 的 Window 第一帧只定下尺寸，文字在第二帧的 shapes 里才捞得到。
+        frame(&mut state, &ctx);
+        let texts = frame(&mut state, &ctx);
+        for (name, kind) in [("钢琴瀑布", "舞台"), ("乐器方块排", "叠加")] {
+            let row = texts
+                .iter()
+                .find(|t| t.contains(name) && t.contains(kind))
+                .unwrap_or_else(|| panic!("清单里少了「{name}（{kind}）」这一行：{texts:?}"));
+            assert!(row.starts_with(name), "行首是特效名，勾在它前面：{row}");
+        }
     }
 }

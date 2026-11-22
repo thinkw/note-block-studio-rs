@@ -11,32 +11,19 @@ use egui::{pos2, Align2, Color32, Context, LayerId, Painter, Pos2, Rect, Sense, 
 use nbs_core::model::{key_name, KEY_MAX, MC_KEY_MAX, MC_KEY_MIN};
 
 use crate::commands::Command;
+// 琴键像素常量与几何全部来自 `fx::keyboard`：特效的下落道要和这条键盘用同一套
+// 横坐标，两边各留一份迟早会飘（见该模块的说明）。
+use crate::fx::keyboard::{KeyboardLayout, BLACK_DRAW_X, BLACK_LIFT, KEY_W, WHITE_SLOTS, ART_H};
 use crate::fonts::{bold_font, main_font};
 use crate::icons::{piano_frame, Bank};
 use crate::state::EditorState;
 use crate::theme::{Theme, ThemeKind};
 use crate::viewport::PIANO_HEIGHT;
 
-/// 原版白键步进 `xx + 39 * a`。
-const KEY_W: f32 = 39.0;
-/// `spr_piano` 一帧 40×121。
-const ART_H: f32 = 121.0;
-/// 白键命中区 `mouse_rectangle(xx + 39a, yy, 39, 128)`。
-const WHITE_HIT_H: f32 = 128.0;
-/// 黑键画在白键左边 19px、上边 7px 处。
-const BLACK_DRAW_X: f32 = -19.0;
-const BLACK_LIFT: f32 = 7.0;
 /// 琴键面板高度：`viewport::PIANO_HEIGHT` 之外还要算上黑键高出的 `BLACK_LIFT`。
 /// 中央面板（网格 + 横向滚动条）晚于琴键绘制，黑键越界画到面板外只会被滚动条底色
 /// 盖住（用户报告 #109）；面板长高这 7px、白键顶边同步下移，键盘可见位置不变。
 pub const PANEL_HEIGHT: f32 = PIANO_HEIGHT + BLACK_LIFT;
-/// 黑键命中区 `mouse_rectangle(xx + 39a - 12, yy - 7, 25, 71)`：
-/// 帧里不透明的是第 7..31 列，画在 `-19` 处正好落在白键左缘的 `-12..+13`。
-const BLACK_HIT_X: f32 = -12.0;
-const BLACK_HIT_W: f32 = 25.0;
-const BLACK_HIT_H: f32 = 71.0;
-/// 右边相邻黑键的命中区左缘（`xx + 39a + 27`，挡住本白键的右半边）。
-const RIGHT_BLACK_HIT_X: f32 = 27.0;
 /// 原版 `if (key_midipress || key_press || key_click) down = 0.75`：实时按下时的下沉
 /// 倍率，画出来是 `floor(7 * 0.75)` = 5px。
 const PRESS_RATIO: f32 = 0.75;
@@ -46,8 +33,6 @@ const PRESS_PX: f32 = 7.0;
 const PLAYED_WINDOW: f64 = 0.3;
 /// 原版 `c_yellow`（$00FFFF 按 BGR 存 = RGB(255,255,0)）。
 const YELLOW: Color32 = Color32::from_rgb(255, 255, 0);
-/// 原版右移上限 `startkey + k < 52`。
-const RIGHT_LIMIT: usize = 52;
 /// 原版 8224255 = RGB(255,126,125)，超出 MC 音域的键。
 const OUT_OF_RANGE: Color32 = Color32::from_rgb(255, 126, 125);
 /// 原版 16753828 = RGB(164,164,255)，非 Fluent 主题下当前选中的键。
@@ -223,7 +208,7 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) -> Option<ChartRequest> 
     // 偏离原版（用户要求）：琴键横向占满面板——去掉原版 `keysmax`（首选项
     // 「同屏显示的琴键数」，20..50）的截短与 32px 内缩，显示到放不下为止，
     // 上限 = 完整键盘 52 个白键槽（startkey 27-52/2=1，即 A0 起）。
-    let keysshow = 52usize.min(((rw) / (KEY_W * u)).floor() as usize).max(1);
+    let keysshow = WHITE_SLOTS.min(((rw) / (KEY_W * u)).floor() as usize).max(1);
     if state.piano_keys_shown as usize != keysshow {
         // 原版：窗口宽度变了就把键盘重新以 27 号键为中心。
         // 偏离原版（#110）：中心位再夹进 `[0, 52 - keysshow]`。原式的 `27` 是给
@@ -231,16 +216,22 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) -> Option<ChartRequest> 
         // 算出 startkey = 1：槽 0 的 A0 永远画不出来，最右一列还落空（用户报告
         // 「缩到较小时低音区缺几个键，挪过去又少高音区几个」）。夹住之后
         // 52 槽时正好是槽 0..51 = MIDI 0..87，一个键都不缺，也无需再平移。
-        state.piano_start = (27usize.saturating_sub(keysshow / 2)).min(52 - keysshow) as u8;
+        state.piano_start = (27usize.saturating_sub(keysshow / 2)).min(WHITE_SLOTS - keysshow) as u8;
         state.piano_keys_shown = keysshow as u8;
     }
     let startkey = state.piano_start as usize;
-    // 原版 `sharpkeys`：startkey 之前有几个黑键（白键序号 mod 7 为 1、4 的没有右邻黑键）。
-    let sharpkeys = (0..startkey).filter(|a| *a % 7 != 1 && *a % 7 != 4).count();
     let x0 = area.min.x + ((rw - keysshow as f32 * KEY_W * u) / 2.0).floor();
     // 白键顶边下移黑键的那 7px：整排键（含黑键高出的一段）都留在面板内，
     // 琴键的可见位置与改之前一致（面板同步长高 7px，见 `PANEL_HEIGHT`）。
     let y0 = area.min.y + BLACK_LIFT * u;
+    // 几何交给 `fx::keyboard`：这里的摆放（居中、startkey、缩放）保持原样，
+    // 只把「槽 → 键号 / 矩形」的算式换成和特效共用的那一份。
+    let layout = KeyboardLayout {
+        origin: pos2(x0, y0),
+        scale: u,
+        first: startkey,
+        slots: keysshow,
+    };
 
     let pointer = ui.input(|i| i.pointer.hover_pos());
     let holding = ui.input(|i| i.pointer.any_down());
@@ -271,39 +262,28 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) -> Option<ChartRequest> 
             .unwrap_or(f64::NEG_INFINITY);
         played_key(now - at)
     };
-    // 黑键命中区：`xx + 39a - 12`（`hit_x` 已经是这条线要用的绝对横坐标）。
-    let hit = |hit_x: f32| {
-        Rect::from_min_size(
-            pos2(hit_x, y0 - BLACK_LIFT * u),
-            Vec2::new(BLACK_HIT_W * u, BLACK_HIT_H * u),
-        )
-    };
-
     let p = ui.painter();
     let frames = FrameMap::new(&th);
     let mut picked: Option<u8> = None;
     let mut chart: Option<ChartRequest> = None;
-    let mut b = 0usize;
     let mut edge = 0i8;
 
     // 偏离原版（用户要求）：去掉 `draw_piano.gml:12/119-120` 的两侧渐隐
     // （alpha 从 `3 - startkey` 起步、尾部递减），所有琴键恒全亮度——
     // 原版播放器模式（isplayer）本来就不渐隐。
     for a in 0..keysshow {
-        let c = (startkey + a) % 7;
-        let x = x0 + a as f32 * KEY_W * u;
-        // 原版 `a > 0 && c != 2 && c != 5`：最左一根白键不画它左边的黑键。
-        let with_black = a > 0 && c != 2 && c != 5;
-        let white = startkey + sharpkeys + b + if with_black { 1 } else { 0 };
-
-        if white <= KEY_MAX as usize {
-            let key = white as u8;
-            let white_hit =
-                Rect::from_min_size(pos2(x, y0), Vec2::new(KEY_W * u, WHITE_HIT_H * u));
+        let x = layout.slot_x(a);
+        // 键号与矩形都由 `layout` 给出：黑键归属于它右侧那个白键的槽，
+        // 最左一根白键不画它左边的黑键（原版 `a > 0 && c != 2 && c != 5`）。
+        let Some(key) = layout.slot_white_key(a) else {
+            continue;
+        };
+        let black = layout.slot_black_key(a);
+        {
+            let white_hit = layout.white_hit(a);
             // 原版：白键被左右黑键挡住的部分不算命中；最右一根、以及右边没有黑键的白键除外。
-            let left = with_black && inside(hit(x + BLACK_HIT_X * u));
-            let right_exists = a + 1 < keysshow && c != 1 && c != 4;
-            let right = right_exists && inside(hit(x + RIGHT_BLACK_HIT_X * u));
+            let left = layout.black_rect(a).is_some_and(|r| inside(r));
+            let right = layout.black_rect(a + 1).is_some_and(|r| inside(r));
             let hovering = !left && !right && inside(white_hit);
             // 原版 `draw_piano.gml:66-67`：先看 key_played 的 300ms 窗口（染黄 + 弹下），
             // 再被实时按下覆盖 —— 鼠标按住白键（key_click）或键盘绑定按住（key_press）
@@ -316,7 +296,7 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) -> Option<ChartRequest> 
             // 原版在画这根键之前先画五线谱：门是 `c2 > 6 && c2 < 69 && playing = 0`
             // （C/F 分支用 c1，值相同），键号参数是列号 `startkey + a`。没有播放器模式，
             // `!isplayer` 恒真，C/F 分支少的那一个门可以合并。
-            if hovering && show_chart && !opts.playing && white > 6 && white < 69 {
+            if hovering && show_chart && !opts.playing && key > 6 && key < 69 {
                 chart = Some(ChartRequest {
                     rw,
                     x1: x + 18.0 * u,
@@ -353,9 +333,9 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) -> Option<ChartRequest> 
             }
         }
 
-        if with_black && white - 1 <= KEY_MAX as usize {
-            let key = (white - 1) as u8;
-            let black_hit = hit(x + BLACK_HIT_X * u);
+        // 黑键骑在本槽左缘上：`black` 与 `black_rect(a)` 由同一个判定给出
+        // （`layout` 只在「左边确有黑键」时返回它们）。
+        if let (Some(key), Some(black_hit)) = (black, layout.black_rect(a)) {
             let (tint, mut drop) = glow(key).unwrap_or((0.0, 0.0));
             if (inside(black_hit) && holding) || held(key) {
                 drop = PRESS_RATIO;
@@ -400,9 +380,6 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) -> Option<ChartRequest> 
             if inside(black_hit) && pressing {
                 picked = Some(key);
             }
-            b += 2;
-        } else {
-            b += 1;
         }
     }
 
@@ -418,7 +395,8 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) -> Option<ChartRequest> 
     state.piano_scroll_delay = (state.piano_scroll_delay - dt).max(0.0);
     if edge != 0 && !holding {
         // 还能不能再往这一侧挪：左到头是槽 0，右到头是槽 `52 - keysshow`。
-        let can_pan = (edge < 0 && startkey > 0) || (edge > 0 && startkey + keysshow < RIGHT_LIMIT);
+        let can_pan = (edge < 0 && startkey > 0)
+            || (edge > 0 && startkey + keysshow < WHITE_SLOTS);
         if can_pan && state.piano_scroll_delay == 0.0 {
             state.piano_start = (startkey as i32 + if edge < 0 { -1 } else { 1 }) as u8;
             state.piano_scroll_delay = 0.1;

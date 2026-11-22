@@ -54,6 +54,8 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         WindowKind::Preferences => 500.0,
         // 我们自己的窗口（原版没有）：要放得下发现文件全路径和目录列表。
         WindowKind::ExternalControl => 520.0,
+        // 同样是我们自己的：一屏放得下每个特效名字 + 它那几条滑杆。
+        WindowKind::PlaybackEffects => 460.0,
         // 原版 `draw_window(x1, y1, x1 + 500 + theme_offset, y1 + 400)`：
         // `theme_offset` 只有非 Fluent 才 +20（那三套字体更宽）。
         WindowKind::Changelist | WindowKind::Update => {
@@ -78,6 +80,10 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         WindowKind::TrackExport => 560.0,
         // 端口自加：MAESTRO 节目单窗口，改写清单最长，给到 600。
         WindowKind::MaestroExport => 600.0,
+        // 端口自加：Fractal 机体投影，选项一行比节目单多，同样 600。
+        WindowKind::FractalExport => 600.0,
+        // 端口自加：编码唱片数据箱，选项只有三行，清单和 Fractal 一样长，同样 600。
+        WindowKind::DiscChestExport => 600.0,
         // 原版 `draw_window(x1, y1, x1 + 490, y1 + 450)`。
         WindowKind::MinecraftCompat => 490.0,
         // 原版 `draw_window(x1, y1, x1 + 600, y1 + 400 + navigation_space)`。
@@ -133,6 +139,7 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::Statistics => statistics(state, ui),
             WindowKind::Preferences => preferences(state, ui),
             WindowKind::ExternalControl => external_control_window(state, ui),
+            WindowKind::PlaybackEffects => playback_effects_window(state, ui),
             WindowKind::Instruments => instruments_window(state, ui),
             WindowKind::About => about(state, ui),
             // 原版 `draw_windows.gml:56-57`：`w_update` 和 `w_changelist` 都进
@@ -165,6 +172,8 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::SchematicExport => schematic_export_window(state, ui),
             WindowKind::TrackExport => track_export_window(state, ui),
             WindowKind::MaestroExport => maestro_export_window(state, ui),
+            WindowKind::FractalExport => fractal_export_window(state, ui),
+            WindowKind::DiscChestExport => disc_chest_export_window(state, ui),
             WindowKind::DatapackExport => datapack_export_window(state, ui),
             WindowKind::PngExport => png_export_window(state, ui),
             WindowKind::Autosaves => autosaves_window(state, ui),
@@ -2409,6 +2418,64 @@ fn rate_items() -> [&'static str; 5] {
         ["30帧", "60帧", "120帧", "144帧", "240帧"]
     } else {
         ["30FPS", "60FPS", "120FPS", "144FPS", "240FPS"]
+    }
+}
+
+/// 端口自加（用户要求「有一个底座可以在上面扩展各种播放效果并可以切换」）：特效清单。
+/// 这一扇不认识任何具体特效——列谁、开谁、调谁全走 `FxStack`，加一种特效不用改这里。
+/// 参数改动不单独落盘：30 秒一次的 `maybe_save_prefs` 和退出时的 `save_prefs` 都会带上。
+fn playback_effects_window(state: &mut EditorState, ui: &mut Ui) {
+    ui.label(
+        RichText::new(tr(
+            "Overlay effects stack on top of the editor; a stage effect takes over the middle panel \
+             and the grid is not drawn until it is switched off. Only one stage can be up - opening \
+             another swaps it out.",
+            "叠加类特效压在界面上；舞台类接管中间那块面板，网格跟着停画，关掉才回来。 \
+             舞台同时只能有一个，开新的会自动换下旧的。",
+        ))
+        .small()
+        .weak(),
+    );
+    ui.separator();
+    let ids = state.fx.stack.ids();
+    for id in ids {
+        let Some(info) = state.fx.stack.info(id) else {
+            continue;
+        };
+        let kind = match info.surface {
+            crate::fx::Surface::Stage => tr("stage", "舞台"),
+            crate::fx::Surface::Overlay => tr("overlay", "叠加"),
+        };
+        let mut on = state.fx.stack.is_active(id);
+        if ui
+            .checkbox(&mut on, format!("{}（{kind}）", info.name))
+            .changed()
+        {
+            if let Some(msg) = state.fx.stack.set_active(id, on) {
+                state.set_message(msg);
+            }
+        }
+        if state.fx.stack.is_active(id) {
+            ui.indent(id, |ui| {
+                state.fx.stack.settings_ui(ui, id);
+            });
+        }
+    }
+    ui.separator();
+    let mut opacity = state.fx.stack.opacity();
+    if ui
+        .add(
+            egui::Slider::new(&mut opacity, 0.05..=1.0).text(tr("Overlay opacity", "叠加透明度")),
+        )
+        .changed()
+    {
+        state.fx.stack.set_opacity(opacity);
+    }
+    // 降级说明（方块贴图没扒到之类）：只在特效真开着时提。
+    let notes = state.fx.stack.notes();
+    for note in notes {
+        let color = ui.visuals().warn_fg_color;
+        ui.colored_label(color, note);
     }
 }
 
@@ -8896,6 +8963,238 @@ fn maestro_export_window(state: &mut EditorState, ui: &mut Ui) {
             state.set_message(tr(
                 "MAESTRO export defaults restored",
                 "已恢复 MAESTRO 导出默认设置",
+            ));
+        }
+        if ui.button(tr("Close", "关闭")).clicked() {
+            state.emit(Command::CloseWindow);
+        }
+    });
+}
+
+/// 端口自加（用户要求「把新给出来的两条路线接成两个导出样式」）：nbs-fractal 机体投影。
+/// 位置照 MAESTRO 节目单窗口：选项在上、改写清单贴着选项、底部三个按钮。
+/// 与节目单最大的不同是这份产物自带红石，所以窗口里不再讲「要先有机体」。
+fn fractal_export_window(state: &mut EditorState, ui: &mut Ui) {
+    ui.label(tr(
+        "This .litematic is a whole redstone music machine: note blocks, repeaters, pistons and wiring are already inside it.\nPaste it and it plays - there is no machine to build first.",
+        "这份 .litematic 是一台完整的红石音乐机：音符盒、中继器、活塞和线路都在里面。\n贴下去就能响，不需要事先搭好机体。",
+    ));
+    ui.separator();
+
+    let layout = state.fractal_options.layout;
+    ui.label(tr("Machine layout", "机体布局"));
+    let mut picked: Option<nbs_io::FractalLayout> = None;
+    for l in nbs_io::FractalLayout::ALL {
+        if ui
+            .radio(layout == l, l.label())
+            .on_hover_text(l.hint())
+            .clicked()
+        {
+            picked = Some(l);
+        }
+    }
+    ui.label(RichText::new(layout.hint()).small().weak());
+
+    let mut changed = picked.is_some();
+    if let Some(l) = picked {
+        state.fractal_options.layout = l;
+    }
+    let opts = &mut state.fractal_options;
+    // 下面两项只喂 Compact：Linear 的档位由这首歌的音符时刻自己选，开关动不了它。
+    let half = ui.add_enabled(
+        layout.honors_half_ticks(),
+        egui::Checkbox::new(
+            &mut opts.twenty_hz,
+            tr("One note per game tick (20 t/s)", "每 game tick 一音（20 t/s）"),
+        ),
+    );
+    changed |= half.clicked();
+    half.on_hover_text(tr(
+        "Only Compact reads this: it puts the two notes that share one redstone tick onto even and odd lanes. Linear picks its own scale from the timestamps.",
+        "这一项只有 Compact 吃：把同一个红石刻里的两颗音符拆到偶、奇两条道。Linear 的档位由音符时刻决定。",
+    ));
+    let coarse = ui.add_enabled(
+        layout == nbs_io::FractalLayout::Compact,
+        egui::DragValue::new(&mut opts.coarse).range(0..=4),
+    );
+    changed |= coarse.changed();
+    coarse.on_hover_text(tr(
+        "Repeater delay steps allowed on a lane, 0 = unlimited. Larger numbers give a shorter machine but can only land on those delays.",
+        "一条道允许的继电器延迟档数，0 = 不限。数字越大机体越短，但音符只能落在这些延迟上。",
+    ));
+    ui.horizontal(|ui| {
+        ui.label(tr("Columns per row", "每行列数"));
+        let mut wrap = opts.wrap as u32;
+        let cols = ui.add(egui::DragValue::new(&mut wrap).range(0..=1024));
+        if cols.changed() {
+            opts.wrap = wrap as usize;
+            changed = true;
+        }
+        cols.on_hover_text(tr(
+            "0 = never wrap: the machine stays one long line.",
+            "0 = 不换行：机体拉成一条长线。",
+        ));
+        ui.label(tr("Track gap", "道间距"));
+        let gap = ui.add(egui::DragValue::new(&mut opts.gap).range(0..=64));
+        changed |= gap.changed();
+        gap.on_hover_text(tr(
+            "Blocks between neighbouring tracks, 0 = lanes interleave as tightly as the layout allows.",
+            "相邻道之间空几格，0 = 按布局允许的最紧方式啮合。",
+        ));
+    });
+    ui.horizontal(|ui| {
+        let floor = ui.checkbox(
+            &mut opts.full_floor,
+            tr("Full floor platform", "底部铺整层地板"),
+        );
+        changed |= floor.clicked();
+        floor.on_hover_text(tr(
+            "A solid platform under every lane instead of the small pads between blocks.",
+            "在每道下面铺一整层地板，而不是格点之间的小垫块。",
+        ));
+        let breaks = ui.checkbox(&mut opts.breaks, tr("Split on blank layers", "按空层拆分声道"));
+        changed |= breaks.clicked();
+        breaks.on_hover_text(tr(
+            "Cut the song at every run of blank layers so each part gets its own track.",
+            "遇到连续空层就把曲子切开，让每一段各占一条道。",
+        ));
+    });
+    if changed {
+        // 选项动一下就要重算：清单里「每格几个 game tick」会随布局和奇偶分道变。
+        state.refresh_fractal_preview();
+    }
+
+    ui.separator();
+    ui.label(tr("The machine and what changed", "机体与改写"));
+    if let Some(e) = &state.fractal_error {
+        ui.label(RichText::new(e.replace('\n', " ")).small().color(Color32::from_rgb(200, 90, 90)));
+    } else if let Some(r) = &state.fractal_report {
+        for line in r.lines() {
+            ui.label(RichText::new(format!("· {line}")).small());
+        }
+    }
+
+    if let Some(s) = &state.export_status {
+        ui.separator();
+        ui.label(RichText::new(s).small());
+    }
+    ui.separator();
+    ui.horizontal(|ui| {
+        if ui.button(tr("Export", "导出")).clicked() {
+            state.emit(Command::ExportFractalChecked);
+        }
+        if ui.button(tr("Use default", "使用默认值")).clicked() {
+            state.fractal_options = nbs_io::FractalOptions::default();
+            state.export_status = None;
+            state.refresh_fractal_preview();
+            state.set_message(tr(
+                "Fractal projection export defaults restored",
+                "已恢复 Fractal 机体投影默认设置",
+            ));
+        }
+        if ui.button(tr("Close", "关闭")).clicked() {
+            state.emit(Command::CloseWindow);
+        }
+    });
+}
+
+/// 端口自加（用户要求「把新给出来的两条路线接成两个导出样式」）：唱片工坊那一档的编码唱片数据箱。
+/// 位置照 Fractal 窗口：选项在上、清单贴着选项、底部三个按钮。与 Fractal 相反，这份产物
+/// 只有箱子，所以开头就把「要贴在已建好的机体里」讲清楚（同 MAESTRO 那条）。
+fn disc_chest_export_window(state: &mut EditorState, ui: &mut Ui) {
+    ui.label(tr(
+        "This .litematic holds only the coded chests: each row carries the disc combination for one pair of semitones, and the blank slots are written down too.\nPaste it into a disc-chest machine that is already built - that is what makes the sound.",
+        "这份 .litematic 只有编码箱子：每行装的是同一对半音的唱片组合，哪一格是空拍也写在里面。\n要贴在已经建好的唱片工坊机体里才会响。",
+    ));
+    ui.separator();
+
+    let mut changed = false;
+    let machine = state.disc_chest_options.machine;
+    ui.label(tr("Machine", "机体"));
+    let mut picked_machine: Option<nbs_io::DiscChestMachine> = None;
+    for m in nbs_io::DiscChestMachine::ALL {
+        if ui.radio(machine == m, m.label()).on_hover_text(m.hint()).clicked() {
+            picked_machine = Some(m);
+        }
+    }
+    ui.label(RichText::new(machine.hint()).small().weak());
+    if let Some(m) = picked_machine {
+        state.disc_chest_options.machine = m;
+        changed = true;
+    }
+
+    let timing = state.disc_chest_options.timing;
+    ui.label(tr("Ticks", "刻号"));
+    let mut picked_timing: Option<nbs_io::DiscChestTiming> = None;
+    for t in nbs_io::DiscChestTiming::ALL {
+        if ui.radio(timing == t, t.label()).on_hover_text(t.hint()).clicked() {
+            picked_timing = Some(t);
+        }
+    }
+    if let Some(t) = picked_timing {
+        state.disc_chest_options.timing = t;
+        changed = true;
+    }
+
+    let opts = &mut state.disc_chest_options;
+    ui.horizontal(|ui| {
+        ui.label(tr("Layer height", "层高"));
+        let height = ui.add(egui::DragValue::new(&mut opts.layer_height).range(1..=1024));
+        changed |= height.changed();
+        height.on_hover_text(tr(
+            "How many blocks between two module arms. Upstream ships 8; match the machine you built, or the arms land on the wrong levels.",
+            "两条模块臂之间空几格。上游出厂是 8；机体按别的层高建过就得改成一致，否则各层对不上。",
+        ));
+        let stack = ui.checkbox(
+            &mut opts.stackable_rests,
+            tr("Stackable rests", "空拍用可堆叠地毯"),
+        );
+        changed |= stack.clicked();
+        stack.on_hover_text(tr(
+            "Compress a run of empty slots into one carpet stack of up to 64 and change colour between runs. Off uses one pair of scissors per slot instead.",
+            "把连续留白压成一叠地毯（最多 64），两次留白之间还换颜色。不勾就一格一把剪刀。",
+        ));
+    });
+    let strip = ui.checkbox(
+        &mut opts.remove_empty_chests,
+        tr("Skip rows with no notes", "整行没音符就不放箱子"),
+    );
+    changed |= strip.clicked();
+    strip.on_hover_text(tr(
+        "A row codes one pair of semitones; with nothing in it the two chests are left out. Keep it off if the machine you pasted into already has those chests.",
+        "一行代表同一对半音的两个相位，整行空着就省掉左右两只箱子。机体上那几格已经放好箱子的话别勾。",
+    ));
+    if changed {
+        // 选项动一下就要重算：清单里的子区域数、箱子数与包围盒都随机体档和层高变。
+        state.refresh_disc_chest_preview();
+    }
+
+    ui.separator();
+    ui.label(tr("The chests and what changed", "数据箱与改写"));
+    if let Some(e) = &state.disc_chest_error {
+        ui.label(RichText::new(e.replace('\n', " ")).small().color(Color32::from_rgb(200, 90, 90)));
+    } else if let Some(r) = &state.disc_chest_report {
+        for line in r.lines() {
+            ui.label(RichText::new(format!("· {line}")).small());
+        }
+    }
+
+    if let Some(s) = &state.export_status {
+        ui.separator();
+        ui.label(RichText::new(s).small());
+    }
+    ui.separator();
+    ui.horizontal(|ui| {
+        if ui.button(tr("Export", "导出")).clicked() {
+            state.emit(Command::ExportDiscChestChecked);
+        }
+        if ui.button(tr("Use default", "使用默认值")).clicked() {
+            state.disc_chest_options = nbs_io::DiscChestOptions::default();
+            state.export_status = None;
+            state.refresh_disc_chest_preview();
+            state.set_message(tr(
+                "Encoded disc chest export defaults restored",
+                "已恢复编码唱片数据箱默认设置",
             ));
         }
         if ui.button(tr("Close", "关闭")).clicked() {
