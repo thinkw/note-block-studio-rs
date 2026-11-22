@@ -1524,6 +1524,128 @@ mod gui_window_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Fractal 那条导出（端口自加）走完整链路：菜单入口 → 一次性提示 → 窗口上屏 →
+    /// 换布局重算 → 空歌闸门 → 保存框扩展名 → 真落盘。断言的是磁盘字节与报告，
+    /// 不是内部函数返回值。
+    #[test]
+    fn fractal_menu_entry_notice_dialog_and_file_are_real() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.window = None; // for_test() 带着开机欢迎窗，先关掉再走入口
+        state.prefs.warning_fractal = false;
+
+        dispatch(&mut state, commands::Command::OpenFractalExport, &ctx);
+        assert_eq!(
+            state.modals.items.len(),
+            1,
+            "第一次用要先说明「这是自带红石的整机」"
+        );
+        assert_eq!(state.window, None, "提示没答完之前不开窗");
+        assert!(state.fractal_report.is_some(), "开窗前先算好机体与清单");
+
+        dispatch(&mut state, commands::Command::AnswerModal(true), &ctx);
+        assert_eq!(state.window, Some(WindowKind::FractalExport));
+        assert!(
+            state.prefs.warning_fractal,
+            "提示看过就落盘，同 warning_maestro 的规矩"
+        );
+
+        // 演示曲 tempo 10、音符全在偶数 tick ⇒ 折算到 game tick 后每个时刻都能被 4 整除，
+        // 上游 Linear 取「能整除全部时刻的最粗档」= Scale4：每 4 gt 一格、5 音/秒。
+        // 这一档是这首歌的性质，不是我们选的，所以断言钉在这里防它悄悄变。
+        let lin = state.fractal_report.clone().unwrap();
+        assert_eq!(
+            (lin.layout, lin.cell_gt, lin.notes_per_sec()),
+            (nbs_io::FractalLayout::Linear, 4, 5.0)
+        );
+
+        // 上屏检查（「代码里有 ≠ 看得见」）：两档布局、20 t/s 开关、按钮都要真画出来。
+        let _zh = crate::LangGuard::set(1);
+        state.prefs.language = 1;
+        let painted: Vec<String> = settle(&mut state, &ctx)
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        for want in [
+            "机体布局",
+            "Linear（主干＋支道）",
+            "Compact（变长紧凑）",
+            "每 game tick 一音（20 t/s）",
+            "机体与改写",
+            "导出",
+            "关闭",
+        ] {
+            assert!(
+                painted.iter().any(|t| t == want),
+                "窗口里应画得出「{want}」: {painted:?}"
+            );
+        }
+
+        dispatch(&mut state, commands::Command::CloseWindow, &ctx);
+        dispatch(&mut state, commands::Command::OpenFractalExport, &ctx);
+        assert!(state.modals.is_empty(), "第二次不再提示");
+        assert_eq!(state.window, Some(WindowKind::FractalExport));
+
+        // 换 Compact：每格间隔与道数都要跟着重算。
+        state.fractal_options.layout = nbs_io::FractalLayout::Compact;
+        state.refresh_fractal_preview();
+        let com = state.fractal_report.clone().unwrap();
+        // 演示曲没有奇数 tick 的音符 ⇒ 奇道整条是空的 ⇒ 只剩一条 2 gt 一格的道。
+        // 20 t/s 开关亮着也不许把这台机器报成每刻一音（对照：两条反相道都用上才是 1 gt）。
+        assert_eq!(
+            (com.layout, com.tracks, com.cell_gt, com.notes_per_sec()),
+            (nbs_io::FractalLayout::Compact, 1, 2, 10.0),
+            "只用上一条反相道时报错：{com:?}"
+        );
+        state.fractal_options.layout = nbs_io::FractalLayout::Linear;
+        state.refresh_fractal_preview();
+
+        // 空歌要像节目单窗口那样被闸门拦下：只报错，不弹保存框。
+        let demo = state.doc.song.clone();
+        state.doc.replace_song(nbs_core::model::Song::new());
+        state.refresh_fractal_preview();
+        dispatch(&mut state, commands::Command::ExportFractalChecked, &ctx);
+        assert_eq!(state.modals.items.len(), 1, "空歌该被闸门拦下");
+        assert!(state.file_dialog.is_none(), "拦下之后不该有保存框");
+        dispatch(&mut state, commands::Command::AnswerModal(true), &ctx);
+        state.doc.replace_song(demo);
+        state.refresh_fractal_preview();
+
+        // 保存框：扩展名与默认名都要是 .litematic（默认名取当前文件名）。
+        state.doc.song.filename = Some(PathBuf::from("Rust Rewrite Demo.nbs"));
+        dispatch(
+            &mut state,
+            commands::Command::OpenDialog(state::DialogAction::ExportFractal),
+            &ctx,
+        );
+        let dialog = state.file_dialog.as_ref().expect("对话框已打开");
+        assert_eq!(dialog.ext, "litematic", "Litematica 吃的是 .litematic");
+        assert!(dialog.save);
+        assert_eq!(dialog.name, "Rust Rewrite Demo.litematic");
+
+        let dir = scratch("fractal");
+        let out = dir.join("machine.litematic");
+        dispatch(&mut state, commands::Command::DialogConfirm(out.clone()), &ctx);
+        let bytes = std::fs::read(&out).expect("机体投影已落盘");
+        assert_eq!(&bytes[..2], &[0x1f, 0x8b], "gzip 魔数");
+        assert!(state.export_status.is_some(), "窗口里要能看到这台机器的口径");
+        assert_eq!(state.window, Some(WindowKind::FractalExport), "导出完窗口留着");
+        let rep = state.fractal_report.clone().unwrap();
+        assert!(rep.notes_kept > 0, "示例歌该有音符进机体");
+        let status = state.export_status.clone().unwrap_or_default();
+        assert!(
+            status.contains("game tick"),
+            "状态区要写出实际时间基：{status}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 空名称必须像原版一样报错，并且不留半成品。
     #[test]
     fn datapack_export_refuses_an_empty_name() {

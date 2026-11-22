@@ -78,6 +78,8 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         WindowKind::TrackExport => 560.0,
         // 端口自加：MAESTRO 节目单窗口，改写清单最长，给到 600。
         WindowKind::MaestroExport => 600.0,
+        // 端口自加：Fractal 机体投影，选项一行比节目单多，同样 600。
+        WindowKind::FractalExport => 600.0,
         // 原版 `draw_window(x1, y1, x1 + 490, y1 + 450)`。
         WindowKind::MinecraftCompat => 490.0,
         // 原版 `draw_window(x1, y1, x1 + 600, y1 + 400 + navigation_space)`。
@@ -165,6 +167,7 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::SchematicExport => schematic_export_window(state, ui),
             WindowKind::TrackExport => track_export_window(state, ui),
             WindowKind::MaestroExport => maestro_export_window(state, ui),
+            WindowKind::FractalExport => fractal_export_window(state, ui),
             WindowKind::DatapackExport => datapack_export_window(state, ui),
             WindowKind::PngExport => png_export_window(state, ui),
             WindowKind::Autosaves => autosaves_window(state, ui),
@@ -8867,6 +8870,133 @@ fn maestro_export_window(state: &mut EditorState, ui: &mut Ui) {
             state.set_message(tr(
                 "MAESTRO export defaults restored",
                 "已恢复 MAESTRO 导出默认设置",
+            ));
+        }
+        if ui.button(tr("Close", "关闭")).clicked() {
+            state.emit(Command::CloseWindow);
+        }
+    });
+}
+
+/// 端口自加（用户要求「把新给出来的两条路线接成两个导出样式」）：nbs-fractal 机体投影。
+/// 位置照 MAESTRO 节目单窗口：选项在上、改写清单贴着选项、底部三个按钮。
+/// 与节目单最大的不同是这份产物自带红石，所以窗口里不再讲「要先有机体」。
+fn fractal_export_window(state: &mut EditorState, ui: &mut Ui) {
+    ui.label(tr(
+        "This .litematic is a whole redstone music machine: note blocks, repeaters, pistons and wiring are already inside it.\nPaste it and it plays - there is no machine to build first.",
+        "这份 .litematic 是一台完整的红石音乐机：音符盒、中继器、活塞和线路都在里面。\n贴下去就能响，不需要事先搭好机体。",
+    ));
+    ui.separator();
+
+    let layout = state.fractal_options.layout;
+    ui.label(tr("Machine layout", "机体布局"));
+    let mut picked: Option<nbs_io::FractalLayout> = None;
+    for l in nbs_io::FractalLayout::ALL {
+        if ui
+            .radio(layout == l, l.label())
+            .on_hover_text(l.hint())
+            .clicked()
+        {
+            picked = Some(l);
+        }
+    }
+    ui.label(RichText::new(layout.hint()).small().weak());
+
+    let mut changed = picked.is_some();
+    if let Some(l) = picked {
+        state.fractal_options.layout = l;
+    }
+    let opts = &mut state.fractal_options;
+    // 下面两项只喂 Compact：Linear 的档位由这首歌的音符时刻自己选，开关动不了它。
+    let half = ui.add_enabled(
+        layout.honors_half_ticks(),
+        egui::Checkbox::new(
+            &mut opts.twenty_hz,
+            tr("One note per game tick (20 t/s)", "每 game tick 一音（20 t/s）"),
+        ),
+    );
+    changed |= half.clicked();
+    half.on_hover_text(tr(
+        "Only Compact reads this: it puts the two notes that share one redstone tick onto even and odd lanes. Linear picks its own scale from the timestamps.",
+        "这一项只有 Compact 吃：把同一个红石刻里的两颗音符拆到偶、奇两条道。Linear 的档位由音符时刻决定。",
+    ));
+    let coarse = ui.add_enabled(
+        layout == nbs_io::FractalLayout::Compact,
+        egui::DragValue::new(&mut opts.coarse).range(0..=4),
+    );
+    changed |= coarse.changed();
+    coarse.on_hover_text(tr(
+        "Repeater delay steps allowed on a lane, 0 = unlimited. Larger numbers give a shorter machine but can only land on those delays.",
+        "一条道允许的继电器延迟档数，0 = 不限。数字越大机体越短，但音符只能落在这些延迟上。",
+    ));
+    ui.horizontal(|ui| {
+        ui.label(tr("Columns per row", "每行列数"));
+        let mut wrap = opts.wrap as u32;
+        let cols = ui.add(egui::DragValue::new(&mut wrap).range(0..=1024));
+        if cols.changed() {
+            opts.wrap = wrap as usize;
+            changed = true;
+        }
+        cols.on_hover_text(tr(
+            "0 = never wrap: the machine stays one long line.",
+            "0 = 不换行：机体拉成一条长线。",
+        ));
+        ui.label(tr("Track gap", "道间距"));
+        let gap = ui.add(egui::DragValue::new(&mut opts.gap).range(0..=64));
+        changed |= gap.changed();
+        gap.on_hover_text(tr(
+            "Blocks between neighbouring tracks, 0 = lanes interleave as tightly as the layout allows.",
+            "相邻道之间空几格，0 = 按布局允许的最紧方式啮合。",
+        ));
+    });
+    ui.horizontal(|ui| {
+        let floor = ui.checkbox(
+            &mut opts.full_floor,
+            tr("Full floor platform", "底部铺整层地板"),
+        );
+        changed |= floor.clicked();
+        floor.on_hover_text(tr(
+            "A solid platform under every lane instead of the small pads between blocks.",
+            "在每道下面铺一整层地板，而不是格点之间的小垫块。",
+        ));
+        let breaks = ui.checkbox(&mut opts.breaks, tr("Split on blank layers", "按空层拆分声道"));
+        changed |= breaks.clicked();
+        breaks.on_hover_text(tr(
+            "Cut the song at every run of blank layers so each part gets its own track.",
+            "遇到连续空层就把曲子切开，让每一段各占一条道。",
+        ));
+    });
+    if changed {
+        // 选项动一下就要重算：清单里「每格几个 game tick」会随布局和奇偶分道变。
+        state.refresh_fractal_preview();
+    }
+
+    ui.separator();
+    ui.label(tr("The machine and what changed", "机体与改写"));
+    if let Some(e) = &state.fractal_error {
+        ui.label(RichText::new(e.replace('\n', " ")).small().color(Color32::from_rgb(200, 90, 90)));
+    } else if let Some(r) = &state.fractal_report {
+        for line in r.lines() {
+            ui.label(RichText::new(format!("· {line}")).small());
+        }
+    }
+
+    if let Some(s) = &state.export_status {
+        ui.separator();
+        ui.label(RichText::new(s).small());
+    }
+    ui.separator();
+    ui.horizontal(|ui| {
+        if ui.button(tr("Export", "导出")).clicked() {
+            state.emit(Command::ExportFractalChecked);
+        }
+        if ui.button(tr("Use default", "使用默认值")).clicked() {
+            state.fractal_options = nbs_io::FractalOptions::default();
+            state.export_status = None;
+            state.refresh_fractal_preview();
+            state.set_message(tr(
+                "Fractal projection export defaults restored",
+                "已恢复 Fractal 机体投影默认设置",
             ));
         }
         if ui.button(tr("Close", "关闭")).clicked() {

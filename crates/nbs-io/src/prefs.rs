@@ -136,6 +136,8 @@ pub struct Preferences {
     /// 端口自加（用户要求接 MAESTRO 导出）：MAESTRO 机体节目单的导出选项。
     /// 原版没有这条导出，所以也没有对应的 `[..._export]` 段，键名用 `maestro`。
     pub maestro: crate::maestro::MaestroOptions,
+    /// 端口自加（用户要求接 nbs-fractal 机体导出）：`.litematic` 整机投影的导出选项。
+    pub fractal: crate::fractal::FractalOptions,
     /// 原版 `[midi_import]` 段：勾了「记住我的更改」后，导入窗口里改的通道/鼓映射
     /// 会写进 GM 表并持久化到这里。`None` = 没改过，用出厂表。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -149,6 +151,8 @@ pub struct Preferences {
     /// 端口自加：MAESTRO 那条「节目单要在已建好的机体里才出声」的一次性提示是否已看过。
     /// 语义同 `warning_schematic`（`false` = 还没提示过）。
     pub warning_maestro: bool,
+    /// 端口自加：fractal 那条「这份投影自带红石、贴下去就能响，不需要先建机体」的一次性提示。
+    pub warning_fractal: bool,
     /// 原版 `show_welcome`（出厂 1，`control_create.gml:175`）：开机显示欢迎窗。
     pub show_welcome: bool,
     /// 原版 `check_update`（Windows 直装出厂 1，`control_create.gml:172`）：开机检查更新。
@@ -326,10 +330,12 @@ impl Default for Preferences {
             auto_save_minutes: 10,
             schematic: crate::schematic::SchematicOptions::default(),
             maestro: crate::maestro::MaestroOptions::default(),
+            fractal: crate::fractal::FractalOptions::default(),
             midi_gm: None,
             midi_import: None,
             warning_schematic: false,
             warning_maestro: false,
+            warning_fractal: false,
             // 原版 `control_create.gml:172-175`：check_update = 1（Windows）、
             // check_prerelease = is_prerelease（我们的构建按稳定版算 = 0）、
             // show_welcome = 1；donate_banner = 1、donate_banner_time = −1（:112-113）。
@@ -809,6 +815,31 @@ mod tests {
             "官方转换器默认 round，老配置缺键时必须退回它"
         );
         assert!(!old.warning_maestro);
+    }
+
+    /// fractal 那条导出（端口自加）：布局族、奇偶分道与一次性提示要能落盘，
+    /// 老配置里没有这几个键时退回出厂档（Linear / 20 t/s / 未提示）。
+    #[test]
+    fn fractal_options_and_notice_flag_persist() {
+        let mut p = Preferences::default();
+        p.fractal.layout = crate::fractal::FractalLayout::Compact;
+        p.fractal.twenty_hz = false;
+        p.fractal.wrap = 16;
+        p.warning_fractal = true;
+        let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.fractal.layout, crate::fractal::FractalLayout::Compact);
+        assert!(!back.fractal.twenty_hz);
+        assert_eq!(back.fractal.wrap, 16);
+        assert!(back.warning_fractal);
+
+        let old: Preferences = serde_json::from_str(r#"{"theme":2}"#).unwrap();
+        assert_eq!(
+            old.fractal.layout,
+            crate::fractal::FractalLayout::Linear,
+            "老配置缺键时得退回上游 CLI 的出厂档"
+        );
+        assert!(old.fractal.twenty_hz);
+        assert!(!old.warning_fractal);
     }
 
     /// 外部控制这三条是我们自己加的（原版没有对应物），所以对旧文件的口径是「全关」：

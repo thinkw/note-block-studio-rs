@@ -37,7 +37,8 @@ use crate::maestro::{msg, MOB_SOUNDS};
 // ==================================================== 选项
 
 /// 布局族。上游有 9 个布局模块，这里只接两族能兑现 20 t/s 的。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum FractalLayout {
     /// 主干＋支道的时间格；档位由时间戳自动选，最细一格一个 game tick。
     #[default]
@@ -75,8 +76,9 @@ impl FractalLayout {
     }
 }
 
-/// 导出选项。默认值对齐上游 CLI 的出厂档。
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// 导出选项。默认值对齐上游 CLI 的出厂档，随 `settings.ini` 的 `[fractal_export]` 段持久化。
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct FractalOptions {
     pub layout: FractalLayout,
     /// 每 game tick 一音（上游 `--halves`）。`Linear` 本来就按时间戳自动选档，此项只对
@@ -192,10 +194,15 @@ impl FractalReport {
         }
     }
 
+    /// 发声频率的显示串：每 3 格一机的 6.666… 不留一长串小数。
+    pub fn grid_label(&self) -> String {
+        crate::maestro::trim_num(self.notes_per_sec() as f64)
+    }
+
     /// 变化说明：只列真正发生过的改写，给导出对话框直接显示。
     pub fn lines(&self) -> Vec<String> {
         let mut v = Vec::new();
-        let grid = crate::maestro::trim_num(self.notes_per_sec() as f64);
+        let grid = self.grid_label();
         let gt = self.cell_gt;
         if self.layout == FractalLayout::Linear {
             v.push(msg(
@@ -331,10 +338,12 @@ fn prepare(song: &Song) -> Result<(Vec<u8>, FractalReport), String> {
             .map(|(_, id)| *id)
     };
 
-    let mut out = Song::default();
-    out.meta = song.meta.clone();
-    out.layers = song.layers.clone();
-    out.custom_instruments = customs.clone();
+    let mut out = Song {
+        meta: song.meta.clone(),
+        layers: song.layers.clone(),
+        custom_instruments: customs.clone(),
+        ..Default::default()
+    };
 
     for (&tick, col) in &song.columns {
         for (&layer, note) in &col.notes {
@@ -436,7 +445,7 @@ fn assemble(
             let cell_gt = ScaleMode::new(
                 tracks
                     .iter()
-                    .flat_map(|t| t.iter().map(|(pos, _)| pos.into_tick())),
+                    .flat_map(|t| t.keys().map(|pos| pos.into_tick())),
             )
             .scale();
             let layout: Box<dyn Layout<()>> = match NonZero::new(opts.wrap) {
@@ -459,6 +468,9 @@ fn assemble(
                 vec![parsed.notes]
             };
             let mut tracks: Vec<CompactedTrack> = Vec::new();
+            // 两条反相道是不是都真用上了：只用上一条时这台机器仍是 2 刻一格，
+            // 不能因为开关亮着就喊 20 音/秒。
+            let mut halves_used = [false; 2];
             for group in groups {
                 let stream = group
                     .rescale_to_tick_rate(tempo, target)
@@ -468,6 +480,9 @@ fn assemble(
                     let mut lanes: [Vec<(u32, UpNote)>; 2] = Default::default();
                     for (tick, note) in stream {
                         lanes[(tick % 2) as usize].push((tick / 2, note));
+                    }
+                    for (i, lane) in lanes.iter().enumerate() {
+                        halves_used[i] |= !lane.is_empty();
                     }
                     tracks.extend(
                         lanes
@@ -489,9 +504,15 @@ fn assemble(
                 opts.gap,
                 opts.full_floor,
             ));
-            // Compact 的一条道恒是 2 game tick 一格；开奇偶分道后两条道错开 1 刻，
-            // 相邻发声间隔才降到 1 刻。
-            (layout, count, target, if opts.twenty_hz { 1 } else { 2 })
+            // Compact 的一条道恒是 2 game tick 一格；奇偶两条道都用上，
+            // 错开的那 1 刻才真在机器里，相邻发声间隔才降到 1 刻。
+            let both_halves = halves_used[0] && halves_used[1];
+            (
+                layout,
+                count,
+                target,
+                if opts.twenty_hz && both_halves { 1 } else { 2 },
+            )
         }
     };
     Ok((layout, n_tracks, rate, cell_gt, trumpets))
@@ -686,6 +707,38 @@ mod tests {
             "两条道竖直堆叠，高度该更大：{:?} vs {:?}",
             ten.size,
             twenty.size
+        );
+    }
+
+    /// 20 t/s 开关亮着、但这首歌根本没有奇数刻的音符：反相那条道是空的，
+    /// 机器只剩一条 2 刻一格的道。报告不许跟着开关喊 20 音/秒。
+    #[test]
+    fn compact_reports_the_grid_it_can_actually_play() {
+        let even_only = song(
+            20.0,
+            &[(0, 0, 0, 45), (2, 0, 0, 47), (4, 0, 0, 49), (6, 0, 0, 51)],
+        );
+        let opts = FractalOptions {
+            layout: FractalLayout::Compact,
+            breaks: false,
+            ..FractalOptions::default()
+        };
+        let (_, rep) = build_bytes(&even_only, &opts).unwrap();
+        assert_eq!(
+            (rep.tracks, rep.cell_gt, rep.notes_per_sec()),
+            (1, 2, 10.0),
+            "只用上一条道时报的是这台机器的真实间隔"
+        );
+
+        // 只差一个因子：把其中一颗挪到奇数刻，两条道都用上了，才是每 game tick 一格。
+        let mixed = song(
+            20.0,
+            &[(0, 0, 0, 45), (1, 0, 0, 47), (4, 0, 0, 49), (6, 0, 0, 51)],
+        );
+        let (_, both) = build_bytes(&mixed, &opts).unwrap();
+        assert_eq!(
+            (both.tracks, both.cell_gt, both.notes_per_sec()),
+            (2, 1, 20.0)
         );
     }
 
