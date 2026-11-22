@@ -1721,6 +1721,22 @@ fn prefs_interface(
     if pg.arrow(&state.icons, 357.0, 96.0) && !state.prefs_rate_menu {
         state.prefs_rate_menu = true;
     }
+    // 端口自加（用户要求 #119）：原版这一组只有帧率下拉，下面这颗垂直同步是自加的。
+    // 位置取组内 y=120：组是 74..134，下拉占到 115，不动任何原版坐标。
+    if pg.check(
+        276.0,
+        120.0,
+        state.prefs.vsync,
+        tr("VSync", "垂直同步"),
+        tr(
+            "Wait for the display refresh before a new frame reaches the screen.\nTurn this off to let the limit above run uncapped.",
+            "每帧等显示器刷新后再上屏。关掉后帧的节拍只由上面的帧率限制决定，\n不再被显示器刷新率压住。",
+        ),
+        false,
+        false,
+    ) {
+        state.emit(Command::SetVsync(!state.prefs.vsync));
+    }
 
     // 原版 `draw_areaheader(x1 + 258, y1 + 150, 220, 64, "窗口")`。
     let native = pg.ui.ctx().native_pixels_per_point().unwrap_or(1.0);

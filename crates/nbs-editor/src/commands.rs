@@ -242,6 +242,8 @@ pub enum Command {
     SetSoundsDir(String),
     ReloadSamples,
     SavePreferences,
+    /// 端口自加（用户要求 #119）：首选项「帧率限制」旁边那颗垂直同步。
+    SetVsync(bool),
     RestoreAutosave(PathBuf),
     /// 原版 `open_url(url)`：欢迎窗链接、捐赠横幅、更新弹窗的「去 releases 页」。
     OpenUrl(String),
@@ -1283,9 +1285,10 @@ the machine in your world before pasting this structure.\n\nThis warning will ne
             dispatch(state, Command::RunMacro(m), ctx);
         }
         Command::ShowCompat => {
-            // 原版这一段（`control_draw.gml:2032-2036`）：playing = 0、record = 0、
+            // 原版这一段（`control_draw.gml:2196-2200`）：playing = 0、record = 0、
             // selection_place(0)，然后 window = w_minecraft。
-            state.audio.clock_mut().pause();
+            // 刻意偏离（用户要求 #117）：不暂停播放。这颗徽标只是「查看兼容性说明」，
+            // 原版顺手把曲子掐了，听歌的人点一下就被打断；record 和选区那两句照旧。
             state.record = false;
             state.record_armed = false;
             state.doc.deselect();
@@ -2078,6 +2081,13 @@ the machine in your world before pasting this structure.\n\nThis warning will ne
         // 隐式落盘（原版在退出时统一 save_settings）。
         Command::SetCheckPrerelease(on) => {
             state.prefs.check_prerelease = on;
+            dispatch(state, Command::SavePreferences, ctx);
+        }
+        // 端口自加（用户要求 #119）：写设置 + 落盘，再把切换请求留给宿主去改
+        // GL 的换帧间隔（改不改得动、要不要等下次启动，由宿主在状态栏说清楚）。
+        Command::SetVsync(on) => {
+            state.prefs.vsync = on;
+            state.vsync_request = Some(on);
             dispatch(state, Command::SavePreferences, ctx);
         }
         Command::OpenSoundImport => {
@@ -3529,6 +3539,31 @@ mod tests {
         }
     }
 
+    /// 用户要求 #119：那颗「垂直同步」要真的写进设置、落盘，并把切换请求交给宿主。
+    #[test]
+    fn set_vsync_saves_the_pref_and_hands_the_switch_to_the_host() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        assert!(state.prefs.vsync, "出厂与 eframe 一致：垂直同步开着");
+        dispatch(&mut state, Command::SetVsync(false), &ctx);
+        assert!(!state.prefs.vsync);
+        assert_eq!(
+            state.vsync_request,
+            Some(false),
+            "编辑器不碰呈现层，切换要求要留给宿主取走"
+        );
+        assert_eq!(
+            nbs_io::prefs::Preferences::load().vsync,
+            false,
+            "开关要落盘，重启后照旧"
+        );
+        // 取走一次就清零：下一帧不该重复切。
+        state.vsync_request = None;
+        dispatch(&mut state, Command::SetVsync(false), &ctx);
+        assert_eq!(state.vsync_request, Some(false));
+    }
+
     /// 跑一帧，取这一帧交给平台层的窗口图标命令。
     fn icon_command(ctx: &Context, state: &mut EditorState) -> Option<egui::IconData> {
         let out = ctx.run(raw_input(), |c| state.tick_transport(c));
@@ -3576,20 +3611,26 @@ mod tests {
         assert_ne!(old.rgba, new.rgba, "旧图标和新图标必须是两张不同的图");
     }
 
-    /// 原版徽章命中那一段（`control_draw.gml:2032-2036`）：停播放、关录制、
-    /// 浮动选区落回，再 `window = w_minecraft`。
+    /// 徽章命中原本（`control_draw.gml:2196-2200`）是 playing = 0、record = 0、
+    /// selection_place(0)、window = w_minecraft。用户要求 #117 把「打断播放」这一句去掉，
+    /// 其余三条照旧，所以这个用例同时钉住「曲子继续播」和「录制 / 选区照旧落下」。
     #[test]
-    fn compat_badge_stops_everything_and_opens_the_window() {
+    fn compat_badge_keeps_playback_and_opens_the_window() {
         let ctx = Context::default();
         let mut state = state_with(four_case_song(3.0));
         state.record = true;
         state.record_armed = true;
         state.doc.select_all();
         assert!(!state.doc.selection.is_empty());
+        state.begin_playback();
+        assert!(state.is_playing(), "先确认用例自己真的在播");
 
         dispatch(&mut state, Command::ShowCompat, &ctx);
         assert_eq!(state.window, Some(WindowKind::MinecraftCompat));
-        assert!(!state.is_playing(), "原版 playing = 0");
+        assert!(
+            state.is_playing(),
+            "用户要求 #117：点徽标不该把正在播的曲子暂停"
+        );
         assert!(!state.record && !state.record_armed, "原版 record = 0");
         assert!(
             state.doc.selection.is_empty(),

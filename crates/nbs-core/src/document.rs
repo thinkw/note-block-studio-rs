@@ -715,15 +715,14 @@ impl Document {
         self.history.redo(&mut self.song, &mut self.selection)
     }
 
-    /// 换掉整首曲子（开档 / 新建 / 导入 / 外部控制落盘后重建）。
-    ///
-    /// `rev` 必须跟着走：它对外是「内容版本号」，按它缓存的下游（特效时间轴等）
-    /// 只看这一个数。而解析出来的 `Song` rev 恒为 0，不递增的话缓存会一直留着上一首
-    /// ——启动时先烘了演示曲（rev 0），开档后又拿到 rev 0，键位没变，特效就永远在画
-    /// 演示曲的音符。
-    pub fn replace_song(&mut self, mut song: Song) {
-        song.rev = self.song.rev + 1;
+    pub fn replace_song(&mut self, song: Song) {
+        // rev 只增不减，且换歌也要推进它（在旧值上 +1，而不是沿用载入值）：两首新载入的
+        // 歌都带 rev=0，沿用就会撞在同一个数上，凡是拿 rev 当缓存键的下游（右上角兼容
+        // 徽标、特效时间轴、导出方块表、MCP 的 expect_rev）都会把上一首的结论留给下一首
+        // ——特效那条最显眼：开机烘的是演示曲，开档后于是一直在画演示曲的音符。
+        let next = self.song.rev.saturating_add(1);
         self.song = song;
+        self.song.rev = next;
         self.selection = Selection::new();
         self.history.clear();
     }
