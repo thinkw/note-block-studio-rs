@@ -10,6 +10,7 @@
 
 use nbs_audio::scheduler::{build_event_table, EventKind};
 use nbs_core::model::{Song, FIRST_CUSTOM_INDEX};
+use std::collections::HashMap;
 
 /// 一枚会发出声音的音符（事件乐器与锁定层都不在这里）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,6 +20,9 @@ pub struct FxNote {
     pub key: u8,
     pub instrument: u8,
     pub velocity: u8,
+    /// 这枚音按住有几列。NBS 的格式里没有 note-off，只能按「同层同键的下一枚
+    /// 就是上一枚的收尾」推；后面再没有同键音就按一列算。
+    pub duration: u32,
 }
 
 /// 每列起点的时刻（秒，相对播放头 0）。
@@ -26,6 +30,9 @@ pub struct FxTimeline {
     notes: Vec<FxNote>,
     cum: Vec<f32>,
     ticks_per_bar: u32,
+    /// 最长那枚音从起手到收尾跨几秒：瀑布据此决定可见窗口要往前（下）多取一段，
+    /// 否则长音的胶囊会在还没落到底之前整条消失。
+    max_span: f32,
     /// 乐器号 → 乐器名（内置 20 个 + 这首曲子的自定义乐器）。
     /// 特效要靠它区分「这是哪件乐器」：方块表没配的自定义乐器在表里全是同一块石头，
     /// 只有名字能把它们分开。
@@ -44,6 +51,7 @@ impl FxTimeline {
             notes: Vec::new(),
             cum: vec![0.0, 1.0],
             ticks_per_bar: 16,
+            max_span: 0.0,
             instruments: Vec::new(),
         }
     }
@@ -77,6 +85,7 @@ impl FxTimeline {
                     key: ev.note.key,
                     instrument: ev.note.instrument,
                     velocity: ev.note.velocity,
+                    duration: 1,
                 }),
                 _ => {}
             }
@@ -99,12 +108,41 @@ impl FxTimeline {
         let instruments = (0..(FIRST_CUSTOM_INDEX as usize + song.custom_instruments.len()))
             .map(|i| song.instrument_name(i as u8).to_string())
             .collect();
-        Self {
+        let mut this = Self {
             notes,
             cum,
             ticks_per_bar,
+            max_span: 0.0,
             instruments,
+        };
+        this.stamp_durations();
+        this
+    }
+
+    /// 时值盖章：表已按 (tick, 层) 排好，同层同键的下一枚就是上一枚的收尾。
+    /// 顺带记下最长那枚音跨几秒 —— 瀑布的可见窗口要按它往前多取一段，
+    /// 否则长音的胶囊会在尾还没落到底之前整条消失。
+    fn stamp_durations(&mut self) {
+        let mut last: HashMap<(u32, u8), usize> = HashMap::new();
+        for i in 0..self.notes.len() {
+            let n = self.notes[i];
+            if let Some(j) = last.insert((n.layer, n.key), i) {
+                self.notes[j].duration = n.tick - self.notes[j].tick;
+            }
         }
+        self.max_span = self
+            .notes
+            .iter()
+            .fold(0.0_f32, |acc, n| {
+                let end = self.seconds_at((n.tick + n.duration) as f64);
+                let start = self.seconds_at(n.tick as f64);
+                acc.max(end - start)
+            });
+    }
+
+    /// 最长一枚音的时长（秒）。空表返回 0。
+    pub fn max_span_seconds(&self) -> f32 {
+        self.max_span
     }
 
     /// 音符总数，也用来判断「烘出来的表是不是空的」。
@@ -329,6 +367,34 @@ mod tests {
         assert!(tl.notes_in(-5.0, -1.0).is_empty());
         // from > to（往回拖）也是空，不是反向切片。
         assert!(tl.notes_in(9.0, 2.0).is_empty());
+    }
+
+    /// NBS 的格式里没有 note-off，时值只能推：同层同键的下一枚就是上一枚的收尾，
+    /// 换层或换键都不算，之后没有同键音按一列。瀑布的胶囊高度全靠这个数（① 项）。
+    #[test]
+    fn duration_is_the_gap_to_the_next_note_on_the_same_layer_and_key() {
+        let mut s = Song::new();
+        s.meta.tempo = 2.0; // 一列 0.5 秒
+        s.meta.time_signature = 4;
+        s.set(0, 0, note(0, 60, 0));
+        s.set(3, 0, note(0, 60, 0)); // 同层同键 ⇒ 第 0 列那枚响 3 列
+        s.set(5, 1, note(0, 60, 0)); // 换了层 ⇒ 不接管第 3 列那枚
+        s.set(9, 0, note(0, 62, 0)); // 换了键 ⇒ 同上
+        s.recalculate();
+        let tl = FxTimeline::bake(&s, false);
+        let dur = |tick: u32| {
+            tl.notes()
+                .iter()
+                .find(|n| n.tick == tick)
+                .unwrap_or_else(|| panic!("第 {tick} 列应该有音"))
+                .duration
+        };
+        assert_eq!(dur(0), 3);
+        assert_eq!(dur(3), 1, "后面没有同层同键的音，按一列算");
+        assert_eq!(dur(5), 1);
+        assert_eq!(dur(9), 1);
+        // 可见窗口要往前多取的就是这个最长值：3 列 × 0.5 秒。
+        assert!((tl.max_span_seconds() - 1.5).abs() < 1e-4);
     }
 
     /// `tick_at_seconds` 是 `seconds_at` 的反函数：特效算「可见窗口到哪一列」全靠它，

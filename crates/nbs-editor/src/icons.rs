@@ -150,6 +150,21 @@ pub enum BlockSet {
     Plain,
 }
 
+/// 原版贴图表给自定义乐器留的帧数（`(i - first_custom) % 18 + first_custom`）。
+/// 3.11 的表比 3.12 少 4 帧，取模算出的号会滑到别的素材上，所以钉成常量。
+pub const CUSTOM_FRAMES: usize = 18;
+
+/// 主界面画一枚音符时取方块精灵的第几帧：内置按序号，自定义在那 18 帧里循环。
+/// 这个算式原本内联在 `grid.rs::push_note`，抽出来是因为瀑布胶囊的底色要取同一帧
+/// 的平均色（「和主界面同色」）—— 两处各写一遍迟早会飘。
+pub fn block_frame(instrument: usize, first_custom: usize) -> usize {
+    if instrument >= first_custom {
+        (instrument - first_custom) % CUSTOM_FRAMES + first_custom
+    } else {
+        instrument
+    }
+}
+
 /// 一行摆完所有帧的小图集。
 #[derive(Clone)]
 struct Strip {
@@ -1329,7 +1344,7 @@ impl Icons {
 
 /// 与 `nbs-audio` 找采样同样的搜索顺序：可执行文件旁 → 工作目录。两边都按相对层级往上找，
 /// 不把编译期的绝对路径写进二进制，换台机器/换个目录放 exe 也还能找到资源。
-fn asset_root() -> Option<PathBuf> {
+pub(crate) fn asset_root() -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {

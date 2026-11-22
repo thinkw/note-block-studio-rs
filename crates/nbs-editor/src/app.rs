@@ -211,8 +211,10 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
     }
 
     // 叠加类特效同理：压住面板、仍在弹窗之下（它自成一个 background 层 id，
-    // 排在五线谱那条之后）。一条都没开时 `paint_overlay` 里就是一次空判断。
-    if fx_on {
+    // 排在五线谱那条之后）。这里按表面判断而不是按「有没有开特效」：开着瀑布时
+    // 这条路径整段跳过，`fx_input` 那次读偏好、算琴键栏矩形也一并省掉 ——
+    // 两条表面互斥，同一帧只有一边在算图元。
+    if fx_on && state.fx.overlay_active() {
         let overlay = fx_input(state, ctx, ctx.screen_rect());
         state.fx.paint_overlay(ctx, &overlay);
     }

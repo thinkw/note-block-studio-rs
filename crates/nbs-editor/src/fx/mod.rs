@@ -28,7 +28,7 @@ use nbs_core::model::Song;
 use keyboard::{KeyboardLayout, BLACK_LIFT};
 use stage::Frame;
 use timeline::FxTimeline;
-use tiles::{BlockTiles, InstrumentBlocks};
+use tiles::{BlockTiles, InstrumentBlocks, NotePalette};
 
 /// 特效画在哪一层。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,6 +99,9 @@ pub struct FxContext<'a> {
     pub blocks: &'a InstrumentBlocks,
     /// 方块贴图。素材没扒到时是 `None` 或空表，特效自动退回色块。
     pub tiles: Option<&'a BlockTiles>,
+    /// 主界面画音符用的那行精灵的平均色：特效要「和编辑区同色」就取这里，
+    /// 空表（素材没入库）时自己退回按乐器名哈希。
+    pub palette: &'a NotePalette,
 }
 
 /// 一个播放特效。实现者只产图元，不碰 `Painter`。
@@ -181,6 +184,14 @@ impl FxStack {
 
     pub fn active(&self) -> &[String] {
         &self.active
+    }
+
+    /// 启用中的特效有没有画在某个表面上的。`app.rs` 靠它决定「这一帧谁在画」：
+    /// 舞台那条把网格顶掉，叠加那条反过来要求网格照画 —— 两条都省掉空转。
+    pub fn surface_active(&self, surface: Surface) -> bool {
+        self.active
+            .iter()
+            .any(|id| self.info(id).is_some_and(|i| i.surface == surface))
     }
 
     pub fn set_opacity(&mut self, opacity: f32) {
@@ -407,6 +418,10 @@ pub struct FxState {
     pub blocks_key: Vec<u8>,
     pub stack: FxStack,
     pub tiles: Option<BlockTiles>,
+    /// 主界面那行方块精灵的平均色（瀑布胶囊的底色，和编辑区同源）。
+    pub palette: NotePalette,
+    /// 素材目录只认一次：没扒素材时 `palette` 一直是空的，不然后每帧重扫一遍目录。
+    palette_done: bool,
 }
 
 impl Default for FxState {
@@ -418,6 +433,8 @@ impl Default for FxState {
             blocks_key: Vec::new(),
             stack: FxStack::new(),
             tiles: None,
+            palette: NotePalette::default(),
+            palette_done: false,
         }
     }
 }
@@ -434,8 +451,23 @@ impl FxState {
         self.stack.wants_piano()
     }
 
+    /// 有没有画在叠加层上的特效。`app.rs` 靠它决定要不要为叠加那一路凑一份输入
+    /// （凑一份要读时钟、算键盘摆放，一条都没开时不该花钱）。
+    pub fn overlay_active(&self) -> bool {
+        self.stack.surface_active(Surface::Overlay)
+    }
+
     /// 每帧开头调一次：该重烘的烘掉，素材只认一次目录。
+    ///
+    /// 一条特效都没开时整段跳过 —— 那时画的是主界面网格，把整首曲子的事件展开、
+    /// 排序、累加秒表纯属白干。这是「渲染瀑布时主界面不画」的另一半：
+    /// 反过来渲染主界面时特效这边也不许烘表。跳过那一帧把缓存键打回哨兵值，
+    /// 下一条特效开启的那帧就地重烘，不会画半帧上一首曲子。
     pub fn refresh(&mut self, song: &Song, include_locked: bool, opts: &nbs_io::schematic::SchematicOptions) {
+        if self.stack.active().is_empty() {
+            self.baked_for = (u64::MAX, false);
+            return;
+        }
         if self.baked_for != (song.rev, include_locked) {
             self.timeline = FxTimeline::bake(song, include_locked);
             self.baked_for = (song.rev, include_locked);
@@ -447,25 +479,43 @@ impl FxState {
         if self.tiles.is_none() {
             self.tiles = Some(BlockTiles::open());
         }
+        // 精灵平均色只读一次目录：没扒素材时表会一直是空的，不能每帧重扫。
+        if !self.palette_done {
+            self.palette = NotePalette::open();
+            self.palette_done = true;
+        }
     }
 
     /// 舞台那一路：`area` 是中央面板那块，`p` 是从那块面板拿到的画笔。
     pub fn paint_stage(&mut self, ctx: &Context, input: &FxInput, p: &Painter) {
-        let cx = fx_context(ctx, (&self.timeline, &self.blocks, self.tiles.as_ref()), input);
+        let cx = fx_context(
+            ctx,
+            (
+                &self.timeline,
+                &self.blocks,
+                self.tiles.as_ref(),
+                &self.palette,
+            ),
+            input,
+        );
         self.stack.paint_stage(&cx, p);
     }
 
     /// 叠加那一路：所有面板画完、弹窗之前调。没有启用中的叠加特效时等于空判断。
     pub fn paint_overlay(&mut self, ctx: &Context, input: &FxInput) {
-        if !self
-            .stack
-            .active()
-            .iter()
-            .any(|id| self.stack.info(id).is_some_and(|i| i.surface == Surface::Overlay))
-        {
+        if !self.stack.surface_active(Surface::Overlay) {
             return;
         }
-        let cx = fx_context(ctx, (&self.timeline, &self.blocks, self.tiles.as_ref()), input);
+        let cx = fx_context(
+            ctx,
+            (
+                &self.timeline,
+                &self.blocks,
+                self.tiles.as_ref(),
+                &self.palette,
+            ),
+            input,
+        );
         self.stack.paint_overlay(&cx, ctx);
     }
 }
@@ -478,10 +528,11 @@ fn fx_context<'a>(
         &'a FxTimeline,
         &'a InstrumentBlocks,
         Option<&'a BlockTiles>,
+        &'a NotePalette,
     ),
     input: &'a FxInput,
 ) -> FxContext<'a> {
-    let (timeline, blocks, tiles) = data;
+    let (timeline, blocks, tiles, palette) = data;
     FxContext {
         tex,
         now: input.now,
@@ -496,6 +547,7 @@ fn fx_context<'a>(
         timeline,
         blocks,
         tiles,
+        palette,
     }
 }
 
@@ -623,6 +675,7 @@ mod tests {
         let ctx = Context::default();
         let timeline = FxTimeline::new();
         let blocks = InstrumentBlocks::default();
+        let palette = NotePalette::default();
         let cx = FxContext {
             tex: &ctx,
             now: 0.0,
@@ -637,6 +690,7 @@ mod tests {
             timeline: &timeline,
             blocks: &blocks,
             tiles: None,
+            palette: &palette,
         };
         stack.compose(&cx, Surface::Overlay);
         assert_eq!(stack.frame().len(), 1, "叠加层只跑叠加特效");
@@ -733,7 +787,11 @@ mod tests {
             area: Rect::from_min_size(egui::pos2(4.0, 6.0), egui::vec2(640.0, 480.0)),
             keyboard: Some(layout),
         };
-        let cx = fx_context(&ctx, (&fx.timeline, &fx.blocks, fx.tiles.as_ref()), &input);
+        let cx = fx_context(
+            &ctx,
+            (&fx.timeline, &fx.blocks, fx.tiles.as_ref(), &fx.palette),
+            &input,
+        );
         assert_eq!(cx.now, input.now);
         assert_eq!(cx.dt, input.dt);
         assert_eq!(cx.position, input.position);
@@ -775,8 +833,8 @@ mod tests {
         assert!(fx.stage_active());
         fx.paint_stage(&ctx, &input, &p);
         assert!(
-            (20..40).contains(&fx.stack.frame().len()),
-            "空曲子的静态帧该只剩轨道线 + 击中线（800px 放 20 槽 = 22 个），实际 {}",
+            (1..12).contains(&fx.stack.frame().len()),
+            "空曲子的静态帧该只剩 C/F 参考线 + 击中线（800px 放 20 槽，八度线只有两三根），实际 {}",
             fx.stack.frame().len()
         );
         assert!(
@@ -810,6 +868,9 @@ mod tests {
     fn swapping_the_song_rebakes_the_timeline() {
         let mut doc = nbs_core::Document::new();
         let mut fx = FxState::default();
+        // 关着特效时 `refresh` 直接不烘（省开销那条），这里要验的是换歌重烘，
+        // 所以先把瀑布打开 —— 和真机上「开着特效换歌」是同一件事。
+        fx.stack.set_active(synthesia::Synthesia::ID, true);
         let opts = nbs_io::schematic::SchematicOptions::default();
         doc.replace_song(song_with(&[(0, 0, 0, 60), (1, 0, 0, 62), (2, 0, 7, 64)]));
         fx.refresh(&doc.song, false, &opts);
@@ -817,5 +878,22 @@ mod tests {
         doc.replace_song(song_with(&[(0, 0, 7, 48)]));
         fx.refresh(&doc.song, false, &opts);
         assert_eq!(fx.timeline.note_count(), 1, "换歌之后特效还在用上一首的音符表");
+    }
+
+    /// 两边都不渲染才叫省开销：特效全关时 `refresh` 一帧都不该烘，画面上也不该
+    /// 有人去算图元；反过来开着瀑布时叠加表面（方块排）不干活。
+    #[test]
+    fn nothing_is_baked_or_painted_while_every_effect_is_off() {
+        let mut fx = FxState::default();
+        let opts = nbs_io::schematic::SchematicOptions::default();
+        fx.refresh(&song_with(&[(0, 0, 0, 60), (1, 0, 0, 62), (2, 0, 7, 64)]), false, &opts);
+        assert_eq!(fx.timeline.note_count(), 0, "没开特效不该烘音符表");
+        assert!(!fx.stage_active() && !fx.overlay_active());
+
+        fx.stack.set_active(synthesia::Synthesia::ID, true);
+        fx.refresh(&song_with(&[(0, 0, 0, 60), (1, 0, 0, 62), (2, 0, 7, 64)]), false, &opts);
+        assert_eq!(fx.timeline.note_count(), 3, "打开特效的那一次就要补烘上");
+        assert!(fx.stage_active(), "瀑布占舞台");
+        assert!(!fx.overlay_active(), "瀑布不占叠加表面");
     }
 }

@@ -119,6 +119,80 @@ pub fn instrument_color(name: &str, index: u8) -> Color32 {
     Color32::from_rgb(r, g, b)
 }
 
+/// 主界面画音符那行精灵（`assets/icons/block_color/00..37.png`，原版
+/// `spr_block_color`）的平均色。瀑布胶囊的底色取这里，颜色就和编辑区同一个来源：
+/// 素材换了色特效跟着换，不存在第二张需要维护的表。
+///
+/// 素材目录找不到时表是空的，调用方（`fx::synthesia`）退回 [`instrument_color`]
+/// 的按名哈希 —— 观感变差，但不会没颜色。
+#[derive(Clone, Default)]
+pub struct NotePalette {
+    frames: Vec<Option<Color32>>,
+}
+
+impl NotePalette {
+    /// 读装机素材。只在「第一条特效开启」那帧调一次（`FxState::refresh`），
+    /// 38 张 32×32 的 PNG 摊成一次性的开销，不进播放循环。
+    pub fn open() -> Self {
+        crate::icons::asset_root()
+            .map(|root| Self::from_dir(&root.join("block_color")))
+            .unwrap_or_default()
+    }
+
+    /// 取帧规则和 `icons::Strip::load` 一致（只要 `.png`、按文件名排序），
+    /// 这样第 i 帧和主界面 blit 的第 i 帧是同一个文件。
+    pub fn from_dir(dir: &Path) -> Self {
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("png"))
+            .collect();
+        paths.sort();
+        Self {
+            frames: paths.iter().map(|p| average_color(p)).collect(),
+        }
+    }
+
+    /// 乐器号 → 主界面给它用的那帧精灵的色。帧号口径见 `icons::block_frame`。
+    pub fn color(&self, instrument: u8) -> Option<Color32> {
+        let frame = crate::icons::block_frame(
+            instrument as usize,
+            nbs_core::model::FIRST_CUSTOM_INDEX as usize,
+        );
+        // `Strip::blit` 把越界帧号静默夹到最后一帧，主界面就是这么画的：
+        // 第 19 个自定义乐器往后全都同一块色。跟着夹才对得上，返回 None 反而更错。
+        let idx = frame.min(self.frames.len().saturating_sub(1));
+        self.frames.get(idx).copied().flatten()
+    }
+
+    pub fn len(&self) -> usize {
+        self.frames.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+}
+
+/// 一帧精灵的平均色：只算不透明像素，透明边会把颜色冲淡。
+/// 读失败或整帧透明返回 `None`，调用方按「这帧没有色」处理。
+fn average_color(path: &Path) -> Option<Color32> {
+    let rgba = image::open(path).ok()?.to_rgba8();
+    let (mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
+    for px in rgba.pixels() {
+        if px.0[3] == 0 {
+            continue;
+        }
+        r += px.0[0] as u64;
+        g += px.0[1] as u64;
+        b += px.0[2] as u64;
+        n += 1;
+    }
+    (n > 0).then(|| Color32::from_rgb((r / n) as u8, (g / n) as u8, (b / n) as u8))
+}
+
 /// 乐器 → 方块名 的那张表。导出选项（`ins_block` / `ins_data`）一改就重建，
 /// 每帧只查内存，不在音符循环里分配字符串。
 pub struct InstrumentBlocks {
@@ -504,5 +578,44 @@ mod tests {
                 "{ins} 号乐器 → {name}：扒下来的贴图里没有这个方块"
             );
         }
+    }
+
+    /// 帧号口径：内置按序号，自定义在那 18 帧里循环。主界面的 `push_note` 和
+    /// 瀑布取色共用这一个函数，改这里等于同时改两边 —— 不会飘。
+    #[test]
+    fn block_frame_wraps_custom_instruments() {
+        assert_eq!(crate::icons::block_frame(3, 20), 3, "内置就是自己的帧");
+        assert_eq!(crate::icons::block_frame(19, 20), 19, "19 号还没到自定义区");
+        assert_eq!(crate::icons::block_frame(20, 20), 20, "第一个自定义");
+        assert_eq!(crate::icons::block_frame(37, 20), 37, "第 18 个自定义正好到表尾");
+        assert_eq!(
+            crate::icons::block_frame(38, 20),
+            20,
+            "第 19 个自定义循环回那 18 帧的第一帧，跟主界面一样"
+        );
+    }
+
+    /// 配色对齐主界面：`assets/icons/block_color` 的 38 帧都要有色，自定义序号
+    /// 在那 18 帧里循环（主界面就是这么选的），素材缺帧时才夹到现有表尾。
+    #[test]
+    fn the_palette_covers_the_frames_the_grid_draws() {
+        let p = NotePalette::open();
+        if p.is_empty() {
+            eprintln!("跳过：assets/icons/block_color 没素材");
+            return;
+        }
+        assert_eq!(p.len(), 38, "block_color 是 38 帧");
+        for ins in 0..40u8 {
+            assert!(p.color(ins).is_some(), "{ins} 号乐器没色");
+        }
+        assert_ne!(p.color(1), p.color(3), "不同帧该有不同颜色，否则等于没对齐");
+        assert_eq!(
+            p.color(38),
+            p.color(20),
+            "第 19 个自定义循环回首帧，主界面画的也是它"
+        );
+        // 空表不能假装有色：调用方要靠 None 退回按名哈希。
+        assert_eq!(NotePalette::default().color(1), None);
+        assert_eq!(NotePalette::default().len(), 0);
     }
 }
