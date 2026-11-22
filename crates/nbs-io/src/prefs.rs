@@ -97,6 +97,10 @@ pub struct Preferences {
     pub show_notechart: bool,
     /// 原版 `refreshrate`（出厂 0，`control_create.gml:130`）：帧数上限档位。
     pub refresh_rate: u8,
+    /// 端口自加（用户要求 #119）：垂直同步。原版把呈现整个交给 GameMaker，
+    /// 首选项里没有这一项；出厂值跟 eframe 自己的默认 `NativeOptions.vsync = true` 一致。
+    /// 关掉后帧的节拍只剩上面那档「帧率限制」，不再被显示器刷新率压住。
+    pub vsync: bool,
     /// 原版 `window_scale`：界面缩放倍率。`None` = 跟随系统 DPI，
     /// 也就是原版的出厂值 `display_get_dpi_x() / 96`（`get_default_window_scale.gml`）。
     pub window_scale: Option<f32>,
@@ -308,6 +312,8 @@ impl Default for Preferences {
             show_notechart: false,
             // 原版 `control_create.gml:130`：refreshrate = 0，即 30 帧。
             refresh_rate: 0,
+            // 端口自加 #119：与 eframe 出厂的 NativeOptions.vsync = true 对齐。
+            vsync: true,
             window_scale: None,
             piano_scale: 1.0,
             layer_panel_width: LAYER_PANEL_DEFAULT_WIDTH,
@@ -631,6 +637,7 @@ mod tests {
         p.master_volume = 0.42;
         p.theme = 2;
         p.refresh_rate = 3;
+        p.vsync = false;
         p.window_scale = Some(1.25);
         p.window_icon = true;
         p.show_welcome = false;
@@ -652,6 +659,7 @@ mod tests {
         assert_eq!(back.recent_files[0].path, "C:/songs/demo.nbs");
         assert_eq!(back.recent_files[0].time, 1760000001);
         assert_eq!(back.refresh_rate, 3);
+        assert!(!back.vsync, "垂直同步开关要落盘（端口自加 #119）");
         assert_eq!(back.window_scale, Some(1.25));
         assert!(back.window_icon, "旧图标开关要落盘（原版 save_settings.gml:73）");
         assert!(back.remove_effect, "删除效果出厂打开（control_create.gml:225）");
@@ -671,6 +679,10 @@ mod tests {
         let old = r#"{"version":1,"theme":3}"#;
         let back: Preferences = serde_json::from_str(old).unwrap();
         assert_eq!(back.refresh_rate, 0, "出厂就是 30 帧");
+        assert!(
+            back.vsync,
+            "旧配置缺键时垂直同步退回出厂打开（eframe 默认同步）"
+        );
         assert_eq!(back.window_scale, None, "出厂跟随系统 DPI");
         assert_eq!(
             back.note_text_min_percent, 50,
