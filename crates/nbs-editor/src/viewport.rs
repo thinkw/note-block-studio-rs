@@ -169,6 +169,9 @@ impl Viewport {
             let target = (m - (cols / 2.0).ceil()).max(0.0);
             self.start_tick = target.floor() as u32;
             // 原版 `note_offset` 只在按帧（=2）时才有亚刻位移；按刻（=0）整刻对齐。
+            // 刻意偏离：原版 `control_draw.gml:307` 外面还套了一层 `floor(...)`，位移只到整
+            // 逻辑像素（画布再整体缩放到屏幕）；这里保留小数，播放头才能按帧连续走。代价是
+            // 网格线落点变成亚像素，由 `grid.rs` 画竖线时统一吸附到物理像素格子上。
             self.note_offset = if mode == 2 {
                 (target.fract() * self.cell() as f64) as f32
             } else {

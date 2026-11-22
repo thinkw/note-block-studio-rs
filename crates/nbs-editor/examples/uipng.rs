@@ -29,6 +29,9 @@
 //! 「鼠标停在琴键边缘不放，键盘是否还在继续平移」。
 //! `NBS_UIPNG_DRAG=x0,y0,x1,y1` / `NBS_UIPNG_DBLCLICK=x,y` 补一段鼠标事件（拖动 /
 //! 双击），用来验证图层栏右边界把手，跑完打印结果宽度。
+//! `NBS_UIPNG_PPI=<倍>` 模拟系统的显示缩放（本机 Windows 是 150%），探针默认按 1.0 渲染，
+//! 那样看不到亚像素落点带来的线宽跳变；`NBS_UIPNG_OFFSET=<px>` 把网格的亚刻位移
+//! （`viewport.note_offset`，按帧跟随时每帧都在变）钉成给定值，用来逐帧对比竖线落点。
 //! ```
 //!
 //! 走的是和 GUI 完全相同的一条路：`Context::run` → `tessellate` → 三角形。
@@ -382,6 +385,16 @@ fn main() -> Result<(), String> {
     }
 
     let ctx = egui::Context::default();
+    // `NBS_UIPNG_PPI=<倍>`：模拟系统的显示缩放。本机 Windows 是 150%（`AppliedDPI=120`），
+    // 探针默认按 1.0 渲染，那样网格线的亚像素落点问题只会表现成「宽 1px」，看不出现实里
+    // 1 逻辑像素 = 1.5 物理像素带来的逐帧粗细跳变。
+    let ppi: f32 = std::env::var("NBS_UIPNG_PPI")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1.0);
+    // 只走下面 `ViewportInfo.native_pixels_per_point` 这一条路：egui 的缩放是
+    // `zoom_factor × native`，`set_pixels_per_point` 改的是 zoom_factor，两者叠加会算成
+    // 1.5×1.5=2.25（真实程序只报 native，zoom_factor 是 1.0）。
     state.theme.apply(&ctx);
     if !nbs_editor::fonts::install(&ctx) {
         eprintln!("提示: 本机找不到中文字体，截图里的中文会是空框");
@@ -482,12 +495,23 @@ fn main() -> Result<(), String> {
         }
         let steady = 0.05 * (frame + 1) as f64;
         let secs = if pan_probe { vtime } else { steady };
-        let input = egui::RawInput {
+        let mut input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(w, h))),
             time: Some(secs),
             events,
             ..Default::default()
         };
+        // egui 0.31 起「系统缩放」挪到了各视口自己的输入里（`ViewportInfo`），
+        // `apply_ui_scale` 读的正是 `native_pixels_per_point`，根视口要填上。
+        let vp_input = input.viewports.entry(egui::ViewportId::ROOT).or_default();
+        vp_input.native_pixels_per_point = Some(ppi);
+        // `NBS_UIPNG_OFFSET=<px>`：把网格的亚刻位移钉成给定值。按帧跟随时它就是每帧都在
+        // 变的那个小数（`viewport.rs` 由 marker 算出），静态钉住等效于取播放中的一帧。
+        if let Ok(o) = std::env::var("NBS_UIPNG_OFFSET") {
+            if let Ok(v) = o.parse::<f32>() {
+                state.viewport.note_offset = v;
+            }
+        }
         // 时间戳按本帧的虚拟时间倒推，绘制侧 `played_key(本帧 time - 时间戳)` 才落在窗口里。
         if let Some((k, e)) = key_played {
             if let Some(slot) = state.key_played.get_mut(k) {
@@ -514,6 +538,16 @@ fn main() -> Result<(), String> {
             vtime += delay.as_secs_f64().clamp(0.016, 1.0);
         }
         ppp = out.pixels_per_point;
+        if frame + 1 == frames {
+            // 打印实际生效的缩放，免得把「egui 按 150% 栅格化」和「画布按 150% 换算」两件事搞混。
+            eprintln!(
+                "缩放: pixels_per_point={:.3} native={:?} viewport.scale={:.4} → 一格 {:.2} 物理像素",
+                ppp,
+                ctx.native_pixels_per_point(),
+                state.viewport.scale,
+                32.0 * state.viewport.scale * ppp
+            );
+        }
         for (id, delta) in &out.textures_delta.set {
             apply_delta(&mut texs, *id, delta);
         }
