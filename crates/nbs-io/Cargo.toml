@@ -13,6 +13,11 @@ midly = { workspace = true }
 flate2 = { workspace = true }
 crc32fast = { workspace = true }
 image = { workspace = true }
+# 路线 A「Fractal 机体」：直接调 nbs-fractal 的布局，产物是 .litematic（它自带写出器）。
+# rsnbs 是 nbs-fractal 认的输入类型——我们把自己的 .nbs 字节交给它解析，顺带等于用第三方
+# 解析器验自家 .nbs 写出器。
+nbs-fractal = { workspace = true }
+rsnbs = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 # 出厂语言自动检测用 GetUserDefaultLocaleName（prefs.rs 的 detect_language）。

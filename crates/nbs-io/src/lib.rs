@@ -4,12 +4,14 @@
 //! - [`pattern`]       `.nbp` 选区片段（含 zlib+base64 剪贴板兼容）
 //! - [`schematic`]     `.schematic` / 结构方块 `.nbt`（大端 NBT + gzip）
 //! - [`maestro`]       MAESTRO 音乐机节目单（`.schem`，需已建好的机体才出声）
+//! - [`fractal`]       nbs-fractal 机体投影（`.litematic`，自带红石的整机）
 //! - [`datapack`]      Minecraft 数据包（mcfunction + 二分 tick 查找树）
 //! - [`image_export`]  PNG 谱面导出
 //! - [`prefs`]         JSON 偏好、最近文件、原子保存、自动备份
 
 pub mod audio_export;
 pub mod datapack;
+pub mod fractal;
 pub mod image_export;
 pub mod maestro;
 pub mod mc_export;
@@ -34,6 +36,10 @@ pub use nbs_core::{lang, set_language, tr};
 #[cfg(test)]
 pub(crate) static TEST_LANG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+pub use fractal::{
+    export as export_fractal, preview as preview_fractal, FractalLayout, FractalOptions,
+    FractalReport,
+};
 pub use image_export::{export_png, render_image, ImageOptions};
 pub use maestro::{
     export as export_maestro, preview as preview_maestro, MaestroOptions, MaestroReport, TimingMode,
