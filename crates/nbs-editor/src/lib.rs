@@ -20,6 +20,8 @@ pub mod background;
 pub mod commands;
 pub mod control;
 pub mod fonts;
+/// 播放特效底座与内置特效（`Surface::Overlay` 叠加 / `Surface::Stage` 独占中央面板）。
+pub mod fx;
 pub mod grid;
 pub mod icons;
 pub mod interaction;
@@ -4540,5 +4542,138 @@ mod gui_piano_tests {
             !images(&out).iter().any(|r| (r.width() - 320.0).abs() < 0.6),
             "开关关闭时不应出现五线谱面板"
         );
+    }
+}
+
+/// 播放特效的接线：`app::show` 里那三扇「谁占中央面板 / 琴键面板开不开 / 全都不开」
+/// 的门，以及启用状态与调参的落盘回读。要跑整帧，所以放在这里而不是 `fx/`。
+#[cfg(test)]
+mod fx_wiring_tests {
+    use super::*;
+
+    /// 跑一帧并把画到的文字全捞出来：菜单项、特效清单这些只能这样查。
+    fn frame(state: &mut EditorState, ctx: &egui::Context) -> Vec<String> {
+        crate::fonts::warm_up(ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1440.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let out = ctx.run(input, |ctx| {
+            let _lock = frame_lock();
+            crate::show(ctx, state)
+        });
+        assert!(!out.shapes.is_empty(), "窗口应当真的画出内容");
+        out.shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `visible_notes` 只有 `draw_grid` 会写，正好当「这一帧网格跑没跑」的探针。
+    #[test]
+    fn a_stage_effect_takes_the_center_panel_and_the_piano_panel() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+
+        frame(&mut state, &ctx);
+        assert!(
+            state.interaction.visible_notes > 0,
+            "一条特效都没开时网格照跑"
+        );
+        assert!(state.piano_rect.is_some(), "show_piano 出厂为真，琴键面板要上报矩形");
+
+        state.interaction.visible_notes = 0;
+        state.fx.stack.set_active("synthesia", true);
+        frame(&mut state, &ctx);
+        assert_eq!(
+            state.interaction.visible_notes, 0,
+            "舞台接管中央面板后 draw_grid 不该再跑"
+        );
+        assert!(state.piano_rect.is_none(), "键盘由舞台自己画，琴键面板要让位");
+        assert!(
+            state.fx.stack.frame().len() > 0,
+            "舞台那一帧要真的排出图元"
+        );
+    }
+
+    /// 叠加类特效不动网格，但 `wants_piano` 会把用户关掉的琴键面板顶回来。
+    #[test]
+    fn an_overlay_effect_keeps_the_grid_and_demands_the_piano_panel() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.flags.show_piano = false;
+
+        frame(&mut state, &ctx);
+        assert!(state.piano_rect.is_none(), "琴键面板关掉后矩形要清空");
+        assert!(state.interaction.visible_notes > 0, "网格照跑");
+
+        state.fx.stack.set_active("block_row", true);
+        frame(&mut state, &ctx);
+        assert!(state.fx.wants_piano(), "乐器方块排要求底部有琴键");
+        assert!(
+            state.piano_rect.is_some(),
+            "开着 wants_piano 的特效时琴键面板要被顶回来"
+        );
+        assert!(
+            state.interaction.visible_notes > 0,
+            "叠加类特效不接管中央面板"
+        );
+    }
+
+    #[test]
+    fn fx_prefs_survive_a_restart() {
+        let _prefs = isolate_prefs();
+        let mut state = EditorState::for_test();
+        state.fx.stack.set_active("synthesia", true);
+        state.fx.stack.set_opacity(0.4);
+        state.sync_prefs();
+        assert_eq!(state.prefs.fx_active, vec!["synthesia".to_owned()]);
+        assert!((state.prefs.fx_opacity - 0.4).abs() < 1e-6);
+        assert!(
+            state.prefs.fx.contains_key("synthesia"),
+            "参数快照要和启用状态一起存"
+        );
+        state.save_prefs();
+
+        let back = EditorState::new();
+        assert!(back.fx.stack.is_active("synthesia"), "重启后勾选状态要回来");
+        assert!(
+            (back.fx.stack.opacity() - 0.4).abs() < 1e-3,
+            "透明度落在 prefs.fx_opacity 那一档"
+        );
+    }
+
+    /// 「设置 → 播放特效…」那扇窗：清单是全量枚举注册表来的，两条内置特效各带
+    /// 自己的身份（舞台 / 叠加）。底座不该认识任何一条具体特效。
+    #[test]
+    fn the_effects_window_lists_every_registered_effect() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        assert_eq!(state.fx.stack.ids().len(), 2, "内置两条特效");
+
+        state.window = Some(WindowKind::PlaybackEffects);
+        // 两帧：egui 的 Window 第一帧只定下尺寸，文字在第二帧的 shapes 里才捞得到。
+        frame(&mut state, &ctx);
+        let texts = frame(&mut state, &ctx);
+        for (name, kind) in [("钢琴瀑布", "舞台"), ("乐器方块排", "叠加")] {
+            let row = texts
+                .iter()
+                .find(|t| t.contains(name) && t.contains(kind))
+                .unwrap_or_else(|| panic!("清单里少了「{name}（{kind}）」这一行：{texts:?}"));
+            assert!(row.starts_with(name), "行首是特效名，勾在它前面：{row}");
+        }
     }
 }

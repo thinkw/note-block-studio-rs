@@ -1,8 +1,9 @@
 //! 一帧的整体编排：输入 → 命令 → 状态 → 面板绘制 → 弹窗。
 //! 与 eframe 解耦，入口 crate 只负责创建窗口和调用 `show()`。
 
-use egui::{Context, Frame};
+use egui::{Context, Frame, Rect, Sense};
 
+use crate::fx::{self, FxInput};
 use crate::grid::show_grid;
 use crate::layers_panel::{panel_width, show_layers_panel};
 use crate::piano::{paint_notechart, show_piano, ChartRequest, PANEL_HEIGHT};
@@ -25,6 +26,36 @@ fn flush_all(state: &mut EditorState, ctx: &Context) {
             break;
         }
         state.flush(ctx);
+    }
+}
+
+/// 一帧特效的输入。倍率取 `piano_scale` 而不是 `window_scale`：琴键几何那套常量
+/// （39px 白键、128px 命中区）本来就是屏幕像素，#80 之后也不随界面缩放，
+/// 特效和琴键面板用同一个倍率才对得上道。
+/// 键盘摆放只在琴键面板这一帧真画过时给出，否则 `None`，特效自己 `fit`。
+fn fx_input(state: &EditorState, ctx: &Context, area: Rect) -> FxInput {
+    let scale = state.prefs.piano_scale.max(0.1);
+    let clock = state.audio.clock();
+    let keyboard = if state.piano_keys_shown == 0 {
+        None
+    } else {
+        fx::panel_keyboard(
+            state.piano_rect,
+            scale,
+            state.piano_start as usize,
+            state.piano_keys_shown as usize,
+        )
+    };
+    FxInput {
+        now: ctx.input(|i| i.time),
+        dt: ctx.input(|i| i.stable_dt).clamp(0.0, 0.1) as f32,
+        position: clock.position(),
+        playing: clock.is_playing(),
+        speed: clock.speed(),
+        scale,
+        accent: state.theme.accent,
+        area,
+        keyboard,
     }
 }
 
@@ -71,6 +102,14 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
     // `state.control` 是 None 时这里等于一次空判断，不开链路就没有任何开销。
     crate::control::drain(state, ctx);
 
+    // 特效用的那份时间轴在绘制之前烘好：命令、快捷键、外部控制都已经落完，
+    // `song.rev` 这一帧不会再变。
+    state.refresh_fx();
+    // 播放器档位是原版那套只读界面，特效一律不上：那里的设置菜单没有
+    // 「播放特效…」，一旦接了舞台就没有关掉的入口。
+    let fx_on = !state.player;
+    let stage = fx_on && state.fx.stage_active();
+
     // 原版把壁纸画在 `draw_clear` 之后、所有面板之前（control_draw.gml:48-67），
     // 端口对应的位置是背景层最前面：菜单条 / 工具栏 / 状态栏 / 琴键 / 图层栏随后
     // 各自盖上来，只有编辑区四周的空白会露出图片。
@@ -94,7 +133,10 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
     // 悬停琴键的五线谱：琴键面板里只登记请求，落笔延到中央面板之后（#112）。
     let mut chart: Option<ChartRequest> = None;
     // 原版 `control_draw.gml:2549`：钢琴调用条件是 `show_piano && !isplayer`。
-    if state.flags.show_piano && !state.player {
+    // 端口自加：舞台特效自己画一条键盘，这时琴键面板要让位，不然画面里两条键盘；
+    // 反过来，按琴键栏对齐的叠加特效（方块排）开着时把关掉的面板顶回来。
+    let piano = fx_on && !stage && (state.flags.show_piano || state.fx.wants_piano());
+    if piano {
         // 端口自加（用户要求）：琴键面板独立缩放，高度跟 `piano_scale`，
         // 不随 `window_scale`（与 #80「钢琴栏不随界面缩放」一致）。
         // #109：高度含黑键高出的 7px（见 `piano::PANEL_HEIGHT`），并且关掉 egui 面板
@@ -130,13 +172,29 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
 
     egui::CentralPanel::default().frame(tight()).show(ctx, |ui| {
         let area = ui.available_rect_before_wrap();
-        show_grid(state, ui, area);
+        if stage {
+            // 舞台独占这块：网格这一帧不画，就地编辑和右键菜单跟着停。
+            // 空间还是要照样认领，否则 egui 会把这块地方让给别的面板。
+            ui.allocate_rect(area, Sense::hover());
+            let p = ui.painter().clone();
+            let input = fx_input(state, ctx, area);
+            state.fx.paint_stage(ctx, &input, &p);
+        } else {
+            show_grid(state, ui, area);
+        }
     });
 
     // #112：五线谱画在网格之后才能盖住编辑区（同层按出队顺序绘制，用户报告「音符被
     // 主界面挡住出不来」）。弹窗是 Area，在更高的 `Order::Medium`，仍然压在五线谱上。
     if let Some(req) = chart {
         paint_notechart(ctx, state, req);
+    }
+
+    // 叠加类特效同理：压住面板、仍在弹窗之下（它自成一个 background 层 id，
+    // 排在五线谱那条之后）。一条都没开时 `paint_overlay` 里就是一次空判断。
+    if fx_on {
+        let overlay = fx_input(state, ctx, ctx.screen_rect());
+        state.fx.paint_overlay(ctx, &overlay);
     }
 
     // 网格交互 / 面板按钮产生的命令在这里落地
@@ -146,4 +204,40 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
     flush_all(state, ctx);
     // 对应原版每步结尾的 `prevwindow = window`：窗口自己的 Ctrl+P 关窗要等下一帧才生效。
     state.window_prev = state.window.clone();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Pos2, Vec2};
+
+    /// `fx_input` 的两条口径：倍率取 `piano_scale`（琴键常量是屏幕像素，#80 起不随
+    /// 界面缩放），键盘摆放只在琴键面板真画过那一帧才给出 —— 特效拿不到过期的矩形。
+    #[test]
+    fn fx_input_uses_the_piano_scale_and_only_reports_a_drawn_keyboard() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let mut state = EditorState::for_test();
+        state.prefs.piano_scale = 1.5;
+        let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+
+        state.piano_keys_shown = 0;
+        state.piano_rect = Some(area);
+        let got = fx_input(&state, &ctx, area);
+        assert_eq!(got.scale, 1.5);
+        assert_eq!(got.area, area);
+        assert_eq!(got.keyboard, None, "面板没画过时不给摆放");
+
+        state.piano_keys_shown = 12;
+        state.piano_start = 24;
+        let kb = fx_input(&state, &ctx, area)
+            .keyboard
+            .expect("面板画过那一帧就该有摆放");
+        assert_eq!((kb.scale, kb.first, kb.slots), (1.5, 24, 12));
+        assert_eq!(
+            kb.origin.y,
+            area.min.y + fx::keyboard::BLACK_LIFT * 1.5,
+            "原点顶到黑键上沿，和琴键面板同一套像素"
+        );
+    }
 }

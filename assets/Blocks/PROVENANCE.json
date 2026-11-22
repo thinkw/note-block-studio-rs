@@ -1,0 +1,11 @@
+{
+  "source": "Mojang Studios 官方客户端 jar，路径 assets/minecraft/textures/block/",
+  "minecraft_version": "1.21.4",
+  "jar_sha1": "a7e5a6024bfd3cd614625aa05629adf760020304",
+  "jar_size": 28335587,
+  "textures": 1039,
+  "bytes": 306370,
+  "fetched_at": "2026-11-22T11:56:42",
+  "fetched_by": "tools/fetch_block_textures.py",
+  "license_note": "Mojang/Microsoft 版权素材，默认不入库；随包分发需另行拍板。"
+}

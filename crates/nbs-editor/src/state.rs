@@ -182,6 +182,9 @@ pub enum WindowKind {
     /// 塞第六个页签会把页签条顶出窗口，而且这一页要显示端口、发现文件全路径、
     /// 目录列表这些长字符串——所以单开一窗，不冒充原版的排版。
     ExternalControl,
+    /// 端口自加（用户要求「要有个底座能扩展各种播放效果并可以切换」）：特效开关、
+    /// 各自的调参面板、叠加透明度。原版没有这一窗，排版用普通 egui 控件。
+    PlaybackEffects,
     Instruments,
     About,
     /// 原版 `w_tempotapper`（`draw_window_tempo_tapper.gml`）：按 T 打点测速。
@@ -258,6 +261,7 @@ impl WindowKind {
             Self::Preferences => tr("Preferences", "首选项"),
             // 我们自己的一页，标题就是菜单上那句。
             Self::ExternalControl => tr("External control (MCP)", "外部控制（MCP）"),
+            Self::PlaybackEffects => tr("Playback effects", "播放特效"),
             Self::Instruments => tr("Instruments", "音色设置"),
             // 原版 `draw_window_about.gml:10-11`：框内标题就一个「About」/「关于」。
             Self::About => tr("About", "关于"),
@@ -1303,6 +1307,9 @@ pub struct EditorState {
     /// 原版 `wpaper` + `wpaperexist`：导入的背景图（糊好的贴图）。
     /// 原版既不写进 .nbs 也不写进 settings.ini，重启即失，端口一致。
     pub wallpaper: Option<crate::background::Wallpaper>,
+    /// 播放特效那一坨：烘出来的时间轴、乐器方块表、贴图、启用中的特效。
+    /// 缓存键是 `song.rev`（和 [`Self::compat_rev`]、[`Self::audio_rev`] 同一套路）。
+    pub fx: crate::fx::FxState,
 }
 
 impl Default for EditorState {
@@ -1579,7 +1586,13 @@ impl EditorState {
             rainbow_hue: 0.0,
             background_accent: false,
             wallpaper: None,
+            fx: crate::fx::FxState::default(),
         };
+        // 特效：存档里留过痕迹（启用列表或参数快照）才把快照灌回各特效，
+        // 出厂那两份空表不动，设置文件也就不多写这两段。
+        if !state.prefs.fx_active.is_empty() || !state.prefs.fx.is_empty() {
+            state.fx.stack.sync_prefs(&mut state.prefs);
+        }
         state.enter_startup();
         // 迁移那趟在设备表里认不出的老名字：在状态栏说一句，别让人以为还在自己
         // 点名的那台出声。引擎这时候已经跟着系统默认建好流了。
@@ -2330,6 +2343,15 @@ impl EditorState {
         self.audio_rev = self.doc.song.rev;
     }
 
+    /// 帧首刷新播放特效：曲子一改（`song.rev` 变了）、或「是否播放锁定层」一改，
+    /// 时间轴重烘；导出选项里的乐器方块表一改，方块名表跟着重建；贴图目录只认一次。
+    /// 没有启用中的特效时这三条各是一次比较，不铺表。
+    pub fn refresh_fx(&mut self) {
+        let include_locked = self.prefs.include_locked_in_export;
+        self.fx
+            .refresh(&self.doc.song, include_locked, &self.schematic_options);
+    }
+
     /// 把当前会话状态同步回偏好对象。
     pub fn sync_prefs(&mut self) {
         self.prefs.theme = match self.theme.kind {
@@ -2380,6 +2402,8 @@ impl EditorState {
                 time: r.time,
             })
             .collect();
+        // 特效：只写不读。用 `sync_prefs` 会把调参面板刚滑出来的值覆盖回旧快照。
+        self.fx.stack.store(&mut self.prefs);
     }
 
     pub fn save_prefs(&mut self) {

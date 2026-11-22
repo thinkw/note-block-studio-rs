@@ -181,6 +181,15 @@ pub struct Preferences {
     /// 危险动作（退出程序、替你答确认框、打开外链）是否可调。
     /// **独立**开关：勾「启用外部控制」绝不会把这条一起打开，取消勾选也不会清掉它。
     pub control_danger: bool,
+    /// 播放特效：每个特效一份参数，键 = 特效的稳定 id（不是显示名，改名不冲存档）。
+    /// 老存档没这条 → 空表，各特效由自己参数结构上的 `#[serde(default)]` 补出厂值。
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub fx: std::collections::HashMap<String, serde_json::Value>,
+    /// 启用中的特效 id。出厂全关：没人要特效时播放路径不该多出任何绘制。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fx_active: Vec<String>,
+    /// 叠加类特效的整体透明度（舞台类独占画面，不看这条）。
+    pub fx_opacity: f32,
 }
 
 /// 最近歌曲一条：路径 + 上次打开的时间（unix 秒，原版 `date_current_datetime()`）。
@@ -343,6 +352,11 @@ impl Default for Preferences {
             control_enabled: false,
             control_dirs: Vec::new(),
             control_danger: false,
+            // 播放特效出厂全关、参数用各特效自己的默认值（这里留空表，
+            // 设置文件里也就不多写这两段）。
+            fx: std::collections::HashMap::new(),
+            fx_active: Vec::new(),
+            fx_opacity: 0.85,
         }
     }
 }

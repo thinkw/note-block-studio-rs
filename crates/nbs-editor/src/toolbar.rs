@@ -502,6 +502,14 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                     state.emit(Command::ShowWindow(WindowKind::MidiDevices));
                     ui.close_menu();
                 }
+                // 播放特效同样是我们自己加的一扇，放在首选项之前。
+                if ui
+                    .button(tr("Playback effects...", "播放特效…"))
+                    .clicked()
+                {
+                    state.emit(Command::ShowWindow(WindowKind::PlaybackEffects));
+                    ui.close_menu();
+                }
                 // 原版这一格往后就是首选项了；外部控制是我们自己加的一页，
                 // 排在它前面，因为它是「这台机器要不要留通路」那一类决定。
                 if ui.button(control_menu_label(state)).clicked() {

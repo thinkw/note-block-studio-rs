@@ -54,6 +54,8 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         WindowKind::Preferences => 500.0,
         // 我们自己的窗口（原版没有）：要放得下发现文件全路径和目录列表。
         WindowKind::ExternalControl => 520.0,
+        // 同样是我们自己的：一屏放得下每个特效名字 + 它那几条滑杆。
+        WindowKind::PlaybackEffects => 460.0,
         // 原版 `draw_window(x1, y1, x1 + 500 + theme_offset, y1 + 400)`：
         // `theme_offset` 只有非 Fluent 才 +20（那三套字体更宽）。
         WindowKind::Changelist | WindowKind::Update => {
@@ -133,6 +135,7 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::Statistics => statistics(state, ui),
             WindowKind::Preferences => preferences(state, ui),
             WindowKind::ExternalControl => external_control_window(state, ui),
+            WindowKind::PlaybackEffects => playback_effects_window(state, ui),
             WindowKind::Instruments => instruments_window(state, ui),
             WindowKind::About => about(state, ui),
             // 原版 `draw_windows.gml:56-57`：`w_update` 和 `w_changelist` 都进
@@ -2391,6 +2394,64 @@ fn rate_items() -> [&'static str; 5] {
         ["30帧", "60帧", "120帧", "144帧", "240帧"]
     } else {
         ["30FPS", "60FPS", "120FPS", "144FPS", "240FPS"]
+    }
+}
+
+/// 端口自加（用户要求「有一个底座可以在上面扩展各种播放效果并可以切换」）：特效清单。
+/// 这一扇不认识任何具体特效——列谁、开谁、调谁全走 `FxStack`，加一种特效不用改这里。
+/// 参数改动不单独落盘：30 秒一次的 `maybe_save_prefs` 和退出时的 `save_prefs` 都会带上。
+fn playback_effects_window(state: &mut EditorState, ui: &mut Ui) {
+    ui.label(
+        RichText::new(tr(
+            "Overlay effects stack on top of the editor; a stage effect takes over the middle panel \
+             and the grid is not drawn until it is switched off. Only one stage can be up - opening \
+             another swaps it out.",
+            "叠加类特效压在界面上；舞台类接管中间那块面板，网格跟着停画，关掉才回来。 \
+             舞台同时只能有一个，开新的会自动换下旧的。",
+        ))
+        .small()
+        .weak(),
+    );
+    ui.separator();
+    let ids = state.fx.stack.ids();
+    for id in ids {
+        let Some(info) = state.fx.stack.info(id) else {
+            continue;
+        };
+        let kind = match info.surface {
+            crate::fx::Surface::Stage => tr("stage", "舞台"),
+            crate::fx::Surface::Overlay => tr("overlay", "叠加"),
+        };
+        let mut on = state.fx.stack.is_active(id);
+        if ui
+            .checkbox(&mut on, format!("{}（{kind}）", info.name))
+            .changed()
+        {
+            if let Some(msg) = state.fx.stack.set_active(id, on) {
+                state.set_message(msg);
+            }
+        }
+        if state.fx.stack.is_active(id) {
+            ui.indent(id, |ui| {
+                state.fx.stack.settings_ui(ui, id);
+            });
+        }
+    }
+    ui.separator();
+    let mut opacity = state.fx.stack.opacity();
+    if ui
+        .add(
+            egui::Slider::new(&mut opacity, 0.05..=1.0).text(tr("Overlay opacity", "叠加透明度")),
+        )
+        .changed()
+    {
+        state.fx.stack.set_opacity(opacity);
+    }
+    // 降级说明（方块贴图没扒到之类）：只在特效真开着时提。
+    let notes = state.fx.stack.notes();
+    for note in notes {
+        let color = ui.visuals().warn_fg_color;
+        ui.colored_label(color, note);
     }
 }
 
