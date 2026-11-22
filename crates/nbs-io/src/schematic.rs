@@ -107,7 +107,10 @@ const INS_NAMES: [&str; 20] = [
 /// 这 4 个方块是 1.17+ 的，1.12 数字 id 表里没有，所以 `INSTRUMENT_BLOCKS`
 /// 那套数字表（`.schematic` 路径用）填不进去；.nbt 路径直接按名字写。
 /// 取值逐字来自装机版自己导出的参照文件 palette[19..23]。
-const COPPER_INS_BLOCKS: [&str; 4] = [
+///
+/// 公开给编辑器：`.nbt` 导出对这四格不看 `ins_block`（用户配了也不生效），
+/// 播放特效要画得和机体一致就只能跟着这张表走。
+pub const COPPER_INS_BLOCKS: [&str; 4] = [
     "waxed_copper_block",
     "waxed_exposed_copper",
     "waxed_weathered_copper",

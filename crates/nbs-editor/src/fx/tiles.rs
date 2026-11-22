@@ -47,6 +47,13 @@ const SUFFIXES: &[&str] = &[
     "", "_side", "_top", "_front", "_end", "_bottom", "_0", "_1", "_plain",
 ];
 
+/// 16..19 这四格（小号一族）在导出表里没有数字 id，方块名由 [`nbs_io::schematic::COPPER_INS_BLOCKS`]
+/// 直接定死 —— 导出那一路连 `ins_block` 都不查，特效跟着同一张表才对得上机体里真摆的方块。
+fn copper(i: usize) -> Option<&'static str> {
+    let k = i.checked_sub(nbs_io::schematic::INSTRUMENT_BLOCKS.len())?;
+    nbs_io::schematic::COPPER_INS_BLOCKS.get(k).copied()
+}
+
 /// FNV-1a：字符串 → 稳定的 32 位散列。兜底色和乐器色都靠它，
 /// 同一名字在任何机器上算出同一个数，画面才不会每次重启换个样。
 fn fnv1a(s: &str) -> u32 {
@@ -68,6 +75,11 @@ pub fn resolve_file(available: &impl Fn(&str) -> bool, name: &str) -> Option<Str
         tried.extend(targets.iter().copied());
     }
     tried.push(base);
+    // 打蜡只是「不再氧化」，方块外观没换：MC 的 blockstate 里 waxed_* 直接复用没打蜡
+    // 那张贴图，jar 里根本没有 waxed_copper_block.png，所以剥掉前缀再找一遍。
+    if let Some(bare) = base.strip_prefix("waxed_") {
+        tried.push(bare);
+    }
     for candidate in tried {
         for suffix in SUFFIXES {
             let stem = format!("{candidate}{suffix}");
@@ -127,21 +139,28 @@ impl InstrumentBlocks {
         let count = opts.ins_block.len().max(16);
         let fallback = nbs_io::schematic::default_ins_block();
         let names = (0..count)
-            .map(|i| {
-                let id = opts
-                    .ins_block
-                    .get(i)
-                    .or_else(|| fallback.get(i))
-                    .copied()
-                    .unwrap_or(1);
-                let data = opts.ins_data.get(i).copied().unwrap_or(0);
-                namespaced_id(id, data)
+            .map(|i| match copper(i) {
+                // 铜块一族（小号 16..19）：导出那一路直接写名字，压根不查 ins_block，
+                // 特效跟着它才对得上机体里真摆的方块。
+                Some(c) => c.to_string(),
+                None => {
+                    let id = opts
+                        .ins_block
+                        .get(i)
+                        .or_else(|| fallback.get(i))
+                        .copied()
+                        .unwrap_or(1);
+                    let data = opts.ins_data.get(i).copied().unwrap_or(0);
+                    namespaced_id(id, data)
+                }
             })
             .collect();
         let untouched = (0..count)
             .map(|i| {
-                // 前 16 格默认就是各自的真方块（harp → 泥土），不算「没配过」。
-                i >= nbs_io::schematic::INSTRUMENT_BLOCKS.len()
+                // 前 16 格默认就是各自的真方块（harp → 泥土），铜块一族也有自己的方块，
+                // 都不算「没配过」。
+                copper(i).is_none()
+                    && i >= nbs_io::schematic::INSTRUMENT_BLOCKS.len()
                     && opts.ins_block.get(i) == fallback.get(i)
                     && opts.ins_data.get(i).copied().unwrap_or(0) == 0
             })
@@ -374,11 +393,11 @@ mod tests {
     #[test]
     fn only_configured_instruments_have_a_block() {
         let blocks = InstrumentBlocks::default();
-        for ins in 0..16u8 {
+        for ins in 0..20u8 {
             assert!(blocks.has_block(ins), "{ins} 号内置乐器默认就有自己的方块");
         }
-        // 16..19 是铜块一族（这套 id 表里没有），20 往后是自定义乐器：都还是默认石头。
-        for ins in [16u8, 19, 20, 100, 255] {
+        // 20 往后是自定义乐器：出厂清一色石头，谁都没配过。
+        for ins in [20u8, 100, 255] {
             assert!(!blocks.has_block(ins), "{ins} 号没配方块");
             assert_eq!(blocks.name(ins), "stone");
         }
@@ -388,6 +407,42 @@ mod tests {
         let tuned = InstrumentBlocks::from_options(&opts);
         assert!(tuned.has_block(20), "配了 dirt 就不算默认值了");
         assert!(!tuned.has_block(21), "邻格没动，还是默认的石头");
+    }
+
+    /// 小号一族（16..19）的方块不是 ins_block 里那块默认石头，而是导出那一路写死的
+    /// waxed 铜块 —— 特效跟着它，画面上才认得出「响的是铜块一族」而不是清一色石头。
+    /// 用户把 ins_block[16] 改成别的也不生效，因为 .nbt 导出压根不查那格。
+    #[test]
+    fn the_copper_family_uses_the_export_tables_blocks() {
+        let blocks = InstrumentBlocks::default();
+        assert_eq!(blocks.name(16), "waxed_copper_block");
+        assert_eq!(blocks.name(17), "waxed_exposed_copper");
+        assert_eq!(blocks.name(18), "waxed_weathered_copper");
+        assert_eq!(blocks.name(19), "waxed_oxidized_copper");
+        let mut opts = SchematicOptions::default();
+        opts.ins_block[16] = nbs_io::schematic::INSTRUMENT_BLOCKS[0];
+        assert_eq!(
+            InstrumentBlocks::from_options(&opts).name(16),
+            "waxed_copper_block",
+            "铜块一族不吃 ins_block，改了也得跟导出一致"
+        );
+    }
+
+    /// waxed 铜块在 jar 里没有自己的贴图，blockstate 复用未打蜡那张。
+    #[test]
+    fn waxed_blocks_resolve_to_the_unwaxed_texture() {
+        let have = |stem: &str| stem == "copper_block" || stem == "oxidized_copper";
+        assert_eq!(
+            resolve_file(&have, "waxed_copper_block").as_deref(),
+            Some("copper_block")
+        );
+        assert_eq!(
+            resolve_file(&have, "waxed_oxidized_copper").as_deref(),
+            Some("oxidized_copper")
+        );
+        // 没打蜡那张也没有 → 不给假方块。
+        let none = |_stem: &str| false;
+        assert_eq!(resolve_file(&none, "waxed_copper_block"), None);
     }
 
     #[test]
@@ -431,7 +486,8 @@ mod tests {
         assert!(!blocks.name(255).is_empty());
     }
 
-    /// 素材扒好了才跑：确认 16 个经典乐器的方块在 1.21.4 贴图包里真的存在。
+    /// 素材扒好了才跑：确认 20 个内置乐器的方块在 1.21.4 贴图包里真的存在。
+    /// 后四个是小号一族（waxed 铜块），它们靠「剥前缀」命中未打蜡那张贴图。
     #[test]
     fn fetched_assets_resolve_every_classic_block() {
         let tiles = BlockTiles::open();
@@ -440,7 +496,7 @@ mod tests {
             return;
         }
         let blocks = InstrumentBlocks::default();
-        for ins in 0..16u8 {
+        for ins in 0..20u8 {
             let name = blocks.name(ins);
             let have = |stem: &str| tiles.files.contains_key(stem);
             assert!(
