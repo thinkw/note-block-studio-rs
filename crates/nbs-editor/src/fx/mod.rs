@@ -833,8 +833,8 @@ mod tests {
         assert!(fx.stage_active());
         fx.paint_stage(&ctx, &input, &p);
         assert!(
-            (1..12).contains(&fx.stack.frame().len()),
-            "空曲子的静态帧该只剩 C/F 参考线 + 击中线（800px 放 20 槽，八度线只有两三根），实际 {}",
+            (20..40).contains(&fx.stack.frame().len()),
+            "空曲子的静态帧该只剩轨道线 + 击中线（800px 放 20 槽 = 22 个），实际 {}",
             fx.stack.frame().len()
         );
         assert!(

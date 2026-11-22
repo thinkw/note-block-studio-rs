@@ -4699,7 +4699,7 @@ mod fx_wiring_tests {
             .piano_rect
             .expect("瀑布的键盘就是底部那条面板，舞台期间它照样要画");
         assert!(
-            state.fx.stack.frame().len() > 0,
+            !state.fx.stack.frame().is_empty(),
             "舞台那一帧要真的排出图元"
         );
         // 「音符刚好落到琴键上」的口径：击中线压在面板的白键面沿，不是区域下缘。

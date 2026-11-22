@@ -38,13 +38,6 @@ pub const LANE_FILL: f32 = 0.8;
 /// 方块在「家」周围摆的相位种子步进：相邻声道错开一点，一整排才不像一块板。
 const PHASE_PER_SLOT: f32 = 0.7;
 
-/// 摞底那一枚压在键正上方 ＝ 这一键正被按下：键面直接填上主界面那档色的不透明度。
-/// 比瀑布的按住填色（235）透一些，因为这里琴键栏本身还在画，填色是盖在它上面。
-const KEY_FILL_ALPHA: u8 = 170;
-
-/// 一帧最多给几枚键填色：和方块数各算一份预算，密集段不至于只留方块不留键面。
-const MAX_BASE_KEYS: usize = 64;
-
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Params {
@@ -259,14 +252,8 @@ impl PlaybackEffect for BlockRow {
         }
         let mut missing = false;
         let mut unconfigured = false;
-        let mut filled = 0usize;
         for note in live {
-            let at = cx.timeline.seconds_at(f64::from(note.tick)) as f64;
-            let age = (now_seconds - at) as f32;
-            // 这枚音还在响几秒：NBS 没有 note-off，烘表时按「同层同键的下一枚就是上一枚
-            // 的收尾」推出 `duration`（见 `FxTimeline::stamp_durations`）。
-            let hold =
-                (cx.timeline.seconds_at(f64::from(note.tick + note.duration)) as f64 - at) as f32;
+            let age = (now_seconds - cx.timeline.seconds_at(f64::from(note.tick)) as f64) as f32;
             if age < 0.0 || age > self.params.life_seconds {
                 continue;
             }
@@ -303,23 +290,6 @@ impl PlaybackEffect for BlockRow {
                 base_y + dy + oy,
             );
             let rect = Rect::from_center_size(center, Vec2::new(tile, tile));
-
-            // 摞底那一枚压在键的正上方 ＝ 这一键此刻正被按下：键面直接填上主界面那档色，
-            // 和瀑布的按住填色同一口径。填色排在方块之前，方块才盖得住它。
-            if stack == 0 && age <= hold && filled < MAX_BASE_KEYS {
-                filled += 1;
-                let hit = cx.palette.color(note.instrument).unwrap_or_else(|| {
-                    instrument_color(
-                        cx.timeline.instrument_name(note.instrument),
-                        note.instrument,
-                    )
-                });
-                out.rect(
-                    home.shrink(1.0 * scale),
-                    Color32::from_rgba_premultiplied(hit.r(), hit.g(), hit.b(), KEY_FILL_ALPHA),
-                    0.0,
-                );
-            }
 
             // 只有导出表里真配了方块的乐器才走贴图；没配过的（自定义乐器默认全是石头）
             // 用乐器色，否则一整排方块全同，看着就是「不随乐器变」。
@@ -390,6 +360,7 @@ mod tests {
         timeline: FxTimeline,
         blocks: InstrumentBlocks,
         tiles: BlockTiles,
+        /// 方块排画的是方块贴图，不读音符配色表；空表摆在这里只为凑齐 `FxContext`。
         palette: NotePalette,
         layout: Option<KeyboardLayout>,
     }
@@ -454,8 +425,7 @@ mod tests {
         }
     }
 
-    /// 色块那条路径里，一个方块 = 一个带圆角的填充矩形（描边那圈另算，键面填色是直角，
-    /// 由 [`key_fills`] 单独数）。
+    /// 色块那条路径里，一个方块 = 一个无描边的填充矩形（描边那圈另算）。
     fn blocks(frame: &Frame) -> Vec<Rect> {
         frame
             .prims
@@ -464,26 +434,8 @@ mod tests {
                 Primitive::Rect {
                     rect,
                     stroke: None,
-                    rounding,
                     ..
-                } if *rounding > 0.0 => Some(*rect),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// 键面填色那批：直角、贴着键往里收 1px。
-    fn key_fills(frame: &Frame) -> Vec<(Rect, Color32)> {
-        frame
-            .prims
-            .iter()
-            .filter_map(|p| match p {
-                Primitive::Rect {
-                    rect,
-                    fill,
-                    stroke: None,
-                    rounding,
-                } if *rounding == 0.0 => Some((*rect, *fill)),
+                } => Some(*rect),
                 _ => None,
             })
             .collect()
@@ -493,7 +445,7 @@ mod tests {
         blocks(frame).iter().map(|r| r.center()).collect()
     }
 
-    /// 色块那条路径里每个方块的颜色（描边那圈和键面填色都不算）。
+    /// 色块那条路径里每个方块的颜色（描边那圈不算）。
     fn fills(frame: &Frame) -> Vec<Color32> {
         frame
             .prims
@@ -502,9 +454,8 @@ mod tests {
                 Primitive::Rect {
                     fill,
                     stroke: None,
-                    rounding,
                     ..
-                } if *rounding > 0.0 => Some(*fill),
+                } => Some(*fill),
                 _ => None,
             })
             .collect()
@@ -581,8 +532,8 @@ mod tests {
             "{got:?} 该贴着键 {want}"
         );
         assert!(got.y < layout.origin.y, "方块压在键盘上缘之上");
-        // 一个方块就是一格填充 + 一圈描边，不该画成两格；这枚音还按着键，再加一格键面填色。
-        assert_eq!(frame.prims.len(), 3);
+        // 一个方块就是一格填充 + 一圈描边，不该画成两格。
+        assert_eq!(frame.prims.len(), 2);
     }
 
     #[test]
@@ -641,35 +592,6 @@ mod tests {
         twice.draw(&rig.cx(12.0, 3.25), &mut b);
         assert_eq!(blocks(&a), blocks(&b));
         assert_eq!(a.images.len(), b.images.len());
-    }
-
-    /// 摞底那一枚压在键的正上方 ＝ 这一键正被按下：键面直接填色，音尾一过就撤。
-    /// 填色是直角、方块是圆角，两个计数器才分得开，方块也才盖得住填色。
-    #[test]
-    fn the_pressed_key_is_filled_until_its_sustain_ends() {
-        // 60 列那枚把拍速表撑长：不然播放头 16 会被夹在曲尾，「音尾已过」看不出来。
-        let rig = Rig::new(&[(4, 0, 0, 48), (10, 0, 0, 48), (60, 1, 7, 62)]).with_keyboard();
-        let lane = rig.layout.unwrap().rect_of_key(48).unwrap();
-        let mut fx = BlockRow::default();
-
-        // 10 列/秒：tick 4 那枚按住到 tick 10，播放头走到 6 时还压着。
-        let mut holding = Frame::default();
-        fx.draw(&rig.cx(6.0, 1.0), &mut holding);
-        let fills = key_fills(&holding);
-        assert_eq!(fills.len(), 1, "按住的键面该有一整面填色：{fills:?}");
-        let (rect, color) = fills[0];
-        assert!(
-            (rect.width() - (lane.width() - 2.0)).abs() < 0.01 && rect.center() == lane.center(),
-            "填色贴着键面往里收 1px，实际 {rect:?} 对 {lane:?}"
-        );
-        assert_eq!(color.a(), KEY_FILL_ALPHA);
-        assert!(!blocks(&holding).is_empty(), "填色不该替掉方块本身");
-
-        // 播放头走过音尾：这一键不再被按下，方块还在按 life_seconds 留着。
-        let mut gone = Frame::default();
-        fx.draw(&rig.cx(16.0, 2.0), &mut gone);
-        assert!(key_fills(&gone).is_empty(), "音尾之后不该还剩填色：{:?}", key_fills(&gone));
-        assert!(!blocks(&gone).is_empty(), "方块按 life_seconds 留着，不该跟着一起消失");
     }
 
     #[test]
