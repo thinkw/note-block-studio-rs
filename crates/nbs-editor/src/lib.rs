@@ -1646,6 +1646,131 @@ mod gui_window_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 编码唱片数据箱那条导出（端口自加）走完整链路：菜单入口 → 一次性提示 → 窗口上屏 →
+    /// 换机体重算 → 空歌闸门 → 保存框扩展名 → 真落盘。断言的是磁盘字节与报告。
+    #[test]
+    fn disc_chest_menu_entry_notice_dialog_and_file_are_real() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.window = None; // for_test() 带着开机欢迎窗，先关掉再走入口
+        state.prefs.warning_disc_chest = false;
+
+        dispatch(&mut state, commands::Command::OpenDiscChestExport, &ctx);
+        assert_eq!(
+            state.modals.items.len(),
+            1,
+            "第一次用要先说明「这只是数据箱，得贴在已建好的机体里」"
+        );
+        assert_eq!(state.window, None, "提示没答完之前不开窗");
+        assert!(state.disc_chest_report.is_some(), "开窗前先算好箱子与清单");
+
+        dispatch(&mut state, commands::Command::AnswerModal(true), &ctx);
+        assert_eq!(state.window, Some(WindowKind::DiscChestExport));
+        assert!(
+            state.prefs.warning_disc_chest,
+            "提示看过就落盘，同 warning_maestro / warning_fractal 的规矩"
+        );
+
+        // 出厂档 = 上游 defaultConfig 的 20 音/秒：每件乐器偶/奇两条臂 ⇒ 20 轨 40 个子区域。
+        let twenty = state.disc_chest_report.clone().unwrap();
+        assert_eq!(
+            (twenty.machine(), twenty.lanes, twenty.regions, twenty.grid_rate),
+            (nbs_io::DiscChestMachine::TwentyHz, 2, 40, 20.0)
+        );
+
+        // 上屏检查（「代码里有 ≠ 看得见」）：两档机体、两种刻号处理、层高与三个按钮都要真画出来。
+        let _zh = crate::LangGuard::set(1);
+        state.prefs.language = 1;
+        let painted: Vec<String> = settle(&mut state, &ctx)
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        for want in [
+            "机体",
+            "20 t/s 机体（20 轨，偶/奇双臂）",
+            "10 t/s 机体（20 轨，每件乐器一条臂）",
+            "折算到机器网格",
+            "保留 NBS 刻号",
+            "层高",
+            "数据箱与改写",
+            "导出",
+            "关闭",
+        ] {
+            assert!(
+                painted.iter().any(|t| t == want),
+                "窗口里应画得出「{want}」: {painted:?}"
+            );
+        }
+
+        dispatch(&mut state, commands::Command::CloseWindow, &ctx);
+        dispatch(&mut state, commands::Command::OpenDiscChestExport, &ctx);
+        assert!(state.modals.is_empty(), "第二次不再提示");
+        assert_eq!(state.window, Some(WindowKind::DiscChestExport));
+
+        // 换 10 音/秒：一条臂一件乐器，子区域数减半，网格速度也跟着减半。
+        state.disc_chest_options.machine = nbs_io::DiscChestMachine::TenHz;
+        state.refresh_disc_chest_preview();
+        let ten = state.disc_chest_report.clone().unwrap();
+        assert_eq!(
+            (ten.machine(), ten.lanes, ten.regions, ten.grid_rate),
+            (nbs_io::DiscChestMachine::TenHz, 1, 20, 10.0),
+            "换机体后清单要跟着重算：{ten:?}"
+        );
+        state.disc_chest_options.machine = nbs_io::DiscChestMachine::TwentyHz;
+        state.refresh_disc_chest_preview();
+
+        // 空歌：这条路的编码端会直接拒绝（没有可编码的音符），闸门照样拦下且不弹保存框。
+        let demo = state.doc.song.clone();
+        state.doc.replace_song(nbs_core::model::Song::new());
+        state.refresh_disc_chest_preview();
+        assert!(state.disc_chest_error.is_some(), "空歌预览就该报错");
+        dispatch(&mut state, commands::Command::ExportDiscChestChecked, &ctx);
+        assert_eq!(state.modals.items.len(), 1, "空歌该被闸门拦下");
+        assert!(state.file_dialog.is_none(), "拦下之后不该有保存框");
+        dispatch(&mut state, commands::Command::AnswerModal(true), &ctx);
+        state.doc.replace_song(demo);
+        state.refresh_disc_chest_preview();
+
+        // 保存框：扩展名与默认名都要是 .litematic（同 Fractal 那条，容器就是 Litematica）。
+        state.doc.song.filename = Some(PathBuf::from("Rust Rewrite Demo.nbs"));
+        dispatch(
+            &mut state,
+            commands::Command::OpenDialog(state::DialogAction::ExportDiscChest),
+            &ctx,
+        );
+        let dialog = state.file_dialog.as_ref().expect("对话框已打开");
+        assert_eq!(dialog.ext, "litematic", "Litematica 吃的是 .litematic");
+        assert!(dialog.save);
+        assert_eq!(dialog.name, "Rust Rewrite Demo.litematic");
+
+        let dir = scratch("disc_chest");
+        let out = dir.join("disc-chests.litematic");
+        dispatch(&mut state, commands::Command::DialogConfirm(out.clone()), &ctx);
+        let bytes = std::fs::read(&out).expect("数据箱已落盘");
+        assert_eq!(&bytes[..2], &[0x1f, 0x8b], "gzip 魔数");
+        assert!(state.export_status.is_some(), "窗口里要能看到这批箱子的口径");
+        assert_eq!(
+            state.window,
+            Some(WindowKind::DiscChestExport),
+            "导出完窗口留着"
+        );
+        let rep = state.disc_chest_report.clone().unwrap();
+        assert!(rep.notes_kept > 0, "示例歌该有音符进数据箱");
+        assert!(rep.chests > 0 && rep.boxes > 0, "箱子与潜影盒要真放进去");
+        let status = state.export_status.clone().unwrap_or_default();
+        assert!(
+            status.contains("game tick") && status.contains("已经建好的机体"),
+            "状态区要写出时间基和「要先有机体」：{status}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 空名称必须像原版一样报错，并且不留半成品。
     #[test]
     fn datapack_export_refuses_an_empty_name() {

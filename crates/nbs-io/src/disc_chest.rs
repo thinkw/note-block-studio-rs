@@ -509,7 +509,8 @@ impl DiscChestReport {
         v
     }
 
-    fn machine(&self) -> Machine {
+    /// 报告对应哪台机体：道数是这台机器唯一的差别（20 音/秒才拆偶/奇两条臂）。
+    pub fn machine(&self) -> Machine {
         if self.lanes == 2 {
             Machine::TwentyHz
         } else {

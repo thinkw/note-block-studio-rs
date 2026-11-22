@@ -218,6 +218,9 @@ pub enum WindowKind {
     /// 端口自加（用户要求接第二条 20Hz 路子）：nbs-fractal 的整机投影导出。
     /// 与 MAESTRO 相反，这份 `.litematic` 自带红石，贴下去就能响。
     FractalExport,
+    /// 端口自加（用户要求接第二条 20Hz 路子）：唱片工坊那一档的编码唱片数据箱导出。
+    /// 和 MAESTRO 同族——这份 `.litematic` 只有箱子，要贴在已建好的机体里才出声。
+    DiscChestExport,
     /// 原版 `w_track_export`（`draw_window_track_export.gml`）：550×400，
     /// 「普通过道」直轨布局的结构/schematic 导出。
     TrackExport,
@@ -303,6 +306,8 @@ impl WindowKind {
             Self::MaestroExport => tr("MAESTRO Machine Sheet", "MAESTRO 机体节目单"),
             // 端口自加，原版没有对应文案。
             Self::FractalExport => tr("Fractal Machine Projection", "Fractal 机体投影"),
+            // 端口自加，原版没有对应文案。
+            Self::DiscChestExport => tr("Encoded Disc Chest", "编码唱片数据箱"),
             // 原版 `draw_window_track_export.gml:13`：CN "导出直轨"。
             Self::TrackExport => tr("Track Export", "导出直轨"),
             Self::PngExport => tr("Export PNG chart", "导出 PNG 谱面"),
@@ -523,6 +528,8 @@ pub enum DialogAction {
     ExportMaestro,
     /// 端口自加：nbs-fractal 整机投影的保存框，扩展名 `.litematic`。
     ExportFractal,
+    /// 端口自加：编码唱片数据箱的保存框，扩展名同样 `.litematic`，但内容只有箱子。
+    ExportDiscChest,
     ImportMidi,
     TranscriptionAudio,
     TranscriptionMidi,
@@ -557,6 +564,7 @@ impl DialogAction {
                 | Self::ExportPattern
                 | Self::ExportMaestro
                 | Self::ExportFractal
+                | Self::ExportDiscChest
                 | Self::SaveExtraNotes
                 | Self::SaveTranscriptionMidi
                 // 原版选文件夹走的是 `get_save_filename_ext`（见 `picker_spec` 里那条），
@@ -585,7 +593,7 @@ impl DialogAction {
             // 端口自加：MAESTRO 机体吃的是 WorldEdit 的 .schem（gzip），不是原版的 .schematic。
             Self::ExportMaestro => "schem",
             // 端口自加：fractal 出的是 Litematica 投影（gzip NBT，扩展名 .litematic）。
-            Self::ExportFractal => "litematic",
+            Self::ExportFractal | Self::ExportDiscChest => "litematic",
             // 原版背景图对话框一次放行 png/jpg/jpeg（`menu_click.gml:57`）；
             // 这里的单扩展名只用于兜底列表和默认名，多个扩展名在 `accepts` 里放行。
             Self::ImportBackground => "png",
@@ -813,6 +821,11 @@ impl FileDialog {
             // 端口自加：fractal 整机投影。Litematica 认 .litematic（gzip NBT）。
             DialogAction::ExportFractal => (
                 tr("Export Fractal machine", "导出 Fractal 机体投影"),
+                vec![filter("Litematica Projection (*.litematic)", "*.litematic")],
+            ),
+            // 端口自加：编码唱片数据箱。同一份 Litematica 容器，只是里面只有箱子没有红石。
+            DialogAction::ExportDiscChest => (
+                tr("Export encoded disc chests", "导出编码唱片数据箱"),
                 vec![filter("Litematica Projection (*.litematic)", "*.litematic")],
             ),
             // 端口自加：MAESTRO 节目单。扩展名用机体那边认的 .schem。
@@ -1217,6 +1230,12 @@ pub struct EditorState {
     /// 端口自加：fractal 投影的预览清单与失败原因，用法同上面那对 maestro 字段。
     pub fractal_report: Option<nbs_io::FractalReport>,
     pub fractal_error: Option<String>,
+    /// 端口自加：编码唱片数据箱的导出选项（机体档 + 时间处理方式 + 层高 + 留白/空行两条开关），
+    /// 随首选项落盘。
+    pub disc_chest_options: nbs_io::DiscChestOptions,
+    /// 端口自加：编码唱片的预览清单与失败原因，用法同上面那对 fractal 字段。
+    pub disc_chest_report: Option<nbs_io::DiscChestReport>,
+    pub disc_chest_error: Option<String>,
     /// 原版 `calculate_size()` 每次打开导出窗口时重算的歌曲统计。
     pub schematic_stats: nbs_io::schematic::SchematicStats,
     /// 原版 `selected_tab_sch`：0 = 设计，1 = 方块。关窗时回到 0。
@@ -1450,6 +1469,8 @@ impl EditorState {
         let maestro_options = prefs.maestro.clone();
         // 端口自加：fractal 投影导出选项（`[fractal]`），出厂 Linear + 奇偶分道。
         let fractal_options = prefs.fractal;
+        // 端口自加：编码唱片数据箱的导出选项，出厂照上游 `defaultConfig`（20 t/s、resample、层高 8）。
+        let disc_chest_options = prefs.disc_chest;
         // 原版 `load_settings` 的 `[midi_import]` 段：14 个 `w_midi_*` 标量 +
         // 「记住我的更改」写回的 GM 表。通道/鼓映射不在这里恢复，那是
         // `open_midi` 每次解析完按 GM 表现算的（我们的 `MidiImportOptions::for_midi`）。
@@ -1547,10 +1568,13 @@ impl EditorState {
             schematic_options,
             maestro_options,
             fractal_options,
+            disc_chest_options,
             maestro_report: None,
             maestro_error: None,
             fractal_report: None,
             fractal_error: None,
+            disc_chest_report: None,
+            disc_chest_error: None,
             schematic_command_plan: None,
             schematic_command_signature: String::new(),
             song_session: 1,
@@ -2391,6 +2415,7 @@ impl EditorState {
         self.prefs.schematic = self.schematic_options.clone();
         self.prefs.maestro = self.maestro_options.clone();
         self.prefs.fractal = self.fractal_options;
+        self.prefs.disc_chest = self.disc_chest_options;
         // MIDI 导入同理：`import_midi()` 结尾的 `save_settings()` 每次都把
         // 14 个 w_midi_* 和 128 组 ins_N / drum_N 全量写盘。
         self.prefs.midi_import = Some(nbs_io::MidiImportPrefs::from_options(&self.midi_options));
@@ -2446,6 +2471,21 @@ impl EditorState {
             Err(e) => {
                 self.fractal_report = None;
                 self.fractal_error = Some(e);
+            }
+        }
+    }
+
+    /// 端口自加：按当前 `disc_chest_options` 重算一遍「编码唱片会发生哪些改写 + 数据箱多大」。
+    /// 同 fractal：要把盒子真摆一遍才出得了包围盒，只在开窗和改选项时调。
+    pub fn refresh_disc_chest_preview(&mut self) {
+        match nbs_io::preview_disc_chest(&self.doc.song, &self.disc_chest_options) {
+            Ok(r) => {
+                self.disc_chest_report = Some(r);
+                self.disc_chest_error = None;
+            }
+            Err(e) => {
+                self.disc_chest_report = None;
+                self.disc_chest_error = Some(e);
             }
         }
     }

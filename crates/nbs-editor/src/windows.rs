@@ -80,6 +80,8 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         WindowKind::MaestroExport => 600.0,
         // 端口自加：Fractal 机体投影，选项一行比节目单多，同样 600。
         WindowKind::FractalExport => 600.0,
+        // 端口自加：编码唱片数据箱，选项只有三行，清单和 Fractal 一样长，同样 600。
+        WindowKind::DiscChestExport => 600.0,
         // 原版 `draw_window(x1, y1, x1 + 490, y1 + 450)`。
         WindowKind::MinecraftCompat => 490.0,
         // 原版 `draw_window(x1, y1, x1 + 600, y1 + 400 + navigation_space)`。
@@ -168,6 +170,7 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::TrackExport => track_export_window(state, ui),
             WindowKind::MaestroExport => maestro_export_window(state, ui),
             WindowKind::FractalExport => fractal_export_window(state, ui),
+            WindowKind::DiscChestExport => disc_chest_export_window(state, ui),
             WindowKind::DatapackExport => datapack_export_window(state, ui),
             WindowKind::PngExport => png_export_window(state, ui),
             WindowKind::Autosaves => autosaves_window(state, ui),
@@ -8997,6 +9000,111 @@ fn fractal_export_window(state: &mut EditorState, ui: &mut Ui) {
             state.set_message(tr(
                 "Fractal projection export defaults restored",
                 "已恢复 Fractal 机体投影默认设置",
+            ));
+        }
+        if ui.button(tr("Close", "关闭")).clicked() {
+            state.emit(Command::CloseWindow);
+        }
+    });
+}
+
+/// 端口自加（用户要求「把新给出来的两条路线接成两个导出样式」）：唱片工坊那一档的编码唱片数据箱。
+/// 位置照 Fractal 窗口：选项在上、清单贴着选项、底部三个按钮。与 Fractal 相反，这份产物
+/// 只有箱子，所以开头就把「要贴在已建好的机体里」讲清楚（同 MAESTRO 那条）。
+fn disc_chest_export_window(state: &mut EditorState, ui: &mut Ui) {
+    ui.label(tr(
+        "This .litematic holds only the coded chests: each row carries the disc combination for one pair of semitones, and the blank slots are written down too.\nPaste it into a disc-chest machine that is already built - that is what makes the sound.",
+        "这份 .litematic 只有编码箱子：每行装的是同一对半音的唱片组合，哪一格是空拍也写在里面。\n要贴在已经建好的唱片工坊机体里才会响。",
+    ));
+    ui.separator();
+
+    let mut changed = false;
+    let machine = state.disc_chest_options.machine;
+    ui.label(tr("Machine", "机体"));
+    let mut picked_machine: Option<nbs_io::DiscChestMachine> = None;
+    for m in nbs_io::DiscChestMachine::ALL {
+        if ui.radio(machine == m, m.label()).on_hover_text(m.hint()).clicked() {
+            picked_machine = Some(m);
+        }
+    }
+    ui.label(RichText::new(machine.hint()).small().weak());
+    if let Some(m) = picked_machine {
+        state.disc_chest_options.machine = m;
+        changed = true;
+    }
+
+    let timing = state.disc_chest_options.timing;
+    ui.label(tr("Ticks", "刻号"));
+    let mut picked_timing: Option<nbs_io::DiscChestTiming> = None;
+    for t in nbs_io::DiscChestTiming::ALL {
+        if ui.radio(timing == t, t.label()).on_hover_text(t.hint()).clicked() {
+            picked_timing = Some(t);
+        }
+    }
+    if let Some(t) = picked_timing {
+        state.disc_chest_options.timing = t;
+        changed = true;
+    }
+
+    let opts = &mut state.disc_chest_options;
+    ui.horizontal(|ui| {
+        ui.label(tr("Layer height", "层高"));
+        let height = ui.add(egui::DragValue::new(&mut opts.layer_height).range(1..=1024));
+        changed |= height.changed();
+        height.on_hover_text(tr(
+            "How many blocks between two module arms. Upstream ships 8; match the machine you built, or the arms land on the wrong levels.",
+            "两条模块臂之间空几格。上游出厂是 8；机体按别的层高建过就得改成一致，否则各层对不上。",
+        ));
+        let stack = ui.checkbox(
+            &mut opts.stackable_rests,
+            tr("Stackable rests", "空拍用可堆叠地毯"),
+        );
+        changed |= stack.clicked();
+        stack.on_hover_text(tr(
+            "Compress a run of empty slots into one carpet stack of up to 64 and change colour between runs. Off uses one pair of scissors per slot instead.",
+            "把连续留白压成一叠地毯（最多 64），两次留白之间还换颜色。不勾就一格一把剪刀。",
+        ));
+    });
+    let strip = ui.checkbox(
+        &mut opts.remove_empty_chests,
+        tr("Skip rows with no notes", "整行没音符就不放箱子"),
+    );
+    changed |= strip.clicked();
+    strip.on_hover_text(tr(
+        "A row codes one pair of semitones; with nothing in it the two chests are left out. Keep it off if the machine you pasted into already has those chests.",
+        "一行代表同一对半音的两个相位，整行空着就省掉左右两只箱子。机体上那几格已经放好箱子的话别勾。",
+    ));
+    if changed {
+        // 选项动一下就要重算：清单里的子区域数、箱子数与包围盒都随机体档和层高变。
+        state.refresh_disc_chest_preview();
+    }
+
+    ui.separator();
+    ui.label(tr("The chests and what changed", "数据箱与改写"));
+    if let Some(e) = &state.disc_chest_error {
+        ui.label(RichText::new(e.replace('\n', " ")).small().color(Color32::from_rgb(200, 90, 90)));
+    } else if let Some(r) = &state.disc_chest_report {
+        for line in r.lines() {
+            ui.label(RichText::new(format!("· {line}")).small());
+        }
+    }
+
+    if let Some(s) = &state.export_status {
+        ui.separator();
+        ui.label(RichText::new(s).small());
+    }
+    ui.separator();
+    ui.horizontal(|ui| {
+        if ui.button(tr("Export", "导出")).clicked() {
+            state.emit(Command::ExportDiscChestChecked);
+        }
+        if ui.button(tr("Use default", "使用默认值")).clicked() {
+            state.disc_chest_options = nbs_io::DiscChestOptions::default();
+            state.export_status = None;
+            state.refresh_disc_chest_preview();
+            state.set_message(tr(
+                "Encoded disc chest export defaults restored",
+                "已恢复编码唱片数据箱默认设置",
             ));
         }
         if ui.button(tr("Close", "关闭")).clicked() {
