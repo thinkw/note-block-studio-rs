@@ -1,6 +1,16 @@
 帧顺序取自原版 GameMaker 工程 sprites/<name>/<name>.yy 里 "frames" 数组的书写顺序，
 文件名 <序号>.png 即 draw_sprite(sprite, <序号>, ...) 的 subimg。
-来源仓库：OpenNBS/OpenNoteBlockStudio（GPL-3.0-or-later）。
+来源仓库：OpenNBS/OpenNoteBlockStudio（LICENSE 是 MIT，`Copyright (c) 2024 OpenNBS`；
+2019-01-21 首次提交那份写的是 `Copyright (c) 2019 Hielke`，历史只动过年份和作者名。
+这里早先标的 GPL-3.0-or-later 是误记，2026-11-22 核对上游 LICENSE 后勘误）。
+素材归属：这一目录不是「全 MIT 的上游装配产物」——`block/`、`block_color/`、
+`block_color_shape/`、`block_sel/`、`block_shape/`、`instrumenticons/` 这几组（含末尾提到的
+`extranotes.zip`）的内容是 Mojang/Microsoft 的 Minecraft 素材及其衍生，上游那份 MIT 只
+处分它自己的代码与精灵装配，不处分这些像素；`assets/Sounds/` 那 20 段 note block 采样
+同理。所有权、条款口径、投诉退路见仓库根的 THIRD-PARTY-NOTICES.md 与
+assets/Blocks/MOJANG-NOTICE.txt，无素材发行包用 tools/strip_mojang_assets.py 产。
+其余字形（主题 UI 图标、按钮、谱号等）按上游 MIT 分发；我们没有逐帧核对过每组字形
+内部有没有引用 Mojang 像素，发现的话请按同样方式补进那张表。
 全部贴图锁定在装机版对应的 tag v3.12.0-rc.1 上导出（tools/export_sprites.py 里的 OPENNBS_REF），
 不是工作树当前检出的提交；`python tools/export_sprites.py --check` 会逐帧比对，不一致就报错。
 icons_classic/ = spr_icons（经典主题的 UI 字形），icons_light/ = spr_icons_f（Fluent 浅色主题的深字），icons_d/ = spr_icons_d（Fluent 深色 / 选中态的浅字），icons_accent/ = spr_icons_col（叠在字形上的强调色层）；都是 64 帧 25x25（3.12 在铜块一族上多了 4 帧，后面的字形整体后移 4），帧号就是原版 `enum icons` 的下标（scripts/icons_init/icons_init.gml）。目录名是导出后改的，所以和精灵名不完全一致。

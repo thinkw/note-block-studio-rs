@@ -7,5 +7,9 @@
   "bytes": 306370,
   "fetched_at": "2026-11-22T11:56:42",
   "fetched_by": "tools/fetch_block_textures.py",
-  "license_note": "Mojang/Microsoft 版权素材；仓库只入 20 个内置乐器用到的那几张（白名单见 .gitignore，名单由 fx::tiles 的测试现算核对），其余不入库；随包分发需另行拍板。"
+  "license_note": "Mojang/Microsoft 版权素材，所有权不在我们这边。仓库只入 20 个内置乐器用到的那几张（白名单见 .gitignore，名单由 crates/nbs-editor/src/fx/tiles.rs 的测试现算核对），其余不入库。",
+  "not_under_agpl": true,
+  "notice": "MOJANG-NOTICE.txt",
+  "third_party_notices": "THIRD-PARTY-NOTICES.md",
+  "committed_textures": 20
 }

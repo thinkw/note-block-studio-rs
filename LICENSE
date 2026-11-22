@@ -659,3 +659,27 @@ specific requirements.
 if any, to sign a "copyright disclaimer" for the program, if necessary.
 For more information on this, and how to apply and follow the GNU AGPL, see
 <https://www.gnu.org/licenses/>.
+
+---
+
+IMPORTANT NOTICE ABOUT THIRD-PARTY MATERIALS
+
+The GNU Affero General Public License v3.0-only stated above covers only the
+material for which we hold the copyright: our own source code, our own
+documentation, and the sprite assembly we export from the upstream OpenNBS
+GameMaker project (that part is MIT-licensed by OpenNBS).
+
+It does NOT cover the Minecraft content shipped in this repository. The block
+textures under assets/Blocks/, the note-block samples under assets/Sounds/, the
+Minecraft-derived sprite folders under assets/icons/ (block, block_color,
+block_color_shape, block_sel, block_shape, instrumenticons) and
+assets/extranotes.zip are the intellectual property of Mojang Studios /
+Microsoft, who expressly retain ownership of their textures and derivatives.
+We redistribute a small part of them under Mojang's fan content expectations and
+claim no rights over them; the AGPL imposes no additional permission on those
+files and does not purport to relicense them.
+
+The full inventory, the exact wording we rely on, the procedure to build a
+release containing none of it (tools/strip_mojang_assets.py), and our takedown
+commitment are in THIRD-PARTY-NOTICES.md at the repository root, with a
+short-form notice in assets/Blocks/MOJANG-NOTICE.txt.

@@ -11,9 +11,10 @@
 工具这边不做名字归一，免得两处各有一套规则。
 
 产物是 Mojang 的版权素材。仓库只入「20 个内置乐器真的会画到的那几张」（白名单在
-.gitignore 里逐张 `!` 放行，名单由 crates/nbs-editor/src/fx/tiles.rs 那条测试对着
+.gitignore 里逐张 `!` 放行，名单由 crates/nbs-editor/src/fx/tiles.rs 的测试对着
 出厂表现算核对），其余 1000 多张跟乐器无关、不入库，只留在这台机器上。
-随包分发（装进安装包）仍需另行拍板。
+权利归属、条款口径与投诉退路写在 assets/Blocks/MOJANG-NOTICE.txt；整仓库的第三方
+声明在 THIRD-PARTY-NOTICES.md（那里还给了产出无素材发行包的 tools/strip_mojang_assets.py）。
 """
 
 from __future__ import annotations
@@ -83,6 +84,14 @@ def extract(jar: Path, out: Path) -> tuple[int, int]:
         return len(names), total
 
 
+def committed_textures() -> int:
+    """.gitignore 里逐张放行的贴图数。PROVENANCE.json 的 committed_textures 取这个，
+    不写死数字，免得改了出厂乐器表之后白名单和来路记录各说各话。"""
+    ignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+    return len([line for line in ignore.splitlines()
+                if line.startswith("!assets/Blocks/") and line.endswith(".png")])
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--version", default=MC_VERSION, help=f"锁定版本（默认 {MC_VERSION}）")
@@ -106,9 +115,13 @@ def main() -> int:
         "bytes": bytes_out,
         "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "fetched_by": "tools/fetch_block_textures.py",
-        "license_note": "Mojang/Microsoft 版权素材；仓库只入 20 个内置乐器用到的那几张"
-                        "（白名单见 .gitignore，名单由 fx::tiles 的测试现算核对），"
-                        "其余不入库；随包分发需另行拍板。",
+        "license_note": "Mojang/Microsoft 版权素材，所有权不在我们这边。仓库只入 20 个"
+                        "内置乐器用到的那几张（白名单见 .gitignore，名单由 "
+                        "crates/nbs-editor/src/fx/tiles.rs 的测试现算核对），其余不入库。",
+        "not_under_agpl": True,
+        "notice": "MOJANG-NOTICE.txt",
+        "third_party_notices": "THIRD-PARTY-NOTICES.md",
+        "committed_textures": committed_textures(),
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     print(f"解出 {count} 张（{bytes_out / 1e6:.1f} MB）→ {out}")

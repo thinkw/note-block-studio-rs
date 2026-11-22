@@ -13,9 +13,11 @@ assets/Songs/
 # 其余 1000 多张是扒 jar 时的顺带产物，跟乐器无关，不入库，需要时现跑
 # tools/fetch_block_textures.py。白名单不是手抄的：`fx::tiles` 里那条测试会拿
 # INSTRUMENT_BLOCKS / COPPER_INS_BLOCKS 现算出该用哪张图，对不上就红。
-# 来路记录那份 JSON 是我们自己写的文字，跟进来，别克隆的人才知道图是从哪个 jar 扒的。
+# 来路记录那份 JSON 是我们自己写的文字，跟进来，别克隆的人才知道图是从哪个 jar 扒的；
+# 旁边 MOJANG-NOTICE.txt 是「这几张不是我们的、权利人是谁、投诉怎么办」那句声明。
 assets/Blocks/*
 !assets/Blocks/PROVENANCE.json
+!assets/Blocks/MOJANG-NOTICE.txt
 !assets/Blocks/bone_block_side.png
 !assets/Blocks/clay.png
 !assets/Blocks/cobblestone.png
@@ -36,3 +38,5 @@ assets/Blocks/*
 !assets/Blocks/soul_sand.png
 !assets/Blocks/weathered_copper.png
 !assets/Blocks/white_wool.png
+# tools/strip_mojang_assets.py 的产出（无素材发行包副本），不入库
+/dist/

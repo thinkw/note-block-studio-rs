@@ -11,6 +11,10 @@
 //! `assets/Blocks/PROVENANCE.json`）。找不到目录、或某个方块在 1.21 资源里换了名，
 //! 都退回按名字哈希出的稳定色块：画面会失真，但不会缺格，也不会因为素材没扒就整个
 //! 特效不能用。自定义乐器在出厂表里还是默认的石头，走的是乐器色那条路，不欠贴图。
+//!
+//! 这几张图不是我们的著作物：归属、Mojang 条款原文、无素材发行包和下架承诺写在
+//! `assets/Blocks/MOJANG-NOTICE.txt` 与仓库根的 `THIRD-PARTY-NOTICES.md`，
+//! 那两份声明有没有跟着代码走由 `tests::the_third_party_notices_ship_with_the_textures` 核。
 
 use egui::{Color32, Context, TextureHandle, TextureOptions};
 use nbs_io::schematic::{namespaced_id, SchematicOptions};
@@ -603,6 +607,48 @@ mod tests {
         assert!(
             extra.is_empty(),
             "入库贴图里有乐器用不到的：{extra:?} —— 口径是只入乐器会用到的那几张"
+        );
+    }
+
+    /// 声明要跟着素材走：贴图入库那一刻，「这几张不是我们的」那几句话必须在仓库里，
+    /// 而且要真的随包分发（`.gitignore` 放行、被 LICENSE 指到）。这条测试拦的是
+    /// 「图加了、声明没加」和「声明写了却被误 ignore」两种飘。
+    #[test]
+    fn the_third_party_notices_ship_with_the_textures() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("仓库根")
+            .to_path_buf();
+        for rel in [
+            "assets/Blocks/MOJANG-NOTICE.txt",
+            "assets/Blocks/PROVENANCE.json",
+            "THIRD-PARTY-NOTICES.md",
+        ] {
+            assert!(
+                root.join(rel).is_file(),
+                "{rel} 不见了：入库素材的归属声明不能缺"
+            );
+        }
+        let ignore = std::fs::read_to_string(root.join(".gitignore")).expect("读不到 .gitignore");
+        assert!(
+            ignore
+                .lines()
+                .any(|l| l.trim() == "!assets/Blocks/MOJANG-NOTICE.txt"),
+            "MOJANG-NOTICE.txt 没在 .gitignore 里放行，克隆的人看不到它"
+        );
+        let license = std::fs::read_to_string(root.join("LICENSE")).expect("读不到 LICENSE");
+        assert!(
+            license.contains("THIRD-PARTY-NOTICES.md"),
+            "LICENSE 里没有指向第三方素材声明的那段"
+        );
+        let prov = std::fs::read_to_string(root.join("assets/Blocks/PROVENANCE.json"))
+            .expect("读不到 PROVENANCE.json");
+        let v: serde_json::Value = serde_json::from_str(&prov).expect("PROVENANCE.json 不是合法 JSON");
+        assert_eq!(
+            v["not_under_agpl"].as_bool(),
+            Some(true),
+            "PROVENANCE.json 要写明这些贴图不在 AGPL 授权范围内"
         );
     }
 
