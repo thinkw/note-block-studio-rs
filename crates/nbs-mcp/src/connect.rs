@@ -47,12 +47,16 @@ nbs-mcp —— 把正在运行的 nbs-rs 编辑器接成 MCP 服务（stdio）�
   --names               只把工具名打到 stdout（= --dump-tools 的名字版）
   --json                机器可读输出：配 --dump-tools 给全表 JSON，配 --call 给整份回执
   --call <工具> ['<json参数>']  连上编辑器、只调这一条、结果打到 stdout 后退出
+  --call-file <路径|->  配合 --call 换参数来源：从文件读，路径给 `-` 时读标准输入。
+                        几百个格子的 cells 别塞进命令行，shell 引号比调用更容易错
   --help                打这段说明
 
 一次性调用（不用开 IDE，也不用自己写 stdio 握手脚本）:
   nbs-mcp --call get_snapshot
   nbs-mcp --call clear_song '{\"discard_changes\":true}'
   nbs-mcp --call get_notes '{\"tick_from\":0,\"tick_to\":31}' --json
+  nbs-mcp --call set_notes --call-file cells.json
+  nbs-mcp --call set_notes --call-file - < cells.json
 默认输出是一行状态：`工具 ok rev= cells_changed= layers_changed= meta_changed= dirty= data= \"message\"`；
 要看数据体就加 --json。退出码 0 = 编辑器答成，1 = 编辑器答不（闸、参数、当前状态），
 2 = 没连上或命令本身不对——1 和 2 分开是因为该改的东西不一样。
@@ -65,10 +69,54 @@ nbs-mcp —— 把正在运行的 nbs-rs 编辑器接成 MCP 服务（stdio）�
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallRequest {
     pub tool: String,
-    /// 参数原文，形状对不对要到 [`crate::call::op_for`] 才知道，那里报得比这里准。
-    pub args: String,
+    /// 参数来源，形状对不对要到 [`crate::call::op_for`] 才知道，那里报得比这里准。
+    pub args: ArgsSource,
     /// true = 打整份回执 JSON，而不是那一行状态。
     pub json: bool,
+}
+
+/// `--call` 那份参数从哪儿读。文件那一支是给脚本的：几百个格子的 `cells` 塞进一条命令行，
+/// 引号怎么套、会不会被 shell 吃掉，比调用本身更容易出错。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArgsSource {
+    /// 紧跟在工具名后面的那段原文。
+    Inline(String),
+    /// `--call-file <路径>`；路径写成 `-` 时读标准输入。
+    File(PathBuf),
+}
+
+impl CallRequest {
+    /// 读出参数原文。空内容当空对象： piping 一个空文件进来和干脆不给参数是同一件事。
+    pub fn payload(&self) -> Result<String, String> {
+        let text = match &self.args {
+            ArgsSource::Inline(text) => text.clone(),
+            ArgsSource::File(path) if path.to_str() == Some("-") => {
+                use std::io::Read as _;
+                let mut text = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut text)
+                    .map_err(|e| format!("读标准输入失败: {e}"))?;
+                text
+            }
+            ArgsSource::File(path) => std::fs::read_to_string(path)
+                .map_err(|e| format!("读参数文件 {} 失败: {e}", path.display()))?,
+        };
+        Ok(if text.trim().is_empty() {
+            "{}".to_string()
+        } else {
+            text
+        })
+    }
+
+    /// 参数来源的说法。报错要点名是哪一份，否则「不是合法 JSON」会指向命令行，
+    /// 而真正该改的是那个文件。
+    pub fn origin(&self) -> String {
+        match &self.args {
+            ArgsSource::Inline(_) => "命令行".to_string(),
+            ArgsSource::File(path) if path.to_str() == Some("-") => "标准输入".to_string(),
+            ArgsSource::File(path) => format!("文件 {}", path.display()),
+        }
+    }
 }
 
 /// 解析出来的意图。`--dump-tools` / `--names` 不连编辑器：它们是给人核对
@@ -157,9 +205,29 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
                 }
                 call = Some(CallRequest {
                     tool,
-                    args: payload.unwrap_or_else(|| "{}".to_string()),
+                    args: ArgsSource::Inline(payload.unwrap_or_else(|| "{}".to_string())),
                     json: false,
                 });
+            }
+            "--call-file" => {
+                let path = PathBuf::from(take_value(args, &mut i, inline, key)?);
+                match &mut call {
+                    Some(req) => match &req.args {
+                        // `"{}"` 是「压根没给参数」的默认值，不算第二份来源。
+                        ArgsSource::Inline(text) if text == "{}" => {
+                            req.args = ArgsSource::File(path)
+                        }
+                        _ => {
+                            return Err(
+                                "--call 的参数和 --call-file 各给了一份，挑一份"
+                                    .to_string(),
+                            )
+                        }
+                    },
+                    None => {
+                        return Err("--call-file 要和 --call <工具> 一起用".to_string());
+                    }
+                }
             }
             other => return Err(format!("未知参数 {other}\n\n{USAGE}")),
         }
@@ -331,7 +399,10 @@ mod tests {
             panic!("应该是 Call，实际 {parsed:?}")
         };
         assert_eq!(req.tool, "clear_song");
-        assert_eq!(req.args, r#"{"discard_changes":true}"#);
+        assert_eq!(
+            req.args,
+            ArgsSource::Inline(r#"{"discard_changes":true}"#.to_string())
+        );
         assert!(!req.json);
         assert_eq!(ep.direct, None, "没给端口就该走发现文件");
 
@@ -343,7 +414,7 @@ mod tests {
         let Command::Call(_, req) = parse_args(&argv(&["--call", "get_notes"])).unwrap() else {
             panic!()
         };
-        assert_eq!(req.args, "{}");
+        assert_eq!(req.args, ArgsSource::Inline("{}".to_string()));
 
         // JSON 吃紧跟的那一个；下一个看着像旗标就必须留着当旗标。
         let Command::Call(ep, req) =
@@ -351,7 +422,11 @@ mod tests {
         else {
             panic!()
         };
-        assert_eq!(req.args, "{}", "把 --config-dir 当参数吃掉就没法连了");
+        assert_eq!(
+            req.args,
+            ArgsSource::Inline("{}".to_string()),
+            "把 --config-dir 当参数吃掉就没法连了"
+        );
         assert_eq!(ep.config_dir, PathBuf::from("/tmp/x"));
 
         // --json 位置随意；它只改输出形状。
@@ -373,6 +448,16 @@ mod tests {
         assert!(parse_args(&argv(&["--call"])).is_err(), "缺工具名要报错");
         let err = parse_args(&argv(&["--call", "ping", "--names"])).unwrap_err();
         assert!(err.contains("--names"), "混搭要说清为什么不行：{err}");
+        // 列表面是离线的，一次性调用是敲编辑器的，混着给谁都不知道该听哪条。
+        let err = parse_args(&argv(&[
+            "--call",
+            "ping",
+            "--call-file",
+            "args.json",
+            "--dump-tools",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("--dump-tools"), "混搭要说清为什么不行：{err}");
     }
 
     /// 参数原文这里不解析：形状对不对要按那条工具的结构体判，那是 `op_for` 的活。
@@ -385,8 +470,72 @@ mod tests {
             else {
                 panic!()
             };
-            assert_eq!(req.args, payload, "坏 JSON 也要原样带到能说出为什么坏的地方");
+            assert_eq!(
+                req.args,
+                ArgsSource::Inline(payload.to_string()),
+                "坏 JSON 也要原样带到能说出为什么坏的地方"
+            );
         }
+    }
+
+    /// 几百个格子的 `cells` 用内联 JSON 递，先崩的往往是 shell 引号而不是调用。
+    /// `--call-file` 那条支路要在这里就分出来源，`payload()` 只在真要调的时候读盘。
+    #[test]
+    fn call_args_can_come_from_a_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("nbs-mcp-args-{}.json", std::process::id()));
+        std::fs::write(&path, r#"{"tick_from":0,"tick_to":31}"#).unwrap();
+        let text = path.to_string_lossy().replace('\\', "/");
+
+        for form in [
+            vec!["--call", "get_notes", "--call-file", &text],
+            vec!["--call=get_notes", &format!("--call-file={text}")],
+        ] {
+            let Command::Call(_, req) = parse_args(&argv(&form)).unwrap() else {
+                panic!("应该是 Call，实际 {form:?}")
+            };
+            assert_eq!(req.tool, "get_notes");
+            assert_eq!(req.payload().unwrap(), r#"{"tick_from":0,"tick_to":31}"#);
+        }
+
+        // 没有 `--call` 时这条旗标什么都不该做（尤其不能悄悄去读文件）。
+        assert!(parse_args(&argv(&["--call-file", &text])).is_err());
+        // 两份来源同时给必须报错，不能「后给的赢」——脚本里拼错一次就是静默换数据。
+        assert!(parse_args(&argv(&[
+            "--call",
+            "get_notes",
+            "{\"tick_from\":0}",
+            "--call-file",
+            &text
+        ]))
+        .is_err());
+        assert!(parse_args(&argv(&["--call", "get_notes", "--call-file"])).is_err());
+        assert!(CallRequest {
+            tool: "get_notes".to_string(),
+            args: ArgsSource::File(PathBuf::from(&path).with_extension("no-such-file")),
+            json: false,
+        }
+        .payload()
+        .is_err());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 标准输入那一支（`--call-file -`）是 CLI 的写法，和文件共用同一段读法。
+    #[test]
+    fn dash_means_stdin_and_is_named_in_the_error() {
+        let Command::Call(_, req) = parse_args(&argv(&["--call", "ping", "--call-file", "-"]))
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(req.args, ArgsSource::File(PathBuf::from("-")));
+        assert_eq!(req.origin(), "标准输入");
+        // 内联那份的来源要说「命令行」，否则报错会把人支去改一个不存在的文件。
+        let Command::Call(_, inline) = parse_args(&argv(&["--call", "ping"])).unwrap() else {
+            panic!()
+        };
+        assert_eq!(inline.origin(), "命令行");
     }
 
     #[test]

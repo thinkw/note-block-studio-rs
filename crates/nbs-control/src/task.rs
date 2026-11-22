@@ -20,6 +20,44 @@ pub enum SpawnReject {
     Thread(String),
 }
 
+/// 任务表里 `kind` 的那几个写法。收成类型是因为闸要按它数「同一类活是不是已经在跑」——
+/// 拼错一个字母的字符串会让那道闸形同虚设，而且没人看得见。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JobKind {
+    Export,
+    TranscribeProbe,
+    TranscribePrepareEnv,
+    TranscribePrepareModel,
+    TranscribeAudio,
+}
+
+impl JobKind {
+    /// 闸要遍历的就是这一张表：新加一类重活得同时加进来，否则「一次只跑一个」看不见它。
+    pub const ALL: &'static [Self] = &[
+        Self::Export,
+        Self::TranscribeProbe,
+        Self::TranscribePrepareEnv,
+        Self::TranscribePrepareModel,
+        Self::TranscribeAudio,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Export => "export",
+            Self::TranscribeProbe => "transcribe_probe",
+            Self::TranscribePrepareEnv => "transcribe_prepare_env",
+            Self::TranscribePrepareModel => "transcribe_prepare_model",
+            Self::TranscribeAudio => "transcribe_audio",
+        }
+    }
+
+    /// 转录那四条共用「一次只许跑一个」：它们都起本机 python 子进程，并发跑等于
+    /// 抢同一份 venv、同一份权重缓存，出错的形状还很难看。
+    pub fn is_transcription(&self) -> bool {
+        !matches!(self, Self::Export)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CancelOutcome {
     NotFound,
@@ -66,6 +104,19 @@ impl JobRegistry {
             .unwrap()
             .iter()
             .filter(|e| matches!(e.info.status, JobStatus::Running | JobStatus::Queued))
+            .count()
+    }
+
+    /// 某一类活现在有几个在册（刚登记还没起线程也算）。「一次只许跑一个」那道闸读这条。
+    pub fn running_of(&self, kind: &str) -> usize {
+        self.inner
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| {
+                e.info.kind == kind
+                    && matches!(e.info.status, JobStatus::Running | JobStatus::Queued)
+            })
             .count()
     }
 

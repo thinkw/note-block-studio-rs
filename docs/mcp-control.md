@@ -71,6 +71,15 @@ nbs-mcp --call clear_song '{"discard_changes":true}'
 nbs-mcp --call set_notes '{"cells":[{"tick":0,"layer":0,"instrument":0,"key":"C4"}]}'
 ```
 
+参数几百个格子时别塞进命令行——shell 引号比调用本身更容易出错，用 `--call-file` 换来源，路径给 `-` 读标准输入：
+
+```bash
+nbs-mcp --call set_notes --call-file cells.json
+nbs-mcp --call set_notes --call-file - < cells.json
+```
+
+文件里是空的（或只有空白）等于没给参数；读不到文件、JSON 坏掉都在连编辑器之前退出（码 2），报错会点名是哪一份来源。
+
 默认打一行状态：
 
 ```
@@ -86,7 +95,7 @@ set_notes ok rev=6 cells_changed=1 layers_changed=0 meta_changed=false dirty=tru
 核对「AI 会看到什么口径」不需要编辑器在场：
 
 ```bash
-nbs-mcp --names                        # 38 条工具名
+nbs-mcp --names                        # 43 条工具名
 nbs-mcp --dump-tools set_notes         # 只看一条：说明 + 入参 schema
 nbs-mcp --dump-tools set_notes --json  # 同一条的机器可读版
 ```
@@ -103,6 +112,7 @@ MCP 那一侧的 `isError`：**两层里任何一层答「不」，`isError` 都
 
 每条写操作的回执都带 `report`：`rev`、`cells_changed`、`layers_changed`、`meta_changed`、`dirty`、`history_len`。
 `cells_changed` 可能小于你给的条数——写下去和原来一样的格子不算改动。
+`open_file` / `import_midi` 是整首替换，撤销历史一起清空，算不出差量，所以这两条的 `cells_changed` / `layers_changed` 是**新工程的规模**（几个音符、几层）；`song_session` 同时加一，用它判断「工程被换过」比看数字更直接。
 
 ## 7. 闸门：不带就等于不认错
 
@@ -123,15 +133,102 @@ MCP 那一侧的 `isError`：**两层里任何一层答「不」，`isError` 都
 - `velocity` 省略取 100，`panning` 省略取 100（中央），`pitch`（音分）省略取 0；
 - 一次 `set_notes` = 一次撤销，整批先校验后落笔，要么全成要么全不动。
 
-## 9. 这套面做不到的事
+音名↔键号那张表是**从 A 起**的（`A0=0`、`B0=1`、`C1=2`…，八度号跟着 NBS 惯例走），别按「C0=0」心算：
+按 C 起算会把 sol/la/si 那一档整体低半音，而写进去和读回来用的是同一张表，所以两头都对得上、只有耳朵能发现。
+要确认某张表就 `get_instruments`（带 `mc_key_range`）或直接问一句 `nbs-mcp --dump-tools set_notes`。
+
+## 9. 播放与网格的口径
+
+- **一格（tick）多长** = `1 / tempo` 秒：`tempo` 是「每秒走几格」，tempo 10 时 1 秒走 10 格，不是 1 秒 1 格；
+- **`tempo` 不是 BPM**：BPM = `tempo × 15`。`get_snapshot` 两个字段都给（`tempo` 和 `bpm`，后者就是界面那行的数），
+  想按 BPM 定速度就 `set_meta {"tempo": BPM / 15}`，写完回读 `bpm` 确认；
+- **小节**：每节 `time_signature × 4` 格（默认拍号 4 → 16 格一小节），这就是界面竖线的间距。
+  拍号在读写时夹在 2..=8，所以 12/8 那类文件进来会落到 8 → 32 格一节；
+  按小节读旋律就 `nbs-mcp --call get_notes '{"bars":[0,3]}' --json`，
+  回执的 `data.bar_overview` 每节一行 `tick:音名(音色)`（音名由状态栏同一张表生成，不用自己把键号心算回去）；
+  想换宽度加 `ticks_per_bar`（可与 `bars` 同给），一次最多 256 节，`bars` 与 `tick_from` / `tick_to` 互斥；
+- **`play` 的落点**：从当前播放头起播；播放头已经到或越过曲尾时先归零，回执说一句「已归零」。
+  需要显式起点就先 `seek` 再 `play`；
+- `pause` 留住播放头，`stop` 把播放头送回 0，`seek` 的 tick 可以是小数（落在两格之间）；
+- `set_loop` 只改循环开关，别的元数据不动。
+
+## 10. 导入 MIDI：先预演，再落歌
+
+`inspect_midi` 和 `import_midi` 吃同一套参数，区别只在要不要换掉当前工程：
+
+```bash
+nbs-mcp --call inspect_midi '{"path":"D:/songs/jazz.mid"}' --json
+nbs-mcp --call import_midi '{"path":"D:/songs/jazz.mid","discard_changes":true}'
+```
+
+预检跑的是真的导入算法，算完就丢，`rev` 一点不动。它回的核对单和导入回执同一个形状：音符数、层数、层名、`length_ticks`、tempo 与 BPM、超 MC 音域的个数、按映射判成静音的个数，逐通道 / 逐鼓音 / 逐声部的计划，加上这次**真正生效**的选项全表。先预演再落歌，是给「我以为这份文件长这样」找一个可以对的地方。
+
+- 省略选项 = 复刻人坐在导入窗前看到的那份，不是出厂默认值：通道与鼓映射按 GM 表现算，标量取自偏好。出厂那份的鼓表是空的，照它导会把打击乐整段判成静音。
+- 选项里的字段名**拼错会被当场拒**（这几份结构体不认未知字段）。「写错」和「省略」在结果上是两件事：省略该走基线，写错不该悄悄变成基线。
+- `channels` 不含通道 9，9 的映射写在 `drums`，`note` 要用预检给你的那些音号；`instrument: -1` 是「这条通道不要」，不是「用 0 号音色」。
+- `enhanced` 是窗上那套延音 / 拆声部 / 去重 / 越界配器。只给子字段却不给 `enabled: true` 会被拒——你以为在调延音，实际走的是传统路径，那才是最难查的一种没生效。越界替换表 `substitutes` 只覆盖内置 0..=19，给一行就整行替换出厂那一行。
+- `remember: true` 是这条链上唯一会动用户长期设置的开关：把这次的映射写回 GM 表并存进偏好，等于替人点了窗上那个「记住」。省略就是 false，想改一次而不留痕就别给。
+- `precision` 收 0 / 1 / 3 / 7，对应窗上 1 / 2 / 4 / 8 倍；它同时决定 tick 密度，同一份文件 8 倍比 1 倍长四倍。
+
+## 11. 音频转 MIDI：许可、环境，和一条必须点名的交付路径
+
+四条件对应转录窗上的四个按钮，全部**立即回任务句柄**（python 子进程动辄几十秒到几十分钟，
+不让一次调用憋着，也不让一条请求挂住界面线程），之后 `job_status` 轮询、`job_cancel` 能停：
+
+| 工具 | 要许可 | 要装好的环境 | 干什么 |
+| --- | --- | --- | --- |
+| `transcribe_probe` | 否 | 否 | 问 Python / torch / MuScriptor 版本和 GPU 情况，不下载任何东西 |
+| `transcribe_prepare_env` | 是 | 否 | uv 建 venv、装 MuScriptor 与 torch（几百 MB） |
+| `transcribe_prepare_model` | 是 | 是 | 只取权重并加载一遍，先验显存与精度，不识别音频 |
+| `transcribe_audio` | 是 | 是 | 音频 → MIDI，`result` 带产物与核对数 |
+
+**许可那一下只能人自己勾。** MuScriptor 权重是 CC BY-NC 4.0、环境要现装几百 MB，所以
+「确认本地下载和模型使用许可」这个勾只认人在「音频转 MIDI」窗口里点的那一下：
+AI 面没有代勾的入口，`options` 里也没有这个字段，`list_actions` 的逃生舱里同样没有它。
+没勾时三条得到的是 `not_allowed`，那句话会点名该谁去勾——**这不是接线故障，别绕**。
+
+`options` 省略哪个字段就用窗口里当前那一份（和 MIDI 导入同一个口径），字段名拼错当场拒。
+取值域在这儿就钉死了：`model` 是 `small`/`medium`/`large`，`device` 是 `auto`/`cpu`/`cuda`，
+`dtype` 是 `auto`/`float32`/`float16`，`beam_size` 是 `1..=4` 的整数，`temperature` `0..=2`，
+`cfg_coef` `0..=3`，`model_path` 要本地 `.safetensors`（给空串是显式清掉窗上那行）。
+错在起子进程之前，是为了三十秒后回来的不是「任务失败」而是一句能照着改的话。
+
+**要接着导入就必须给 `save_midi`。** 转录产物本来落在编辑器自己的
+`<workspace>/.work/transcription/jobs/…`，那个目录**不在**路径白名单里，
+`import_midi` 读不到它——这是刻意的：白名单是这台机器上唯一的门禁，不该因为
+「文件是我自己生成的」就放行。给一个落在放行目录里的 `.mid` 路径，
+覆盖别人的文件照样要 `overwrite=true`，之后接现成的那条链：
+
+```bash
+nbs-mcp --call transcribe_probe
+nbs-mcp --call job_status '{"id":1}'
+# 人在窗口里勾过许可之后：
+nbs-mcp --call transcribe_prepare_env '{"cuda":false}'
+nbs-mcp --call transcribe_audio '{"audio":"D:/in/take.wav","save_midi":"D:/out/take.mid","overwrite":true}'
+nbs-mcp --call job_status '{"id":3}' --json
+nbs-mcp --call inspect_midi '{"path":"D:/out/take.mid"}' --json
+nbs-mcp --call import_midi '{"path":"D:/out/take.mid","discard_changes":true}'
+```
+
+转录任务的 `result` 除了 `raw_note_count`（模型报的原始音符数），还带回窗上那两条核对：
+`preview_notes`（预览读到的音符）、`importer_events`（NBS 导入器读到的事件数）、
+`note_count_mismatch`（两者不一致）。对不上时**窗口里那个「导入」按钮会直接停止**，
+这里照实报而不替人决定——真正会落进歌里的数量看下一步 `inspect_midi`，
+它按你准备用的那套选项算，且 `import_midi` 会拒掉算不平的结果。
+
+一次只跑一个转录任务：这四条共用同一份 venv 和权重缓存，并发跑出来的失败形状很难看。
+窗口里已经有一个在跑、或任务表里已经排着一个，都会得到 `busy`。
+
+## 12. 这套面做不到的事
 
 - **没有截屏**，也没有任何「看一眼界面」的能力。想知道现状就调 `get_snapshot` / `get_notes` / `get_diagnostics`，它们是这件事的替代；
 - 必须靠鼠标拖动的流程没有等价物，会回 `unsupported`；能列出有哪些动作的，是 `list_actions` + `run_action` 那对逃生舱；
 - schematic / datapack 导出没接进工具面（`export` 只到 wav / midi / png）；
+- 转录窗上的 SoundFont A/B 试听没接进来：要听识别出来的效果，用 `export`（wav 是离线渲染，不需要那个几百 MB 的音色库勾）；
 - 撤销栈有容量上限，`get_history` 会告诉你游标和长度；
 - 它操作的是**正在跑的那个窗口**，不是磁盘上的文件：想让 AI 改完再存，要显式 `save`。
 
-## 10. 排查顺序
+## 13. 排查顺序
 
 1. `nbs-mcp --call ping` —— 一句就知道通不通；
 2. 不通先确认编辑器答应了吗：设置页那栏会写「正在监听 127.0.0.1:<端口>」和发现文件全路径；

@@ -147,6 +147,20 @@ pub struct NoteCell {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BarOverview {
+    /// 小节号，从 0 起算。
+    pub bar: u32,
+    /// 这一小节的 tick 闭区间，和界面竖线对齐。
+    pub tick_from: u32,
+    pub tick_to: u32,
+    /// 这一小节里的真实格数（`text` 可能因为打印上限而少列几格）。
+    pub cells: usize,
+    /// 形如 `0:C4(2) 6:G4(2)`：tick 绝对坐标、音名、音色号。
+    /// 超出打印上限时以 `…` 收尾，`cells` 仍是真实条数。
+    pub text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LayerInfo {
     pub index: u32,
     pub name: String,
@@ -264,6 +278,9 @@ pub enum Data {
         /// 因为超过上限而被截断时为 true，调用方得知道自己在看部分结果。
         truncated: bool,
         limit: usize,
+        /// 小节文字视图：请求里给了 `bars` 或 `ticks_per_bar` 才非空。
+        /// 名字和入参的 `bars`（一对小节号）刻意错开——同一个词指两样形状会读错。
+        bar_overview: Vec<BarOverview>,
     },
     Layers {
         layers: Vec<LayerInfo>,
@@ -296,6 +313,9 @@ pub enum Data {
         file_kind: String,
         notes: usize,
     },
+    /// MIDI 导入的核对单：`inspect_midi` 给的是「会导成什么」，`import_midi` 给的是
+    /// 「导成了什么」，同一个形状才比得动。
+    MidiPlan(Box<crate::midi::MidiPlan>),
 }
 
 /// 逃生舱里一条动作的自述。

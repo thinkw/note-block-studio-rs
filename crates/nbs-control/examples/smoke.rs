@@ -131,6 +131,8 @@ fn run(config: &Path, work: &Path) -> i32 {
             tick_to: Some(2),
             layer_from: Some(0),
             layer_to: Some(0),
+            ticks_per_bar: None,
+            bars: None,
         }),
     );
     show(
@@ -140,6 +142,19 @@ fn run(config: &Path, work: &Path) -> i32 {
             tick_to: None,
             layer_from: None,
             layer_to: None,
+            ticks_per_bar: None,
+            bars: None,
+        }),
+    );
+    show(
+        "GetNotes(按小节读前两节)",
+        client.request(Op::GetNotes {
+            tick_from: None,
+            tick_to: None,
+            layer_from: None,
+            layer_to: None,
+            ticks_per_bar: None,
+            bars: Some([0, 1]),
         }),
     );
     show(
@@ -312,6 +327,27 @@ fn run(config: &Path, work: &Path) -> i32 {
             expect_rev: None,
         }),
     );
+    // 音频转 MIDI：三条要下载的先说「该人自己去勾」，probe 不需要许可、起的是任务。
+    show(
+        "TranscribePrepareEnv(没勾许可应被拒)",
+        client.request(Op::TranscribePrepareEnv { cuda: Some(false) }),
+    );
+    show(
+        "TranscribeAudio(没勾许可时不该先报路径)",
+        client.request(Op::TranscribeAudio {
+            audio: "C:/nope/there.wav".into(),
+            options: Default::default(),
+            save_midi: None,
+            overwrite: false,
+        }),
+    );
+    show(
+        "TranscribeProbe(不需要许可)",
+        client.request(Op::TranscribeProbe),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    show("JobList(转录任务在册)", client.request(Op::JobList));
+
     show(
         "RunAction exit(认错丢弃)",
         client.request(Op::RunAction {

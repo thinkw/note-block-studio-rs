@@ -716,6 +716,39 @@ pub(super) struct Resolved {
     pub(super) voice: Option<u8>,
 }
 
+/// 通道/鼓映射对这条事件的判定：`(音色, 是否静音, 鼓音的最终键号)`。
+///
+/// `resolve` 和只读核对 [`is_silenced`] 共用这一个判据，免得「导入实际出不出声」和
+/// 「回执说它出不出声」长成两套口径。
+fn map_instrument(midi: &MidiData, opts: &MidiImportOptions, ev: &MidiEvent) -> (i8, bool, Option<i32>) {
+    let channel = ev.channel as usize;
+    if channel == 9 {
+        // 原版那圈「找不到就停在 midi_percamount」：解析阶段每个鼓音都进过 perc_notes，
+        // 找不到只可能来自手改的选项表，此时按静音处理。
+        return match midi
+            .perc_notes
+            .iter()
+            .position(|&n| n == ev.note)
+            .and_then(|i| Some((opts.perc_ins.get(i).copied()?, opts.perc_pitch.get(i).copied()?)))
+        {
+            Some((perc_ins, pitch)) => (
+                perc_ins,
+                perc_ins == -1,
+                Some((pitch as i32).clamp(0, KEY_MAX as i32)),
+            ),
+            None => (-1, true, None),
+        };
+    }
+    let ins = opts.channel_ins[channel];
+    (ins, ins == -1, None)
+}
+
+/// 只读核对用：这条事件在给定选项下会被映射判成静音吗。
+/// 不含 `max_height` 截断，也不看增强导入的音色替换。
+pub fn is_silenced(midi: &MidiData, opts: &MidiImportOptions, ev: &MidiEvent) -> bool {
+    map_instrument(midi, opts, ev).1
+}
+
 pub(super) fn resolve(midi: &MidiData, opts: &MidiImportOptions, ev: &MidiEvent, dpt: f64) -> Resolved {
     let channel = ev.channel as usize;
     let pos = midi.quantize(ev.pos, opts.remove_silent, dpt);
@@ -731,26 +764,10 @@ pub(super) fn resolve(midi: &MidiData, opts: &MidiImportOptions, ev: &MidiEvent,
     if vel >= 100 {
         vel = 100;
     }
-    let mut note = ev.note as i32 - 21;
-    let (ins, stop) = if channel == 9 {
-        // 原版那圈「找不到就停在 midi_percamount」：解析阶段每个鼓音都进过 perc_notes，
-        // 找不到只可能来自手改的选项表，此时按静音处理。
-        match midi
-            .perc_notes
-            .iter()
-            .position(|&n| n == ev.note)
-            .and_then(|i| Some((opts.perc_ins.get(i).copied()?, opts.perc_pitch.get(i).copied()?)))
-        {
-            Some((perc_ins, pitch)) => {
-                note = (pitch as i32).clamp(0, KEY_MAX as i32);
-                (perc_ins, perc_ins == -1)
-            }
-            None => (-1, true),
-        }
-    } else {
-        let ins = opts.channel_ins[channel];
-        note = (note + 12 * opts.channel_octave[channel] as i32).clamp(0, KEY_MAX as i32);
-        (ins, ins == -1)
+    let (ins, stop, drum_key) = map_instrument(midi, opts, ev);
+    let mut note = match drum_key {
+        Some(key) => key,
+        None => (ev.note as i32 - 21 + 12 * opts.channel_octave[channel] as i32).clamp(0, KEY_MAX as i32),
     };
     if opts.keep_octave_range {
         while note < MC_KEY_MIN as i32 {

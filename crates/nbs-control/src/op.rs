@@ -258,6 +258,14 @@ pub enum Op {
         layer_from: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         layer_to: Option<u32>,
+        /// 小节宽度（格数）。省略时用工程的 `time_signature * 4`，也就是界面画竖线的那对数。
+        /// 只给了它没给 `bars` 时，区间照原样读，文字视图按这个宽度切。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ticks_per_bar: Option<u32>,
+        /// `[起始小节, 结束小节]`，两头都含。给了就换成按小节算的 tick 区间，
+        /// 并且回执里带一份小节文字视图。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bars: Option<[u32; 2]>,
     },
     GetLayers,
     GetSelection,
@@ -378,11 +386,31 @@ pub enum Op {
     /// 存回当前文件名；没有文件名时报错，绝不弹「另存为」。
     Save,
     /// 导入 MIDI 并**替换**当前工程（历史清空，与界面导入一致）。
+    /// 选项全部可省略，省略 = 复刻人打开导入窗时那份基线，见 [`crate::midi::ImportMidiOptions`]。
     ImportMidi {
         path: String,
         /// 同 `OpenPath`：替换会丢掉当前工程的改动与历史。
         #[serde(default)]
         discard_changes: bool,
+        /// 传统导入的 14 个标量 + 通道/鼓映射 + 尾音声部；省略 = 基线。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<crate::midi::ImportMidiOptions>,
+        /// 增强导入那一套；省略 = 传统路径。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enhanced: Option<crate::midi::ImportEnhancedOptions>,
+        /// true = 把这次用到的通道/鼓映射写回 GM 表，并把标量存进偏好——
+        /// 那是**改用户的长期设置**，所以省略算 false，且增强路径不写回（和界面一致）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remember: Option<bool>,
+    },
+    /// 只算不写：把某个 MIDI 文件按给定选项走一遍导入计算，回报会得到什么。
+    /// 当前工程一点不动，所以它是 `import_midi` 之前的那一步核对。
+    InspectMidi {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<crate::midi::ImportMidiOptions>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enhanced: Option<crate::midi::ImportEnhancedOptions>,
     },
 
     // -------------------------------------------------------------- 重活 / 任务
@@ -408,6 +436,40 @@ pub enum Op {
     JobCancel {
         id: u64,
     },
+
+    // -------------------------------------------------------------- 音频转 MIDI
+    // 这四条全部对应转录窗上那四个按钮：都起一个本机子进程，所以一律回任务句柄。
+    // 它们既不改工程也不动撤销历史，唯一「写」的磁盘是 `TranscribeAudio` 里
+    // 调用方自己点名的 `save_midi`——那条走和 `export` 完全相同的路径闸与覆盖闸。
+    /// 问本机转录环境在不在（Python / torch / MuScriptor / GPU）。只读子进程的输出，
+    /// 不下载任何东西，所以这一条**不需要**许可勾。
+    TranscribeProbe,
+    /// 装环境：uv 建 venv 并装 MuScriptor + torch，会下几百 MB。
+    /// `cuda` = 装 cu128 构建还是 cpu 构建；省略 = 用转录窗上当前那个勾（这里不替人改它）。
+    TranscribePrepareEnv {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cuda: Option<bool>,
+    },
+    /// 只把权重取来并加载一遍（预检模型），不识别音频。
+    TranscribePrepareModel {
+        #[serde(default)]
+        options: crate::transcribe::TranscribeOptions,
+    },
+    /// 音频 → MIDI。产物先落在编辑器自己的 `.work/transcription/jobs/…` 里，
+    /// 那个目录**不在**路径白名单内，所以要交给 `import_midi` 就得同时给 `save_midi`
+    /// ——由调用方点名一份落在允许目录里的文件，覆盖照样要 `overwrite`。
+    TranscribeAudio {
+        /// 要识别的音频，必须落在允许的目录里且真的存在。
+        audio: String,
+        #[serde(default)]
+        options: crate::transcribe::TranscribeOptions,
+        /// 把识别出的 MIDI 另存到这个路径；省略 = 只留在任务产物里。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        save_midi: Option<String>,
+        /// true = 允许覆盖已存在的 `save_midi` 目标。
+        #[serde(default)]
+        overwrite: bool,
+    },
 }
 
 impl Op {
@@ -427,6 +489,23 @@ impl Op {
                 | Op::GetHistory
                 | Op::JobStatus { .. }
                 | Op::JobList
+                // 读文件、算导入，但既不改工程也不落盘，所以弹窗挡在中间时照样该回答。
+                | Op::InspectMidi { .. }
+        )
+    }
+
+    /// 只是「起一个后台任务」的操作：不改工程、不动撤销历史，所以弹窗挡在中间时
+    /// 也该照样回答——转录窗本身开着的时候，人正是想让它去准备环境。
+    /// （`TranscribeAudio` 的 `save_midi` 落盘是另一码事：那条过的是 `export` 同一套
+    /// 路径闸与覆盖闸，工程状态一点不动。）
+    pub fn only_spawns_a_job(&self) -> bool {
+        matches!(
+            self,
+            Op::Export { .. }
+                | Op::TranscribeProbe
+                | Op::TranscribePrepareEnv { .. }
+                | Op::TranscribePrepareModel { .. }
+                | Op::TranscribeAudio { .. }
         )
     }
 }

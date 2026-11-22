@@ -28,12 +28,13 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use schemars::JsonSchema;
 use serde::Serialize;
 
-pub use connect::{connect, parse_args, CallRequest, Command, Endpoint, USAGE};
+pub use connect::{connect, parse_args, ArgsSource, CallRequest, Command, Endpoint, USAGE};
 use nbs_control::{ControlClient, Op, Outcome, Playback};
 pub use params::{
-    BatchFieldArgs, CellRef, ClearSong, Export, GetNotes, ImportMidi, JobId, LayerAdd, LayerIndex,
-    LayerMove, LayerUpdate, OpenPath, RemoveCells, RevOnly, RunAction, SavePath, Seek, Select,
-    SetLoop, SetMetaArgs, SetNotes, Steps, Transpose,
+    BatchFieldArgs, CellRef, ClearSong, Export, GetNotes, ImportMidi, InspectMidi, JobId, LayerAdd,
+    LayerIndex, LayerMove, LayerUpdate, OpenPath, RemoveCells, RevOnly, RunAction, SavePath, Seek,
+    Select, SetLoop, SetMetaArgs, SetNotes, Steps, TranscribeAudio, TranscribePrepareEnv,
+    TranscribePrepareModel, Transpose,
 };
 
 /// 一条工具回执。两个失败层各自点名自己的范围。
@@ -133,7 +134,7 @@ pub enum ToolList {
 
 /// 把工具面打出来：给人核对「AI 会看到什么口径」，不需要编辑器在场，也不碰 stdio 协议。
 ///
-/// `only` 是给 `--dump-tools <工具>` 用的：全表 38 条、每条带一份 schema，
+/// `only` 是给 `--dump-tools <工具>` 用的：全表 43 条、每条带一份 schema，
 /// 只想看一条时那输出比正文长十倍。名字不在表里返回 `Ok(false)`，让调用方说清
 /// 「这条没有」而不是打一份空表装作成功。
 pub fn dump_tools(
@@ -291,6 +292,9 @@ impl Bridge {
 
     /// 读一段范围内的音符格子。返回上限由服务端定，`truncated=true` 说明只给了一部分，
     /// 需要缩小 `tick_from..=tick_to` 再读。
+    /// 想按小节读 melody：给 `bars:[起,止]`（两头都含，一次最多 256 节），tick 区间由小节号算，
+    /// 回执的 `data.bar_overview` 每节一行 `tick:音名(音色)`——键号要心算才会唱，而错的那半音
+    /// 只有耳朵能发现，所以这份文字视图由状态栏同一张表生成。
     #[tool]
     async fn get_notes(&self, Parameters(a): Parameters<GetNotes>) -> Result<Json<Reply>, CallToolResult> {
         self.call(a.into()).await
@@ -425,7 +429,8 @@ impl Bridge {
 
     // -------------------------------------------------------------- 播放
 
-    /// 从当前落点起播（和界面播放按钮同一语义：停在歌尾会先回 0）。
+    /// 从当前落点起播。落点已经到或越过曲尾时**先归零再播**，回执会说一句归过零：
+    /// 刚 `clear_song` / `open_file` 换了一首更短的歌时，不归零就是「按下去立刻停」。
     #[tool]
     async fn play(&self) -> Result<Json<Reply>, CallToolResult> {
         self.call(Op::Playback(Playback::Play)).await
@@ -478,8 +483,23 @@ impl Bridge {
     }
 
     /// 导入 MIDI 并**替换**当前工程：撤销历史清空，有未保存改动时要带 `discard_changes=true`。
+    /// `options` / `enhanced` 省略 = 复刻人打开 MIDI 导入窗时的那份基线（标量取自偏好，
+    /// 通道与鼓映射按这个文件和当前 GM 表现算）；要改哪一项就只写哪一项。
+    /// `remember=true` 会写回用户的 GM 表和偏好，所以默认不动它，且只有传统路径会写回。
+    /// 回执 `data` 是完整的导入核对单（`MidiPlan`），`applied` / `applied_enhanced`
+    /// 回显这次**真正生效**的每一个字段——先 `inspect_midi` 预演、再拿同一份选项导，
+    /// 两边逐字段比得动。
     #[tool]
     async fn import_midi(&self, Parameters(a): Parameters<ImportMidi>) -> Result<Json<Reply>, CallToolResult> {
+        self.call(a.into()).await
+    }
+
+    /// 只读预演 MIDI 导入：读文件、按给定选项算出一整首歌，然后**把结果丢掉**，
+    /// 工程一点不动（`rev` 也不变）。回执和 `import_midi` 同一个形状，用来先看清
+    /// 「通道 3 是不是被我标成静音了」「层数会不会超」再动手。
+    /// 这一步在主线程算，大文件会给几十毫秒到几百毫秒的等待。
+    #[tool]
+    async fn inspect_midi(&self, Parameters(a): Parameters<InspectMidi>) -> Result<Json<Reply>, CallToolResult> {
         self.call(a.into()).await
     }
 
@@ -488,6 +508,57 @@ impl Bridge {
     /// 路径同样受启动时允许的目录约束。
     #[tool]
     async fn export(&self, Parameters(a): Parameters<Export>) -> Result<Json<Reply>, CallToolResult> {
+        self.call(a.into()).await
+    }
+
+    // -------------------------------------------------------------- 音频转 MIDI
+
+    /// 问一次本机转录环境：Python / torch / MuScriptor 版本和 GPU 情况。
+    /// 它只起一个子进程读现状，**不下载任何东西**，所以是这四条里唯一不需要许可的。
+    /// 重活不在这次调用里做完：回执是任务句柄，之后 `job_status` 轮询，`job_cancel` 能停。
+    #[tool]
+    async fn transcribe_probe(&self) -> Result<Json<Reply>, CallToolResult> {
+        self.call(Op::TranscribeProbe).await
+    }
+
+    /// 装本机转录环境（uv 建 venv、装 MuScriptor 与 torch，几百 MB）。
+    /// 这一下**要人先在编辑器「音频转 MIDI」窗口里勾过本地下载与模型使用许可**：
+    /// AI 不能代勾，也没有绕过它的参数——没勾会得到 `not_allowed`，那句话里写了该谁去勾。
+    /// `cuda` 省略 = 用窗上当前那个勾，不替人改它。回任务句柄，完活带环境与 GPU 情况。
+    #[tool]
+    async fn transcribe_prepare_env(
+        &self,
+        Parameters(a): Parameters<TranscribePrepareEnv>,
+    ) -> Result<Json<Reply>, CallToolResult> {
+        self.call(a.into()).await
+    }
+
+    /// 只把权重取来并加载一遍（不识别音频）：几十分钟的活之前先验一次显存够不够、
+    /// dtype 选得对不对。要许可（权重是 CC BY-NC 4.0，下载由人勾过的那一下放行），
+    /// 也要环境已装好。`options` 省略哪个字段就用窗上当前那一份。
+    #[tool]
+    async fn transcribe_prepare_model(
+        &self,
+        Parameters(a): Parameters<TranscribePrepareModel>,
+    ) -> Result<Json<Reply>, CallToolResult> {
+        self.call(a.into()).await
+    }
+
+    /// 音频 → MIDI。要许可、要装好的环境，音频路径受允许的目录约束；回任务句柄，
+    /// 用 `job_status` 轮询（模型第一次跑还会先下权重，进度和消息都在句柄里）。
+    /// **想接着导入就必须给 `save_midi`**：产物本来落在编辑器自己的
+    /// `.work/transcription/jobs/…`，那个目录不在路径白名单里，`import_midi` 读不到它。
+    /// 给一个落在放行目录里的 `.mid` 路径（目标已存在要带 `overwrite=true`），
+    /// 之后就能走 `inspect_midi` 预演 → `import_midi` 落歌那条现成的链。
+    /// 完活的 `result` 除了音符数，还带回转录窗那两条核对：`preview_notes`、
+    /// `importer_events`、`note_count_mismatch`——对不上时窗上会直接停止导入，
+    /// 这里照实报、不替人决定，下一步该看 `inspect_midi` 给的真正落歌数。
+    /// 窗上的 SoundFont A/B 试听没接进来：要听效果请用 `export`（wav 能离线渲染出来）。
+    #[tool]
+    async fn transcribe_audio(
+        &self,
+        Parameters(a): Parameters<TranscribeAudio>,
+    ) -> Result<Json<Reply>, CallToolResult> {
         self.call(a.into()).await
     }
 
@@ -546,8 +617,8 @@ mod tests {
     fn tool_names_are_unique_and_every_tool_says_something() {
         let tools = Bridge::tool_router().list_all();
         assert!(
-            tools.len() >= 37,
-            "工具面塌了，只剩 {} 条：结构化 Op 有 37 条，一条都不能少",
+            tools.len() >= 41,
+            "工具面塌了，只剩 {} 条：结构化 Op 有 41 条，一条都不能少",
             tools.len()
         );
         let mut names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
@@ -618,7 +689,7 @@ mod tests {
     }
 
     /// 报错文案里那句「形状看 `--dump-tools set_notes`」必须是真能跑的写法：
-    /// 全表 38 条带 schema，为了看一个参数读完整张表，等于没给答案。
+    /// 全表 43 条带 schema，为了看一个参数读完整张表，等于没给答案。
     #[test]
     fn tool_face_dumps_whole_or_one_by_one() {
         let mut all = Vec::new();

@@ -63,10 +63,22 @@ fn serve(endpoint: Endpoint) -> Result<(), Box<dyn std::error::Error>> {
 /// 一次一条：定计划、连上、调用、把结果打到 stdout、按回执决定退出码。
 /// 这条路径不开 stdio 服务，所以脚本不用握手，人也能直接在终端里问一句。
 fn run_call(endpoint: Endpoint, request: CallRequest) -> Result<(), Box<dyn std::error::Error>> {
-    let args = match serde_json::from_str::<serde_json::Value>(&request.args) {
+    // 先取来源再解析：读盘失败和 JSON 坏掉是两种不同的下一步，混在一句里只会让人改错地方。
+    let text = match request.payload() {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("nbs-mcp: {e}");
+            std::process::exit(2)
+        }
+    };
+    let args = match serde_json::from_str::<serde_json::Value>(&text) {
         Ok(args) => args,
         Err(e) => {
-            eprintln!("nbs-mcp: {} 的参数不是合法 JSON: {e}", request.tool);
+            eprintln!(
+                "nbs-mcp: {} 的参数不是合法 JSON（来自{}）: {e}",
+                request.tool,
+                request.origin()
+            );
             std::process::exit(2)
         }
     };

@@ -15,16 +15,20 @@
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use egui::Context;
 use serde_json::{json, Value};
 
-use nbs_control::task::{CancelOutcome, SpawnReject};
+use nbs_control::task::{CancelOutcome, JobKind, SpawnReject};
 use nbs_control::{
-    ActionInfo, BatchField, CellNote, ChangeReport, ClientBoard, ControlServer, Data, Diagnostics,
-    Discovery, ErrorCode, ErrorInfo, HistoryInfo, Inbox, InstrumentInfo, JobHandle, JobInfo,
-    JobRegistry, JobStatus, LayerInfo, NoteCell, Op, Outcome, Playback, Scope, SelectTarget,
-    SelectionInfo, ServerConfig, SetMeta, Snapshot, PROTOCOL_VERSION,
+    ActionInfo, BarOverview, BatchField, CellNote, ChangeReport, ClientBoard, ControlServer, Data,
+    Diagnostics, Discovery, ErrorCode, ErrorInfo, HistoryInfo, ImportChannelMap, ImportDrumMap,
+    ImportEnhancedChannel, ImportEnhancedOptions, ImportMidiOptions, ImportRangeMode, ImportSlot,
+    ImportSubstitution, Inbox, InstrumentInfo, JobHandle, JobInfo, JobRegistry, JobStatus,
+    LayerInfo, MidiChannelPlan, MidiDrumPlan, MidiEnhancedReport, MidiPartPlan, MidiPlan,
+    MidiTrackInfo, NoteCell, Op, Outcome, Playback, Scope, SelectTarget, SelectionInfo,
+    ServerConfig, SetMeta, Snapshot, TranscribeOptions, PROTOCOL_VERSION,
 };
 use nbs_core::model::{
     Note, Song, FIRST_CUSTOM_INDEX, KEY_MAX, MC_KEY_MAX, MC_KEY_MIN, PAN_MAX, PIT_MAX, VEL_MAX,
@@ -37,6 +41,10 @@ use crate::state::{EditorState, Flag};
 const MAX_CELLS_PER_CALL: usize = 50_000;
 /// `GetNotes` 一次最多回多少格，截断会显式标出来。
 const MAX_CELLS_RETURNED: usize = 20_000;
+/// 小节文字视图一次最多切几节：再多就不是「读一段」，而是让主线程拼一份没人读的长文本。
+const MAX_BARS_RETURNED: usize = 256;
+/// 一小节的文字最多列几格，超了以 `…` 收尾（`cells` 仍是真实条数）。
+const MAX_BAR_CELLS_PRINTED: usize = 64;
 /// 一次 `Undo` / `Redo` 最多滚多远。
 const MAX_HISTORY_STEPS: u32 = 64;
 
@@ -301,7 +309,17 @@ fn execute(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op)
             tick_to,
             layer_from,
             layer_to,
-        } => match read_notes(state, *tick_from, *tick_to, *layer_from, *layer_to) {
+            ticks_per_bar,
+            bars,
+        } => match read_notes(
+            state,
+            *tick_from,
+            *tick_to,
+            *layer_from,
+            *layer_to,
+            *ticks_per_bar,
+            *bars,
+        ) {
             Ok((data, message)) => ok_data(state, data, message),
             Err(error) => Outcome::err(error, current_report(state, String::new())),
         },
@@ -374,6 +392,16 @@ fn execute(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op)
                 say(format!("没有编号 {id} 的任务"), format!("No job {id}")),
             ),
         },
+        // 预检会读盘并把整首歌算一遍，但工程一点不动；主线程这一下可能几百毫秒，
+        // 换的是「写之前先看清会得到什么」，值。
+        Op::InspectMidi {
+            path,
+            options,
+            enhanced,
+        } => match midi_inspect(state, ch, path, options.as_ref(), enhanced.as_ref()) {
+            Ok((data, message)) => ok_data(state, data, message),
+            Err(error) => Outcome::err(error, current_report(state, String::new())),
+        },
         other => mutate(state, ctx, ch, other),
     }
 }
@@ -381,8 +409,8 @@ fn execute(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op)
 // ------------------------------------------------------------------ 写路径
 
 fn mutate(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op) -> Outcome {
-    // 导出只是给歌曲拍快照再交给后台线程，不改状态，所以不受弹窗闸约束。
-    if !matches!(op, Op::Export { .. }) {
+    // 起后台任务的那几条只是拍快照再交给别的线程，不改状态，所以不受弹窗与窗口草稿闸约束。
+    if !op.only_spawns_a_job() {
         if let Err(e) = gate(state, op) {
             return fail(state, e);
         }
@@ -473,6 +501,9 @@ struct Stamp {
     history_len: usize,
     /// 撤销游标：undo/redo 用它算出这次滚过了哪几条。
     cursor: usize,
+    /// 开档 / 导入 MIDI 这类整首替换会把撤销历史一起清空，历史那条路于是算不出任何变更量，
+    /// 回执看着像「什么都没改」。会话号一变就是换了歌，变更量改按新工程的规模报。
+    song_session: u64,
 }
 
 impl Stamp {
@@ -480,6 +511,7 @@ impl Stamp {
         Self {
             history_len: state.doc.history.len(),
             cursor: state.doc.history.cursor(),
+            song_session: state.song_session,
         }
     }
 
@@ -494,7 +526,11 @@ impl Stamp {
         } else {
             (self.cursor, state.doc.history.cursor())
         };
-        let (cells, layers, meta) = edit_totals(state, from, to);
+        let (cells, layers, meta) = if state.song_session != self.song_session {
+            (state.doc.song.total_blocks, state.doc.song.layers.len(), true)
+        } else {
+            edit_totals(state, from, to)
+        };
         ChangeReport {
             cells_changed: cells,
             layers_changed: layers,
@@ -1268,26 +1304,48 @@ fn write(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op) -
         Op::ImportMidi {
             path,
             discard_changes,
+            options,
+            enhanced,
+            remember,
         } => {
             let target = resolve_path(state, ch, path, &["mid", "midi"], true)?;
             keep_or_replace(state, *discard_changes, ("导入 MIDI", "Importing MIDI"))?;
-            // 用 MIDI 导入窗的默认档位（原版 control_create 那一套），
-            // 精确度、通道映射都不在这里改，需要的人先 RunAction midi_import_*。
-            let opts = nbs_io::midi::MidiImportOptions::default();
-            let song = nbs_io::midi::import_midi_path(&target, &opts)
-                .map_err(|e| ErrorInfo::new(ErrorCode::Io, e))?;
-            let notes = song.total_blocks;
-            let layers = song.layers.len();
+            let computed = midi_compute(
+                state,
+                midi_parse(&target)?,
+                target.display().to_string(),
+                options.as_ref(),
+                enhanced.as_ref(),
+                remember.unwrap_or(false),
+            )?;
+            let MidiComputed {
+                plan,
+                song,
+                opts,
+                enh,
+                midi,
+            } = computed;
+            if remember.unwrap_or(false) && !enh.enabled {
+                // 与界面 `MidiImportRun` 传统分支同一个收尾：映射写回 GM 表，再落盘偏好。
+                // `remember` 没给真时连 `save_prefs` 都不跟——那次调用没改用户的任何东西，
+                // 顺手写一次设置文件就是无中生有。增强路径界面也不写回，照旧。
+                state.midi_options = opts;
+                state.midi_options.finish_import(&midi, &mut state.midi_gm);
+                state.save_prefs();
+            }
             apply_replacement(state, song);
+            let mut message = midi_plan_line(&plan);
+            if remember.unwrap_or(false) && !enh.enabled {
+                message.push_str(&say(
+                    "；映射已写回 GM 表并存进偏好",
+                    "; mappings written back to the GM table and saved to preferences",
+                ));
+            }
             Ok((
-                Some(Data::File {
-                    path: target.display().to_string(),
-                    file_kind: "midi-import".into(),
-                    notes,
-                }),
+                Some(Data::MidiPlan(Box::new(plan))),
                 say(
-                    format!("MIDI 导入完成：{notes} 个音符、{layers} 层（用的是导入窗默认选项）"),
-                    format!("MIDI imported: {notes} notes across {layers} layers (default window options)"),
+                    format!("MIDI 导入完成（工程已换成这份）：{message}"),
+                    format!("MIDI imported (song replaced): {message}"),
                 ),
             ))
         }
@@ -1309,6 +1367,22 @@ fn write(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op) -
             *overwrite,
         ),
         Op::RunAction { action, args } => run_action(state, ctx, ch, action, args.as_ref()),
+        Op::TranscribeProbe => transcribe_probe(state, ch),
+        Op::TranscribePrepareEnv { cuda } => transcribe_prepare_env(state, ch, *cuda),
+        Op::TranscribePrepareModel { options } => transcribe_prepare_model(state, ch, options),
+        Op::TranscribeAudio {
+            audio,
+            options,
+            save_midi,
+            overwrite,
+        } => transcribe_audio(
+            state,
+            ch,
+            audio,
+            options,
+            save_midi.as_deref(),
+            *overwrite,
+        ),
         other => Err(ErrorInfo::new(
             ErrorCode::Unsupported,
             say(
@@ -1572,6 +1646,735 @@ fn saved_or_error(state: &EditorState, path: &Path) -> Written {
     ))
 }
 
+// --------------------------------------------------------------- MIDI 导入
+//
+// 界面导入（`Command::MidiImportRun`）、`inspect_midi`、`import_midi` 三条路必须算出
+// 同一首歌，所以基线只有 [`crate::commands::midi_options_base`] 一处、覆盖只在这里合并、
+// 落歌只走 `nbs-io` 的公开入口。以后要加第四路，先把这三条并起来。
+
+/// 一次 MIDI 计算的全部产物。`midi` 留着是因为 `remember` 收尾写回 GM 表还要用它。
+struct MidiComputed {
+    plan: MidiPlan,
+    song: Song,
+    opts: nbs_io::midi::MidiImportOptions,
+    enh: nbs_io::midi_enhanced::EnhancedMidiOptions,
+    midi: nbs_io::midi::MidiData,
+}
+
+/// 把「哪一行出的错」补到文案前面，否则调用方只看见一句「音色 25 不存在」，
+/// 不知道自己是在通道 3 还是鼓音 38 上写错的。
+fn where_about(prefix_cn: String, prefix_en: String, error: ErrorInfo) -> ErrorInfo {
+    ErrorInfo {
+        code: error.code,
+        message: say(
+            format!("{prefix_cn}{}", error.message),
+            format!("{prefix_en}{}", error.message),
+        ),
+        detail: error.detail,
+    }
+}
+
+/// 覆盖项校验：越界数、不存在的鼓音号、重复通道都在这里拒掉，
+/// 合并阶段因此不可能半途失败。
+fn check_midi_overrides(
+    state: &EditorState,
+    midi: &nbs_io::midi::MidiData,
+    options: Option<&ImportMidiOptions>,
+    enhanced: Option<&ImportEnhancedOptions>,
+) -> Result<(), ErrorInfo> {
+    if let Some(o) = options {
+        if let Some(p) = o.precision {
+            if !matches!(p, 0 | 1 | 3 | 7) {
+                return Err(bad(
+                    format!("精准度只收 0 / 1 / 3 / 7（界面 1 / 2 / 4 / 8 倍），收到 {p}"),
+                    format!("precision must be 0, 1, 3 or 7 (UI 1x/2x/4x/8x), got {p}"),
+                ));
+            }
+        }
+        if let Some(h) = o.max_height {
+            if h == 0 || h > 20 {
+                return Err(out_of_range(
+                    format!("每通道层数上限只收 1..=20（20 = 不限），收到 {h}"),
+                    format!("max_height must be 1..=20 (20 = unlimited), got {h}"),
+                ));
+            }
+        }
+        for (field, value) in [
+            ("note_duration_fade_start", o.note_duration_fade_start),
+            ("note_duration_fade_end", o.note_duration_fade_end),
+        ] {
+            if let Some(v) = value {
+                if v > 100 {
+                    return Err(out_of_range(
+                        format!("{field} 是百分比，只收 0..=100，收到 {v}"),
+                        format!("{field} is a percentage 0..=100, got {v}"),
+                    ));
+                }
+            }
+        }
+        let mut seen_channel = [false; 16];
+        for c in &o.channels {
+            if usize::from(c.channel) >= 16 {
+                return Err(out_of_range(
+                    format!("通道号只收 0..=15，收到 {}", c.channel),
+                    format!("channel must be 0..=15, got {}", c.channel),
+                ));
+            }
+            let index = usize::from(c.channel);
+            if seen_channel[index] {
+                return Err(bad(
+                    format!("通道 {} 在 channels 里出现两次，不知道以哪条为准", c.channel),
+                    format!("channel {} appears twice in channels", c.channel),
+                ));
+            }
+            seen_channel[index] = true;
+            if c.channel == 9 {
+                return Err(bad(
+                    "通道 9 是打击乐，映射写在 drums，不在 channels",
+                    "Channel 9 is percussion; map it in drums, not channels",
+                ));
+            }
+            if !(-12..=12).contains(&c.octave) {
+                return Err(out_of_range(
+                    format!("通道 {} 的八度位移收 -12..=12，收到 {}", c.channel, c.octave),
+                    format!("Channel {} octave shift must be -12..=12, got {}", c.channel, c.octave),
+                ));
+            }
+            if c.instrument != -1 {
+                let raw = c.instrument;
+                let index = u8::try_from(raw).map_err(|_| {
+                    out_of_range(
+                        format!("通道 {index} 的音色只收 -1（忽略该通道）或音色号，收到 {raw}"),
+                        format!("Channel {index} instrument must be -1 (ignore) or an index, got {raw}"),
+                    )
+                })?;
+                check_instrument(state, index)
+                    .map_err(|e| where_about(format!("通道 {index}："), format!("Channel {index}: "), e))?;
+            }
+        }
+        let mut seen_drum: Vec<u8> = Vec::new();
+        for d in &o.drums {
+            if d.key < 0 || d.key > KEY_MAX as i8 {
+                return Err(out_of_range(
+                    format!(
+                        "鼓音 {} 的键号只收 0..={KEY_MAX}（界面上那列已经是加过 33 的最终键号），收到 {}",
+                        d.note, d.key
+                    ),
+                    format!(
+                        "Drum note {}: key must be 0..={KEY_MAX} (the UI column is the final key, +33 already applied), got {}",
+                        d.note, d.key
+                    ),
+                ));
+            }
+            if midi.perc_notes.iter().all(|&n| n != d.note) {
+                return Err(bad(
+                    format!(
+                        "这个文件的鼓音里没有音号 {}；可用清单看 inspect_midi 回包的 drums",
+                        d.note
+                    ),
+                    format!(
+                        "Note {} is not a percussion note in this file; see drums from inspect_midi",
+                        d.note
+                    ),
+                ));
+            }
+            if seen_drum.contains(&d.note) {
+                return Err(bad(
+                    format!("鼓音 {} 在 drums 里出现两次，不知道以哪条为准", d.note),
+                    format!("drum note {} appears twice in drums", d.note),
+                ));
+            }
+            seen_drum.push(d.note);
+            if d.instrument != -1 {
+                let raw = d.instrument;
+                let index = u8::try_from(raw).map_err(|_| {
+                    out_of_range(
+                        format!("鼓音 {} 的音色只收 -1（静音）或音色号，收到 {raw}", d.note),
+                        format!("Drum note {} instrument must be -1 (mute) or an index, got {raw}", d.note),
+                    )
+                })?;
+                check_instrument(state, index).map_err(|e| {
+                    where_about(format!("鼓音 {}：", d.note), format!("Drum note {}: ", d.note), e)
+                })?;
+            }
+        }
+        if let Some(parts) = &o.tail_parts {
+            for &index in parts {
+                if usize::try_from(index)
+                    .map(|i| i >= midi.parts.len())
+                    .unwrap_or(true)
+                {
+                    return Err(out_of_range(
+                        format!(
+                            "声部下标 {index} 不存在：这个文件只有 {} 个声部（0..{}）",
+                            midi.parts.len(),
+                            midi.parts.len().saturating_sub(1)
+                        ),
+                        format!(
+                            "Part index {index} is out of range: this file has {} parts (0..{})",
+                            midi.parts.len(),
+                            midi.parts.len().saturating_sub(1)
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(e) = enhanced {
+        let extras = e.range_mode.is_some()
+            || e.smart_substitute.is_some()
+            || e.force_fold.is_some()
+            || e.sustain.is_some()
+            || e.sustain_fade.is_some()
+            || e.separate_voices.is_some()
+            || e.voice_ignore_metadata.is_some()
+            || e.dedupe_notes.is_some()
+            || !e.channels.is_empty()
+            || !e.substitutes.is_empty();
+        if !e.enabled.unwrap_or(false) && extras {
+            return Err(bad(
+                "给了 enhanced 的其他字段却没带 enabled=true：这些字段会被整个跳过、走传统导入。要么带上 enabled，要么别给。",
+                "enhanced fields given without enabled=true would be skipped and the traditional importer used. Pass enabled or drop the fields.",
+            ));
+        }
+        let mut seen_channel = [false; 16];
+        for c in &e.channels {
+            if usize::from(c.channel) >= 16 {
+                return Err(out_of_range(
+                    format!("通道号只收 0..=15，收到 {}", c.channel),
+                    format!("channel must be 0..=15, got {}", c.channel),
+                ));
+            }
+            let index = usize::from(c.channel);
+            if seen_channel[index] {
+                return Err(bad(
+                    format!("通道 {} 在 enhanced.channels 里出现两次", c.channel),
+                    format!("channel {} appears twice in enhanced.channels", c.channel),
+                ));
+            }
+            seen_channel[index] = true;
+            if let Some(t) = c.transpose {
+                if !(-72..=72).contains(&t) {
+                    return Err(out_of_range(
+                        format!("通道 {} 的移调收 -72..=72 半音，收到 {t}", c.channel),
+                        format!("Channel {} transpose must be -72..=72 semitones, got {t}", c.channel),
+                    ));
+                }
+            }
+            if c.slots.len() > 3 {
+                return Err(bad(
+                    format!("通道 {} 给了 {} 个槽位，一个通道最多 3 个", c.channel, c.slots.len()),
+                    format!("Channel {} has {} slots; at most 3 per channel", c.channel, c.slots.len()),
+                ));
+            }
+            for (slot, value) in c.slots.iter().enumerate() {
+                if let Some(instrument) = value.instrument {
+                    if instrument >= FIRST_CUSTOM_INDEX {
+                        return Err(out_of_range(
+                            format!(
+                                "通道 {} 的槽位 {} 只收内置音色 0..{}（增强导入不用自定义音色），收到 {instrument}",
+                                c.channel,
+                                slot + 1,
+                                FIRST_CUSTOM_INDEX - 1
+                            ),
+                            format!(
+                                "Channel {} slot {} must be a built-in 0..{} (enhanced import does not use custom instruments), got {instrument}",
+                                c.channel,
+                                slot + 1,
+                                FIRST_CUSTOM_INDEX - 1
+                            ),
+                        ));
+                    }
+                }
+                if let Some(volume) = value.volume {
+                    if volume > 100 {
+                        return Err(out_of_range(
+                            format!("通道 {} 的槽位 {} 音量是百分比，只收 0..=100，收到 {volume}", c.channel, slot + 1),
+                            format!("Channel {} slot {} volume is a percentage 0..=100, got {volume}", c.channel, slot + 1),
+                        ));
+                    }
+                }
+            }
+        }
+        let mut seen_substitute: Vec<u8> = Vec::new();
+        for s in &e.substitutes {
+            if s.instrument >= FIRST_CUSTOM_INDEX {
+                return Err(out_of_range(
+                    format!(
+                        "替换表的音色只收内置 0..{}，收到 {}",
+                        FIRST_CUSTOM_INDEX - 1,
+                        s.instrument
+                    ),
+                    format!(
+                        "Substitution rows cover built-ins 0..{} only, got {}",
+                        FIRST_CUSTOM_INDEX - 1,
+                        s.instrument
+                    ),
+                ));
+            }
+            if seen_substitute.contains(&s.instrument) {
+                return Err(bad(
+                    format!("音色 {} 在 substitutes 里出现两次", s.instrument),
+                    format!("instrument {} appears twice in substitutes", s.instrument),
+                ));
+            }
+            seen_substitute.push(s.instrument);
+            for (side, target) in [("high", s.high), ("low", s.low)] {
+                if let Some(instrument) = target {
+                    if instrument >= FIRST_CUSTOM_INDEX {
+                        return Err(out_of_range(
+                            format!("音色 {} 的 {side} 替换只收内置 0..{}，收到 {instrument}", s.instrument, FIRST_CUSTOM_INDEX - 1),
+                            format!("Instrument {} {side} replacement must be a built-in 0..{}, got {instrument}", s.instrument, FIRST_CUSTOM_INDEX - 1),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 基线 ⊕ 覆盖 = 这次真正生效的两套选项。校验先过，所以这里每一步都直接落值。
+fn midi_effective(
+    state: &EditorState,
+    midi: &nbs_io::midi::MidiData,
+    options: Option<&ImportMidiOptions>,
+    enhanced: Option<&ImportEnhancedOptions>,
+    remember: bool,
+) -> Result<(nbs_io::midi::MidiImportOptions, nbs_io::midi_enhanced::EnhancedMidiOptions), ErrorInfo> {
+    check_midi_overrides(state, midi, options, enhanced)?;
+    let mut opts = crate::commands::midi_options_base(state, midi);
+    // 省略 `remember` 就是「别动我的长期设置」。界面上那个勾不参与这条判定——
+    // 写回 GM 表动的是用户的偏好，外部调用方不能替用户点它。
+    opts.remember = remember;
+    if let Some(o) = options {
+        opts.remove_silent = o.remove_silent.unwrap_or(opts.remove_silent);
+        opts.name_layers = o.name_layers.unwrap_or(opts.name_layers);
+        opts.name_after_patch = o.name_after_patch.unwrap_or(opts.name_after_patch);
+        opts.tempo_from_file = o.tempo_from_file.unwrap_or(opts.tempo_from_file);
+        opts.tempo_changer = o.tempo_changer.unwrap_or(opts.tempo_changer);
+        opts.keep_octave_range = o.keep_octave_range.unwrap_or(opts.keep_octave_range);
+        opts.use_velocity = o.use_velocity.unwrap_or(opts.use_velocity);
+        opts.note_duration = o.note_duration.unwrap_or(opts.note_duration);
+        opts.note_duration_fade = o.note_duration_fade.unwrap_or(opts.note_duration_fade);
+        if let Some(value) = o.max_height {
+            opts.max_height = value;
+        }
+        if let Some(value) = o.precision {
+            opts.precision = value;
+        }
+        if let Some(value) = o.note_duration_fade_start {
+            opts.note_duration_fade_start = value;
+        }
+        if let Some(value) = o.note_duration_fade_end {
+            opts.note_duration_fade_end = value;
+        }
+        for c in &o.channels {
+            let index = usize::from(c.channel);
+            opts.channel_ins[index] = c.instrument;
+            opts.channel_octave[index] = c.octave;
+        }
+        for d in &o.drums {
+            // 校验阶段保证音号在这个文件里、下标两张表都取到到；取不到就当没这条。
+            if let Some(index) = midi.perc_notes.iter().position(|&n| n == d.note) {
+                if let Some(ins) = opts.perc_ins.get_mut(index) {
+                    *ins = d.instrument;
+                }
+                if let Some(key) = opts.perc_pitch.get_mut(index) {
+                    *key = d.key;
+                }
+            }
+        }
+        if let Some(parts) = &o.tail_parts {
+            // 给了就以它为准：先全关，再点亮列出的那些；空数组 = 尾音全关。
+            for flag in &mut opts.part_durations {
+                *flag = false;
+            }
+            for &index in parts {
+                if let Some(flag) = opts.part_durations.get_mut(usize::try_from(index).unwrap_or(usize::MAX)) {
+                    *flag = true;
+                }
+            }
+        }
+    }
+    // 增强档的基线是「这个文件的预设」，和 `load_midi_for_import` 里给界面的那份同源；
+    // 预设本身就带 `enabled = false`，所以省略即传统路径。
+    let mut enh = nbs_io::midi_enhanced::EnhancedMidiOptions::for_midi(midi);
+    if let Some(e) = enhanced {
+        enh.enabled = e.enabled.unwrap_or(false);
+        if let Some(mode) = e.range_mode {
+            enh.range_mode = match mode {
+                ImportRangeMode::Keep => nbs_io::midi_enhanced::RangeMode::Keep,
+                ImportRangeMode::Fold => nbs_io::midi_enhanced::RangeMode::Fold,
+                ImportRangeMode::Octave => nbs_io::midi_enhanced::RangeMode::Octave,
+                ImportRangeMode::Semitone => nbs_io::midi_enhanced::RangeMode::Semitone,
+            };
+        }
+        enh.smart_substitute = e.smart_substitute.unwrap_or(enh.smart_substitute);
+        enh.force_fold = e.force_fold.unwrap_or(enh.force_fold);
+        enh.sustain = e.sustain.unwrap_or(enh.sustain);
+        enh.sustain_fade = e.sustain_fade.unwrap_or(enh.sustain_fade);
+        enh.separate_voices = e.separate_voices.unwrap_or(enh.separate_voices);
+        enh.voice_ignore_metadata = e
+            .voice_ignore_metadata
+            .unwrap_or(enh.voice_ignore_metadata);
+        enh.dedupe_notes = e.dedupe_notes.unwrap_or(enh.dedupe_notes);
+        let mut rerecommend = e.range_mode.is_some();
+        for c in &e.channels {
+            let combination = &mut enh.channels[usize::from(c.channel)];
+            if !c.slots.is_empty() {
+                let mut slots = [nbs_io::midi_enhanced::MidiSlot::default(); 3];
+                for (index, slot) in c.slots.iter().enumerate() {
+                    slots[index] = nbs_io::midi_enhanced::MidiSlot {
+                        instrument: slot.instrument,
+                        volume: slot.volume.unwrap_or(100),
+                    };
+                }
+                combination.slots = slots;
+                // 界面里改槽位乐器/音量也会重算推荐位移，这里跟着走。
+                rerecommend = true;
+            }
+        }
+        if rerecommend {
+            enh.recommend_offsets(midi);
+        }
+        for c in &e.channels {
+            if let Some(value) = c.transpose {
+                // 手动值最后落地：`recommend_offsets` 会覆盖 transpose，界面上也是手改赢。
+                enh.channels[usize::from(c.channel)].transpose = value;
+            }
+        }
+        for s in &e.substitutes {
+            // 给一行就整行替换：省略 high/low 就是那一侧不换。
+            enh.substitutes[usize::from(s.instrument)] = nbs_io::midi_enhanced::InstrumentSubstitution {
+                high: s.high,
+                low: s.low,
+            };
+        }
+    }
+    Ok((opts, enh))
+}
+
+/// 读文件 + 解析。失败一律 `io`：这时候工程一点没动，剩下的只有磁盘和格式。
+fn midi_parse(target: &Path) -> Result<nbs_io::midi::MidiData, ErrorInfo> {
+    nbs_io::midi::parse_midi_path(target).map_err(|error| ErrorInfo::new(ErrorCode::Io, error))
+}
+
+/// 算歌 + 出核对单，但不碰工程。`inspect_midi` 用完就丢，`import_midi` 拿去落地。
+///
+/// 收的是已经解析好的 `MidiData` 而不是路径，因为预检、导入和测试都要走这同一条算法；
+/// 谁也别在旁边再算一遍自己的版本。
+fn midi_compute(
+    state: &EditorState,
+    midi: nbs_io::midi::MidiData,
+    path_label: String,
+    options: Option<&ImportMidiOptions>,
+    enhanced: Option<&ImportEnhancedOptions>,
+    remember: bool,
+) -> Result<MidiComputed, ErrorInfo> {
+    let (opts, enh) = midi_effective(state, &midi, options, enhanced, remember)?;
+    let (song, report) = if enh.enabled {
+        let (song, report) = nbs_io::midi_enhanced::import_midi_enhanced(&midi, &opts, &enh)
+            // 增强导入只会因为配置本身不合法而失败（比如槽位写了自定义音色），
+            // 文案由 `nbs-io` 按当前语言出，这里原样转给调用方。
+            .map_err(|error| bad(error.clone(), error))?;
+        (song, Some(report))
+    } else {
+        (nbs_io::midi::import_midi_data(&midi, &opts), None)
+    };
+    let mut per_channel = [0usize; 16];
+    let mut per_drum = [0usize; 128];
+    let mut per_part = vec![0usize; midi.parts.len()];
+    let mut silenced_notes = 0usize;
+    for track in &midi.tracks {
+        for event in &track.events {
+            per_channel[usize::from(event.channel.min(15))] += 1;
+            if event.channel == 9 {
+                per_drum[usize::from(event.note)] += 1;
+            }
+            if let Some(count) = per_part.get_mut(event.part) {
+                *count += 1;
+            }
+            if nbs_io::midi::is_silenced(&midi, &opts, event) {
+                silenced_notes += 1;
+            }
+        }
+    }
+    let out_of_range = song
+        .iter_notes()
+        .filter(|(_, _, note)| note.key < MC_KEY_MIN || note.key > MC_KEY_MAX)
+        .count();
+    let plan = MidiPlan {
+        path: path_label,
+        format: midi.format,
+        division: midi.division,
+        smpte_division: midi.division & 0x8000 != 0,
+        channels_seen: midi.channels,
+        tracks: midi
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| MidiTrackInfo {
+                index: index as u32,
+                name: track.name.clone(),
+                events: track.events.len(),
+            })
+            .collect(),
+        channels: (0..=midi.channels)
+            .filter(|channel| *channel != 9)
+            .map(|channel| {
+                let index = usize::from(channel);
+                let patch = midi.channel_patch[index];
+                let instrument = opts.channel_ins[index];
+                MidiChannelPlan {
+                    channel,
+                    patch,
+                    patch_name: if patch < 128 {
+                        nbs_io::MidiGmTable::patch_name(patch as u8).to_string()
+                    } else {
+                        String::new()
+                    },
+                    instrument,
+                    octave: opts.channel_octave[index],
+                    notes: per_channel[index],
+                    silent: instrument == -1,
+                }
+            })
+            .collect(),
+        drums: midi
+            .perc_notes
+            .iter()
+            .enumerate()
+            .map(|(index, &note)| MidiDrumPlan {
+                note,
+                name: nbs_io::MidiGmTable::drum_name(note).to_string(),
+                instrument: opts.perc_ins.get(index).copied().unwrap_or(-1),
+                key: opts.perc_pitch.get(index).copied().unwrap_or(0),
+                notes: per_drum[usize::from(note)],
+            })
+            .collect(),
+        parts: midi
+            .parts
+            .iter()
+            .enumerate()
+            .map(|(index, part)| MidiPartPlan {
+                index: index as u32,
+                track: part.track as u32,
+                channel: part.channel,
+                patch: part.patch,
+                tail: opts
+                    .part_durations
+                    .get(index)
+                    .copied()
+                    .unwrap_or(part.note_duration),
+                notes: per_part[index],
+            })
+            .collect(),
+        tempo_changes: midi.tempo_changers.len(),
+        notes: song.total_blocks,
+        layers: song.layers.len(),
+        layer_names: song.layers.iter().map(|layer| layer.name.clone()).collect(),
+        length_ticks: song.song_length(),
+        tempo: song.meta.tempo,
+        bpm: song.meta.bpm(),
+        out_of_range,
+        silenced_notes,
+        enhanced: report.map(|report| MidiEnhancedReport {
+            notes: report.notes,
+            out_of_range: report.out_of_range,
+            substituted: report.substituted,
+            folded: report.folded,
+            voiced_notes: report.voiced_notes,
+            deduped: report.deduped,
+        }),
+        applied: midi_echo(&midi, &opts),
+        applied_enhanced: midi_echo_enhanced(&enh),
+    };
+    Ok(MidiComputed {
+        plan,
+        song,
+        opts,
+        enh,
+        midi,
+    })
+}
+
+/// 生效选项回显成线上形状，每个字段都给满——回显的是「这次真正用了什么」，
+/// 不是调用方当初发过来的那份省略稿。
+fn midi_echo(midi: &nbs_io::midi::MidiData, opts: &nbs_io::midi::MidiImportOptions) -> ImportMidiOptions {
+    ImportMidiOptions {
+        remove_silent: Some(opts.remove_silent),
+        name_layers: Some(opts.name_layers),
+        name_after_patch: Some(opts.name_after_patch),
+        tempo_from_file: Some(opts.tempo_from_file),
+        tempo_changer: Some(opts.tempo_changer),
+        max_height: Some(opts.max_height),
+        keep_octave_range: Some(opts.keep_octave_range),
+        use_velocity: Some(opts.use_velocity),
+        precision: Some(opts.precision),
+        note_duration: Some(opts.note_duration),
+        note_duration_fade: Some(opts.note_duration_fade),
+        note_duration_fade_start: Some(opts.note_duration_fade_start),
+        note_duration_fade_end: Some(opts.note_duration_fade_end),
+        channels: (0..=midi.channels)
+            .filter(|channel| *channel != 9)
+            .map(|channel| {
+                let index = usize::from(channel);
+                ImportChannelMap {
+                    channel,
+                    instrument: opts.channel_ins[index],
+                    octave: opts.channel_octave[index],
+                }
+            })
+            .collect(),
+        drums: midi
+            .perc_notes
+            .iter()
+            .enumerate()
+            .map(|(index, &note)| ImportDrumMap {
+                note,
+                instrument: opts.perc_ins.get(index).copied().unwrap_or(-1),
+                key: opts.perc_pitch.get(index).copied().unwrap_or(0),
+            })
+            .collect(),
+        tail_parts: Some(
+            opts.part_durations
+                .iter()
+                .enumerate()
+                .filter(|(_, flag)| **flag)
+                .map(|(index, _)| index as u32)
+                .collect(),
+        ),
+    }
+}
+
+/// 走传统路径时这里只留一句 `enabled: false`——把没用上的 16 通道 × 3 槽和 20 行替换表
+/// 塞进每一份回执，只会让调用方多读两百行与本次无关的 JSON。
+fn midi_echo_enhanced(enh: &nbs_io::midi_enhanced::EnhancedMidiOptions) -> ImportEnhancedOptions {
+    if !enh.enabled {
+        return ImportEnhancedOptions {
+            enabled: Some(false),
+            ..ImportEnhancedOptions::default()
+        };
+    }
+    ImportEnhancedOptions {
+        enabled: Some(true),
+        range_mode: Some(match enh.range_mode {
+            nbs_io::midi_enhanced::RangeMode::Keep => ImportRangeMode::Keep,
+            nbs_io::midi_enhanced::RangeMode::Fold => ImportRangeMode::Fold,
+            nbs_io::midi_enhanced::RangeMode::Octave => ImportRangeMode::Octave,
+            nbs_io::midi_enhanced::RangeMode::Semitone => ImportRangeMode::Semitone,
+        }),
+        smart_substitute: Some(enh.smart_substitute),
+        force_fold: Some(enh.force_fold),
+        sustain: Some(enh.sustain),
+        sustain_fade: Some(enh.sustain_fade),
+        separate_voices: Some(enh.separate_voices),
+        voice_ignore_metadata: Some(enh.voice_ignore_metadata),
+        dedupe_notes: Some(enh.dedupe_notes),
+        channels: (0..16u8)
+            .map(|channel| {
+                let combination = &enh.channels[usize::from(channel)];
+                ImportEnhancedChannel {
+                    channel,
+                    transpose: Some(combination.transpose),
+                    slots: combination
+                        .slots
+                        .iter()
+                        .map(|slot| ImportSlot {
+                            instrument: slot.instrument,
+                            volume: Some(slot.volume),
+                        })
+                        .collect(),
+                }
+            })
+            .collect(),
+        substitutes: (0..FIRST_CUSTOM_INDEX)
+            .map(|instrument| ImportSubstitution {
+                instrument,
+                high: enh.substitutes[usize::from(instrument)].high,
+                low: enh.substitutes[usize::from(instrument)].low,
+            })
+            .collect(),
+    }
+}
+
+/// 核对单里最该被看见的那几个数，一行说完；细节调用方自己从 `data` 里取。
+fn midi_plan_line(plan: &MidiPlan) -> String {
+    let mode = if plan.applied_enhanced.enabled == Some(true) {
+        say("增强导入", "enhanced")
+    } else {
+        say("传统导入", "traditional")
+    };
+    let mut line = say(
+        format!(
+            "{mode}：{} 个音符、{} 层、{} tick（BPM {:.0}）；超 MC 音域 {}、按映射判静音 {}",
+            plan.notes,
+            plan.layers,
+            plan.length_ticks,
+            plan.bpm,
+            plan.out_of_range,
+            plan.silenced_notes
+        ),
+        format!(
+            "{mode}: {} notes, {} layers, {} ticks (BPM {:.0}); {} outside native range (key {MC_KEY_MIN}..{MC_KEY_MAX}), {} silenced by the mappings",
+            plan.notes,
+            plan.layers,
+            plan.length_ticks,
+            plan.bpm,
+            plan.out_of_range,
+            plan.silenced_notes
+        ),
+    );
+    if plan.tempo_changes > 0 {
+        line.push_str(&say(
+            format!("；文件有 {} 处速度变化，tempo_changer={}", plan.tempo_changes, plan.applied.tempo_changer.unwrap_or(false)),
+            format!("; {} tempo change(s) in the file, tempo_changer={}", plan.tempo_changes, plan.applied.tempo_changer.unwrap_or(false)),
+        ));
+    }
+    if let Some(report) = &plan.enhanced {
+        line.push_str(&say(
+            format!(
+                "；替换 {}、折叠 {}、拆声部音符 {}、去重 {}",
+                report.substituted, report.folded, report.voiced_notes, report.deduped
+            ),
+            format!(
+                "; substituted {}, folded {}, voiced {}, deduped {}",
+                report.substituted, report.folded, report.voiced_notes, report.deduped
+            ),
+        ));
+    }
+    line
+}
+
+/// 只读预检：算一遍、报一份核对单，工程一动不动。
+fn midi_inspect(
+    state: &EditorState,
+    ch: &ControlChannel,
+    raw: &str,
+    options: Option<&ImportMidiOptions>,
+    enhanced: Option<&ImportEnhancedOptions>,
+) -> Result<(Data, String), ErrorInfo> {
+    let target = resolve_path(state, ch, raw, &["mid", "midi"], true)?;
+    let midi = midi_parse(&target)?;
+    let computed = midi_compute(
+        state,
+        midi,
+        target.display().to_string(),
+        options,
+        enhanced,
+        false,
+    )?;
+    let line = midi_plan_line(&computed.plan);
+    Ok((
+        Data::MidiPlan(Box::new(computed.plan)),
+        say(
+            format!("MIDI 预检完成（工程未改动）：{line}"),
+            format!("MIDI preview done (song untouched): {line}"),
+        ),
+    ))
+}
+
 // ------------------------------------------------------------------ 路径闸
 
 /// 词法归一：补上当前目录、就地消掉 `.` 与 `..`。不用 `canonicalize`，它要求文件已存在，
@@ -1740,8 +2543,29 @@ fn playback(state: &mut EditorState, ctx: &Context, action: &Playback) -> Writte
             if state.audio.is_playing() {
                 return Ok((None, say("已经在播放", "Already playing")));
             }
+            // 播放头停在曲尾之外时，`begin_playback` 那道归零闸还带一个尾巴余量（尾音要放完），
+            // 于是「落在 137、歌只有 121」这种情况会起播即停，回执再说一句「开始播放」，
+            // 调用方只能靠自己先 seek。这里按真正的曲尾归零，并在回执里说清了落点动过。
+            let length = state.doc.song.song_length() as f64;
+            let parked = state.audio.position_ticks();
+            let rewound = parked > 0.0 && parked >= length;
+            if rewound {
+                state.set_marker(0.0);
+            }
             run_command(state, ctx, Command::PlayPause);
-            Ok((None, say("开始播放", "Playback started")))
+            let message = if rewound {
+                say(
+                    format!(
+                        "开始播放（落点原本停在 {parked:.2} tick，已过曲尾 {length:.0} tick，已归零）",
+                    ),
+                    format!(
+                        "Playback started (playhead was parked at {parked:.2} ticks, past the song's {length:.0}; reset to 0)",
+                    ),
+                )
+            } else {
+                say("开始播放", "Playback started")
+            };
+            Ok((None, message))
         }
         Playback::Pause => {
             if !state.audio.is_playing() {
@@ -1827,19 +2651,71 @@ fn read_notes(
     tick_to: Option<u32>,
     layer_from: Option<u32>,
     layer_to: Option<u32>,
+    ticks_per_bar: Option<u32>,
+    bars: Option<[u32; 2]>,
 ) -> Result<(Data, String), ErrorInfo> {
     let song = &state.doc.song;
     let layers = song.layers.len() as u32;
-    let tf = tick_from.unwrap_or(0);
-    let end = song.song_length().saturating_sub(1);
-    // 省略 tick_to = 读到歌尾。起点已经在歌尾之外时读空，而不是报一个自相矛盾的区间错。
-    let tt = tick_to.unwrap_or_else(|| tf.max(end));
-    if tt < tf {
-        return Err(bad(
-            "tick_to 不能小于 tick_from",
-            "tick_to must be >= tick_from",
-        ));
-    }
+    // 宽度默认取界面画竖线用的那对数（拍号 × 4），0 是病态值，别拿它除。
+    let width = ticks_per_bar
+        .unwrap_or_else(|| song.meta.ticks_per_bar())
+        .max(1);
+    let (tf, tt) = match bars {
+        Some([b0, b1]) => {
+            if tick_from.is_some() || tick_to.is_some() {
+                return Err(bad(
+                    "bars 已经定了区间，别再给 tick_from / tick_to",
+                    "bars already sets the range; drop tick_from / tick_to",
+                ));
+            }
+            if b1 < b0 {
+                return Err(bad(
+                    "bars 的终点不能小于起点",
+                    "bars[1] must not be below bars[0]",
+                ));
+            }
+            let count = b1 - b0 + 1;
+            if count > MAX_BARS_RETURNED as u32 {
+                return Err(bad(
+                    format!("一次最多 {MAX_BARS_RETURNED} 小节，这里要 {count} 节"),
+                    format!("{count} bars requested, the cap is {MAX_BARS_RETURNED}")),
+                );
+            }
+            // 小节号乘宽度不能悄悄绕回一个小数字去读：溢出就是区间错，说清是哪一节。
+            let start = b0.checked_mul(width);
+            let end = b1.checked_mul(width).and_then(|t| t.checked_add(width - 1));
+            match (start, end) {
+                (Some(from), Some(to)) => (from, to),
+                _ => {
+                    return Err(bad(
+                        format!("小节号 {b0}..={b1} 乘宽度 {width} 超出了 tick 范围"),
+                        format!("bars {b0}..={b1} at {width} ticks each exceeds the tick range"),
+                    ))
+                }
+            }
+        }
+        None => {
+            let tf = tick_from.unwrap_or(0);
+            let end = song.song_length().saturating_sub(1);
+            // 省略 tick_to = 读到歌尾。起点已经在歌尾之外时读空，而不是报一个自相矛盾的区间错。
+            let tt = tick_to.unwrap_or_else(|| tf.max(end));
+            if tt < tf {
+                return Err(bad(
+                    "tick_to 不能小于 tick_from",
+                    "tick_to must be >= tick_from",
+                ));
+            }
+            // 只给宽度没给小节号时区间照原样读，但那份文本同样不能长成上万行。
+            let count = (tt - tf) / width + 1;
+            if ticks_per_bar.is_some() && count > MAX_BARS_RETURNED as u32 {
+                return Err(bad(
+                    format!("这段有 {count} 小节，一次最多 {MAX_BARS_RETURNED}；用 bars 分段读"),
+                    format!("{count} bars in this range, the cap is {MAX_BARS_RETURNED}; chunk it with bars"),
+                ));
+            }
+            (tf, tt)
+        }
+    };
     let lf = layer_from.unwrap_or(0);
     let lt = layer_to.unwrap_or(layers.saturating_sub(1));
     if lf > lt || lt >= layers {
@@ -1854,22 +2730,46 @@ fn read_notes(
     let raw = song.notes_in_rect(tf, lf, tt, lt);
     let total = raw.len();
     let truncated = total > MAX_CELLS_RETURNED;
-    let cells = raw
-        .into_iter()
+    let cells: Vec<NoteCell> = raw
+        .iter()
         .take(MAX_CELLS_RETURNED)
-        .map(|(tick, layer, note)| note_cell(tick, layer, note))
+        .map(|&(tick, layer, note)| note_cell(tick, layer, note))
         .collect();
+    // 文字视图只在请求点名要时给：不要的人不该多一份没人读的文本。
+    let bar_views = if bars.is_some() || ticks_per_bar.is_some() {
+        bar_overviews(&raw, tf, tt, width, state.flags.flats)
+    } else {
+        Vec::new()
+    };
     let mut message = String::new();
     // 省略的边界要说清算成了什么，否则调用方分不清「这段本来就空」和「我少读了」。
-    if tick_from.is_none() || tick_to.is_none() {
+    if bars.is_none() && (tick_from.is_none() || tick_to.is_none()) {
         message.push_str(&say(
             format!("tick 范围按全曲算：{tf}..={tt}"),
             format!("tick range resolved from the song: {tf}..={tt}"),
         ));
     }
+    if !bar_views.is_empty() {
+        if !message.is_empty() {
+            message.push_str(if zh() { "；" } else { "; " });
+        }
+        // 宽度是从拍号来的还是人给的要说出来：同一份谱按 16 和按 12 切出来的小节不是一回事。
+        message.push_str(&say(
+            format!(
+                "{} 小节，每节 {width} 格（{}）",
+                bar_views.len(),
+                if ticks_per_bar.is_some() { "指定" } else { "取自拍号" }
+            ),
+            format!(
+                "{} bars, {width} ticks each ({})",
+                bar_views.len(),
+                if ticks_per_bar.is_some() { "given" } else { "from time signature" }
+            ),
+        ));
+    }
     if truncated {
         if !message.is_empty() {
-            message.push_str(if crate::lang() == 1 { "；" } else { "; " });
+            message.push_str(if zh() { "；" } else { "; " });
         }
         message.push_str(&say(
             format!("范围里共 {total} 格，只回了前 {MAX_CELLS_RETURNED} 格"),
@@ -1881,9 +2781,57 @@ fn read_notes(
             cells,
             truncated,
             limit: MAX_CELLS_RETURNED,
+            bar_overview: bar_views,
         },
         message,
     ))
+}
+
+/// 把矩形里的音符按小节切成一行行文字：`0:C4(2) 6:G4(2)`。
+///
+/// 音名在这里由 `nbs_core::model::key_name` 生成，和状态栏同一份实现：让调用方拿键号自己心算，
+/// 错的是半音，而写进去、读回来用的是同一张表，只有耳朵能发现。
+fn bar_overviews(
+    raw: &[(u32, u32, Note)],
+    tick_from: u32,
+    tick_to: u32,
+    width: u32,
+    flats: bool,
+) -> Vec<BarOverview> {
+    let first = tick_from / width;
+    let last = tick_to / width;
+    let mut out: Vec<BarOverview> = (first..=last)
+        .map(|bar| {
+            // 两端落在小节中间时把边界收到实际读到的范围：条目里写的区间必须真含得住它列的格。
+            BarOverview {
+                bar,
+                tick_from: (bar * width).max(tick_from),
+                tick_to: (bar * width + width - 1).min(tick_to),
+                cells: 0,
+                text: String::new(),
+            }
+        })
+        .collect();
+    // `notes_in_rect` 是 tick 主序且已经按区间过滤过，所以一格一趟就够。
+    for (tick, _layer, note) in raw {
+        let bar = &mut out[(tick / width - first) as usize];
+        bar.cells += 1;
+        if bar.cells > MAX_BAR_CELLS_PRINTED {
+            if bar.cells == MAX_BAR_CELLS_PRINTED + 1 {
+                bar.text.push('…');
+            }
+            continue;
+        }
+        if !bar.text.is_empty() {
+            bar.text.push(' ');
+        }
+        bar.text.push_str(&format!(
+            "{tick}:{}({})",
+            nbs_core::model::key_name(note.key, true, flats),
+            note.instrument
+        ));
+    }
+    out
 }
 
 fn note_cell(tick: u32, layer: u32, note: Note) -> NoteCell {
@@ -2779,6 +3727,53 @@ fn arg_f32(args: Option<&Value>, key: &str) -> Result<f32, ErrorInfo> {
     Ok(value as f32)
 }
 
+/// 任务表起不动的两种原因，说法分开：满不满是调用方能解决的（等、取消），线程起不来不是。
+fn spawn_reject(reject: SpawnReject) -> ErrorInfo {
+    match reject {
+        SpawnReject::Busy => ErrorInfo::new(
+            ErrorCode::Busy,
+            say(
+                "并发任务已满，先用 job_list 看看有什么在跑，或 job_cancel 掉一个。",
+                "All job slots are busy; check job_list or cancel one first.",
+            ),
+        ),
+        SpawnReject::Thread(message) => ErrorInfo::new(ErrorCode::Internal, message),
+    }
+}
+
+/// 刚登记、线程还没排上时 `status()` 通常已经查得到；查不到就照实回一条 queued，
+/// 不编一个进度出来。
+fn job_snapshot(ch: &ControlChannel, id: u64, kind: &str) -> JobInfo {
+    ch.jobs.status(id).unwrap_or_else(|| JobInfo {
+        id,
+        kind: kind.into(),
+        status: JobStatus::Queued,
+        progress: 0.0,
+        message: String::new(),
+        started_unix: 0,
+        finished_unix: None,
+        result: None,
+    })
+}
+
+/// 「目标已存在」这道闸：`export` 和转录的 MIDI 交付共用同一条，所以字面实现只有一份。
+/// 认错的方式就是显式带 `overwrite=true`——不带就当调用方没打算覆盖别人的文件。
+fn overwrite_gate(target: &Path, overwrite: bool) -> Result<(), ErrorInfo> {
+    if target.exists() && !overwrite {
+        return Err(ErrorInfo::new(
+            ErrorCode::NotAllowed,
+            say(
+                format!("目标已存在：{}。确认覆盖就带 overwrite=true。", target.display()),
+                format!(
+                    "Target exists: {}. Pass overwrite=true to replace it.",
+                    target.display()
+                ),
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// 导出走任务表：拍一份歌曲快照，剩下的全在别的线程做，回一个句柄。
 /// 主线程既不等混音也不为它挂住一条界面请求。
 fn export_job(
@@ -2792,21 +3787,7 @@ fn export_job(
     overwrite: bool,
 ) -> Written {
     let target = resolve_path(state, ch, path, format_extensions(format), false)?;
-    if target.exists() && !overwrite {
-        return Err(ErrorInfo::new(
-            ErrorCode::NotAllowed,
-            say(
-                format!(
-                    "目标已存在：{}。确认覆盖就带 overwrite=true。",
-                    target.display()
-                ),
-                format!(
-                    "Target exists: {}. Pass overwrite=true to replace it.",
-                    target.display()
-                ),
-            ),
-        ));
-    }
+    overwrite_gate(&target, overwrite)?;
     let sample_rate = sample_rate.unwrap_or(state.prefs.export_sample_rate);
     if !(8_000..=192_000).contains(&sample_rate) {
         return Err(out_of_range(
@@ -2878,26 +3859,8 @@ fn export_job(
                 }
             }
         })
-        .map_err(|reject| match reject {
-            SpawnReject::Busy => ErrorInfo::new(
-                ErrorCode::Busy,
-                say(
-                    "并发任务已满，先用 JobList 看看有什么在跑，或 JobCancel 掉一个。",
-                    "All job slots are busy; check JobList or cancel one first.",
-                ),
-            ),
-            SpawnReject::Thread(message) => ErrorInfo::new(ErrorCode::Internal, message),
-        })?;
-    let info = ch.jobs.status(id).unwrap_or_else(|| JobInfo {
-        id,
-        kind: "export".into(),
-        status: JobStatus::Queued,
-        progress: 0.0,
-        message: String::new(),
-        started_unix: 0,
-        finished_unix: None,
-        result: None,
-    });
+        .map_err(spawn_reject)?;
+    let info = job_snapshot(ch, id, JobKind::Export.as_str());
     Ok((
         Some(Data::Job(Box::new(info))),
         say(
@@ -2912,6 +3875,509 @@ fn export_job(
             ),
         ),
     ))
+}
+
+// ------------------------------------------------------------------ 音频转 MIDI
+//
+// 转录窗上那四个按钮各有一条对应 op。形状一律「立即回任务句柄，之后 job_status 轮询」：
+// python 子进程动辄几十秒到几十分钟，界面线程既不该为它等，也不该有一条请求挂在那里
+// 占住收件箱。事件、进度、取消都按窗上那份语义走，只是把落点从窗口换成任务表。
+//
+// 闸的顺序也照窗上，一条都不放松：许可（只有人自己在窗上勾得动——这里没有代填的入口，
+// 也没有为 AI 新开的总开关）→ 环境装没装 → 一次只跑一个 → 路径与覆盖。
+// `transcribe_probe` 是窗上唯一不需要许可的那条，这里也照样不要：它只是问一句现状。
+
+/// worker 回给窗口的事件里「这轮活干完了」的三种形状。`Failed` / `Cancelled` 不进这里，
+/// 它们直接把任务标失败、消息原样带出去。
+#[derive(Debug)]
+enum TranscribeTerminal {
+    Ready(nbs_io::transcription::RuntimeInfo),
+    ModelReady {
+        model: String,
+        device: String,
+        dtype: String,
+    },
+    Complete(nbs_io::transcription::TranscriptionOutput),
+}
+
+/// 音频扩展名，和界面「选择音频」那格放的过滤器同一张表。
+const AUDIO_EXTS: &[&str] = &[
+    "wav", "flac", "mp3", "ogg", "m4a", "aac", "aif", "aiff", "opus", "webm",
+];
+
+/// 转录产物另存前要先读一遍（核对音符数），这是它的上限：和窗上预览那条一样，
+/// 宁可报错也不吃进内存。
+const MAX_MIDI_PREVIEW_BYTES: u64 = 64 * 1024 * 1024;
+
+/// 取值域检查，错在起子进程**之前**。worker 那侧的 ValueError 到不了调用方手上，
+/// 只会变成二十秒后一句「任务失败」。
+fn one_of(field: &str, value: &str, allowed: &[&str]) -> Result<(), ErrorInfo> {
+    if allowed.iter().any(|want| *want == value) {
+        return Ok(());
+    }
+    Err(bad(
+        format!("{field} {value:?} 不认识，这里只接受 {}", allowed.join(" / ")),
+        format!(
+            "{field} {value:?} is not one of {}",
+            allowed.join(" / ")
+        ),
+    ))
+}
+
+fn number_in(field: &str, value: f64, lower: f64, upper: f64) -> Result<(), ErrorInfo> {
+    if !value.is_finite() || !(lower..=upper).contains(&value) {
+        return Err(out_of_range(
+            format!("{field} 要是 {lower}..={upper} 之间的有限数字"),
+            format!("{field} must be a finite number in {lower}..={upper}"),
+        ));
+    }
+    Ok(())
+}
+
+/// 窗上当前那一份参数，加上调用方点名要改的字段。省略的字段**不动**窗上那份，
+/// 所以「AI 只改 device」和「人只改 device」算出来的是同一件事。
+///
+/// `model_path` 给空串是显式清空（回到按模型名取缓存那份）；省略才是「用窗上那一份」。
+fn transcribe_options(
+    state: &EditorState,
+    given: &TranscribeOptions,
+) -> Result<nbs_io::transcription::TranscriptionOptions, ErrorInfo> {
+    let mut out = state.transcription.request_options();
+    if let Some(value) = given.model.as_deref() {
+        one_of("model", value, &["small", "medium", "large"])?;
+        out.model = value.to_string();
+    }
+    if let Some(value) = given.device.as_deref() {
+        one_of("device", value, &["auto", "cpu", "cuda"])?;
+        out.device = value.to_string();
+    }
+    if let Some(value) = given.dtype.as_deref() {
+        one_of("dtype", value, &["auto", "float32", "float16"])?;
+        out.dtype = value.to_string();
+    }
+    if let Some(value) = given.beam_size {
+        if !(1..=4).contains(&value) {
+            return Err(out_of_range(
+                "beam_size 是 1..=4 的整数",
+                "beam_size must be an integer in 1..=4",
+            ));
+        }
+        out.beam_size = value;
+    }
+    if let Some(value) = given.temperature {
+        number_in("temperature", value, 0.0, 2.0)?;
+        out.temperature = value;
+    }
+    if let Some(value) = given.cfg_coef {
+        number_in("cfg_coef", value, 0.0, 3.0)?;
+        out.cfg_coef = value;
+    }
+    if let Some(value) = given.use_sampling {
+        out.use_sampling = value;
+    }
+    if let Some(value) = given.strict_eos {
+        out.strict_eos = value;
+    }
+    if let Some(raw) = given.model_path.as_deref() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            out.model_path = None;
+        } else {
+            let path = Path::new(trimmed);
+            if extension(path) != "safetensors" {
+                return Err(bad(
+                    format!(
+                        "model_path 要的是本地 .safetensors 权重文件，扩展名是 {:?}",
+                        extension(path)
+                    ),
+                    format!(
+                        "model_path must be a local .safetensors weight file, extension {:?}",
+                        extension(path)
+                    ),
+                ));
+            }
+            if !path.exists() {
+                return Err(ErrorInfo::new(
+                    ErrorCode::NotFound,
+                    say(
+                        format!("权重文件不存在：{}", path.display()),
+                        format!("Weights not found: {}", path.display()),
+                    ),
+                ));
+            }
+            out.model_path = Some(path.to_path_buf());
+        }
+    }
+    if let Some(list) = given.instruments.as_ref() {
+        out.instruments = list.clone();
+    }
+    Ok(out)
+}
+
+/// 三条共用的前置闸。`downloads` = 这一下会往本机下东西（环境或权重），
+/// `needs_env` = 这一下得有装好的 venv 才跑得动。
+fn transcribe_gate(
+    state: &EditorState,
+    ch: &ControlChannel,
+    downloads: bool,
+    needs_env: bool,
+) -> Result<(), ErrorInfo> {
+    if downloads && !state.transcription.accepted_downloads {
+        return Err(ErrorInfo::new(
+            ErrorCode::NotAllowed,
+            say(
+                "本机下载和模型使用许可还没确认。MuScriptor 的权重是 CC BY-NC 4.0，环境要现装几百 MB——那一下只能由人自己在「音频转 MIDI」窗口里勾，外部调用不许代勾，这里也没有为它新开的开关。",
+                "Local downloads and the model license are not accepted yet. MuScriptor weights are CC BY-NC 4.0 and the environment is hundreds of MB: only the person at the transcription window can tick that. No external call may answer it, and there is no separate switch for it.",
+            ),
+        ));
+    }
+    if needs_env && !state.transcription.runtime.installed() {
+        let python = state.transcription.runtime.python_path();
+        return Err(ErrorInfo::new(
+            ErrorCode::NotAllowed,
+            say(
+                format!(
+                    "本机转录环境还没装：{} 不存在。先 transcribe_prepare_env（同样要人勾过许可），完活后再回来。",
+                    python.display()
+                ),
+                format!(
+                    "The local transcription environment is not installed: {} does not exist. Run transcribe_prepare_env first (same license tick), then come back.",
+                    python.display()
+                ),
+            ),
+        ));
+    }
+    if state.transcription.busy() {
+        return Err(ErrorInfo::new(
+            ErrorCode::Busy,
+            say(
+                "转录窗口里已经有一个本机任务在跑。先等它结束，或在那扇窗口里按取消。",
+                "The transcription window already has a local task running; wait for it or cancel it there.",
+            ),
+        ));
+    }
+    let in_flight: usize = JobKind::ALL
+        .iter()
+        .filter(|kind| kind.is_transcription())
+        .map(|kind| ch.jobs.running_of(kind.as_str()))
+        .sum();
+    if in_flight > 0 {
+        return Err(ErrorInfo::new(
+            ErrorCode::Busy,
+            say(
+                "已经有一个转录任务在册（转录的活共用同一份 venv 和权重缓存，所以一次只跑一个）。用 job_list 找回句柄、job_status 看进度、job_cancel 停它。",
+                "A transcription job is already registered (they share one venv and one weight cache, so only one runs at a time). Use job_list for the handle, job_status to poll, job_cancel to stop it.",
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// 把 worker 的事件泵进任务表：`Message` / `Progress` 进句柄的 message 与 progress，
+/// 终态交给 `done` 变成 result。取消是协作式的——`job_cancel` 置位后这里转成
+/// `task.cancel()`（那边去 taskkill 子进程），再给 10 秒收尾；子进程不应答就按「已取消」
+/// 结掉，任务位不能永远占着。
+fn transcribe_job(
+    ch: &ControlChannel,
+    kind: JobKind,
+    task: nbs_io::transcription::TranscriptionTask,
+    opening: String,
+    done: impl FnOnce(TranscribeTerminal) -> Result<Value, String> + Send + 'static,
+) -> Written {
+    let id = ch
+        .jobs
+        .spawn(kind.as_str(), move |job: &JobHandle| {
+            use nbs_io::transcription::TranscriptionEvent as Event;
+            let mut cancelling: Option<Instant> = None;
+            loop {
+                for event in task.drain() {
+                    match event {
+                        Event::Message(text) => job.note(text),
+                        Event::Progress {
+                            stage,
+                            message,
+                            completed,
+                            total,
+                            note_count,
+                        } => {
+                            let fraction = match (completed, total) {
+                                (Some(step), Some(of)) if of > 0 => step as f32 / of as f32,
+                                _ => 0.0,
+                            };
+                            let mut line = if message.is_empty() {
+                                stage
+                            } else if stage.is_empty() {
+                                message
+                            } else {
+                                format!("{stage} · {message}")
+                            };
+                            if let Some(count) = note_count {
+                                line.push_str(&say(
+                                    format!(" · {count} 个音符"),
+                                    format!(" · {count} notes"),
+                                ));
+                            }
+                            if line.is_empty() {
+                                line = say("处理中", "working");
+                            }
+                            job.progress(fraction, line);
+                        }
+                        Event::Ready(info) => return done(TranscribeTerminal::Ready(info)),
+                        Event::ModelReady { model, device, dtype } => {
+                            return done(TranscribeTerminal::ModelReady {
+                                model,
+                                device,
+                                dtype,
+                            })
+                        }
+                        Event::Complete(output) => return done(TranscribeTerminal::Complete(output)),
+                        Event::Failed(error) => return Err(error),
+                        Event::Cancelled => return Err(say("已取消", "cancelled")),
+                    }
+                }
+                if job.cancelled() {
+                    task.cancel();
+                    let since = *cancelling.get_or_insert_with(Instant::now);
+                    if since.elapsed() > Duration::from_secs(10) {
+                        return Err(say(
+                            "已取消（本机子进程 10 秒内没应答）",
+                            "cancelled (the local worker did not answer within 10s)",
+                        ));
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(80));
+            }
+        })
+        .map_err(spawn_reject)?;
+    Ok((
+        Some(Data::Job(Box::new(job_snapshot(ch, id, kind.as_str())))),
+        opening,
+    ))
+}
+
+fn runtime_info_json(
+    runtime: &nbs_io::transcription::TranscriptionRuntime,
+    info: &nbs_io::transcription::RuntimeInfo,
+) -> Value {
+    json!({
+        "runtime_root": runtime.root.display().to_string(),
+        "environment_installed": runtime.installed(),
+        "python": runtime.python_path().display().to_string(),
+        "python_version": info.python_version,
+        "torch_version": info.torch_version,
+        "muscriptor_version": info.muscriptor_version,
+        "cuda_available": info.cuda_available,
+        "gpu_name": info.gpu_name,
+        "gpu_memory_bytes": info.gpu_memory_bytes,
+    })
+}
+
+/// 窗上的按钮串了才会走到这里：probe 只回 Ready，prepare_model 只回 ModelReady。
+/// 形状不对就照实报，不猜成另一种成功。
+fn wrong_terminal(kind: &str, got: &TranscribeTerminal) -> String {
+    say(
+        format!("{kind} 回来的是别种终态：{got:?}"),
+        format!("{kind} returned an unexpected terminal state: {got:?}"),
+    )
+}
+
+fn transcribe_probe(state: &EditorState, ch: &ControlChannel) -> Written {
+    transcribe_gate(state, ch, false, false)?;
+    let runtime = state.transcription.runtime.clone();
+    let task = runtime.probe();
+    transcribe_job(
+        ch,
+        JobKind::TranscribeProbe,
+        task,
+        say(
+            "已起转录环境检查任务（不下载任何东西）；用 job_status 轮询",
+            "Transcription environment probe started (it downloads nothing); poll with job_status",
+        ),
+        move |terminal| match terminal {
+            TranscribeTerminal::Ready(info) => Ok(runtime_info_json(&runtime, &info)),
+            other => Err(wrong_terminal("transcribe_probe", &other)),
+        },
+    )
+}
+
+fn transcribe_prepare_env(state: &EditorState, ch: &ControlChannel, cuda: Option<bool>) -> Written {
+    transcribe_gate(state, ch, true, false)?;
+    // 省略 = 窗上那个勾当前是什么就是是什么；这条链上「AI 没给」从来不该改人的设置。
+    let cuda = cuda.unwrap_or(state.transcription.install_cuda);
+    let runtime = state.transcription.runtime.clone();
+    let task = runtime.prepare(cuda);
+    transcribe_job(
+        ch,
+        JobKind::TranscribePrepareEnv,
+        task,
+        say(
+            format!(
+                "已起环境安装任务（{} 构建，几百 MB，装到 {}）；用 job_status 轮询",
+                if cuda { "CUDA" } else { "CPU" },
+                runtime.root.display()
+            ),
+            format!(
+                "Environment install started ({} build, hundreds of MB, into {}); poll with job_status",
+                if cuda { "CUDA" } else { "CPU" },
+                runtime.root.display()
+            ),
+        ),
+        move |terminal| match terminal {
+            TranscribeTerminal::Ready(info) => {
+                let mut out = runtime_info_json(&runtime, &info);
+                out["cuda_build"] = json!(cuda);
+                Ok(out)
+            }
+            other => Err(wrong_terminal("transcribe_prepare_env", &other)),
+        },
+    )
+}
+
+fn transcribe_prepare_model(
+    state: &EditorState,
+    ch: &ControlChannel,
+    given: &TranscribeOptions,
+) -> Written {
+    // 参数先过，闸后过：`model` 写错和「没勾许可」是两件不同的事，前者改调用方的 JSON，
+    // 后者要人去窗口，两条撞在一起只会让人去查错的那一头。
+    let options = transcribe_options(state, given)?;
+    transcribe_gate(state, ch, true, true)?;
+    let runtime = state.transcription.runtime.clone();
+    let asked = options.model.clone();
+    let task = runtime.prepare_model(options);
+    transcribe_job(
+        ch,
+        JobKind::TranscribePrepareModel,
+        task,
+        say(
+            format!("已起模型预检任务（{asked}）；用 job_status 轮询"),
+            format!("Model preflight started ({asked}); poll with job_status"),
+        ),
+        move |terminal| match terminal {
+            TranscribeTerminal::ModelReady {
+                model,
+                device,
+                dtype,
+            } => Ok(json!({
+                "model": model,
+                "device": device,
+                "dtype": dtype,
+                "cached_model": runtime.cached_model(&asked).map(|p| p.display().to_string()),
+            })),
+            other => Err(wrong_terminal("transcribe_prepare_model", &other)),
+        },
+    )
+}
+
+fn transcribe_audio(
+    state: &EditorState,
+    ch: &ControlChannel,
+    audio: &str,
+    given: &TranscribeOptions,
+    save_midi: Option<&str>,
+    overwrite: bool,
+) -> Written {
+    let options = transcribe_options(state, given)?;
+    transcribe_gate(state, ch, true, true)?;
+    let source = resolve_path(state, ch, audio, AUDIO_EXTS, true)?;
+    let target = match save_midi {
+        Some(raw) => {
+            let target = resolve_path(state, ch, raw, &["mid", "midi"], false)?;
+            overwrite_gate(&target, overwrite)?;
+            Some(target)
+        }
+        None => None,
+    };
+    let runtime = state.transcription.runtime.clone();
+    let model = options.model.clone();
+    let task = runtime.transcribe(source.clone(), options);
+    let where_to = match &target {
+        Some(path) => say(
+            format!("，完活后把 MIDI 另存到 {}", path.display()),
+            format!("; the MIDI is then delivered to {}", path.display()),
+        ),
+        None => say(
+            "（产物只留在转录目录里）",
+            " (the artifact stays in the transcription folder)",
+        ),
+    };
+    let deliver = target;
+    transcribe_job(
+        ch,
+        JobKind::TranscribeAudio,
+        task,
+        say(
+            format!("已起转录任务（{model}，{}）{where_to}；用 job_status 轮询", source.display()),
+            format!(
+                "Transcription started ({model}, {}){where_to}; poll with job_status",
+                source.display()
+            ),
+        ),
+        move |terminal| match terminal {
+            TranscribeTerminal::Complete(output) => {
+                transcribed_midi(&source, deliver.as_deref(), output, &model)
+            }
+            other => Err(wrong_terminal("transcribe_audio", &other)),
+        },
+    )
+}
+
+/// 转录完的核对：先把 MIDI 落一份到调用方点名的路径（那条路径已经过完路径闸与覆盖闸），
+/// 再把窗上那两条数一遍带回去。音符数对不上是窗上「停止导入」的那条判据，这里**照实报、
+/// 不替人决定**——下一步 `inspect_midi` 会给真正落进歌里的数量。
+fn transcribed_midi(
+    source: &Path,
+    target: Option<&Path>,
+    output: nbs_io::transcription::TranscriptionOutput,
+    model: &str,
+) -> Result<Value, String> {
+    let bytes = read_bounded(&output.midi_path)?;
+    let preview = nbs_io::midi_preview::parse_midi_preview(&bytes)?;
+    let importer_events = nbs_io::midi::parse_midi(&bytes)
+        .map(|midi| midi.tracks.iter().map(|track| track.events.len()).sum::<usize>())
+        .map_err(|e| format!("转录产物已写好，但 NBS 的 MIDI 读取器打不开它：{e}"))?;
+    if let Some(path) = target {
+        std::fs::write(path, &bytes).map_err(|e| {
+            format!(
+                "转录完成了，但把 MIDI 写到 {} 失败：{e}；原产物仍在 {}",
+                path.display(),
+                output.midi_path.display()
+            )
+        })?;
+    }
+    Ok(json!({
+        "audio": source.display().to_string(),
+        "model": model,
+        "midi_path": output.midi_path.display().to_string(),
+        "events_path": output.events_path.display().to_string(),
+        "delivered_midi": target.map(|p| p.display().to_string()),
+        "raw_note_count": output.raw_note_count,
+        "preview_notes": preview.notes.len(),
+        "preview_seconds": preview.duration_seconds,
+        "importer_events": importer_events,
+        "note_count_mismatch": importer_events != preview.notes.len(),
+        "import_blocked_reason": preview.import_blocked_reason,
+        "device": output.device,
+        "dtype": output.dtype,
+        "warnings": output.warnings,
+    }))
+}
+
+/// 读一份产物，带上限。转录出来的 MIDI 正常也就几百 KB，撞到上限说明结果不对。
+fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|e| format!("读不到 {}：{e}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_MIDI_PREVIEW_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("读 {} 失败：{e}", path.display()))?;
+    if bytes.len() as u64 > MAX_MIDI_PREVIEW_BYTES {
+        return Err(format!(
+            "{} 超过 {MAX_MIDI_PREVIEW_BYTES} 字节上限，不像转录产物",
+            path.display()
+        ));
+    }
+    Ok(bytes)
 }
 
 fn change_line(field: &str, touched: usize, clamped: usize, add: bool, skipped: usize) -> String {
@@ -3184,6 +4650,8 @@ mod tests {
             tick_to: None,
             layer_from: None,
             layer_to: None,
+            ticks_per_bar: None,
+            bars: None,
         });
         assert!(out.ok, "{:?}", out.error);
         let cells = match out.data.as_ref().expect("读音符必带 data") {
@@ -3199,6 +4667,8 @@ mod tests {
             tick_to: None,
             layer_from: None,
             layer_to: None,
+            ticks_per_bar: None,
+            bars: None,
         });
         assert!(out.ok, "{:?}", out.error);
         assert!(
@@ -3212,9 +4682,149 @@ mod tests {
             tick_to: Some(2),
             layer_from: None,
             layer_to: None,
+            ticks_per_bar: None,
+            bars: None,
         });
         assert!(!out.ok, "显式给反的区间不能静默读空");
         assert_eq!(code(&out), ErrorCode::BadArgument);
+    }
+
+    /// 按小节读的要拿到音名而不是键号：39 心算成「A3 那一档」这种事，错了只有耳朵能发现，
+    /// 而写进去和读回来用的是同一张表，逐行对比也对得上。空小节同样占一行——
+    /// 「这段本来就空」和「我少读了」必须分得开。
+    #[test]
+    fn bars_view_names_the_notes_and_keeps_the_empty_bars() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        assert!(h
+            .run(&Op::SetNotes {
+                cells: vec![cell(0, 0, 1, 39), cell(11, 0, 1, 43), cell(12, 0, 2, 45)],
+                label: None,
+                expect_rev: None,
+            })
+            .ok);
+
+        let out = h.run(&Op::GetNotes {
+            tick_from: None,
+            tick_to: None,
+            layer_from: None,
+            layer_to: None,
+            ticks_per_bar: None,
+            bars: Some([0, 1]),
+        });
+        assert!(out.ok, "{:?}", out.error);
+        let view = match out.data.as_ref().expect("读音符必带 data") {
+            Data::Notes {
+                bar_overview,
+                cells,
+                ..
+            } => {
+                assert_eq!(cells.len(), 3, "bars 只切区间，不该少给格子");
+                bar_overview
+            }
+            other => panic!("形状不对：{other:?}"),
+        };
+        // 默认拍号 4 → 每节 16 格，和第 0 节里的三格一起落在同一节；第 1 节是空的。
+        assert_eq!(view.len(), 2);
+        assert_eq!(
+            (view[0].bar, view[0].tick_from, view[0].tick_to, view[0].cells),
+            (0, 0, 15, 3)
+        );
+        assert_eq!(view[0].text, "0:C4(1) 11:E4(1) 12:F#4(2)");
+        assert_eq!(
+            (view[1].bar, view[1].tick_from, view[1].tick_to, view[1].cells),
+            (1, 16, 31, 0)
+        );
+        assert!(view[1].text.is_empty());
+        // 宽度是从拍号来的，回执要说清，否则调用方以为自己按 12 切了。
+        assert!(
+            out.report.message.contains(&say("每节 16 格", "16 ticks each")),
+            "{}",
+            out.report.message
+        );
+
+        // 没点名要小节视图时，那份文本一份都不给。
+        let out = h.run(&Op::GetNotes {
+            tick_from: Some(0),
+            tick_to: Some(12),
+            layer_from: None,
+            layer_to: None,
+            ticks_per_bar: None,
+            bars: None,
+        });
+        assert!(
+            matches!(out.data.as_ref(), Some(Data::Notes { bar_overview, .. }) if bar_overview.is_empty())
+        );
+    }
+
+    /// 只给宽度时区间不变，但落在小节中间的端点要把边界收到真读到的范围——
+    /// 条目里写的区间必须含得住它自己列出的格。
+    #[test]
+    fn ticks_per_bar_alone_recuts_the_requested_range() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        assert!(h
+            .run(&Op::SetNotes {
+                cells: vec![cell(3, 0, 1, 39), cell(11, 0, 1, 43), cell(12, 0, 2, 45)],
+                label: None,
+                expect_rev: None,
+            })
+            .ok);
+
+        let out = h.run(&Op::GetNotes {
+            tick_from: Some(6),
+            tick_to: Some(30),
+            layer_from: None,
+            layer_to: None,
+            ticks_per_bar: Some(12),
+            bars: None,
+        });
+        assert!(out.ok, "{:?}", out.error);
+        let view = match out.data.as_ref().expect("读音符必带 data") {
+            Data::Notes { bar_overview, .. } => bar_overview,
+            other => panic!("形状不对：{other:?}"),
+        };
+        assert_eq!(view.len(), 3, "6..=30 按 12 切是第 0、1、2 节");
+        assert_eq!((view[0].tick_from, view[0].tick_to), (6, 11));
+        assert_eq!((view[0].cells, view[0].text.as_str()), (1, "11:E4(1)"));
+        assert_eq!((view[1].tick_from, view[1].tick_to, view[1].cells), (12, 23, 1));
+        // tick 3 在请求区间之外，这一节就该看不见它，而不是数出一个没列出来的格。
+        assert_eq!(view[2].cells, 0);
+    }
+
+    /// 三种说不通的小节写法都要在动工程之前拒掉，并且报错要说该改哪一个参数。
+    #[test]
+    fn bar_requests_that_do_not_make_sense_are_refused() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        let mut ask = |from: Option<u32>, to: Option<u32>, bars: Option<[u32; 2]>| {
+            h.run(&Op::GetNotes {
+                tick_from: from,
+                tick_to: to,
+                layer_from: None,
+                layer_to: None,
+                ticks_per_bar: None,
+                bars,
+            })
+        };
+
+        let out = ask(Some(4), None, Some([0, 1]));
+        assert_eq!(code(&out), ErrorCode::BadArgument);
+        let reason = out.error.as_ref().expect("被拒要有原因").message.clone();
+        assert!(reason.contains("bars"), "互斥要说清是哪一条：{reason}");
+        assert_eq!(
+            code(&ask(None, None, Some([3, 1]))),
+            ErrorCode::BadArgument,
+            "终点小于起点"
+        );
+        // 256 节是上限：再多就不是「读一段」，而是让主线程拼一份没人读的长文本。
+        assert!(!ask(None, None, Some([0, 256])).ok, "257 节要拒");
+        assert!(ask(None, None, Some([0, 255])).ok, "256 节正好放行");
+        // 小节号乘宽度溢出 tick：不能悄悄绕回一个小数字去读。
+        assert_eq!(code(&ask(None, None, Some([4_000_000_000, 4_000_000_100]))), ErrorCode::BadArgument);
     }
 
     #[test]
@@ -3756,6 +5366,49 @@ mod tests {
         assert!(board.snapshot().is_empty(), "停服当场清空");
     }
 
+    /// 播放头停在曲尾之外时，起播即停，回执还说一句「开始播放」——调用方只能靠自己先 seek。
+    /// 现在 `play` 自己按真正的曲尾归零，并把「落点动过」写进回执。曲内落点照旧不碰。
+    #[test]
+    fn play_past_the_end_rewinds_and_says_so() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        let painted = h.run(&Op::SetNotes {
+            cells: vec![cell(0, 0, 5, 48), cell(8, 0, 5, 50)],
+            label: None,
+            expect_rev: None,
+        });
+        assert!(painted.ok, "{:?}", painted.error);
+        let length = h.state.doc.song.song_length() as f64;
+
+        let parked = h.run(&Op::Playback(Playback::Seek {
+            tick: length + 4.0,
+        }));
+        assert!(parked.ok, "{:?}", parked.error);
+        let out = h.run(&Op::Playback(Playback::Play));
+        assert!(out.ok, "{:?}", out.error);
+        assert!(
+            // 断言跟着 `say` 走：这条链上没有任何东西该取决于界面语言，测试也不该。
+            out.report.message.contains(&say("已归零", "reset to 0")),
+            "回执要说清落点被动过：{}",
+            out.report.message
+        );
+        assert!(h.state.marker() < 2.0, "起播点该回到 0，实际 {}", h.state.marker());
+        h.state.audio.stop();
+
+        let inside = h.run(&Op::Playback(Playback::Seek { tick: 4.0 }));
+        assert!(inside.ok, "{:?}", inside.error);
+        let out = h.run(&Op::Playback(Playback::Play));
+        assert!(out.ok, "{:?}", out.error);
+        assert!(
+            !out.report.message.contains(&say("归零", "reset")),
+            "曲内落点不该被挪：{}",
+            out.report.message
+        );
+        assert!(h.state.marker() >= 4.0, "从 4 起播：{}", h.state.marker());
+        h.state.audio.stop();
+    }
+
     #[test]
     fn ping_and_snapshot_carry_the_current_rev() {
         let _prefs = crate::isolate_prefs();
@@ -3768,5 +5421,774 @@ mod tests {
         let snap = snapshot(&h.state, &h.channel);
         assert_eq!(snap.rev, h.state.doc.song.rev);
         assert_eq!(snap.layers, h.state.doc.song.layers.len());
+    }
+
+    /// 手写 `MidiData` 而不是拿导出器生成：`export_midi_bytes` 把所有音符都塞在通道 0 上，
+    /// 测不出通道映射和鼓映射这两张表。这里给两条旋律通道（patch 11 / 48）加一段鼓（36、38）。
+    fn midi_fixture() -> nbs_io::midi::MidiData {
+        let ev = |pos: i64, channel: u8, note: u8, patch: u16, part: usize| nbs_io::midi::MidiEvent {
+            pos,
+            until: pos + 240,
+            note,
+            velocity: 100,
+            channel,
+            patch,
+            part,
+        };
+        let mut midi = nbs_io::midi::MidiData {
+            format: 1,
+            division: 480,
+            tracks: vec![
+                nbs_io::midi::MidiTrack {
+                    name: "melody".to_string(),
+                    events: vec![ev(0, 0, 60, 11, 0), ev(240, 0, 64, 11, 0), ev(480, 1, 67, 48, 1)],
+                },
+                nbs_io::midi::MidiTrack {
+                    name: "drums".to_string(),
+                    events: vec![ev(0, 9, 36, 0, 2), ev(240, 9, 38, 0, 2)],
+                },
+            ],
+            channels: 9,
+            perc_notes: vec![36, 38],
+            parts: vec![
+                nbs_io::midi::MidiPart {
+                    track: 0,
+                    channel: 0,
+                    patch: 11,
+                    note_duration: true,
+                },
+                nbs_io::midi::MidiPart {
+                    track: 0,
+                    channel: 1,
+                    patch: 48,
+                    note_duration: true,
+                },
+                nbs_io::midi::MidiPart {
+                    track: 1,
+                    channel: 9,
+                    patch: 0,
+                    note_duration: false,
+                },
+            ],
+            minpos: 0,
+            maxpos: 720,
+            micsecqn: 500_000,
+            ..Default::default()
+        };
+        midi.channel_patch[0] = 11;
+        midi.channel_patch[1] = 48;
+        midi
+    }
+
+    fn plan_of(out: &Outcome) -> MidiPlan {
+        let Data::MidiPlan(plan) = out.data.clone().expect("MIDI 两条工具必带核对单") else {
+            panic!("回执不是 midi_plan：{:?}", out.data);
+        };
+        *plan
+    }
+
+    /// 省略选项时用的是「人坐在导入窗前看到的那份」，不是出厂 `default()`。
+    /// 出厂那份的鼓表是空的，照它导会把打击乐整段判成静音——这条就是钉住那个 bug。
+    #[test]
+    fn midi_import_baseline_is_the_window_view_not_the_factory_table() {
+        let _prefs = crate::isolate_prefs();
+        let h = Harness::new();
+        let midi = midi_fixture();
+        let (opts, enh) = midi_effective(&h.state, &midi, None, None, false).expect("基线不该有非法覆盖");
+        assert!(!enh.enabled, "省略 enhanced 就是传统路径");
+        assert!(!opts.remember, "省略 remember 就是别动用户的长期设置");
+        let gm = &h.state.midi_gm;
+        assert_eq!(opts.channel_ins[0], gm.patch(11).0, "通道 0 按 GM 表现算");
+        assert_eq!(opts.channel_ins[1], gm.patch(48).0, "通道 1 按 GM 表现算");
+        assert_eq!(opts.perc_ins.len(), 2, "鼓映射按这个文件的鼓音清单长出来");
+        assert!(opts.perc_ins.iter().all(|ins| *ins != -1), "基线里鼓不该是静音");
+        assert_eq!(opts.perc_pitch[0], gm.drum(36).1 + 33, "鼓键号含 +33，和界面同一把尺");
+
+        let factory = nbs_io::midi::MidiImportOptions::default();
+        assert!(factory.perc_ins.is_empty(), "出厂那份压根没有鼓映射");
+        let from_baseline = nbs_io::midi::import_midi_data(&midi, &opts).total_blocks;
+        let from_factory = nbs_io::midi::import_midi_data(&midi, &factory).total_blocks;
+        assert_eq!(
+            from_baseline - from_factory,
+            2,
+            "基线比出厂多出来的应该就是那两个鼓音；对不上说明两份的差不止在鼓表"
+        );
+    }
+
+    /// 预检和导入必须说同一句话：同一个文件、同一套选项，预测的形状就该是落地的形状，
+    /// 而且预检一步都不碰工程。这里用导出器造的临时文件，测的是「两条工具走没走同一条算法」。
+    #[test]
+    fn inspect_midi_predicts_the_import_and_touches_nothing() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        h.ensure_layers(2);
+        let painted = h.run(&Op::SetNotes {
+            cells: vec![cell(0, 0, 5, 48), cell(4, 0, 5, 50), cell(8, 1, 11, 43)],
+            label: None,
+            expect_rev: None,
+        });
+        assert!(painted.ok, "{:?}", painted.error);
+        let dir = std::env::temp_dir().join(format!("nbs-control-midi-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        sync_policy(&h.state, std::slice::from_ref(&dir), false);
+        let path = dir.join("fixture.mid");
+        nbs_io::midi::export_midi(&h.state.doc.song, &path).expect("临时 MIDI 写得出去");
+        let raw = path.display().to_string();
+
+        let rev_before = h.state.doc.song.rev;
+        let preview = h.run(&Op::InspectMidi {
+            path: raw.clone(),
+            options: None,
+            enhanced: None,
+        });
+        assert!(preview.ok, "{:?}", preview.error);
+        assert_eq!(preview.report.rev, rev_before, "预检不能推进 rev");
+        assert_eq!(preview.report.cells_changed, 0, "预检一格都没写");
+        assert_eq!(preview.report.layers_changed, 0);
+        let predicted = plan_of(&preview);
+
+        let import = h.run(&Op::ImportMidi {
+            path: raw,
+            discard_changes: true,
+            options: None,
+            enhanced: None,
+            remember: None,
+        });
+        assert!(import.ok, "{:?}", import.error);
+        let achieved = plan_of(&import);
+        assert_eq!(achieved, predicted, "预测和实得逐字段都得对上");
+        assert_eq!(
+            h.state.doc.song.total_blocks,
+            achieved.notes,
+            "回执报的音符数就是工程里的音符数"
+        );
+        assert_eq!(
+            import.report.cells_changed,
+            achieved.notes,
+            "换整首歌的回执按新工程规模报变更，不是 0"
+        );
+        assert!(import.report.meta_changed, "速度和出生点也一起换了");
+        assert_eq!(h.state.doc.song.layers.len(), achieved.layers);
+        assert_eq!(h.state.doc.song.song_length(), achieved.length_ticks);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 两道闸各管各的：目录白名单挡读得到读不到，`discard_changes` 挡「换歌要不要先认错」。
+    /// 两条都在动工程之前，所以失败之后 `rev` 和谱面都得原样。
+    #[test]
+    fn midi_import_stops_at_the_directory_gate_and_the_acknowledgement_gate() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        let dir = std::env::temp_dir().join(format!("nbs-control-midi-gate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("song.mid");
+        std::fs::write(&path, nbs_io::midi::export_midi_bytes(&h.state.doc.song)).unwrap();
+        let raw = path.display().to_string();
+        let rev = h.state.doc.song.rev;
+
+        // 文件是真的，但这条目录没放行——报的是「不在允许的目录里」，不是「读不懂」。
+        let out = h.run(&Op::InspectMidi {
+            path: raw.clone(),
+            options: None,
+            enhanced: None,
+        });
+        assert_eq!(code(&out), ErrorCode::NotAllowed, "{:?}", out.error);
+        let out = h.run(&Op::ImportMidi {
+            path: raw.clone(),
+            discard_changes: false,
+            options: None,
+            enhanced: None,
+            remember: None,
+        });
+        assert_eq!(code(&out), ErrorCode::NotAllowed, "{:?}", out.error);
+        assert_eq!(h.state.doc.song.rev, rev, "被目录闸挡下不该动到 rev");
+
+        sync_policy(&h.state, std::slice::from_ref(&dir), false);
+        // 放行之后，脏工程上的导入仍要先点头：省略 `discard_changes` 就是「别动我的未存改动」。
+        let painted = h.run(&Op::SetNotes {
+            cells: vec![cell(0, 0, 5, 48)],
+            label: None,
+            expect_rev: None,
+        });
+        assert!(painted.ok, "{:?}", painted.error);
+        assert!(painted.report.dirty);
+        let dirty_rev = h.state.doc.song.rev;
+        let out = h.run(&Op::ImportMidi {
+            path: raw.clone(),
+            discard_changes: false,
+            options: None,
+            enhanced: None,
+            remember: None,
+        });
+        assert_eq!(code(&out), ErrorCode::NotAllowed, "{:?}", out.error);
+        // 两道闸用的是同一个错误码，靠话区分：这条要提「未保存改动」。
+        let text = format!("{:?}", out.error);
+        assert!(
+            text.contains("discard_changes"),
+            "该指认未保存改动这道闸：{text}"
+        );
+        assert_eq!(h.state.doc.song.rev, dirty_rev, "没点头就不能换歌");
+        assert!(h.state.doc.song.dirty, "被拒的那一步连脏状态都不该动");
+
+        let out = h.run(&Op::InspectMidi {
+            path: raw,
+            options: None,
+            enhanced: None,
+        });
+        assert!(out.ok, "{:?}", out.error);
+        assert_eq!(out.report.rev, dirty_rev, "预检不放行第二次写，也不推进 rev");
+        assert_eq!(h.state.doc.song.total_blocks, 1, "预检之后谱面还是那一个音符");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 整首替换（开档 / 导入 MIDI）会把撤销历史一起清空，于是「按历史算变更量」那条路
+    /// 只能算出 0——回执看着和「什么都没动」一模一样。这里换成报新工程的规模。
+    #[test]
+    fn replacing_the_song_reports_the_incoming_size() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        h.ensure_layers(2);
+        let painted = h.run(&Op::SetNotes {
+            cells: vec![cell(0, 0, 5, 48), cell(4, 0, 5, 50), cell(8, 1, 11, 43)],
+            label: None,
+            expect_rev: None,
+        });
+        assert!(painted.ok, "{:?}", painted.error);
+        assert_eq!(painted.report.cells_changed, 3, "普通写入仍按历史算");
+        assert_eq!(painted.report.layers_changed, 0, "没动图层结构就是 0");
+
+        let dir = std::env::temp_dir().join(format!("nbs-control-replace-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        sync_policy(&h.state, std::slice::from_ref(&dir), false);
+        let path = dir.join("three.nbs");
+        let saved = h.run(&Op::SavePath {
+            path: path.display().to_string(),
+            version: None,
+            overwrite: false,
+        });
+        assert!(saved.ok, "{:?}", saved.error);
+        let cleared = h.run(&Op::ClearSong {
+            expect_rev: None,
+            discard_changes: true,
+        });
+        assert!(cleared.ok, "{:?}", cleared.error);
+        assert_eq!(cleared.report.cells_changed, 3, "清空是改掉那三格，历史算得出来");
+
+        let opened = h.run(&Op::OpenPath {
+            path: path.display().to_string(),
+            discard_changes: true,
+        });
+        assert!(opened.ok, "{:?}", opened.error);
+        assert_eq!(
+            opened.report.cells_changed,
+            h.state.doc.song.total_blocks,
+            "换歌的回执要说清落了几个音符，不能是 0"
+        );
+        assert_eq!(opened.report.cells_changed, 3);
+        assert_eq!(opened.report.layers_changed, h.state.doc.song.layers.len());
+        assert!(opened.report.meta_changed, "整首替换连速度和出生点一起换");
+        assert_eq!(opened.report.history_len, 0, "替换不带撤销");
+        assert!(!opened.report.dirty, "刚开出来的档和磁盘一致");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 覆盖项既要落到歌上，也要在回执里回显出来——回显的是生效值，不是省略稿。
+    #[test]
+    fn midi_overrides_land_on_the_song_and_echo_back() {
+        let _prefs = crate::isolate_prefs();
+        let h = Harness::new();
+        let midi = midi_fixture();
+        let baseline = midi_compute(&h.state, midi_fixture(), "m".to_string(), None, None, false)
+            .expect("基线算得动");
+        let with_override = midi_compute(
+            &h.state,
+            midi.clone(),
+            "m".to_string(),
+            Some(&ImportMidiOptions {
+                channels: vec![ImportChannelMap {
+                    channel: 0,
+                    instrument: -1,
+                    octave: 0,
+                }],
+                tail_parts: Some(vec![2]),
+                precision: Some(3),
+                ..Default::default()
+            }),
+            None,
+            false,
+        )
+        .expect("覆盖算得动");
+        let plan = &with_override.plan;
+        assert_eq!(plan.applied.precision, Some(3));
+        assert_eq!(
+            plan.applied.channels.iter().find(|c| c.channel == 0).map(|c| c.instrument),
+            Some(-1),
+            "回显要写出真正生效的 -1，而不是调用方发过来的那份省略稿"
+        );
+        assert_eq!(
+            plan.channels.iter().find(|c| c.channel == 0).map(|c| c.silent),
+            Some(true)
+        );
+        assert!(plan.parts[2].tail, "通道 9 的声部也在 tail_parts 里点亮了");
+        assert!(!plan.parts[0].tail, "没列出的声部以这份清单为准，全关");
+        assert!(
+            plan.silenced_notes >= 2,
+            "整条通道忽略 → 那两个音符都算静音：{:?}",
+            plan.silenced_notes
+        );
+        assert!(
+            plan.notes < baseline.plan.notes,
+            "关掉一条通道，落地的音符数必须真的少下来：{} vs {}",
+            plan.notes,
+            baseline.plan.notes
+        );
+        // 精度 4 倍 → 同一份 MIDI 摊得更长。
+        assert!(plan.length_ticks > baseline.plan.length_ticks);
+    }
+
+    /// 非法覆盖要在**动工程之前**拒掉，并且点名是哪个字段不对。
+    #[test]
+    fn bad_midi_options_are_refused_before_the_song_moves() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        let rev = h.state.doc.song.rev;
+        let cases: Vec<(ImportMidiOptions, ErrorCode)> = vec![
+            (
+                ImportMidiOptions {
+                    precision: Some(2),
+                    ..Default::default()
+                },
+                ErrorCode::BadArgument,
+            ),
+            (
+                ImportMidiOptions {
+                    max_height: Some(0),
+                    ..Default::default()
+                },
+                ErrorCode::OutOfRange,
+            ),
+            (
+                ImportMidiOptions {
+                    note_duration_fade_end: Some(101),
+                    ..Default::default()
+                },
+                ErrorCode::OutOfRange,
+            ),
+            (
+                ImportMidiOptions {
+                    channels: vec![
+                        ImportChannelMap {
+                            channel: 3,
+                            instrument: 5,
+                            octave: 0,
+                        },
+                        ImportChannelMap {
+                            channel: 3,
+                            instrument: 6,
+                            octave: 1,
+                        },
+                    ],
+                    ..Default::default()
+                },
+                ErrorCode::BadArgument,
+            ),
+            (
+                ImportMidiOptions {
+                    channels: vec![ImportChannelMap {
+                        channel: 9,
+                        instrument: 5,
+                        octave: 0,
+                    }],
+                    ..Default::default()
+                },
+                ErrorCode::BadArgument,
+            ),
+            (
+                ImportMidiOptions {
+                    drums: vec![ImportDrumMap {
+                        note: 70,
+                        instrument: 11,
+                        key: 40,
+                    }],
+                    ..Default::default()
+                },
+                ErrorCode::BadArgument,
+            ),
+            (
+                ImportMidiOptions {
+                    drums: vec![ImportDrumMap {
+                        note: 36,
+                        instrument: 11,
+                        key: 120,
+                    }],
+                    ..Default::default()
+                },
+                ErrorCode::OutOfRange,
+            ),
+            (
+                ImportMidiOptions {
+                    channels: vec![ImportChannelMap {
+                        channel: 0,
+                        instrument: 100,
+                        octave: 0,
+                    }],
+                    ..Default::default()
+                },
+                ErrorCode::OutOfRange,
+            ),
+            (
+                ImportMidiOptions {
+                    tail_parts: Some(vec![99]),
+                    ..Default::default()
+                },
+                ErrorCode::OutOfRange,
+            ),
+        ];
+        for (options, want) in cases {
+            let out = midi_effective(
+                &h.state,
+                &midi_fixture(),
+                Some(&options),
+                None,
+                false,
+            )
+            .expect_err("这份覆盖该被拒");
+            assert_eq!(out.code, want, "{options:?} 的错误码不对：{out:?}");
+        }
+        assert_eq!(h.state.doc.song.rev, rev, "校验不该碰工程");
+    }
+
+    /// `remember` 是唯一能动用户长期设置的开关，省略算 false；给了 true 才写回，
+    /// 并且写回之后它真的变成下一次的基线。
+    #[test]
+    fn remembered_overrides_become_the_next_baseline() {
+        let _prefs = crate::isolate_prefs();
+        let h = Harness::new();
+        let midi = midi_fixture();
+        let patch = midi.channel_patch[0];
+        let options = ImportMidiOptions {
+            channels: vec![ImportChannelMap {
+                channel: 0,
+                instrument: 5,
+                octave: -1,
+            }],
+            ..Default::default()
+        };
+
+        let before = h.state.midi_gm.patch(patch as u8);
+        let (quiet, _) = midi_effective(&h.state, &midi, Some(&options), None, false).expect("算得动");
+        assert_eq!(quiet.channel_ins[0], 5, "覆盖在本次是生效的，只是不写回");
+        assert!(!quiet.remember, "省略 remember 就是别动长期设置");
+        assert_eq!(h.state.midi_gm.patch(patch as u8), before, "没点头就不该写表");
+
+        let computed = midi_compute(
+            &h.state,
+            midi.clone(),
+            "m".to_string(),
+            Some(&options),
+            None,
+            true,
+        )
+        .expect("算得动");
+        let mut state = Harness::new().state;
+        state.midi_gm = h.state.midi_gm.clone();
+        state.midi_options = computed.opts;
+        state.midi_options.finish_import(&midi, &mut state.midi_gm);
+        assert_eq!(
+            state.midi_gm.patch(patch as u8),
+            (5, -1),
+            "写回的是这次真正生效的那一对值"
+        );
+        // 写回之后，连「省略选项」的下一次基线也跟着变——这正是「记住」二字的含义。
+        let next = midi_effective(&state, &midi, None, None, false).expect("算得动");
+        assert_eq!((next.0.channel_ins[0], next.0.channel_octave[0]), (5, -1));
+    }
+
+    /// 增强导入的选项面只在 `enabled=true` 时存在：只给子字段会被拒，
+    /// 免得调用方以为自己在调延音、其实走的是传统路径。
+    #[test]
+    fn enhanced_import_needs_an_explicit_yes_and_reports_its_own_counts() {
+        let _prefs = crate::isolate_prefs();
+        let h = Harness::new();
+        let midi = midi_fixture();
+        let half = ImportEnhancedOptions {
+            sustain: Some(true),
+            ..Default::default()
+        };
+        let refused = midi_effective(&h.state, &midi, None, Some(&half), false)
+            .expect_err("没给 enabled 就该拒");
+        assert_eq!(refused.code, ErrorCode::BadArgument, "{refused:?}");
+
+        let computed = midi_compute(
+            &h.state,
+            midi,
+            "m".to_string(),
+            None,
+            Some(&ImportEnhancedOptions {
+                enabled: Some(true),
+                range_mode: Some(ImportRangeMode::Fold),
+                sustain: Some(true),
+                channels: vec![ImportEnhancedChannel {
+                    channel: 0,
+                    transpose: Some(12),
+                    slots: vec![ImportSlot {
+                        instrument: Some(5),
+                        volume: Some(80),
+                    }],
+                }],
+                substitutes: vec![ImportSubstitution {
+                    instrument: 0,
+                    high: Some(5),
+                    low: None,
+                }],
+                ..Default::default()
+            }),
+            false,
+        )
+        .expect("增强路径算得动");
+        let plan = computed.plan;
+        assert_eq!(plan.applied_enhanced.enabled, Some(true));
+        assert!(plan.enhanced.is_some(), "走增强路径必带那六项计数");
+        let channel = plan
+            .applied_enhanced
+            .channels
+            .iter()
+            .find(|c| c.channel == 0)
+            .expect("回显含通道 0");
+        assert_eq!(channel.transpose, Some(12), "手动移调不能被推荐位移顶掉");
+        assert_eq!(channel.slots.len(), 3, "槽位按三个补齐，不是发过来几个回几个");
+        assert_eq!(channel.slots[0].instrument, Some(5));
+        assert_eq!(channel.slots[0].volume, Some(80));
+        assert_eq!(
+            channel.slots[1].instrument, None,
+            "没给的槽位保持静音，别悄悄补个音色进去"
+        );
+        assert_eq!(plan.applied_enhanced.range_mode, Some(ImportRangeMode::Fold));
+        assert_eq!(
+            plan.applied_enhanced.substitutes.iter().find(|s| s.instrument == 0).map(|s| s.high),
+            Some(Some(5))
+        );
+    }
+
+    /// 下载那一下只能人自己在窗口里勾：三条要下载的都得它，报错要说清该谁去勾。
+    /// 这条测试同时钉住「参数错排在闸前面」——`model` 写错时回执说的是参数而不是许可，
+    /// 调用方才知道自己该改 JSON，而不是坐着等人。
+    #[test]
+    fn downloads_need_the_persons_own_tick() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        assert!(
+            !h.state.transcription.accepted_downloads,
+            "许可默认就是没勾，外部调用不许替人勾上"
+        );
+        for op in [
+            Op::TranscribePrepareEnv { cuda: Some(false) },
+            Op::TranscribePrepareModel {
+                options: TranscribeOptions::default(),
+            },
+            Op::TranscribeAudio {
+                audio: "a/b.wav".into(),
+                options: TranscribeOptions::default(),
+                save_midi: None,
+                overwrite: false,
+            },
+        ] {
+            let out = h.run(&op);
+            assert!(!out.ok, "{op:?} 居然起了任务");
+            assert_eq!(code(&out), ErrorCode::NotAllowed, "{op:?}");
+            let message = out.error.unwrap().message;
+            assert!(
+                message.contains(&say("许可", "license")),
+                "{op:?} 的拒绝没说是许可：{message}"
+            );
+        }
+        let out = h.run(&Op::TranscribePrepareModel {
+            options: TranscribeOptions {
+                model: Some("giant".into()),
+                ..Default::default()
+            },
+        });
+        assert_eq!(code(&out), ErrorCode::BadArgument, "参数错该比闸先说");
+        assert!(out.error.unwrap().message.contains("giant"));
+        // 被拒的调用一条任务都不许起，不然转录的单飞闸会一直挡着后面合法的调用。
+        let listed = match h.run(&Op::JobList).data {
+            Some(Data::Jobs { jobs }) => jobs,
+            other => panic!("JobList 回来的是 {other:?}"),
+        };
+        assert!(listed.is_empty(), "被拒的调用起了任务：{listed:?}");
+    }
+
+    /// 「省略 = 窗上那一份」是这条链的基线口径，和 MIDI 导入那条一样。
+    /// 窗上的乐器组键与权重路径是两行文本，所以搬运必须走 `request_options()` 那一份实现——
+    /// 拿出厂默认会得出另一种 device/beam，那正是最难查的一种「没生效」。
+    #[test]
+    fn omitted_transcribe_fields_keep_the_windows_own_values() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        {
+            let t = &mut h.state.transcription;
+            t.options.model = "small".into();
+            t.options.device = "cpu".into();
+            t.options.beam_size = 3;
+            t.instruments = "acoustic_piano，voice , ".into();
+            t.model_path = " D:/weights/custom.safetensors ".into();
+        }
+        let kept = transcribe_options(&h.state, &TranscribeOptions::default()).unwrap();
+        assert_eq!(kept.model, "small");
+        assert_eq!(kept.device, "cpu");
+        assert_eq!(kept.beam_size, 3);
+        assert_eq!(
+            kept.instruments,
+            vec!["acoustic_piano", "voice"],
+            "逗号分隔（含全角）按窗上那一份解析，空项丢掉"
+        );
+        assert_eq!(
+            kept.model_path.as_deref(),
+            Some(Path::new("D:/weights/custom.safetensors")),
+            "两侧空格是打字习惯，不是路径的一部分"
+        );
+        let merged = transcribe_options(
+            &h.state,
+            &TranscribeOptions {
+                dtype: Some("float16".into()),
+                device: Some("cuda".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(merged.dtype, "float16");
+        assert_eq!(merged.device, "cuda");
+        assert_eq!(merged.model, "small", "没给的字段不许被出厂默认顶掉");
+        assert_eq!(merged.instruments, kept.instruments);
+        // 空串是「显式清掉窗上那行」，和省略是两件事。
+        let cleared = transcribe_options(
+            &h.state,
+            &TranscribeOptions {
+                model_path: Some("  ".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cleared.model_path, None, "给了空串就该把窗上那行清掉");
+    }
+
+    /// 取值域在这儿钉死，起了子进程之后就晚了：worker 的 ValueError 到不了调用方手上，
+    /// 只会变成几十秒后一句「任务失败」。
+    #[test]
+    fn transcribe_arguments_are_checked_before_a_subprocess() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        let cases: Vec<(TranscribeOptions, &str)> = vec![
+            (TranscribeOptions { device: Some("gpu".into()), ..Default::default() }, "gpu"),
+            (TranscribeOptions { dtype: Some("fp16".into()), ..Default::default() }, "fp16"),
+            (TranscribeOptions { model: Some("tiny".into()), ..Default::default() }, "tiny"),
+            (TranscribeOptions { beam_size: Some(0), ..Default::default() }, "beam_size"),
+            (TranscribeOptions { beam_size: Some(5), ..Default::default() }, "beam_size"),
+            (TranscribeOptions { temperature: Some(2.5), ..Default::default() }, "temperature"),
+            (TranscribeOptions { cfg_coef: Some(-1.0), ..Default::default() }, "cfg_coef"),
+            (
+                TranscribeOptions { model_path: Some("D:/weights/model.bin".into()), ..Default::default() },
+                "safetensors",
+            ),
+        ];
+        for (given, wants) in cases {
+            let err = transcribe_options(&h.state, &given)
+                .err()
+                .unwrap_or_else(|| panic!("{given:?} 居然收了"));
+            assert!(
+                matches!(
+                    err.code,
+                    ErrorCode::BadArgument | ErrorCode::OutOfRange | ErrorCode::NotFound
+                ),
+                "{given:?} 的码是 {:?}",
+                err.code
+            );
+            assert!(err.message.contains(wants), "{given:?} → {}", err.message);
+        }
+        // 窗上已经填着的那行权重不重跑这套检查：那是人自己敲的，AI 没给就该照原样用。
+        h.state.transcription.model_path = "D:/weights/model.onnx".into();
+        assert!(transcribe_options(&h.state, &TranscribeOptions::default()).is_ok());
+    }
+
+    /// `export` 和转录交付共用一条「目标已存在就得认错」的闸，所以字面实现只有一份。
+    #[test]
+    fn a_delivery_target_needs_its_own_ack() {
+        let dir = std::env::temp_dir();
+        let taken = dir.join("nbs_transcribe_gate_taken.mid");
+        let absent = dir.join("nbs_transcribe_gate_absent.mid");
+        let _ = std::fs::remove_file(&absent);
+        std::fs::write(&taken, b"MThd").unwrap();
+        let err = overwrite_gate(&taken, false).err().expect("目标已存在又没认错");
+        assert_eq!(err.code, ErrorCode::NotAllowed);
+        assert!(err.message.contains(&say("覆盖", "overwrite")), "{}", err.message);
+        assert!(overwrite_gate(&taken, true).is_ok());
+        assert!(
+            overwrite_gate(&absent, false).is_ok(),
+            "不存在的目标不该要求认错"
+        );
+        let _ = std::fs::remove_file(&taken);
+    }
+
+    /// 环境没装好就别去要权重，而且拒绝的话要说清下一步是哪条工具，不是只说「不行」。
+    /// 这里刻意把 `runtime.root` 指到临时目录之外：装没装是看真机那份 venv 的，
+    /// 测试不许跟着「这台机器跑过转录」变。
+    #[test]
+    fn the_environment_comes_before_the_weights() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.state.transcription.accepted_downloads = true;
+        h.state.transcription.runtime.root = std::env::temp_dir()
+            .join("nbs_transcribe_env_gate_absent")
+            .join("这一层也不该存在");
+        assert!(!h.state.transcription.runtime.installed());
+        for op in [
+            Op::TranscribePrepareModel {
+                options: TranscribeOptions::default(),
+            },
+            Op::TranscribeAudio {
+                audio: String::new(),
+                options: TranscribeOptions::default(),
+                save_midi: None,
+                overwrite: false,
+            },
+        ] {
+            let out = h.run(&op);
+            assert_eq!(code(&out), ErrorCode::NotAllowed, "{op:?}");
+            let message = out.error.unwrap().message;
+            assert!(
+                message.contains("transcribe_prepare_env"),
+                "{op:?} 的拒绝没点名下一步：{message}"
+            );
+        }
+    }
+
+    /// 「一次只跑一个」数的是任务表里的在册量。窗里那条在跑是另一半，
+    /// 它要真的 `TranscriptionTask`，只能在真机验，这里不假装测过。
+    #[test]
+    fn one_transcription_at_a_time() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.state.transcription.accepted_downloads = true;
+        // 不碰 python：占一个同 kind 的在册位就够把闸咬住。
+        let slot = h
+            .channel
+            .jobs
+            .spawn(JobKind::TranscribeAudio.as_str(), |_| {
+                std::thread::sleep(Duration::from_millis(400));
+                Ok(json!(null))
+            })
+            .expect("任务表该收得下这条");
+        let out = h.run(&Op::TranscribePrepareEnv { cuda: Some(false) });
+        assert_eq!(code(&out), ErrorCode::Busy, "{out:?}");
+        assert!(out
+            .error
+            .unwrap()
+            .message
+            .contains(&say("一次只跑一个", "only one runs at a time")));
+        let _ = slot;
     }
 }

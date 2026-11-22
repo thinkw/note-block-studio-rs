@@ -9,7 +9,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use nbs_control::{
-    BatchField, CellNote, ExportFormat, LayerSet, Op, Playback, Scope, SelectTarget, SetMeta,
+    BatchField, CellNote, ExportFormat, ImportEnhancedOptions, ImportMidiOptions, LayerSet, Op,
+    Playback, Scope, SelectTarget, SetMeta, TranscribeOptions,
 };
 
 /// `run_action` 逃生舱的一条调用：动作名 + 它的参数原样。
@@ -183,6 +184,16 @@ pub struct GetNotes {
     #[schemars(description = "结束层号，含；省略 = 最后一层")]
     #[serde(default)]
     pub layer_to: Option<u32>,
+    #[schemars(
+        description = "小节宽度（格数），给 0 按 1 算；省略 = 工程的「拍号 × 4」，也就是界面画竖线的间距。给了它就额外回一份小节文字视图"
+    )]
+    #[serde(default)]
+    pub ticks_per_bar: Option<u32>,
+    #[schemars(
+        description = "[起始小节, 结束小节]，两头都含，一次最多 256 小节。给了就按小节算 tick 区间并回小节文字视图；和 tick_from / tick_to 互斥"
+    )]
+    #[serde(default)]
+    pub bars: Option<[u32; 2]>,
 }
 
 impl From<GetNotes> for Op {
@@ -192,6 +203,8 @@ impl From<GetNotes> for Op {
             tick_to: a.tick_to,
             layer_from: a.layer_from,
             layer_to: a.layer_to,
+            ticks_per_bar: a.ticks_per_bar,
+            bars: a.bars,
         }
     }
 }
@@ -533,6 +546,21 @@ pub struct ImportMidi {
     #[schemars(description = "当前工程有未保存改动时必须为 true：导入会替换整首歌并清空撤销历史")]
     #[serde(default)]
     pub discard_changes: bool,
+    #[schemars(
+        description = "传统导入的选项；整个字段省略 = 复刻人打开导入窗时的基线（标量取自偏好、通道/鼓映射按这个文件和当前 GM 表现算）。给了哪个字段就覆盖哪个，没给的仍走基线——注意出厂默认值不是基线，别拿它当'不设'"
+    )]
+    #[serde(default)]
+    pub options: Option<ImportMidiOptions>,
+    #[schemars(
+        description = "增强导入那一套；省略 = 走传统路径。要启用必须显式写 enabled=true，否则只给子字段会被拒（因为那些字段根本不会被读到）"
+    )]
+    #[serde(default)]
+    pub enhanced: Option<ImportEnhancedOptions>,
+    #[schemars(
+        description = "true = 把这次的通道/鼓映射写回 GM 表、标量存进偏好——这是改用户的长期设置，所以省略算 false。只有传统路径会写回，enhanced.enabled=true 时这个字段无效（和界面一致）"
+    )]
+    #[serde(default)]
+    pub remember: Option<bool>,
 }
 
 impl From<ImportMidi> for Op {
@@ -540,6 +568,33 @@ impl From<ImportMidi> for Op {
         Op::ImportMidi {
             path: a.path,
             discard_changes: a.discard_changes,
+            options: a.options,
+            enhanced: a.enhanced,
+            remember: a.remember,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct InspectMidi {
+    #[schemars(description = "要看的那个 .mid 路径，必须落在编辑器允许的目录里")]
+    pub path: String,
+    #[schemars(
+        description = "按哪套选项预演；形状和 import_midi.options 完全一致，省略 = 编辑器基线。想验证'就这么导会得到什么'，把准备发给 import_midi 的 options 原样发过来"
+    )]
+    #[serde(default)]
+    pub options: Option<ImportMidiOptions>,
+    #[schemars(description = "增强导入的预演，形状和 import_midi.enhanced 一致；省略 = 预演传统路径")]
+    #[serde(default)]
+    pub enhanced: Option<ImportEnhancedOptions>,
+}
+
+impl From<InspectMidi> for Op {
+    fn from(a: InspectMidi) -> Self {
+        Op::InspectMidi {
+            path: a.path,
+            options: a.options,
+            enhanced: a.enhanced,
         }
     }
 }
@@ -582,6 +637,72 @@ impl From<Export> for Op {
 pub struct JobId {
     #[schemars(description = "export 回执里带回来的任务句柄")]
     pub id: u64,
+}
+
+/// `transcribe_probe` 没有参数：它只是问本机转录环境现在是什么样子。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct TranscribePrepareEnv {
+    #[schemars(
+        description = "装 cu128（CUDA）构建还是 CPU 构建；省略 = 用编辑器「音频转 MIDI」窗口里当前那个勾。这一步要下几百 MB"
+    )]
+    #[serde(default)]
+    pub cuda: Option<bool>,
+}
+
+/// `transcribe_prepare_model` 与 `transcribe_audio` 共用同一份 `options`。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct TranscribePrepareModel {
+    #[schemars(
+        description = "要预检的模型与解码参数；省略哪个字段就用窗口里当前那一份。这一步会按名字下权重（CC BY-NC 4.0），也要人勾过许可"
+    )]
+    #[serde(default)]
+    pub options: Option<TranscribeOptions>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct TranscribeAudio {
+    #[schemars(
+        description = "要识别的音频路径，必须落在编辑器允许的目录里且真的存在（wav/flac/mp3/ogg/m4a/aac/aif/aiff/opus/webm）"
+    )]
+    pub audio: String,
+    #[schemars(
+        description = "模型与解码参数；省略哪个字段就用窗口里当前那一份。第一次跑这个模型会先下权重"
+    )]
+    #[serde(default)]
+    pub options: Option<TranscribeOptions>,
+    #[schemars(
+        description = "把识别出的 MIDI 另存到这个路径（.mid/.midi，必须在允许的目录里）。不给也能拿到产物路径，但那个目录在编辑器自己的 .work/transcription 下，import_midi 读不到——要接着导入就得给它"
+    )]
+    #[serde(default)]
+    pub save_midi: Option<String>,
+    #[schemars(description = "save_midi 的目标文件已存在时必须为 true，否则直接报错")]
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+impl From<TranscribePrepareEnv> for Op {
+    fn from(a: TranscribePrepareEnv) -> Self {
+        Op::TranscribePrepareEnv { cuda: a.cuda }
+    }
+}
+
+impl From<TranscribePrepareModel> for Op {
+    fn from(a: TranscribePrepareModel) -> Self {
+        Op::TranscribePrepareModel {
+            options: a.options.unwrap_or_default(),
+        }
+    }
+}
+
+impl From<TranscribeAudio> for Op {
+    fn from(a: TranscribeAudio) -> Self {
+        Op::TranscribeAudio {
+            audio: a.audio,
+            options: a.options.unwrap_or_default(),
+            save_midi: a.save_midi,
+            overwrite: a.overwrite,
+        }
+    }
 }
 
 #[cfg(test)]
