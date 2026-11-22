@@ -407,10 +407,8 @@ fn header(
     let bpm_on = state.prefs.use_bpm;
     let tempo = state.doc.song.meta.tempo.max(0.25);
     // 拖速度框时先按 0.25 量化预览，松手才写进歌曲（原版 `tempo = floor(tempodrag * 4) / 4`）。
-    let shown = state
-        .tempo_drag
-        .map(|raw| (raw * 4.0).floor() / 4.0)
-        .unwrap_or(tempo) as f64;
+    // 右上角的兼容徽标拿的是同一个数（`EditorState::shown_tempo`），框和徽标一起动。
+    let shown = state.shown_tempo() as f64;
     let marker = state.marker();
     let total = song.song_length() as f64;
     let fluent = th.kind == ThemeKind::Fluent;

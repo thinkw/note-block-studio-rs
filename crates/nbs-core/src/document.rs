@@ -716,7 +716,12 @@ impl Document {
     }
 
     pub fn replace_song(&mut self, song: Song) {
+        // rev 只增不减，且换歌也要推进它（在旧值上 +1，而不是沿用载入值）：两首新载入的
+        // 歌都带 rev=0，沿用就会撞在同一个数上，凡是拿 rev 当缓存键的下游（右上角兼容
+        // 徽标、MCP 的 expect_rev）都会把上一首的结论留给下一首。
+        let next = self.song.rev.saturating_add(1);
         self.song = song;
+        self.song.rev = next;
         self.selection = Selection::new();
         self.history.clear();
     }
