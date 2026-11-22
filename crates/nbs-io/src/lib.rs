@@ -43,8 +43,9 @@ pub use midi::{
     parse_midi, MidiData, MidiEvent, MidiImportOptions, MidiImportPrefs, MidiPart, MidiTrack,
 };
 pub use midi_enhanced::{
-    import_midi_enhanced, ChannelCombination, EnhancedImportReport, EnhancedMidiOptions,
-    InstrumentSubstitution, MidiSlot, RangeMode,
+    import_midi_enhanced, sustain_candidate_tracks, track_length_stats, ChannelCombination,
+    EnhancedImportReport, EnhancedMidiOptions, InstrumentSubstitution, MidiSlot, RangeMode,
+    SustainDensity, SustainMode, TrackLengthStats,
 };
 pub use midi_gm::{MidiDrum, MidiGmPersist, MidiGmTable, MidiPatch, MIDI_DRUMS, MIDI_PATCHES};
 pub use pattern::{
