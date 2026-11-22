@@ -47,6 +47,16 @@ const SUFFIXES: &[&str] = &[
     "", "_side", "_top", "_front", "_end", "_bottom", "_0", "_1", "_plain",
 ];
 
+/// FNV-1a：字符串 → 稳定的 32 位散列。兜底色和乐器色都靠它，
+/// 同一名字在任何机器上算出同一个数，画面才不会每次重启换个样。
+fn fnv1a(s: &str) -> u32 {
+    let mut hash: u32 = 2166136261;
+    for b in s.bytes() {
+        hash = (hash ^ b as u32).wrapping_mul(16777619);
+    }
+    hash
+}
+
 /// 找一个方块名能用的贴图文件。返回的是不带扩展名的文件主名。
 pub fn resolve_file(available: &impl Fn(&str) -> bool, name: &str) -> Option<String> {
     let base = name.strip_prefix("minecraft:").unwrap_or(name);
@@ -72,10 +82,7 @@ pub fn resolve_file(available: &impl Fn(&str) -> bool, name: &str) -> Option<Str
 /// 缺贴图时的兜底色：同一个名字在任何机器上都是同一个颜色，
 /// 免得用户每次看到的方块排颜色都在换。
 pub fn fallback_color(name: &str) -> Color32 {
-    let mut hash: u32 = 2166136261;
-    for b in name.bytes() {
-        hash = (hash ^ b as u32).wrapping_mul(16777619);
-    }
+    let hash = fnv1a(name);
     let r = (hash & 0xFF) as u8;
     let g = ((hash >> 8) & 0xFF) as u8;
     let b = ((hash >> 16) & 0xFF) as u8;
@@ -84,10 +91,29 @@ pub fn fallback_color(name: &str) -> Color32 {
     Color32::from_rgb(mix(r), mix(g), mix(b))
 }
 
+/// 乐器 → 稳定颜色：按乐器名哈希出色相，同一件乐器在任何曲子、任何机器上同色。
+///
+/// 自定义乐器在导出用的方块表里默认全是同一块石头（`ins_block[16..]` 没人动过），
+/// 光靠方块分不出「现在响的是 S080 还是 VGE」，颜色是它们唯一分得开的地方。
+/// 空名（号越界、曲子没挂这层乐器）退到按乐器号上色，至少不同号不同色。
+pub fn instrument_color(name: &str, index: u8) -> Color32 {
+    let hue = if name.is_empty() {
+        fnv1a(&format!("#{index}"))
+    } else {
+        fnv1a(name)
+    } % 360;
+    // 只动色相：饱和与明度钉死，免得有的乐器刺眼、有的像蒙了层灰。
+    let [r, g, b] = crate::theme::Theme::hsb_to_rgb(hue as f32, 55.0, 92.0);
+    Color32::from_rgb(r, g, b)
+}
+
 /// 乐器 → 方块名 的那张表。导出选项（`ins_block` / `ins_data`）一改就重建，
 /// 每帧只查内存，不在音符循环里分配字符串。
 pub struct InstrumentBlocks {
     names: Vec<String>,
+    /// 这一格的方块是不是「没人配过的默认值」。默认表只有前 16 格是真方块，
+    /// 往后（内置 16..19 加全部自定义乐器）清一色是石头 —— 特效据此改用乐器色。
+    untouched: Vec<bool>,
 }
 
 impl Default for InstrumentBlocks {
@@ -112,7 +138,26 @@ impl InstrumentBlocks {
                 namespaced_id(id, data)
             })
             .collect();
-        Self { names }
+        let untouched = (0..count)
+            .map(|i| {
+                // 前 16 格默认就是各自的真方块（harp → 泥土），不算「没配过」。
+                i >= nbs_io::schematic::INSTRUMENT_BLOCKS.len()
+                    && opts.ins_block.get(i) == fallback.get(i)
+                    && opts.ins_data.get(i).copied().unwrap_or(0) == 0
+            })
+            .collect();
+        Self { names, untouched }
+    }
+
+    /// 这件乐器在导出表里有没有一个配好的方块（而不是默认的石头）。
+    /// 没有时方块排改用 [`instrument_color`]：否则一整排自定义乐器全是同一种石头，
+    /// 看着就像「特效不随乐器变」。
+    pub fn has_block(&self, instrument: u8) -> bool {
+        !self
+            .untouched
+            .get(instrument as usize)
+            .copied()
+            .unwrap_or(false)
     }
 
     /// 该乐器的方块名；越界（自定义乐器号超出表长）落到最后一格。
@@ -323,6 +368,47 @@ mod tests {
         // 兜底色不能黑到看不见，也不能花到刺眼。
         assert!(a.r() > 40 && a.g() > 40 && a.b() > 40);
         assert!(a.r() < 216 && a.g() < 216 && a.b() < 216);
+    }
+
+    /// 自定义乐器在默认表里全是石头：特效得知道「这格没人配过」，才能改用乐器色。
+    #[test]
+    fn only_configured_instruments_have_a_block() {
+        let blocks = InstrumentBlocks::default();
+        for ins in 0..16u8 {
+            assert!(blocks.has_block(ins), "{ins} 号内置乐器默认就有自己的方块");
+        }
+        // 16..19 是铜块一族（这套 id 表里没有），20 往后是自定义乐器：都还是默认石头。
+        for ins in [16u8, 19, 20, 100, 255] {
+            assert!(!blocks.has_block(ins), "{ins} 号没配方块");
+            assert_eq!(blocks.name(ins), "stone");
+        }
+        // 用户配过一格，就该认出来。
+        let mut opts = SchematicOptions::default();
+        opts.ins_block[20] = nbs_io::schematic::INSTRUMENT_BLOCKS[0];
+        let tuned = InstrumentBlocks::from_options(&opts);
+        assert!(tuned.has_block(20), "配了 dirt 就不算默认值了");
+        assert!(!tuned.has_block(21), "邻格没动，还是默认的石头");
+    }
+
+    #[test]
+    fn instrument_colors_are_stable_and_distinct() {
+        assert_eq!(
+            instrument_color("S080", 20),
+            instrument_color("S080", 21),
+            "同一件乐器不管在这首曲子里排第几号，颜色都得一样"
+        );
+        assert_ne!(instrument_color("S080", 20), instrument_color("VGE", 21));
+        assert_ne!(instrument_color("Harp", 0), instrument_color("Bell", 7));
+        // 没名字（号越界）按号上色，不同号还是分得开。
+        assert_ne!(instrument_color("", 21), instrument_color("", 22));
+        assert_eq!(instrument_color("", 21), instrument_color("", 21));
+        // 上色要看得清：不能暗到贴图上看不见，也不能亮到一片白。
+        for name in ["Harp", "Bell", "S080", "VGE", "idle", "第26层", ""] {
+            let c = instrument_color(name, 3);
+            let (lo, hi) = (c.r().min(c.g().min(c.b())), c.r().max(c.g().max(c.b())));
+            assert!(hi > 150 && lo < 210, "{name:?} → {c:?} 太暗或太白");
+            assert!(hi - lo > 30, "{name:?} → {c:?} 灰到分不出色相");
+        }
     }
 
     #[test]

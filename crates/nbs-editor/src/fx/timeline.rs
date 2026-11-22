@@ -9,7 +9,7 @@
 //! 曲子一改、或那批会出声的音符一换档就重烘，播放中每帧只查表。
 
 use nbs_audio::scheduler::{build_event_table, EventKind};
-use nbs_core::model::Song;
+use nbs_core::model::{Song, FIRST_CUSTOM_INDEX};
 
 /// 一枚会发出声音的音符（事件乐器与锁定层都不在这里）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +26,10 @@ pub struct FxTimeline {
     notes: Vec<FxNote>,
     cum: Vec<f32>,
     ticks_per_bar: u32,
+    /// 乐器号 → 乐器名（内置 20 个 + 这首曲子的自定义乐器）。
+    /// 特效要靠它区分「这是哪件乐器」：方块表没配的自定义乐器在表里全是同一块石头，
+    /// 只有名字能把它们分开。
+    instruments: Vec<String>,
 }
 
 impl Default for FxTimeline {
@@ -40,6 +44,7 @@ impl FxTimeline {
             notes: Vec::new(),
             cum: vec![0.0, 1.0],
             ticks_per_bar: 16,
+            instruments: Vec::new(),
         }
     }
 
@@ -90,16 +95,35 @@ impl FxTimeline {
             cum.push(t);
         }
         notes.sort_by_key(|n| (n.tick, n.layer));
+        // 乐器名表：内置那 20 个 + 这首曲子挂的自定义乐器。越界的号后面查不到，特效按空名处理。
+        let instruments = (0..(FIRST_CUSTOM_INDEX as usize + song.custom_instruments.len()))
+            .map(|i| song.instrument_name(i as u8).to_string())
+            .collect();
         Self {
             notes,
             cum,
             ticks_per_bar,
+            instruments,
         }
     }
 
     /// 音符总数，也用来判断「烘出来的表是不是空的」。
     pub fn note_count(&self) -> usize {
         self.notes.len()
+    }
+
+    /// 某个乐器号在这首曲子里叫什么。内置乐器给英文名（和原版乐器表同源），
+    /// 自定义乐器给用户起的名字；号越界返回空串，调用方自己兜底。
+    pub fn instrument_name(&self, instrument: u8) -> &str {
+        self.instruments
+            .get(instrument as usize)
+            .map(String::as_str)
+            .unwrap_or("")
+    }
+
+    /// 表里有几个乐器（内置 20 + 自定义数）。
+    pub fn instrument_count(&self) -> usize {
+        self.instruments.len()
     }
 
     pub fn ticks_per_bar(&self) -> u32 {
@@ -375,6 +399,30 @@ mod tests {
         solo.layers[0].lock = LockMode::Solo;
         solo.layers[1].lock = LockMode::Normal;
         assert_eq!(FxTimeline::bake(&solo, false).note_count(), 1);
+    }
+
+    /// 特效得知道「这枚音符是哪件乐器」：自定义乐器在导出方块表里全是同一块石头，
+    /// 只有名字能把它们分开，所以名字必须一起烘进表里。
+    #[test]
+    fn instrument_names_cover_builtin_and_custom() {
+        let mut s = song();
+        for name in ["S080", "VGE"] {
+            s.custom_instruments.push(CustomInstrument {
+                name: name.into(),
+                filename: String::new(),
+                key: 45,
+                press: false,
+            });
+        }
+        let tl = FxTimeline::bake(&s, false);
+        assert_eq!(tl.instrument_count(), 22, "内置 20 + 自定义 2");
+        assert_eq!(tl.instrument_name(0), "Harp");
+        assert_eq!(tl.instrument_name(19), "Oxidized Trumpet");
+        assert_eq!(tl.instrument_name(20), "S080");
+        assert_eq!(tl.instrument_name(21), "VGE");
+        // 号越界：空串，不是 panic，也不是把上一个名字顶上去。
+        assert_eq!(tl.instrument_name(22), "");
+        assert_eq!(tl.instrument_name(u8::MAX), "");
     }
 
     #[test]

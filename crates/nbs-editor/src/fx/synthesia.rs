@@ -13,6 +13,8 @@ use egui::{Color32, Pos2, Rect, Ui, Vec2};
 
 use super::keyboard::{is_white_key, KeyboardLayout, KEY_W, WHITE_HIT_H};
 use super::stage::Frame;
+use super::tiles::instrument_color;
+use super::timeline::FxNote;
 use super::{EffectInfo, FxContext, PlaybackEffect, Surface};
 use crate::tr;
 
@@ -39,6 +41,8 @@ pub struct Params {
     pub lanes: bool,
     /// 击中时冒不冒粒子。
     pub particles: bool,
+    /// 胶囊按乐器上色（关掉就全用主题强调色，回到 Synthesia 那种单色瀑布）。
+    pub color_by_instrument: bool,
 }
 
 impl Default for Params {
@@ -49,6 +53,7 @@ impl Default for Params {
             glow_px: 12.0,
             lanes: true,
             particles: true,
+            color_by_instrument: true,
         }
     }
 }
@@ -137,6 +142,20 @@ impl Synthesia {
         Color32::from_rgba_unmultiplied(255, 250, 190, (230.0 * v) as u8)
     }
 
+    /// 胶囊底色：按乐器上色时用乐器名哈希出的颜色，关掉就退回主题强调色。
+    /// 原版 Synthesia 只分「左右手」两档，看不出这枚音是哪件乐器弹的；
+    /// 自定义乐器在导出方块表里又全是同一块石头，所以这里按名字上色。
+    fn capsule_base(&self, cx: &FxContext, note: &FxNote) -> Color32 {
+        if self.params.color_by_instrument {
+            instrument_color(
+                cx.timeline.instrument_name(note.instrument),
+                note.instrument,
+            )
+        } else {
+            cx.accent
+        }
+    }
+
     /// 胶囊在这一帧的纵向中心。`ahead` = 距击中还剩几秒。
     pub fn capsule_y(top: f32, hit: f32, ahead: f32, fall_seconds: f32) -> f32 {
         let fall = fall_seconds.max(0.1);
@@ -189,6 +208,12 @@ impl PlaybackEffect for Synthesia {
             .changed();
         changed |= ui
             .checkbox(&mut p.particles, tr("Hit sparks", "击中粒子"))
+            .changed();
+        changed |= ui
+            .checkbox(
+                &mut p.color_by_instrument,
+                tr("Color by instrument", "按乐器上色"),
+            )
             .changed();
         changed
     }
@@ -250,7 +275,12 @@ impl PlaybackEffect for Synthesia {
                 Pos2::new(rect.center().x, center_y),
                 Vec2::new(capsule_w, capsule_h),
             );
-            let color = capsule_color(cx.accent, note.key, note.velocity, ahead);
+            let color = capsule_color(
+                self.capsule_base(cx, note),
+                note.key,
+                note.velocity,
+                ahead,
+            );
             out.rect(body, color, capsule_w / 2.0);
             if ahead <= 0.0 {
                 // 刚落下的几枚：在击中线上发一束，并把对应琴键点亮。
@@ -287,13 +317,13 @@ impl PlaybackEffect for Synthesia {
     }
 }
 
-fn capsule_color(accent: Color32, key: u8, velocity: u8, ahead: f32) -> Color32 {
-    // 黑键道稍暗：原版 Synthesia 用左右手两色，这里改成黑白键两种明度，
+fn capsule_color(base: Color32, key: u8, velocity: u8, ahead: f32) -> Color32 {
+    // 黑键道稍暗：底色（乐器色或强调色）之上再分黑白键两档明度，
     // 一眼能看出音符落在哪一族键上。
     let base = if is_white_key(key) {
-        accent
+        base
     } else {
-        accent.linear_multiply(0.72)
+        base.linear_multiply(0.72)
     };
     let v = 0.45 + 0.55 * (velocity.min(100) as f32 / 100.0);
     let fade = if ahead <= 0.0 {
@@ -522,6 +552,27 @@ mod tests {
         let before = back.params();
         back.set_params(&serde_json::json!(42));
         assert_eq!(back.params(), before);
+    }
+
+    /// 瀑布原本只按黑白键分两档，看不出这枚音是哪件乐器弹的：底色要跟着乐器走。
+    #[test]
+    fn capsules_are_tinted_by_instrument() {
+        let rig = Rig::new(&[(3, 0, 60), (4, 13, 62), (5, 20, 64)]);
+        let fx = Synthesia::default();
+        let cx = rig.cx(0.0, 0.0, false);
+        let notes = cx.timeline.notes();
+        assert_eq!(notes.len(), 3);
+        let harp = fx.capsule_base(&cx, &notes[0]);
+        let chime = fx.capsule_base(&cx, &notes[1]);
+        let custom = fx.capsule_base(&cx, &notes[2]);
+        assert_ne!(harp, chime, "harp 和 chime 的胶囊该不同色");
+        assert_ne!(harp, custom, "自定义乐器也要有自己的色");
+        assert_eq!(harp, fx.capsule_base(&cx, &notes[0]), "同一件乐器每次同色");
+        // 关掉「按乐器上色」回到主题强调色。
+        let mut plain = Synthesia::default();
+        plain.params.color_by_instrument = false;
+        assert_eq!(plain.capsule_base(&cx, &notes[0]), cx.accent);
+        assert_eq!(plain.capsule_base(&cx, &notes[1]), cx.accent);
     }
 
     #[test]

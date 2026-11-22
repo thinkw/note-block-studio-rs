@@ -3,6 +3,10 @@
 //! 它是**叠加**表面：不接管中央面板，直接压在网格/钢琴栏之上，所以开着它还能照常
 //! 编辑。每个还在响的音符在它**所按键的正上方**落一个方块，方块的样子就是那枚音符
 //! 的乐器对应的方块（和导出 .nbt 用的同一张表），所以画面和机体里实际摆的方块对得上。
+//! 一张密集的和弦会把同一条键道摞成一小塔（最新那枚在最下面、正对键道），
+//! 不摞的话几十个音全盖在同一个像素上，看着就像只落了一块方块、也不随乐器变。
+//! 导出表里没配方块的乐器（自定义乐器默认全是石头）改用按乐器名哈希出的颜色，
+//! 让「现在响的是哪件乐器」在画面上看得见，并在设置区指一句去哪儿配。
 //!
 //! 「以初始位置为中心持续位移几个像素」这条要求位移必须是 `now` 的纯函数：
 //! 每帧从「家」重新算，而不是「上帧位置 += 一点」，否则拖动播放头、或者切走再切回，
@@ -15,12 +19,17 @@ use egui::{Color32, Pos2, Rect, Ui, Vec2};
 
 use super::keyboard::{KeyboardLayout, WHITE_HIT_H};
 use super::stage::Frame;
-use super::tiles::{fallback_color, tile_size};
+use super::tiles::{fallback_color, instrument_color, tile_size};
 use super::{EffectInfo, FxContext, PlaybackEffect, Surface};
 use crate::tr;
+use nbs_core::model::KEY_MAX;
 
 /// 一帧最多摆几个方块。密集段落一秒能进几十个音，超出的按「只留最新的」截。
 pub const MAX_BLOCKS: usize = 240;
+
+/// 同一枚键上一共叠几个方块封顶：再多的音只留最新这一摞。
+/// 三列一层，12 个就是四层，再高就顶到网格上沿了。
+pub const MAX_STACK: usize = 12;
 
 /// 方块在「家」周围摆的相位种子步进：相邻声道错开一点，一整排才不像一块板。
 const PHASE_PER_SLOT: f32 = 0.7;
@@ -58,6 +67,8 @@ pub struct BlockRow {
     params: Params,
     /// 上一帧有没有因为缺素材退成色块（用来提一句「记得扒贴图」）。
     tiles_missing: bool,
+    /// 上一帧有没有因为乐器没配方块而改用乐器色（用来指一句「导出设置里能指定方块」）。
+    unconfigured: bool,
     /// 上一帧是否截断过方块数。
     capped: bool,
 }
@@ -96,12 +107,12 @@ impl BlockRow {
         (0.35 + 0.65 * (1.0 - r), ((1.0 - r) / 0.3).clamp(0.0, 1.0))
     }
 
-    /// 同一枚键上多个声道叠在一起时的小偏移：一个 2×2 的子格，按声道号取。
-    fn slot_offset(layer: u32, tile: f32) -> (f32, f32) {
-        let s = layer % 4;
-        let dx = if s % 2 == 0 { -0.28 } else { 0.28 };
-        let dy = -0.42 * (s / 2) as f32;
-        (dx * tile, dy * tile)
+    /// 同一枚键上叠着的第 `k` 个方块相对「家」的偏移：新的那枚正对键道中心，
+    /// 往后每三个一层往上摞 —— 否则一轮颤音全落在同一个像素上，看着就是一块方块，
+    /// 完全看不出「刚刚响过这么多个音」。
+    pub fn stack_offset(k: usize, tile: f32) -> (f32, f32) {
+        const COLS: [f32; 3] = [0.0, -0.30, 0.30];
+        (COLS[k % 3] * tile, -0.66 * (k / 3) as f32 * tile)
     }
 
     fn fade(color: Color32, k: f32) -> Color32 {
@@ -189,6 +200,14 @@ impl PlaybackEffect for BlockRow {
                 )
                 .to_string(),
             )
+        } else if self.unconfigured {
+            Some(
+                tr(
+                    "Some instruments have no block assigned in the schematic export, so they are shown in their own color.",
+                    "有些乐器在导出表里还是默认的石头，这一帧改用各自的乐器色（导出设置 → 乐器方块 可以指定）。",
+                )
+                .to_string(),
+            )
         } else {
             None
         }
@@ -211,7 +230,16 @@ impl PlaybackEffect for BlockRow {
         }
 
         let amp = self.params.nudge_px * scale;
+        // 每道还剩几枚没摆：`live` 是按列排的正序，正着数下去序号一路减小，
+        // 最新那枚拿到 0，正好压在键道正上方，更早的往上摞。
+        let mut left = [0u16; KEY_MAX as usize + 1];
+        for note in live {
+            if let Some(n) = left.get_mut(note.key as usize) {
+                *n += 1;
+            }
+        }
         let mut missing = false;
+        let mut unconfigured = false;
         for note in live {
             let age = (now_seconds - cx.timeline.seconds_at(f64::from(note.tick)) as f64) as f32;
             if age < 0.0 || age > self.params.life_seconds {
@@ -221,27 +249,51 @@ impl PlaybackEffect for BlockRow {
                 // 这枚键本帧不在画面里（用户把钢琴栏拖到只露一半），方块跟着不画。
                 continue;
             };
+            let stack = match left.get_mut(note.key as usize) {
+                Some(n) => {
+                    let v = n.saturating_sub(1);
+                    *n = v;
+                    v as usize
+                }
+                None => 0,
+            };
+            if stack >= MAX_STACK {
+                // 同一枚键上摞到顶了：再多只留最新那一摞，不然塔会一路长出画面。
+                self.capped = true;
+                continue;
+            }
             let (swing, alpha) = Self::envelope(age, self.params.life_seconds);
             let phase = std::f32::consts::TAU * self.params.nudge_hz * cx.now as f32
                 + note.key as f32 * PHASE_PER_SLOT;
             let (dx, dy) = Self::nudge(phase, amp * swing);
-            let (ox, oy) = Self::slot_offset(note.layer, tile);
-            let center = Pos2::new(
-                home.center().x + dx + ox,
-                base_y + dy + oy - home.height() * 0.0,
-            );
+            let (ox, oy) = Self::stack_offset(stack, tile);
+            let center = Pos2::new(home.center().x + dx + ox, base_y + dy + oy);
             let rect = Rect::from_center_size(center, Vec2::new(tile, tile));
 
-            let texture = self
-                .params
-                .use_tiles
-                .then(|| cx.tiles?.texture_for(cx.tex, cx.blocks, note.instrument))
-                .flatten();
+            // 只有导出表里真配了方块的乐器才走贴图；没配过的（自定义乐器默认全是石头）
+            // 用乐器色，否则一整排方块全同，看着就是「不随乐器变」。
+            let has_block = cx.blocks.has_block(note.instrument);
+            unconfigured |= !has_block;
+            let texture = if self.params.use_tiles && has_block {
+                cx.tiles
+                    .and_then(|tiles| tiles.texture_for(cx.tex, cx.blocks, note.instrument))
+            } else {
+                None
+            };
             match texture {
                 Some(tex) => out.image(rect, tex, Color32::from_white_alpha((255.0 * alpha) as u8)),
                 None => {
-                    missing = true;
-                    let color = fallback_color(cx.blocks.name(note.instrument));
+                    if has_block && self.params.use_tiles {
+                        missing = true;
+                    }
+                    let color = if has_block {
+                        fallback_color(cx.blocks.name(note.instrument))
+                    } else {
+                        instrument_color(
+                            cx.timeline.instrument_name(note.instrument),
+                            note.instrument,
+                        )
+                    };
                     out.rect(rect, Self::fade(color, alpha), 2.0 * scale);
                     out.outlined(
                         rect,
@@ -253,6 +305,7 @@ impl PlaybackEffect for BlockRow {
             }
         }
         self.tiles_missing = missing;
+        self.unconfigured = unconfigured;
     }
 }
 
@@ -265,7 +318,7 @@ mod tests {
     use crate::fx::tiles::{BlockTiles, InstrumentBlocks};
     use crate::fx::timeline::FxTimeline;
     use egui::Context;
-    use nbs_core::model::{Layer, Note, Song};
+    use nbs_core::model::{CustomInstrument, Layer, Note, Song};
 
     /// `(tick, layer, instrument, key)`。
     fn song(notes: &[(u32, u32, u8, u8)]) -> Song {
@@ -300,6 +353,22 @@ mod tests {
                 tiles: BlockTiles::open_in(None),
                 layout: None,
             }
+        }
+
+        /// 挂了自定义乐器的曲子：20 号往后的名字得在曲子里存在，特效才拿得到名字。
+        fn with_custom(notes: &[(u32, u32, u8, u8)], names: &[&str]) -> Self {
+            let mut s = song(notes);
+            for name in names {
+                s.custom_instruments.push(CustomInstrument {
+                    name: (*name).into(),
+                    filename: String::new(),
+                    key: 45,
+                    press: false,
+                });
+            }
+            let mut rig = Self::new(&[]);
+            rig.timeline = FxTimeline::bake(&s, false);
+            rig
         }
 
         /// 底部钢琴栏在位的那种画面（叠加表面的正常情形）。
@@ -351,12 +420,28 @@ mod tests {
         blocks(frame).iter().map(|r| r.center()).collect()
     }
 
-    /// 方块的「家」：那枚键的道中心，加上同键多声道时让开的那半格。
+    /// 色块那条路径里每个方块的颜色（描边那圈不算）。
+    fn fills(frame: &Frame) -> Vec<Color32> {
+        frame
+            .prims
+            .iter()
+            .filter_map(|p| match p {
+                Primitive::Rect {
+                    fill,
+                    stroke: None,
+                    ..
+                } => Some(*fill),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 方块的「家」：那枚键的道中心，加上同键摞第 `stack` 个时让开的那点。
     /// 位移是围绕这个点算的，不是围绕键道中心 —— 否则同一列的方块会互相盖住。
-    fn home(rig: &Rig, key: u8, layer: u32) -> f32 {
+    fn home(rig: &Rig, key: u8, stack: usize) -> f32 {
         let layout = rig.layout.unwrap();
         let tile = tile_size(1.0) * Params::default().tile_scale;
-        let (ox, _) = BlockRow::slot_offset(layer, tile);
+        let (ox, _) = BlockRow::stack_offset(stack, tile);
         layout.rect_of_key(key).unwrap().center().x + ox
     }
 
@@ -443,18 +528,7 @@ mod tests {
         let mut fx = BlockRow::default();
         let mut frame = Frame::default();
         fx.draw(&rig.cx(2.0, 0.0), &mut frame);
-        let fills: Vec<Color32> = frame
-            .prims
-            .iter()
-            .filter_map(|p| match p {
-                Primitive::Rect {
-                    fill,
-                    stroke: None,
-                    ..
-                } => Some(*fill),
-                _ => None,
-            })
-            .collect();
+        let fills = fills(&frame);
         assert_eq!(fills.len(), 2, "两个乐器方块");
         assert_ne!(fills[0], fills[1], "piano 和 bass 的方块要看得出区别");
         let msg = fx.note().unwrap();
@@ -463,6 +537,64 @@ mod tests {
         let mut again = Frame::default();
         fx.draw(&rig.cx(2.0, 0.0), &mut again);
         assert_eq!(blocks(&frame), blocks(&again));
+    }
+
+    /// 自定义乐器在导出方块表里全是默认的石头：光看方块分不出乐器，
+    /// 得改用按乐器名的颜色，并指一句去哪儿配。
+    #[test]
+    fn instruments_without_a_block_get_their_own_color() {
+        let rig = Rig::with_custom(&[(0, 0, 20, 48), (0, 1, 21, 60)], &["S080", "VGE"])
+            .with_keyboard();
+        let mut fx = BlockRow::default();
+        let mut frame = Frame::default();
+        fx.draw(&rig.cx(2.0, 0.0), &mut frame);
+        let fills = fills(&frame);
+        assert_eq!(fills.len(), 2, "两件自定义乐器各一个方块");
+        assert_ne!(fills[0], fills[1], "S080 和 VGE 都是石头，靠颜色才分得开");
+        let msg = fx.note().unwrap();
+        assert!(
+            msg.contains("方块") || msg.contains("block"),
+            "要指一句「导出设置里能配方块」：{msg}"
+        );
+        // 内置乐器配好了方块，不该被拖进这条说明里。
+        let classic = Rig::new(&[(0, 0, 0, 48)]).with_keyboard();
+        let mut other = BlockRow::default();
+        let mut one = Frame::default();
+        other.draw(&classic.cx(2.0, 0.0), &mut one);
+        let classic_msg = other.note().unwrap_or_default();
+        assert!(
+            classic_msg.contains("贴图") || classic_msg.contains("textures"),
+            "harp 有真方块，缺素材时只该提贴图：{classic_msg}"
+        );
+    }
+
+    /// 同一条键道上连着几十个音：不能全盖在同一个像素上，看着像只落了一块方块。
+    #[test]
+    fn a_trill_on_one_key_spreads_upward() {
+        let notes: Vec<(u32, u32, u8, u8)> = (0..20u32).map(|t| (t, 0, 0, 60)).collect();
+        let rig = Rig::new(&notes).with_keyboard();
+        let mut fx = BlockRow::default();
+        let mut frame = Frame::default();
+        // 10 t/s、寿命 1.6 s ⇒ 窗口 16 列；播放头 15.5 ⇒ 15 枚还活着。
+        fx.draw(&rig.cx(15.5, 0.0), &mut frame);
+        let got = blocks(&frame);
+        assert!(got.len() >= 12, "摞到 {MAX_STACK} 封顶，剩下的算截断：{}", got.len());
+        for (i, a) in got.iter().enumerate() {
+            for b in &got[i + 1..] {
+                assert!(
+                    (a.center() - b.center()).length() > 2.0,
+                    "同一条键道叠住了：{a:?} {b:?}"
+                );
+            }
+        }
+        // 最新那枚（第 15 列）压在键道正上方，只带着那点摆动。
+        let want = home(&rig, 60, 0);
+        assert!(
+            got.iter()
+                .any(|r| (r.center().x - want).abs() <= Params::default().nudge_px + 0.01),
+            "总有一个方块正对键道 {want}：{:?}",
+            got.iter().map(|r| r.center().x).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -493,11 +625,11 @@ mod tests {
         let mut fx = BlockRow::default();
         let mut frame = Frame::default();
         fx.draw(&rig.cx(800.0, 0.0), &mut frame);
-        assert_eq!(
-            blocks(&frame).len(),
-            MAX_BLOCKS,
-            "超出上限要截到上限，不是无限堆"
-        );
+        let got = blocks(&frame).len();
+        assert!(got < 640, "640 枚在响不可能全摆出来：{got}");
+        assert!(got <= MAX_BLOCKS, "全局上限 {MAX_BLOCKS}，实测 {got}");
+        // 截到最新 240 枚后只剩 6 条键道，每道再按 `MAX_STACK` 摞封顶。
+        assert_eq!(got, 6 * MAX_STACK, "每道摞到顶就停，塔不能长过画面");
         let msg = fx.note().unwrap();
         assert!(
             msg.contains("只画了") || msg.contains("newest"),
