@@ -2845,6 +2845,49 @@ mod gui_window_tests {
         assert!(back.layerhov_vppreview, "悬停层预览开关要落盘");
     }
 
+    /// 用户要求 #119：首选项「帧率限制」那一组里要有「垂直同步」这颗勾，
+    /// 并且点下去真的生效（改设置 + 落盘 + 把切换请求交给宿主），不是画个样子。
+    #[test]
+    fn the_preferences_page_has_a_working_vsync_toggle() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = Some(WindowKind::Preferences);
+        state.prefs_tab = 1; // 「界面」页才有帧率限制那一组
+        frame(&mut state, &ctx);
+        let out = frame_out(&mut state, &ctx, base_input());
+        let texts: Vec<String> = out
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t == "垂直同步"),
+            "帧率限制那一组里应有「垂直同步」，当前文本：{}",
+            texts.join(" | ")
+        );
+        assert!(state.prefs.vsync, "出厂垂直同步开着");
+        click_text(&mut state, &ctx, "垂直同步");
+        assert!(!state.prefs.vsync, "点标签要真的关掉垂直同步");
+        assert_eq!(
+            state.vsync_request,
+            Some(false),
+            "切换要求要交给宿主（nbs-app 才碰得到呈现层）"
+        );
+        assert_eq!(
+            nbs_io::prefs::Preferences::load().vsync,
+            false,
+            "关掉要落盘"
+        );
+        click_text(&mut state, &ctx, "垂直同步");
+        assert!(state.prefs.vsync, "再点一次要开回来");
+    }
+
     /// 标尺速度格的原版就地输入框（`w_settempo`）：开框时按
     /// `string_format(real_tempo * 倍数, 0, 2)` 播种，Esc 只关窗不提交，
     /// 离开输入框才提交。这里走的是精灵图缺位时图层栏的退路版那颗「速度…」按钮，
@@ -2920,6 +2963,61 @@ mod gui_window_tests {
             state.doc.song.meta.tempo, 12.0,
             "1200 要先除以 100 再夹进 median(0.25, 值, 180)"
         );
+    }
+
+    /// 用户要求 #118：就地速度框填好数字后按回车当场生效，不必再点别处。
+    /// 原版 Enter 是留给文本框自己的（`draw_window_set_tempo.gml:29` 那行注释
+    /// "Enter stays with the text field"），端口在这里刻意偏离。
+    #[test]
+    fn the_inline_tempo_box_commits_on_enter() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.use_bpm = false;
+        state.window = None;
+        state.doc.replace_song(nbs_core::model::Song::new());
+        state.doc.song.meta.tempo = 10.0;
+        let tap = |state: &mut EditorState, p: egui::Pos2| {
+            for pressed in [true, false] {
+                let mut raw = base_input();
+                raw.events.push(egui::Event::PointerMoved(p));
+                raw.events.push(egui::Event::PointerButton {
+                    pos: p,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                });
+                frame_out(state, &ctx, raw);
+            }
+        };
+        let key = |state: &mut EditorState, key: egui::Key| {
+            let mut raw = base_input();
+            raw.events.push(egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            });
+            frame_out(state, &ctx, raw);
+        };
+
+        frame_out(&mut state, &ctx, base_input());
+        let out = frame_out(&mut state, &ctx, base_input());
+        let on_box = text_center_if(&out.shapes, |t| t == "10.00 t / s");
+        tap(&mut state, on_box);
+        assert_eq!(state.tempo_input.as_deref(), Some("10.00"), "框要开着");
+        // 输入框在开框后的下一帧才抢到焦点，先让它拿到。
+        frame_out(&mut state, &ctx, base_input());
+        state.tempo_input = Some("12.5".into());
+        frame_out(&mut state, &ctx, base_input());
+        key(&mut state, egui::Key::Enter);
+        assert_eq!(
+            state.doc.song.meta.tempo, 12.5,
+            "回车要当场把速度设进去（用户要求 #118）"
+        );
+        assert_eq!(state.tempo_input, None, "回车后输入框要关掉");
     }
 
     /// 原版 `w_tempotapper`（速度测量器）：按 T 打点 → 界面按速度单位显示测到的值，

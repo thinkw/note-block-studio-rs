@@ -1255,6 +1255,9 @@ pub struct EditorState {
     /// 已经交给窗口管理器的图标档位（原版 `window_icon`）。`None` = 还没发过，
     /// 对应原版 `icon_display` 初值为 1：第一帧必发一次。
     pub applied_window_icon: Option<bool>,
+    /// 端口自加（用户要求 #119）：这一帧用户改了「垂直同步」，`Some(新值)` 留给宿主
+    /// （nbs-app）在帧外真切一次呈现层——编辑器够不着 GL，只能提要求。
+    pub vsync_request: Option<bool>,
     /// 原版精灵图（工具栏 / 图层栏 / 宏条的图标按钮）。
     pub icons: crate::icons::Icons,
     /// 原版 `showinsbox`：工具栏音色框是否展开成整窗网格。
@@ -1560,6 +1563,7 @@ impl EditorState {
             last_prefs_save: Instant::now(),
             audio_rev: 0,
             applied_window_icon: None,
+            vsync_request: None,
             icons: crate::icons::Icons::default(),
             insbox_open: false,
             insbox_start: 0,

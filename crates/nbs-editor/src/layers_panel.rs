@@ -618,9 +618,13 @@ fn header(
         };
         let re = re.on_hover_text(tip);
         // 原版的收口条件只有一条：这次按下不在框里、这次抬手也在框外
-        // （`draw_window_set_tempo.gml:31`）。Enter 原样留给文本框、不算提交，
-        // Esc 只丢弃不改速度（`:47-51`），两条都顺带把 `settempo` 清回 0。
-        let finish_commit = released && !state.tempo_press_in && !inside;
+        // （`draw_window_set_tempo.gml:31`）；Enter 原样留给文本框、不算提交（`:29`
+        // 那行注释），Esc 只丢弃不改速度（`:47-51`），两条都顺带把 `settempo` 清回 0。
+        // 刻意偏离（用户要求 #118）：回车也算收口，填完数字按回车当场生效。
+        // 单行 TextEdit 自己会在回车时让出焦点（egui `text_edit/builder.rs:1000`），
+        // 所以判据取「这一帧失焦 + 这一帧按了回车」，和图层名那条输入框同一个写法。
+        let enter = re.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+        let finish_commit = (released && !state.tempo_press_in && !inside) || enter;
         let focused = re.has_focus();
         // 关框时顺手清掉「已经抢过焦点」的暂存，下次开框才会重新去抢。
         ui.ctx()
