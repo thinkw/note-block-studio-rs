@@ -13,7 +13,7 @@ fn main() {
     }
     let in_path = std::path::Path::new(&a[0]);
     // 下面那行总结写的是中文，报告文案也跟着走中文，别一次输出两种语言。
-    nbs_core::set_language(1);
+    nbs_io::set_language(1);
     let song = nbs_core::nbs::load(in_path).unwrap_or_else(|e| panic!("读 {} 失败: {e}", a[0]));
     let layout = match a.get(2).map(|s| s.as_str()) {
         Some("compact") => FractalLayout::Compact,

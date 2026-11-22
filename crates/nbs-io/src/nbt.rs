@@ -52,6 +52,15 @@ impl Value {
             _ => None,
         }
     }
+    /// 只认严格的 `TAG_Long`：投影模组的 `BlockStates` 元素与 `TimeCreated` 都是这一档，
+    /// 用 [`Self::as_i32`] 会把 byte/short 也吞进来，测不出「宽度写错」这类问题。
+    pub fn as_i64(&self) -> Option<i64> {
+        if let Value::Long(v) = self {
+            Some(*v)
+        } else {
+            None
+        }
+    }
     pub fn as_str(&self) -> Option<&str> {
         if let Value::String(s) = self {
             Some(s)

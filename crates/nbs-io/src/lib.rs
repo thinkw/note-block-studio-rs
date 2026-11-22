@@ -5,6 +5,7 @@
 //! - [`schematic`]     `.schematic` / 结构方块 `.nbt`（大端 NBT + gzip）
 //! - [`maestro`]       MAESTRO 音乐机节目单（`.schem`，需已建好的机体才出声）
 //! - [`fractal`]       nbs-fractal 机体投影（`.litematic`，自带红石的整机）
+//! - [`litematic`]     自写的 Litematica 写出器（多子区域 + 箱内物品，给编码唱片那一档用）
 //! - [`datapack`]      Minecraft 数据包（mcfunction + 二分 tick 查找树）
 //! - [`image_export`]  PNG 谱面导出
 //! - [`prefs`]         JSON 偏好、最近文件、原子保存、自动备份
@@ -13,6 +14,7 @@ pub mod audio_export;
 pub mod datapack;
 pub mod fractal;
 pub mod image_export;
+pub mod litematic;
 pub mod maestro;
 pub mod mc_export;
 pub mod midi;
