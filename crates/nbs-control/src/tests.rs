@@ -21,7 +21,8 @@ use crate::midi::{
 use crate::op::{CellNote, ExportFormat, Op, Playback, Scope, SelectTarget};
 use crate::outcome::{BarOverview, ChangeReport, Data, ErrorCode, JobInfo, JobStatus, NoteCell, Outcome};
 use crate::server::{ControlServer, ServerConfig};
-use crate::task::{CancelOutcome, JobRegistry, SpawnReject};
+use crate::task::{CancelOutcome, JobKind, JobRegistry, SpawnReject};
+use crate::transcribe::TranscribeOptions;
 use crate::Inbox;
 
 fn report(rev: u64) -> ChangeReport {
@@ -931,4 +932,81 @@ fn a_stopped_server_stops_serving_connections_that_stayed_open() {
 
     stop.store(true, Ordering::Relaxed);
     main.join().unwrap();
+}
+
+/// 音频转 MIDI 的四条：走字节往返（Value 往返会把重复键静默吞掉，这是阶段一那条教训），
+/// 拼错的字段名不许静默变成「省略」，四条都只起任务、不改工程。
+#[test]
+fn the_transcription_ops_round_trip_and_refuse_typo_fields() {
+    let ops = [
+        Op::TranscribeProbe,
+        Op::TranscribePrepareEnv { cuda: None },
+        Op::TranscribePrepareEnv { cuda: Some(true) },
+        Op::TranscribePrepareModel {
+            options: TranscribeOptions {
+                model: Some("large".into()),
+                instruments: Some(vec!["acoustic_piano".into(), "voice".into()]),
+                ..Default::default()
+            },
+        },
+        Op::TranscribeAudio {
+            audio: "a/b.wav".into(),
+            options: TranscribeOptions {
+                beam_size: Some(4),
+                strict_eos: Some(false),
+                ..Default::default()
+            },
+            save_midi: Some("a/b.mid".into()),
+            overwrite: true,
+        },
+        Op::TranscribeAudio {
+            audio: "a/b.wav".into(),
+            options: TranscribeOptions::default(),
+            save_midi: None,
+            overwrite: false,
+        },
+    ];
+    for op in &ops {
+        let text = serde_json::to_string(op).unwrap();
+        let back: Op =
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e} 读不回来：{text}"));
+        assert_eq!(&back, op);
+        // 转录的四条会起本机子进程，不是「读」；但它们都不改工程，弹窗挡路时照样该回答。
+        assert!(op.only_spawns_a_job(), "{op:?} 该和 export 一样豁免弹窗闸");
+        assert!(!op.is_read_only(), "{op:?} 会动本机，不该按只读放行");
+    }
+    // 交付路径省略时字节里不该出现它，否则「没给」和「给了空」就分不开。
+    let bare = serde_json::to_string(&Op::TranscribeAudio {
+        audio: "a.wav".into(),
+        options: TranscribeOptions::default(),
+        save_midi: None,
+        overwrite: false,
+    })
+    .unwrap();
+    assert!(!bare.contains("save_midi"), "{bare}");
+
+    for typo in [
+        r#"{"temperture":1.0}"#,
+        r#"{"device_1":"cpu"}"#,
+        r#"{"beem_size":2}"#,
+    ] {
+        let err = serde_json::from_str::<TranscribeOptions>(typo)
+            .err()
+            .unwrap_or_else(|| panic!("{typo} 居然读得动"));
+        assert!(
+            err.to_string().contains("unknown field"),
+            "{typo} 的报错不像字段问题：{err}"
+        );
+    }
+    // 任务 kind 的字符串是闸数在册量的依据，拼错一个字母那道闸就形同虚设。
+    assert_eq!(
+        JobKind::TranscribePrepareEnv.as_str(),
+        "transcribe_prepare_env"
+    );
+    assert!(JobKind::TranscribeAudio.is_transcription());
+    assert!(!JobKind::Export.is_transcription());
+    let mut strs: Vec<&str> = JobKind::ALL.iter().map(|kind| kind.as_str()).collect();
+    strs.sort();
+    strs.dedup();
+    assert_eq!(strs.len(), JobKind::ALL.len(), "kind 字符串撞车了：{strs:?}");
 }

@@ -11,6 +11,8 @@
 //! client.rs    桥接进程用的客户端
 //! discovery.rs 端口 / token 的发现文件
 //! task.rs      重活（导出、方案重建）的任务表：立即回句柄，之后轮询
+//! midi.rs      MIDI 导入的入参与核对单
+//! transcribe.rs 音频转 MIDI 的入参
 //! ```
 //!
 //! 硬约束：本 crate 的日志**绝不写 stdout**（stdio MCP 会把 stdout 当协议流），
@@ -26,6 +28,7 @@ pub mod op;
 pub mod outcome;
 pub mod server;
 pub mod task;
+pub mod transcribe;
 
 pub use bus::{Inbox, PendingRequest};
 pub use client::{ClientError, ControlClient};
@@ -44,8 +47,9 @@ pub use outcome::{
     ActionInfo, BarOverview, ChangeReport, Data, Diagnostics, ErrorCode, ErrorInfo, HistoryInfo,
     InstrumentInfo, JobInfo, JobStatus, LayerInfo, NoteCell, Outcome, SelectionInfo, Snapshot,
 };
+pub use transcribe::TranscribeOptions;
 pub use server::{ControlServer, ServerConfig};
-pub use task::{JobHandle, JobRegistry};
+pub use task::{JobHandle, JobKind, JobRegistry};
 
 /// 线协议版本：桥接进程与服务端不一致就直接拒绝，别拿半懂不懂的字段猜。
 pub const PROTOCOL_VERSION: u32 = 1;

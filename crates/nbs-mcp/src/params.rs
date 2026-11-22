@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use nbs_control::{
     BatchField, CellNote, ExportFormat, ImportEnhancedOptions, ImportMidiOptions, LayerSet, Op,
-    Playback, Scope, SelectTarget, SetMeta,
+    Playback, Scope, SelectTarget, SetMeta, TranscribeOptions,
 };
 
 /// `run_action` 逃生舱的一条调用：动作名 + 它的参数原样。
@@ -637,6 +637,72 @@ impl From<Export> for Op {
 pub struct JobId {
     #[schemars(description = "export 回执里带回来的任务句柄")]
     pub id: u64,
+}
+
+/// `transcribe_probe` 没有参数：它只是问本机转录环境现在是什么样子。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct TranscribePrepareEnv {
+    #[schemars(
+        description = "装 cu128（CUDA）构建还是 CPU 构建；省略 = 用编辑器「音频转 MIDI」窗口里当前那个勾。这一步要下几百 MB"
+    )]
+    #[serde(default)]
+    pub cuda: Option<bool>,
+}
+
+/// `transcribe_prepare_model` 与 `transcribe_audio` 共用同一份 `options`。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct TranscribePrepareModel {
+    #[schemars(
+        description = "要预检的模型与解码参数；省略哪个字段就用窗口里当前那一份。这一步会按名字下权重（CC BY-NC 4.0），也要人勾过许可"
+    )]
+    #[serde(default)]
+    pub options: Option<TranscribeOptions>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct TranscribeAudio {
+    #[schemars(
+        description = "要识别的音频路径，必须落在编辑器允许的目录里且真的存在（wav/flac/mp3/ogg/m4a/aac/aif/aiff/opus/webm）"
+    )]
+    pub audio: String,
+    #[schemars(
+        description = "模型与解码参数；省略哪个字段就用窗口里当前那一份。第一次跑这个模型会先下权重"
+    )]
+    #[serde(default)]
+    pub options: Option<TranscribeOptions>,
+    #[schemars(
+        description = "把识别出的 MIDI 另存到这个路径（.mid/.midi，必须在允许的目录里）。不给也能拿到产物路径，但那个目录在编辑器自己的 .work/transcription 下，import_midi 读不到——要接着导入就得给它"
+    )]
+    #[serde(default)]
+    pub save_midi: Option<String>,
+    #[schemars(description = "save_midi 的目标文件已存在时必须为 true，否则直接报错")]
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+impl From<TranscribePrepareEnv> for Op {
+    fn from(a: TranscribePrepareEnv) -> Self {
+        Op::TranscribePrepareEnv { cuda: a.cuda }
+    }
+}
+
+impl From<TranscribePrepareModel> for Op {
+    fn from(a: TranscribePrepareModel) -> Self {
+        Op::TranscribePrepareModel {
+            options: a.options.unwrap_or_default(),
+        }
+    }
+}
+
+impl From<TranscribeAudio> for Op {
+    fn from(a: TranscribeAudio) -> Self {
+        Op::TranscribeAudio {
+            audio: a.audio,
+            options: a.options.unwrap_or_default(),
+            save_midi: a.save_midi,
+            overwrite: a.overwrite,
+        }
+    }
 }
 
 #[cfg(test)]

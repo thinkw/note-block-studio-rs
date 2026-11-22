@@ -18,7 +18,8 @@ use nbs_control::{Data, Op, Outcome, Playback};
 use crate::params::{
     BatchFieldArgs, ClearSong, Export, GetNotes, ImportMidi, InspectMidi, JobId, LayerAdd,
     LayerIndex, LayerMove, LayerUpdate, OpenPath, RemoveCells, RevOnly, RunAction, SavePath, Seek,
-    Select, SetLoop, SetMetaArgs, SetNotes, Steps, Transpose,
+    Select, SetLoop, SetMetaArgs, SetNotes, Steps, TranscribeAudio, TranscribePrepareEnv,
+    TranscribePrepareModel, Transpose,
 };
 use crate::Reply;
 
@@ -127,6 +128,10 @@ pub fn op_for(name: &str, args: &Value) -> Result<Op, DispatchError> {
         "import_midi" => Ok(typed::<ImportMidi>(name, args)?.into()),
         "inspect_midi" => Ok(typed::<InspectMidi>(name, args)?.into()),
         "export" => Ok(typed::<Export>(name, args)?.into()),
+        "transcribe_probe" => Ok(Op::TranscribeProbe),
+        "transcribe_prepare_env" => Ok(typed::<TranscribePrepareEnv>(name, args)?.into()),
+        "transcribe_prepare_model" => Ok(typed::<TranscribePrepareModel>(name, args)?.into()),
+        "transcribe_audio" => Ok(typed::<TranscribeAudio>(name, args)?.into()),
         other => Err(DispatchError::Unknown(other.to_string())),
     }
 }
@@ -287,6 +292,10 @@ mod tests {
             "import_midi",
             "inspect_midi",
             "export",
+            "transcribe_probe",
+            "transcribe_prepare_env",
+            "transcribe_prepare_model",
+            "transcribe_audio",
         ];
         for name in table {
             assert!(names.iter().any(|n| n == name), "表里的 {name} 不在工具面上");

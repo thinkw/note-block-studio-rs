@@ -15,11 +15,12 @@
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use egui::Context;
 use serde_json::{json, Value};
 
-use nbs_control::task::{CancelOutcome, SpawnReject};
+use nbs_control::task::{CancelOutcome, JobKind, SpawnReject};
 use nbs_control::{
     ActionInfo, BarOverview, BatchField, CellNote, ChangeReport, ClientBoard, ControlServer, Data,
     Diagnostics, Discovery, ErrorCode, ErrorInfo, HistoryInfo, ImportChannelMap, ImportDrumMap,
@@ -27,7 +28,7 @@ use nbs_control::{
     ImportSubstitution, Inbox, InstrumentInfo, JobHandle, JobInfo, JobRegistry, JobStatus,
     LayerInfo, MidiChannelPlan, MidiDrumPlan, MidiEnhancedReport, MidiPartPlan, MidiPlan,
     MidiTrackInfo, NoteCell, Op, Outcome, Playback, Scope, SelectTarget, SelectionInfo,
-    ServerConfig, SetMeta, Snapshot, PROTOCOL_VERSION,
+    ServerConfig, SetMeta, Snapshot, TranscribeOptions, PROTOCOL_VERSION,
 };
 use nbs_core::model::{
     Note, Song, FIRST_CUSTOM_INDEX, KEY_MAX, MC_KEY_MAX, MC_KEY_MIN, PAN_MAX, PIT_MAX, VEL_MAX,
@@ -408,8 +409,8 @@ fn execute(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op)
 // ------------------------------------------------------------------ 写路径
 
 fn mutate(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op) -> Outcome {
-    // 导出只是给歌曲拍快照再交给后台线程，不改状态，所以不受弹窗闸约束。
-    if !matches!(op, Op::Export { .. }) {
+    // 起后台任务的那几条只是拍快照再交给别的线程，不改状态，所以不受弹窗与窗口草稿闸约束。
+    if !op.only_spawns_a_job() {
         if let Err(e) = gate(state, op) {
             return fail(state, e);
         }
@@ -1366,6 +1367,22 @@ fn write(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op) -
             *overwrite,
         ),
         Op::RunAction { action, args } => run_action(state, ctx, ch, action, args.as_ref()),
+        Op::TranscribeProbe => transcribe_probe(state, ch),
+        Op::TranscribePrepareEnv { cuda } => transcribe_prepare_env(state, ch, *cuda),
+        Op::TranscribePrepareModel { options } => transcribe_prepare_model(state, ch, options),
+        Op::TranscribeAudio {
+            audio,
+            options,
+            save_midi,
+            overwrite,
+        } => transcribe_audio(
+            state,
+            ch,
+            audio,
+            options,
+            save_midi.as_deref(),
+            *overwrite,
+        ),
         other => Err(ErrorInfo::new(
             ErrorCode::Unsupported,
             say(
@@ -3710,6 +3727,53 @@ fn arg_f32(args: Option<&Value>, key: &str) -> Result<f32, ErrorInfo> {
     Ok(value as f32)
 }
 
+/// 任务表起不动的两种原因，说法分开：满不满是调用方能解决的（等、取消），线程起不来不是。
+fn spawn_reject(reject: SpawnReject) -> ErrorInfo {
+    match reject {
+        SpawnReject::Busy => ErrorInfo::new(
+            ErrorCode::Busy,
+            say(
+                "并发任务已满，先用 job_list 看看有什么在跑，或 job_cancel 掉一个。",
+                "All job slots are busy; check job_list or cancel one first.",
+            ),
+        ),
+        SpawnReject::Thread(message) => ErrorInfo::new(ErrorCode::Internal, message),
+    }
+}
+
+/// 刚登记、线程还没排上时 `status()` 通常已经查得到；查不到就照实回一条 queued，
+/// 不编一个进度出来。
+fn job_snapshot(ch: &ControlChannel, id: u64, kind: &str) -> JobInfo {
+    ch.jobs.status(id).unwrap_or_else(|| JobInfo {
+        id,
+        kind: kind.into(),
+        status: JobStatus::Queued,
+        progress: 0.0,
+        message: String::new(),
+        started_unix: 0,
+        finished_unix: None,
+        result: None,
+    })
+}
+
+/// 「目标已存在」这道闸：`export` 和转录的 MIDI 交付共用同一条，所以字面实现只有一份。
+/// 认错的方式就是显式带 `overwrite=true`——不带就当调用方没打算覆盖别人的文件。
+fn overwrite_gate(target: &Path, overwrite: bool) -> Result<(), ErrorInfo> {
+    if target.exists() && !overwrite {
+        return Err(ErrorInfo::new(
+            ErrorCode::NotAllowed,
+            say(
+                format!("目标已存在：{}。确认覆盖就带 overwrite=true。", target.display()),
+                format!(
+                    "Target exists: {}. Pass overwrite=true to replace it.",
+                    target.display()
+                ),
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// 导出走任务表：拍一份歌曲快照，剩下的全在别的线程做，回一个句柄。
 /// 主线程既不等混音也不为它挂住一条界面请求。
 fn export_job(
@@ -3723,21 +3787,7 @@ fn export_job(
     overwrite: bool,
 ) -> Written {
     let target = resolve_path(state, ch, path, format_extensions(format), false)?;
-    if target.exists() && !overwrite {
-        return Err(ErrorInfo::new(
-            ErrorCode::NotAllowed,
-            say(
-                format!(
-                    "目标已存在：{}。确认覆盖就带 overwrite=true。",
-                    target.display()
-                ),
-                format!(
-                    "Target exists: {}. Pass overwrite=true to replace it.",
-                    target.display()
-                ),
-            ),
-        ));
-    }
+    overwrite_gate(&target, overwrite)?;
     let sample_rate = sample_rate.unwrap_or(state.prefs.export_sample_rate);
     if !(8_000..=192_000).contains(&sample_rate) {
         return Err(out_of_range(
@@ -3809,26 +3859,8 @@ fn export_job(
                 }
             }
         })
-        .map_err(|reject| match reject {
-            SpawnReject::Busy => ErrorInfo::new(
-                ErrorCode::Busy,
-                say(
-                    "并发任务已满，先用 JobList 看看有什么在跑，或 JobCancel 掉一个。",
-                    "All job slots are busy; check JobList or cancel one first.",
-                ),
-            ),
-            SpawnReject::Thread(message) => ErrorInfo::new(ErrorCode::Internal, message),
-        })?;
-    let info = ch.jobs.status(id).unwrap_or_else(|| JobInfo {
-        id,
-        kind: "export".into(),
-        status: JobStatus::Queued,
-        progress: 0.0,
-        message: String::new(),
-        started_unix: 0,
-        finished_unix: None,
-        result: None,
-    });
+        .map_err(spawn_reject)?;
+    let info = job_snapshot(ch, id, JobKind::Export.as_str());
     Ok((
         Some(Data::Job(Box::new(info))),
         say(
@@ -3843,6 +3875,509 @@ fn export_job(
             ),
         ),
     ))
+}
+
+// ------------------------------------------------------------------ 音频转 MIDI
+//
+// 转录窗上那四个按钮各有一条对应 op。形状一律「立即回任务句柄，之后 job_status 轮询」：
+// python 子进程动辄几十秒到几十分钟，界面线程既不该为它等，也不该有一条请求挂在那里
+// 占住收件箱。事件、进度、取消都按窗上那份语义走，只是把落点从窗口换成任务表。
+//
+// 闸的顺序也照窗上，一条都不放松：许可（只有人自己在窗上勾得动——这里没有代填的入口，
+// 也没有为 AI 新开的总开关）→ 环境装没装 → 一次只跑一个 → 路径与覆盖。
+// `transcribe_probe` 是窗上唯一不需要许可的那条，这里也照样不要：它只是问一句现状。
+
+/// worker 回给窗口的事件里「这轮活干完了」的三种形状。`Failed` / `Cancelled` 不进这里，
+/// 它们直接把任务标失败、消息原样带出去。
+#[derive(Debug)]
+enum TranscribeTerminal {
+    Ready(nbs_io::transcription::RuntimeInfo),
+    ModelReady {
+        model: String,
+        device: String,
+        dtype: String,
+    },
+    Complete(nbs_io::transcription::TranscriptionOutput),
+}
+
+/// 音频扩展名，和界面「选择音频」那格放的过滤器同一张表。
+const AUDIO_EXTS: &[&str] = &[
+    "wav", "flac", "mp3", "ogg", "m4a", "aac", "aif", "aiff", "opus", "webm",
+];
+
+/// 转录产物另存前要先读一遍（核对音符数），这是它的上限：和窗上预览那条一样，
+/// 宁可报错也不吃进内存。
+const MAX_MIDI_PREVIEW_BYTES: u64 = 64 * 1024 * 1024;
+
+/// 取值域检查，错在起子进程**之前**。worker 那侧的 ValueError 到不了调用方手上，
+/// 只会变成二十秒后一句「任务失败」。
+fn one_of(field: &str, value: &str, allowed: &[&str]) -> Result<(), ErrorInfo> {
+    if allowed.iter().any(|want| *want == value) {
+        return Ok(());
+    }
+    Err(bad(
+        format!("{field} {value:?} 不认识，这里只接受 {}", allowed.join(" / ")),
+        format!(
+            "{field} {value:?} is not one of {}",
+            allowed.join(" / ")
+        ),
+    ))
+}
+
+fn number_in(field: &str, value: f64, lower: f64, upper: f64) -> Result<(), ErrorInfo> {
+    if !value.is_finite() || !(lower..=upper).contains(&value) {
+        return Err(out_of_range(
+            format!("{field} 要是 {lower}..={upper} 之间的有限数字"),
+            format!("{field} must be a finite number in {lower}..={upper}"),
+        ));
+    }
+    Ok(())
+}
+
+/// 窗上当前那一份参数，加上调用方点名要改的字段。省略的字段**不动**窗上那份，
+/// 所以「AI 只改 device」和「人只改 device」算出来的是同一件事。
+///
+/// `model_path` 给空串是显式清空（回到按模型名取缓存那份）；省略才是「用窗上那一份」。
+fn transcribe_options(
+    state: &EditorState,
+    given: &TranscribeOptions,
+) -> Result<nbs_io::transcription::TranscriptionOptions, ErrorInfo> {
+    let mut out = state.transcription.request_options();
+    if let Some(value) = given.model.as_deref() {
+        one_of("model", value, &["small", "medium", "large"])?;
+        out.model = value.to_string();
+    }
+    if let Some(value) = given.device.as_deref() {
+        one_of("device", value, &["auto", "cpu", "cuda"])?;
+        out.device = value.to_string();
+    }
+    if let Some(value) = given.dtype.as_deref() {
+        one_of("dtype", value, &["auto", "float32", "float16"])?;
+        out.dtype = value.to_string();
+    }
+    if let Some(value) = given.beam_size {
+        if !(1..=4).contains(&value) {
+            return Err(out_of_range(
+                "beam_size 是 1..=4 的整数",
+                "beam_size must be an integer in 1..=4",
+            ));
+        }
+        out.beam_size = value;
+    }
+    if let Some(value) = given.temperature {
+        number_in("temperature", value, 0.0, 2.0)?;
+        out.temperature = value;
+    }
+    if let Some(value) = given.cfg_coef {
+        number_in("cfg_coef", value, 0.0, 3.0)?;
+        out.cfg_coef = value;
+    }
+    if let Some(value) = given.use_sampling {
+        out.use_sampling = value;
+    }
+    if let Some(value) = given.strict_eos {
+        out.strict_eos = value;
+    }
+    if let Some(raw) = given.model_path.as_deref() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            out.model_path = None;
+        } else {
+            let path = Path::new(trimmed);
+            if extension(path) != "safetensors" {
+                return Err(bad(
+                    format!(
+                        "model_path 要的是本地 .safetensors 权重文件，扩展名是 {:?}",
+                        extension(path)
+                    ),
+                    format!(
+                        "model_path must be a local .safetensors weight file, extension {:?}",
+                        extension(path)
+                    ),
+                ));
+            }
+            if !path.exists() {
+                return Err(ErrorInfo::new(
+                    ErrorCode::NotFound,
+                    say(
+                        format!("权重文件不存在：{}", path.display()),
+                        format!("Weights not found: {}", path.display()),
+                    ),
+                ));
+            }
+            out.model_path = Some(path.to_path_buf());
+        }
+    }
+    if let Some(list) = given.instruments.as_ref() {
+        out.instruments = list.clone();
+    }
+    Ok(out)
+}
+
+/// 三条共用的前置闸。`downloads` = 这一下会往本机下东西（环境或权重），
+/// `needs_env` = 这一下得有装好的 venv 才跑得动。
+fn transcribe_gate(
+    state: &EditorState,
+    ch: &ControlChannel,
+    downloads: bool,
+    needs_env: bool,
+) -> Result<(), ErrorInfo> {
+    if downloads && !state.transcription.accepted_downloads {
+        return Err(ErrorInfo::new(
+            ErrorCode::NotAllowed,
+            say(
+                "本机下载和模型使用许可还没确认。MuScriptor 的权重是 CC BY-NC 4.0，环境要现装几百 MB——那一下只能由人自己在「音频转 MIDI」窗口里勾，外部调用不许代勾，这里也没有为它新开的开关。",
+                "Local downloads and the model license are not accepted yet. MuScriptor weights are CC BY-NC 4.0 and the environment is hundreds of MB: only the person at the transcription window can tick that. No external call may answer it, and there is no separate switch for it.",
+            ),
+        ));
+    }
+    if needs_env && !state.transcription.runtime.installed() {
+        let python = state.transcription.runtime.python_path();
+        return Err(ErrorInfo::new(
+            ErrorCode::NotAllowed,
+            say(
+                format!(
+                    "本机转录环境还没装：{} 不存在。先 transcribe_prepare_env（同样要人勾过许可），完活后再回来。",
+                    python.display()
+                ),
+                format!(
+                    "The local transcription environment is not installed: {} does not exist. Run transcribe_prepare_env first (same license tick), then come back.",
+                    python.display()
+                ),
+            ),
+        ));
+    }
+    if state.transcription.busy() {
+        return Err(ErrorInfo::new(
+            ErrorCode::Busy,
+            say(
+                "转录窗口里已经有一个本机任务在跑。先等它结束，或在那扇窗口里按取消。",
+                "The transcription window already has a local task running; wait for it or cancel it there.",
+            ),
+        ));
+    }
+    let in_flight: usize = JobKind::ALL
+        .iter()
+        .filter(|kind| kind.is_transcription())
+        .map(|kind| ch.jobs.running_of(kind.as_str()))
+        .sum();
+    if in_flight > 0 {
+        return Err(ErrorInfo::new(
+            ErrorCode::Busy,
+            say(
+                "已经有一个转录任务在册（转录的活共用同一份 venv 和权重缓存，所以一次只跑一个）。用 job_list 找回句柄、job_status 看进度、job_cancel 停它。",
+                "A transcription job is already registered (they share one venv and one weight cache, so only one runs at a time). Use job_list for the handle, job_status to poll, job_cancel to stop it.",
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// 把 worker 的事件泵进任务表：`Message` / `Progress` 进句柄的 message 与 progress，
+/// 终态交给 `done` 变成 result。取消是协作式的——`job_cancel` 置位后这里转成
+/// `task.cancel()`（那边去 taskkill 子进程），再给 10 秒收尾；子进程不应答就按「已取消」
+/// 结掉，任务位不能永远占着。
+fn transcribe_job(
+    ch: &ControlChannel,
+    kind: JobKind,
+    task: nbs_io::transcription::TranscriptionTask,
+    opening: String,
+    done: impl FnOnce(TranscribeTerminal) -> Result<Value, String> + Send + 'static,
+) -> Written {
+    let id = ch
+        .jobs
+        .spawn(kind.as_str(), move |job: &JobHandle| {
+            use nbs_io::transcription::TranscriptionEvent as Event;
+            let mut cancelling: Option<Instant> = None;
+            loop {
+                for event in task.drain() {
+                    match event {
+                        Event::Message(text) => job.note(text),
+                        Event::Progress {
+                            stage,
+                            message,
+                            completed,
+                            total,
+                            note_count,
+                        } => {
+                            let fraction = match (completed, total) {
+                                (Some(step), Some(of)) if of > 0 => step as f32 / of as f32,
+                                _ => 0.0,
+                            };
+                            let mut line = if message.is_empty() {
+                                stage
+                            } else if stage.is_empty() {
+                                message
+                            } else {
+                                format!("{stage} · {message}")
+                            };
+                            if let Some(count) = note_count {
+                                line.push_str(&say(
+                                    format!(" · {count} 个音符"),
+                                    format!(" · {count} notes"),
+                                ));
+                            }
+                            if line.is_empty() {
+                                line = say("处理中", "working");
+                            }
+                            job.progress(fraction, line);
+                        }
+                        Event::Ready(info) => return done(TranscribeTerminal::Ready(info)),
+                        Event::ModelReady { model, device, dtype } => {
+                            return done(TranscribeTerminal::ModelReady {
+                                model,
+                                device,
+                                dtype,
+                            })
+                        }
+                        Event::Complete(output) => return done(TranscribeTerminal::Complete(output)),
+                        Event::Failed(error) => return Err(error),
+                        Event::Cancelled => return Err(say("已取消", "cancelled")),
+                    }
+                }
+                if job.cancelled() {
+                    task.cancel();
+                    let since = *cancelling.get_or_insert_with(Instant::now);
+                    if since.elapsed() > Duration::from_secs(10) {
+                        return Err(say(
+                            "已取消（本机子进程 10 秒内没应答）",
+                            "cancelled (the local worker did not answer within 10s)",
+                        ));
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(80));
+            }
+        })
+        .map_err(spawn_reject)?;
+    Ok((
+        Some(Data::Job(Box::new(job_snapshot(ch, id, kind.as_str())))),
+        opening,
+    ))
+}
+
+fn runtime_info_json(
+    runtime: &nbs_io::transcription::TranscriptionRuntime,
+    info: &nbs_io::transcription::RuntimeInfo,
+) -> Value {
+    json!({
+        "runtime_root": runtime.root.display().to_string(),
+        "environment_installed": runtime.installed(),
+        "python": runtime.python_path().display().to_string(),
+        "python_version": info.python_version,
+        "torch_version": info.torch_version,
+        "muscriptor_version": info.muscriptor_version,
+        "cuda_available": info.cuda_available,
+        "gpu_name": info.gpu_name,
+        "gpu_memory_bytes": info.gpu_memory_bytes,
+    })
+}
+
+/// 窗上的按钮串了才会走到这里：probe 只回 Ready，prepare_model 只回 ModelReady。
+/// 形状不对就照实报，不猜成另一种成功。
+fn wrong_terminal(kind: &str, got: &TranscribeTerminal) -> String {
+    say(
+        format!("{kind} 回来的是别种终态：{got:?}"),
+        format!("{kind} returned an unexpected terminal state: {got:?}"),
+    )
+}
+
+fn transcribe_probe(state: &EditorState, ch: &ControlChannel) -> Written {
+    transcribe_gate(state, ch, false, false)?;
+    let runtime = state.transcription.runtime.clone();
+    let task = runtime.probe();
+    transcribe_job(
+        ch,
+        JobKind::TranscribeProbe,
+        task,
+        say(
+            "已起转录环境检查任务（不下载任何东西）；用 job_status 轮询",
+            "Transcription environment probe started (it downloads nothing); poll with job_status",
+        ),
+        move |terminal| match terminal {
+            TranscribeTerminal::Ready(info) => Ok(runtime_info_json(&runtime, &info)),
+            other => Err(wrong_terminal("transcribe_probe", &other)),
+        },
+    )
+}
+
+fn transcribe_prepare_env(state: &EditorState, ch: &ControlChannel, cuda: Option<bool>) -> Written {
+    transcribe_gate(state, ch, true, false)?;
+    // 省略 = 窗上那个勾当前是什么就是是什么；这条链上「AI 没给」从来不该改人的设置。
+    let cuda = cuda.unwrap_or(state.transcription.install_cuda);
+    let runtime = state.transcription.runtime.clone();
+    let task = runtime.prepare(cuda);
+    transcribe_job(
+        ch,
+        JobKind::TranscribePrepareEnv,
+        task,
+        say(
+            format!(
+                "已起环境安装任务（{} 构建，几百 MB，装到 {}）；用 job_status 轮询",
+                if cuda { "CUDA" } else { "CPU" },
+                runtime.root.display()
+            ),
+            format!(
+                "Environment install started ({} build, hundreds of MB, into {}); poll with job_status",
+                if cuda { "CUDA" } else { "CPU" },
+                runtime.root.display()
+            ),
+        ),
+        move |terminal| match terminal {
+            TranscribeTerminal::Ready(info) => {
+                let mut out = runtime_info_json(&runtime, &info);
+                out["cuda_build"] = json!(cuda);
+                Ok(out)
+            }
+            other => Err(wrong_terminal("transcribe_prepare_env", &other)),
+        },
+    )
+}
+
+fn transcribe_prepare_model(
+    state: &EditorState,
+    ch: &ControlChannel,
+    given: &TranscribeOptions,
+) -> Written {
+    // 参数先过，闸后过：`model` 写错和「没勾许可」是两件不同的事，前者改调用方的 JSON，
+    // 后者要人去窗口，两条撞在一起只会让人去查错的那一头。
+    let options = transcribe_options(state, given)?;
+    transcribe_gate(state, ch, true, true)?;
+    let runtime = state.transcription.runtime.clone();
+    let asked = options.model.clone();
+    let task = runtime.prepare_model(options);
+    transcribe_job(
+        ch,
+        JobKind::TranscribePrepareModel,
+        task,
+        say(
+            format!("已起模型预检任务（{asked}）；用 job_status 轮询"),
+            format!("Model preflight started ({asked}); poll with job_status"),
+        ),
+        move |terminal| match terminal {
+            TranscribeTerminal::ModelReady {
+                model,
+                device,
+                dtype,
+            } => Ok(json!({
+                "model": model,
+                "device": device,
+                "dtype": dtype,
+                "cached_model": runtime.cached_model(&asked).map(|p| p.display().to_string()),
+            })),
+            other => Err(wrong_terminal("transcribe_prepare_model", &other)),
+        },
+    )
+}
+
+fn transcribe_audio(
+    state: &EditorState,
+    ch: &ControlChannel,
+    audio: &str,
+    given: &TranscribeOptions,
+    save_midi: Option<&str>,
+    overwrite: bool,
+) -> Written {
+    let options = transcribe_options(state, given)?;
+    transcribe_gate(state, ch, true, true)?;
+    let source = resolve_path(state, ch, audio, AUDIO_EXTS, true)?;
+    let target = match save_midi {
+        Some(raw) => {
+            let target = resolve_path(state, ch, raw, &["mid", "midi"], false)?;
+            overwrite_gate(&target, overwrite)?;
+            Some(target)
+        }
+        None => None,
+    };
+    let runtime = state.transcription.runtime.clone();
+    let model = options.model.clone();
+    let task = runtime.transcribe(source.clone(), options);
+    let where_to = match &target {
+        Some(path) => say(
+            format!("，完活后把 MIDI 另存到 {}", path.display()),
+            format!("; the MIDI is then delivered to {}", path.display()),
+        ),
+        None => say(
+            "（产物只留在转录目录里）",
+            " (the artifact stays in the transcription folder)",
+        ),
+    };
+    let deliver = target;
+    transcribe_job(
+        ch,
+        JobKind::TranscribeAudio,
+        task,
+        say(
+            format!("已起转录任务（{model}，{}）{where_to}；用 job_status 轮询", source.display()),
+            format!(
+                "Transcription started ({model}, {}){where_to}; poll with job_status",
+                source.display()
+            ),
+        ),
+        move |terminal| match terminal {
+            TranscribeTerminal::Complete(output) => {
+                transcribed_midi(&source, deliver.as_deref(), output, &model)
+            }
+            other => Err(wrong_terminal("transcribe_audio", &other)),
+        },
+    )
+}
+
+/// 转录完的核对：先把 MIDI 落一份到调用方点名的路径（那条路径已经过完路径闸与覆盖闸），
+/// 再把窗上那两条数一遍带回去。音符数对不上是窗上「停止导入」的那条判据，这里**照实报、
+/// 不替人决定**——下一步 `inspect_midi` 会给真正落进歌里的数量。
+fn transcribed_midi(
+    source: &Path,
+    target: Option<&Path>,
+    output: nbs_io::transcription::TranscriptionOutput,
+    model: &str,
+) -> Result<Value, String> {
+    let bytes = read_bounded(&output.midi_path)?;
+    let preview = nbs_io::midi_preview::parse_midi_preview(&bytes)?;
+    let importer_events = nbs_io::midi::parse_midi(&bytes)
+        .map(|midi| midi.tracks.iter().map(|track| track.events.len()).sum::<usize>())
+        .map_err(|e| format!("转录产物已写好，但 NBS 的 MIDI 读取器打不开它：{e}"))?;
+    if let Some(path) = target {
+        std::fs::write(path, &bytes).map_err(|e| {
+            format!(
+                "转录完成了，但把 MIDI 写到 {} 失败：{e}；原产物仍在 {}",
+                path.display(),
+                output.midi_path.display()
+            )
+        })?;
+    }
+    Ok(json!({
+        "audio": source.display().to_string(),
+        "model": model,
+        "midi_path": output.midi_path.display().to_string(),
+        "events_path": output.events_path.display().to_string(),
+        "delivered_midi": target.map(|p| p.display().to_string()),
+        "raw_note_count": output.raw_note_count,
+        "preview_notes": preview.notes.len(),
+        "preview_seconds": preview.duration_seconds,
+        "importer_events": importer_events,
+        "note_count_mismatch": importer_events != preview.notes.len(),
+        "import_blocked_reason": preview.import_blocked_reason,
+        "device": output.device,
+        "dtype": output.dtype,
+        "warnings": output.warnings,
+    }))
+}
+
+/// 读一份产物，带上限。转录出来的 MIDI 正常也就几百 KB，撞到上限说明结果不对。
+fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|e| format!("读不到 {}：{e}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_MIDI_PREVIEW_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("读 {} 失败：{e}", path.display()))?;
+    if bytes.len() as u64 > MAX_MIDI_PREVIEW_BYTES {
+        return Err(format!(
+            "{} 超过 {MAX_MIDI_PREVIEW_BYTES} 字节上限，不像转录产物",
+            path.display()
+        ));
+    }
+    Ok(bytes)
 }
 
 fn change_line(field: &str, touched: usize, clamped: usize, add: bool, skipped: usize) -> String {
@@ -5437,5 +5972,223 @@ mod tests {
             plan.applied_enhanced.substitutes.iter().find(|s| s.instrument == 0).map(|s| s.high),
             Some(Some(5))
         );
+    }
+
+    /// 下载那一下只能人自己在窗口里勾：三条要下载的都得它，报错要说清该谁去勾。
+    /// 这条测试同时钉住「参数错排在闸前面」——`model` 写错时回执说的是参数而不是许可，
+    /// 调用方才知道自己该改 JSON，而不是坐着等人。
+    #[test]
+    fn downloads_need_the_persons_own_tick() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        assert!(
+            !h.state.transcription.accepted_downloads,
+            "许可默认就是没勾，外部调用不许替人勾上"
+        );
+        for op in [
+            Op::TranscribePrepareEnv { cuda: Some(false) },
+            Op::TranscribePrepareModel {
+                options: TranscribeOptions::default(),
+            },
+            Op::TranscribeAudio {
+                audio: "a/b.wav".into(),
+                options: TranscribeOptions::default(),
+                save_midi: None,
+                overwrite: false,
+            },
+        ] {
+            let out = h.run(&op);
+            assert!(!out.ok, "{op:?} 居然起了任务");
+            assert_eq!(code(&out), ErrorCode::NotAllowed, "{op:?}");
+            let message = out.error.unwrap().message;
+            assert!(
+                message.contains(&say("许可", "license")),
+                "{op:?} 的拒绝没说是许可：{message}"
+            );
+        }
+        let out = h.run(&Op::TranscribePrepareModel {
+            options: TranscribeOptions {
+                model: Some("giant".into()),
+                ..Default::default()
+            },
+        });
+        assert_eq!(code(&out), ErrorCode::BadArgument, "参数错该比闸先说");
+        assert!(out.error.unwrap().message.contains("giant"));
+        // 被拒的调用一条任务都不许起，不然转录的单飞闸会一直挡着后面合法的调用。
+        let listed = match h.run(&Op::JobList).data {
+            Some(Data::Jobs { jobs }) => jobs,
+            other => panic!("JobList 回来的是 {other:?}"),
+        };
+        assert!(listed.is_empty(), "被拒的调用起了任务：{listed:?}");
+    }
+
+    /// 「省略 = 窗上那一份」是这条链的基线口径，和 MIDI 导入那条一样。
+    /// 窗上的乐器组键与权重路径是两行文本，所以搬运必须走 `request_options()` 那一份实现——
+    /// 拿出厂默认会得出另一种 device/beam，那正是最难查的一种「没生效」。
+    #[test]
+    fn omitted_transcribe_fields_keep_the_windows_own_values() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        {
+            let t = &mut h.state.transcription;
+            t.options.model = "small".into();
+            t.options.device = "cpu".into();
+            t.options.beam_size = 3;
+            t.instruments = "acoustic_piano，voice , ".into();
+            t.model_path = " D:/weights/custom.safetensors ".into();
+        }
+        let kept = transcribe_options(&h.state, &TranscribeOptions::default()).unwrap();
+        assert_eq!(kept.model, "small");
+        assert_eq!(kept.device, "cpu");
+        assert_eq!(kept.beam_size, 3);
+        assert_eq!(
+            kept.instruments,
+            vec!["acoustic_piano", "voice"],
+            "逗号分隔（含全角）按窗上那一份解析，空项丢掉"
+        );
+        assert_eq!(
+            kept.model_path.as_deref(),
+            Some(Path::new("D:/weights/custom.safetensors")),
+            "两侧空格是打字习惯，不是路径的一部分"
+        );
+        let merged = transcribe_options(
+            &h.state,
+            &TranscribeOptions {
+                dtype: Some("float16".into()),
+                device: Some("cuda".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(merged.dtype, "float16");
+        assert_eq!(merged.device, "cuda");
+        assert_eq!(merged.model, "small", "没给的字段不许被出厂默认顶掉");
+        assert_eq!(merged.instruments, kept.instruments);
+        // 空串是「显式清掉窗上那行」，和省略是两件事。
+        let cleared = transcribe_options(
+            &h.state,
+            &TranscribeOptions {
+                model_path: Some("  ".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cleared.model_path, None, "给了空串就该把窗上那行清掉");
+    }
+
+    /// 取值域在这儿钉死，起了子进程之后就晚了：worker 的 ValueError 到不了调用方手上，
+    /// 只会变成几十秒后一句「任务失败」。
+    #[test]
+    fn transcribe_arguments_are_checked_before_a_subprocess() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        let cases: Vec<(TranscribeOptions, &str)> = vec![
+            (TranscribeOptions { device: Some("gpu".into()), ..Default::default() }, "gpu"),
+            (TranscribeOptions { dtype: Some("fp16".into()), ..Default::default() }, "fp16"),
+            (TranscribeOptions { model: Some("tiny".into()), ..Default::default() }, "tiny"),
+            (TranscribeOptions { beam_size: Some(0), ..Default::default() }, "beam_size"),
+            (TranscribeOptions { beam_size: Some(5), ..Default::default() }, "beam_size"),
+            (TranscribeOptions { temperature: Some(2.5), ..Default::default() }, "temperature"),
+            (TranscribeOptions { cfg_coef: Some(-1.0), ..Default::default() }, "cfg_coef"),
+            (
+                TranscribeOptions { model_path: Some("D:/weights/model.bin".into()), ..Default::default() },
+                "safetensors",
+            ),
+        ];
+        for (given, wants) in cases {
+            let err = transcribe_options(&h.state, &given)
+                .err()
+                .unwrap_or_else(|| panic!("{given:?} 居然收了"));
+            assert!(
+                matches!(
+                    err.code,
+                    ErrorCode::BadArgument | ErrorCode::OutOfRange | ErrorCode::NotFound
+                ),
+                "{given:?} 的码是 {:?}",
+                err.code
+            );
+            assert!(err.message.contains(wants), "{given:?} → {}", err.message);
+        }
+        // 窗上已经填着的那行权重不重跑这套检查：那是人自己敲的，AI 没给就该照原样用。
+        h.state.transcription.model_path = "D:/weights/model.onnx".into();
+        assert!(transcribe_options(&h.state, &TranscribeOptions::default()).is_ok());
+    }
+
+    /// `export` 和转录交付共用一条「目标已存在就得认错」的闸，所以字面实现只有一份。
+    #[test]
+    fn a_delivery_target_needs_its_own_ack() {
+        let dir = std::env::temp_dir();
+        let taken = dir.join("nbs_transcribe_gate_taken.mid");
+        let absent = dir.join("nbs_transcribe_gate_absent.mid");
+        let _ = std::fs::remove_file(&absent);
+        std::fs::write(&taken, b"MThd").unwrap();
+        let err = overwrite_gate(&taken, false).err().expect("目标已存在又没认错");
+        assert_eq!(err.code, ErrorCode::NotAllowed);
+        assert!(err.message.contains(&say("覆盖", "overwrite")), "{}", err.message);
+        assert!(overwrite_gate(&taken, true).is_ok());
+        assert!(
+            overwrite_gate(&absent, false).is_ok(),
+            "不存在的目标不该要求认错"
+        );
+        let _ = std::fs::remove_file(&taken);
+    }
+
+    /// 环境没装好就别去要权重，而且拒绝的话要说清下一步是哪条工具，不是只说「不行」。
+    /// 这里刻意把 `runtime.root` 指到临时目录之外：装没装是看真机那份 venv 的，
+    /// 测试不许跟着「这台机器跑过转录」变。
+    #[test]
+    fn the_environment_comes_before_the_weights() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.state.transcription.accepted_downloads = true;
+        h.state.transcription.runtime.root = std::env::temp_dir()
+            .join("nbs_transcribe_env_gate_absent")
+            .join("这一层也不该存在");
+        assert!(!h.state.transcription.runtime.installed());
+        for op in [
+            Op::TranscribePrepareModel {
+                options: TranscribeOptions::default(),
+            },
+            Op::TranscribeAudio {
+                audio: String::new(),
+                options: TranscribeOptions::default(),
+                save_midi: None,
+                overwrite: false,
+            },
+        ] {
+            let out = h.run(&op);
+            assert_eq!(code(&out), ErrorCode::NotAllowed, "{op:?}");
+            let message = out.error.unwrap().message;
+            assert!(
+                message.contains("transcribe_prepare_env"),
+                "{op:?} 的拒绝没点名下一步：{message}"
+            );
+        }
+    }
+
+    /// 「一次只跑一个」数的是任务表里的在册量。窗里那条在跑是另一半，
+    /// 它要真的 `TranscriptionTask`，只能在真机验，这里不假装测过。
+    #[test]
+    fn one_transcription_at_a_time() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.state.transcription.accepted_downloads = true;
+        // 不碰 python：占一个同 kind 的在册位就够把闸咬住。
+        let slot = h
+            .channel
+            .jobs
+            .spawn(JobKind::TranscribeAudio.as_str(), |_| {
+                std::thread::sleep(Duration::from_millis(400));
+                Ok(json!(null))
+            })
+            .expect("任务表该收得下这条");
+        let out = h.run(&Op::TranscribePrepareEnv { cuda: Some(false) });
+        assert_eq!(code(&out), ErrorCode::Busy, "{out:?}");
+        assert!(out
+            .error
+            .unwrap()
+            .message
+            .contains(&say("一次只跑一个", "only one runs at a time")));
+        let _ = slot;
     }
 }

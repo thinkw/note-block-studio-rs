@@ -108,7 +108,9 @@ impl TranscriptionState {
         }
     }
 
-    fn request_options(&self) -> TranscriptionOptions {
+    /// 窗上那一份参数打包成 worker 的入参。外部控制省略字段时也以它为基线，
+    /// 所以这条对界面和 AI 是同一份口径。
+    pub(crate) fn request_options(&self) -> TranscriptionOptions {
         let mut options = self.options.clone();
         options.model_path =
             (!self.model_path.trim().is_empty()).then(|| PathBuf::from(self.model_path.trim()));

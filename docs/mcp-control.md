@@ -95,7 +95,7 @@ set_notes ok rev=6 cells_changed=1 layers_changed=0 meta_changed=false dirty=tru
 核对「AI 会看到什么口径」不需要编辑器在场：
 
 ```bash
-nbs-mcp --names                        # 39 条工具名
+nbs-mcp --names                        # 43 条工具名
 nbs-mcp --dump-tools set_notes         # 只看一条：说明 + 入参 schema
 nbs-mcp --dump-tools set_notes --json  # 同一条的机器可读版
 ```
@@ -170,15 +170,65 @@ nbs-mcp --call import_midi '{"path":"D:/songs/jazz.mid","discard_changes":true}'
 - `remember: true` 是这条链上唯一会动用户长期设置的开关：把这次的映射写回 GM 表并存进偏好，等于替人点了窗上那个「记住」。省略就是 false，想改一次而不留痕就别给。
 - `precision` 收 0 / 1 / 3 / 7，对应窗上 1 / 2 / 4 / 8 倍；它同时决定 tick 密度，同一份文件 8 倍比 1 倍长四倍。
 
-## 11. 这套面做不到的事
+## 11. 音频转 MIDI：许可、环境，和一条必须点名的交付路径
+
+四条件对应转录窗上的四个按钮，全部**立即回任务句柄**（python 子进程动辄几十秒到几十分钟，
+不让一次调用憋着，也不让一条请求挂住界面线程），之后 `job_status` 轮询、`job_cancel` 能停：
+
+| 工具 | 要许可 | 要装好的环境 | 干什么 |
+| --- | --- | --- | --- |
+| `transcribe_probe` | 否 | 否 | 问 Python / torch / MuScriptor 版本和 GPU 情况，不下载任何东西 |
+| `transcribe_prepare_env` | 是 | 否 | uv 建 venv、装 MuScriptor 与 torch（几百 MB） |
+| `transcribe_prepare_model` | 是 | 是 | 只取权重并加载一遍，先验显存与精度，不识别音频 |
+| `transcribe_audio` | 是 | 是 | 音频 → MIDI，`result` 带产物与核对数 |
+
+**许可那一下只能人自己勾。** MuScriptor 权重是 CC BY-NC 4.0、环境要现装几百 MB，所以
+「确认本地下载和模型使用许可」这个勾只认人在「音频转 MIDI」窗口里点的那一下：
+AI 面没有代勾的入口，`options` 里也没有这个字段，`list_actions` 的逃生舱里同样没有它。
+没勾时三条得到的是 `not_allowed`，那句话会点名该谁去勾——**这不是接线故障，别绕**。
+
+`options` 省略哪个字段就用窗口里当前那一份（和 MIDI 导入同一个口径），字段名拼错当场拒。
+取值域在这儿就钉死了：`model` 是 `small`/`medium`/`large`，`device` 是 `auto`/`cpu`/`cuda`，
+`dtype` 是 `auto`/`float32`/`float16`，`beam_size` 是 `1..=4` 的整数，`temperature` `0..=2`，
+`cfg_coef` `0..=3`，`model_path` 要本地 `.safetensors`（给空串是显式清掉窗上那行）。
+错在起子进程之前，是为了三十秒后回来的不是「任务失败」而是一句能照着改的话。
+
+**要接着导入就必须给 `save_midi`。** 转录产物本来落在编辑器自己的
+`<workspace>/.work/transcription/jobs/…`，那个目录**不在**路径白名单里，
+`import_midi` 读不到它——这是刻意的：白名单是这台机器上唯一的门禁，不该因为
+「文件是我自己生成的」就放行。给一个落在放行目录里的 `.mid` 路径，
+覆盖别人的文件照样要 `overwrite=true`，之后接现成的那条链：
+
+```bash
+nbs-mcp --call transcribe_probe
+nbs-mcp --call job_status '{"id":1}'
+# 人在窗口里勾过许可之后：
+nbs-mcp --call transcribe_prepare_env '{"cuda":false}'
+nbs-mcp --call transcribe_audio '{"audio":"D:/in/take.wav","save_midi":"D:/out/take.mid","overwrite":true}'
+nbs-mcp --call job_status '{"id":3}' --json
+nbs-mcp --call inspect_midi '{"path":"D:/out/take.mid"}' --json
+nbs-mcp --call import_midi '{"path":"D:/out/take.mid","discard_changes":true}'
+```
+
+转录任务的 `result` 除了 `raw_note_count`（模型报的原始音符数），还带回窗上那两条核对：
+`preview_notes`（预览读到的音符）、`importer_events`（NBS 导入器读到的事件数）、
+`note_count_mismatch`（两者不一致）。对不上时**窗口里那个「导入」按钮会直接停止**，
+这里照实报而不替人决定——真正会落进歌里的数量看下一步 `inspect_midi`，
+它按你准备用的那套选项算，且 `import_midi` 会拒掉算不平的结果。
+
+一次只跑一个转录任务：这四条共用同一份 venv 和权重缓存，并发跑出来的失败形状很难看。
+窗口里已经有一个在跑、或任务表里已经排着一个，都会得到 `busy`。
+
+## 12. 这套面做不到的事
 
 - **没有截屏**，也没有任何「看一眼界面」的能力。想知道现状就调 `get_snapshot` / `get_notes` / `get_diagnostics`，它们是这件事的替代；
 - 必须靠鼠标拖动的流程没有等价物，会回 `unsupported`；能列出有哪些动作的，是 `list_actions` + `run_action` 那对逃生舱；
 - schematic / datapack 导出没接进工具面（`export` 只到 wav / midi / png）；
+- 转录窗上的 SoundFont A/B 试听没接进来：要听识别出来的效果，用 `export`（wav 是离线渲染，不需要那个几百 MB 的音色库勾）；
 - 撤销栈有容量上限，`get_history` 会告诉你游标和长度；
 - 它操作的是**正在跑的那个窗口**，不是磁盘上的文件：想让 AI 改完再存，要显式 `save`。
 
-## 12. 排查顺序
+## 13. 排查顺序
 
 1. `nbs-mcp --call ping` —— 一句就知道通不通；
 2. 不通先确认编辑器答应了吗：设置页那栏会写「正在监听 127.0.0.1:<端口>」和发现文件全路径；
