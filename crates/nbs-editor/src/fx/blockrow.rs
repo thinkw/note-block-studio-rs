@@ -27,9 +27,13 @@ use nbs_core::model::KEY_MAX;
 /// 一帧最多摆几个方块。密集段落一秒能进几十个音，超出的按「只留最新的」截。
 pub const MAX_BLOCKS: usize = 240;
 
-/// 同一枚键上一共叠几个方块封顶：再多的音只留最新这一摞。
-/// 三列一层，12 个就是四层，再高就顶到网格上沿了。
+/// 同一枚键上一共叠几个方块封顶：再多的音只留最新这一摞，不然塔会一路长出画面。
 pub const MAX_STACK: usize = 12;
+
+/// 方块边长占所在键道的比例。留的两成缝既是邻道之间的间隔，也是位移能摆的横向余量
+/// （[`BlockRow::block_extent`] 据此夹住 `nudge` 的横分量）。
+/// 用户报的「方块都叠在一起」就是方块宽过键道、位移又没有边界，两道以上的方块互相盖死。
+pub const LANE_FILL: f32 = 0.8;
 
 /// 方块在「家」周围摆的相位种子步进：相邻声道错开一点，一整排才不像一块板。
 const PHASE_PER_SLOT: f32 = 0.7;
@@ -107,12 +111,22 @@ impl BlockRow {
         (0.35 + 0.65 * (1.0 - r), ((1.0 - r) / 0.3).clamp(0.0, 1.0))
     }
 
-    /// 同一枚键上叠着的第 `k` 个方块相对「家」的偏移：新的那枚正对键道中心，
-    /// 往后每三个一层往上摞 —— 否则一轮颤音全落在同一个像素上，看着就是一块方块，
-    /// 完全看不出「刚刚响过这么多个音」。
+    /// 方块的实际边长 + 键道里剩下的横向余量。
+    ///
+    /// 基准边长（[`tile_size`] × `tile_scale`）是像素，键道宽度是 `39 × scale`（黑键
+    /// 更窄），两者不同源，所以基准值在键道窄的画面上会宽过道 —— 这里按本枚音符所在
+    /// 键道夹一次。余量 `room` 就是位移的横向钳位：方块怎么摆都出不了自己那条道。
+    pub fn block_extent(base: f32, lane: f32) -> (f32, f32) {
+        let tile = base.min(lane * LANE_FILL);
+        (tile, (lane - tile).max(0.0) * 0.5)
+    }
+
+    /// 同一枚键上叠着的第 `k` 个方块相对「家」的偏移：新的那枚正对键道中心，越早的
+    /// 往上摞，层高一整格（`1.05 × tile`，只留一点缝免得看成一块）。
+    /// 不摞的话一轮颤音全落在同一个像素上，看着就是一块方块，完全看不出「刚刚响过
+    /// 这么多个音」；横着扇开又摆不下——一条键道只放得下一枚方块。
     pub fn stack_offset(k: usize, tile: f32) -> (f32, f32) {
-        const COLS: [f32; 3] = [0.0, -0.30, 0.30];
-        (COLS[k % 3] * tile, -0.66 * (k / 3) as f32 * tile)
+        (0.0, -1.05 * k as f32 * tile)
     }
 
     fn fade(color: Color32, k: f32) -> Color32 {
@@ -216,9 +230,7 @@ impl PlaybackEffect for BlockRow {
     fn draw(&mut self, cx: &FxContext, out: &mut Frame) {
         let scale = cx.scale.max(f32::EPSILON);
         let layout = Self::layout(cx);
-        let tile = tile_size(scale) * self.params.tile_scale.max(0.2);
-        // 「家」的底边压在键盘上缘之上，留出一点缝，别让方块盖住键面。
-        let base_y = layout.origin.y - tile * 0.5 - 4.0 * scale;
+        let base_tile = tile_size(scale) * self.params.tile_scale.max(0.2);
         let now_seconds = cx.timeline.seconds_at(cx.position) as f64;
         let from = cx
             .timeline
@@ -249,6 +261,11 @@ impl PlaybackEffect for BlockRow {
                 // 这枚键本帧不在画面里（用户把钢琴栏拖到只露一半），方块跟着不画。
                 continue;
             };
+            // 边长和余量按本枚音符所在的键道算：黑键道比白键道窄，一刀切的像素边长
+            // 会在窄道上盖住邻道，一整排就看成叠在一起。
+            let (tile, room) = Self::block_extent(base_tile, layout.lane_width(note.key));
+            // 「家」的底边压在键盘上缘之上，留出一点缝，别让方块盖住键面。
+            let base_y = layout.origin.y - tile * 0.5 - 4.0 * scale;
             let stack = match left.get_mut(note.key as usize) {
                 Some(n) => {
                     let v = n.saturating_sub(1);
@@ -267,7 +284,11 @@ impl PlaybackEffect for BlockRow {
                 + note.key as f32 * PHASE_PER_SLOT;
             let (dx, dy) = Self::nudge(phase, amp * swing);
             let (ox, oy) = Self::stack_offset(stack, tile);
-            let center = Pos2::new(home.center().x + dx + ox, base_y + dy + oy);
+            // 横分量钳在键道余量里：方块可以晃，但出不了自己那条道。
+            let center = Pos2::new(
+                home.center().x + dx.clamp(-room, room) + ox,
+                base_y + dy + oy,
+            );
             let rect = Rect::from_center_size(center, Vec2::new(tile, tile));
 
             // 只有导出表里真配了方块的乐器才走贴图；没配过的（自定义乐器默认全是石头）
@@ -440,9 +461,56 @@ mod tests {
     /// 位移是围绕这个点算的，不是围绕键道中心 —— 否则同一列的方块会互相盖住。
     fn home(rig: &Rig, key: u8, stack: usize) -> f32 {
         let layout = rig.layout.unwrap();
-        let tile = tile_size(1.0) * Params::default().tile_scale;
+        let base = tile_size(1.0) * Params::default().tile_scale;
+        let (tile, _) = BlockRow::block_extent(base, layout.lane_width(key));
         let (ox, _) = BlockRow::stack_offset(stack, tile);
         layout.rect_of_key(key).unwrap().center().x + ox
+    }
+
+    /// 方块不许越到邻道：单音扫一整个摆动周期，横向始终待在自己那条键道里。
+    /// 用户把「方块大小」拉到上限、「位移幅度」拉到上限时最容易挤过道，
+    /// 一整排就会糊成「叠在一起」。
+    #[test]
+    fn a_block_stays_inside_its_lane() {
+        for key in [48u8, 49, 52, 60, 61, 72] {
+            let rig = Rig::new(&[(0, 0, 0, key)]).with_keyboard();
+            let lane = rig.layout.unwrap().rect_of_key(key).unwrap();
+            let mut fx = BlockRow::default();
+            fx.set_params(&serde_json::json!({ "nudge_px": 14.0, "tile_scale": 2.5 }));
+            for i in 0..32u32 {
+                let mut frame = Frame::default();
+                fx.draw(&rig.cx(0.5, i as f64 * 0.02), &mut frame);
+                for rect in blocks(&frame) {
+                    assert!(
+                        rect.left() >= lane.left() - 0.01 && rect.right() <= lane.right() + 0.01,
+                        "键 {key} 的方块 {rect:?} 越出了键道 {lane:?}"
+                    );
+                }
+                assert!(!blocks(&frame).is_empty(), "键 {key} 一帧都没画着");
+            }
+        }
+    }
+
+    /// 摞起来的方块一层压一整格，不许在同一列上互相盖死。
+    #[test]
+    fn stacked_blocks_do_not_cover_each_other() {
+        let notes: Vec<(u32, u32, u8, u8)> = (0..6u32).map(|t| (t, 0, 0, 60)).collect();
+        let rig = Rig::new(&notes).with_keyboard();
+        let mut fx = BlockRow::default();
+        let mut frame = Frame::default();
+        fx.draw(&rig.cx(5.5, 0.0), &mut frame);
+        let got = blocks(&frame);
+        assert_eq!(got.len(), 6);
+        for a in &got {
+            for b in &got {
+                if a.center().x == b.center().x && a != b {
+                    assert!(
+                        !a.intersects(*b),
+                        "同一条键道上摞的两块互相盖住了：{a:?} {b:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

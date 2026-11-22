@@ -398,6 +398,8 @@ pub const STAGE_BACKDROP: Color32 = Color32::from_rgb(12, 12, 16);
 pub struct FxState {
     pub timeline: FxTimeline,
     /// `song.rev` + 「是否播放锁定层」，烘焙的缓存键。
+    /// 换歌（开档/新建/导入）也走 rev：`Document::replace_song` 会递增它，
+    /// 否则新曲子和上一首都是 0，这份缓存会一直留着上一首的音符表。
     pub baked_for: (u64, bool),
     pub blocks: InstrumentBlocks,
     /// 烘焙用的乐器方块表快照（导出选项一改就重建 `blocks`）。
@@ -781,5 +783,33 @@ mod tests {
         assert!(fx.wants_piano(), "方块排按琴键面板对齐");
         fx.paint_overlay(&ctx, &input);
         assert!(fx.stack.frame().is_empty(), "空曲子的方块排没有方块");
+    }
+
+    fn song_with(notes: &[(u32, u32, u8, u8)]) -> nbs_core::model::Song {
+        let mut s = nbs_core::model::Song::new();
+        for (tick, layer, instrument, key) in notes {
+            while s.layers.len() <= *layer as usize {
+                s.layers.push(nbs_core::model::Layer::default());
+            }
+            s.set(*tick, *layer, nbs_core::model::Note::new(*instrument, *key));
+        }
+        s.recalculate();
+        s
+    }
+
+    /// 换歌必须重烘。解析出来的曲子 `rev` 恒为 0，和启动时那份演示曲撞在同一个缓存键上，
+    /// 不递增就永远不重烘 —— 特效于是一直在画上一首的音符，看着就是
+    /// 「特效不随出现的乐器变」（用户报的原话）。
+    #[test]
+    fn swapping_the_song_rebakes_the_timeline() {
+        let mut doc = nbs_core::Document::new();
+        let mut fx = FxState::default();
+        let opts = nbs_io::schematic::SchematicOptions::default();
+        doc.replace_song(song_with(&[(0, 0, 0, 60), (1, 0, 0, 62), (2, 0, 7, 64)]));
+        fx.refresh(&doc.song, false, &opts);
+        assert_eq!(fx.timeline.note_count(), 3);
+        doc.replace_song(song_with(&[(0, 0, 7, 48)]));
+        fx.refresh(&doc.song, false, &opts);
+        assert_eq!(fx.timeline.note_count(), 1, "换歌之后特效还在用上一首的音符表");
     }
 }

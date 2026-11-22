@@ -715,7 +715,14 @@ impl Document {
         self.history.redo(&mut self.song, &mut self.selection)
     }
 
-    pub fn replace_song(&mut self, song: Song) {
+    /// 换掉整首曲子（开档 / 新建 / 导入 / 外部控制落盘后重建）。
+    ///
+    /// `rev` 必须跟着走：它对外是「内容版本号」，按它缓存的下游（特效时间轴等）
+    /// 只看这一个数。而解析出来的 `Song` rev 恒为 0，不递增的话缓存会一直留着上一首
+    /// ——启动时先烘了演示曲（rev 0），开档后又拿到 rev 0，键位没变，特效就永远在画
+    /// 演示曲的音符。
+    pub fn replace_song(&mut self, mut song: Song) {
+        song.rev = self.song.rev + 1;
         self.song = song;
         self.selection = Selection::new();
         self.history.clear();
@@ -974,5 +981,22 @@ mod tests {
         assert_eq!(doc.song.get(0, 0).unwrap().key, 33);
         assert_eq!(doc.song.get(1, 0).unwrap().key, 45);
         assert_eq!(doc.song.get(2, 0).unwrap().key, 46);
+    }
+
+    /// 换歌 = 内容变了：`rev` 必须递增，否则按 rev 缓存的东西（特效时间轴）会留着上一首。
+    /// 解析出来的曲子 rev 恒为 0，这里不递增就撞车。
+    #[test]
+    fn replacing_the_song_moves_rev() {
+        let mut doc = Document::new();
+        assert_eq!(doc.song.rev, 0);
+        let mut loaded = Song::new();
+        loaded.set(2, 0, Note::new(3, 50));
+        loaded.recalculate();
+        doc.replace_song(loaded);
+        assert_eq!(doc.song.rev, 1, "开档后要和开档前区分得开");
+        doc.replace_song(Song::new());
+        assert_eq!(doc.song.rev, 2, "连续换歌每首都得是自己的版本号");
+        doc.place_note(0, 0, Note::new(0, 45));
+        assert_eq!(doc.song.rev, 3, "换歌之后照常继续递增");
     }
 }
