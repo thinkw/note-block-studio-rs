@@ -10,8 +10,10 @@
 「<name>.png → <name>_side.png → <name>_front.png → <name>_top.png」的顺序兜底，
 工具这边不做名字归一，免得两处各有一套规则。
 
-产物是 Mojang 的版权素材，默认不入库（见 .gitignore 的 assets/Blocks/）；
-需要随包分发时再单独拍板。
+产物是 Mojang 的版权素材。仓库只入「20 个内置乐器真的会画到的那几张」（白名单在
+.gitignore 里逐张 `!` 放行，名单由 crates/nbs-editor/src/fx/tiles.rs 那条测试对着
+出厂表现算核对），其余 1000 多张跟乐器无关、不入库，只留在这台机器上。
+随包分发（装进安装包）仍需另行拍板。
 """
 
 from __future__ import annotations
@@ -104,7 +106,9 @@ def main() -> int:
         "bytes": bytes_out,
         "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "fetched_by": "tools/fetch_block_textures.py",
-        "license_note": "Mojang/Microsoft 版权素材，默认不入库；随包分发需另行拍板。",
+        "license_note": "Mojang/Microsoft 版权素材；仓库只入 20 个内置乐器用到的那几张"
+                        "（白名单见 .gitignore，名单由 fx::tiles 的测试现算核对），"
+                        "其余不入库；随包分发需另行拍板。",
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     print(f"解出 {count} 张（{bytes_out / 1e6:.1f} MB）→ {out}")

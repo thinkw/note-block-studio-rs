@@ -4,10 +4,13 @@
 //! [`nbs_io::schematic::namespaced_id`]），和机器里实际摆的方块同源 —— 特效画出来的
 //! 方块必然和导出的 .nbt 一致，用户改「乐器对应的方块」时两边一起变。
 //!
-//! 贴图本身是 Mojang 的版权素材，不入库，由 `tools/fetch_block_textures.py` 从
-//! 客户端 jar 里现扒（来路记在 `assets/Blocks/PROVENANCE.json`）。找不到目录、
-//! 或某个方块在 1.21 资源里换了名，都退回按名字哈希出的稳定色块：画面会失真，
-//! 但不会缺格，也不会因为素材没扒就整个特效不能用。
+//! 贴图本身是 Mojang 的版权素材：仓库只入「20 个内置乐器真的会画到的那几张」（合计约
+//! 4 KB，白名单写在 `.gitignore`，由测试拿 `INSTRUMENT_BLOCKS` / `COPPER_INS_BLOCKS`
+//! 现算名单核对，改了出厂表就会红），其余 1000 多张跟乐器无关、不入库，需要时由
+//! `tools/fetch_block_textures.py` 从客户端 jar 里现扒（来路记在
+//! `assets/Blocks/PROVENANCE.json`）。找不到目录、或某个方块在 1.21 资源里换了名，
+//! 都退回按名字哈希出的稳定色块：画面会失真，但不会缺格，也不会因为素材没扒就整个
+//! 特效不能用。自定义乐器在出厂表里还是默认的石头，走的是乐器色那条路，不欠贴图。
 
 use egui::{Color32, Context, TextureHandle, TextureOptions};
 use nbs_io::schematic::{namespaced_id, SchematicOptions};
@@ -560,24 +563,47 @@ mod tests {
         assert!(!blocks.name(255).is_empty());
     }
 
-    /// 素材扒好了才跑：确认 20 个内置乐器的方块在 1.21.4 贴图包里真的存在。
-    /// 后四个是小号一族（waxed 铜块），它们靠「剥前缀」命中未打蜡那张贴图。
+    /// 入库的那几张贴图 = 20 个内置乐器会画到的那几张，一张不多一张不少。
+    /// 名单不是手抄的：出厂表（`INSTRUMENT_BLOCKS` + 铜块一族）现算，再走一遍
+    /// [`resolve_file`]。这里把 `.gitignore` 的白名单当成「新克隆机器上
+    /// `assets/Blocks` 的全部内容」来解，所以测的是克隆后对不对得上，
+    /// 而不是本机有没有扒全 —— 本机扒了 1000 张也算不出缺哪张。
     #[test]
-    fn fetched_assets_resolve_every_classic_block() {
-        let tiles = BlockTiles::open();
-        if tiles.is_empty() {
-            eprintln!("跳过：assets/Blocks 没素材（跑 tools/fetch_block_textures.py）");
-            return;
-        }
-        let blocks = InstrumentBlocks::default();
+    fn the_shipped_textures_are_exactly_the_builtin_instrument_blocks() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("仓库根")
+            .to_path_buf();
+        let ignore = std::fs::read_to_string(root.join(".gitignore")).expect("读不到 .gitignore");
+        let listed: std::collections::BTreeSet<String> = ignore
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("!assets/Blocks/"))
+            .filter(|f| f.ends_with(".png"))
+            .map(str::to_owned)
+            .collect();
+        assert!(!listed.is_empty(), ".gitignore 里没有 !assets/Blocks/*.png 的白名单");
+
+        let blocks = InstrumentBlocks::from_options(&SchematicOptions::default());
+        let has = |stem: &str| listed.contains(&format!("{stem}.png"));
+        let mut used: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for ins in 0..20u8 {
             let name = blocks.name(ins);
-            let have = |stem: &str| tiles.files.contains_key(stem);
-            assert!(
-                resolve_file(&have, name).is_some(),
-                "{ins} 号乐器 → {name}：扒下来的贴图里没有这个方块"
-            );
+            match resolve_file(&has, name) {
+                Some(stem) => {
+                    used.insert(format!("{stem}.png"));
+                }
+                None => panic!(
+                    "{ins} 号乐器 → {name}：入库白名单里没有这张贴图。\
+                     跑了 tools/fetch_block_textures.py 之后把 !assets/Blocks/<文件主名>.png 补进 .gitignore。"
+                ),
+            }
         }
+        let extra: Vec<&String> = listed.iter().filter(|f| !used.contains(*f)).collect();
+        assert!(
+            extra.is_empty(),
+            "入库贴图里有乐器用不到的：{extra:?} —— 口径是只入乐器会用到的那几张"
+        );
     }
 
     /// 帧号口径：内置按序号，自定义在那 18 帧里循环。主界面的 `push_note` 和
