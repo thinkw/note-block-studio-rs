@@ -14,8 +14,12 @@ use crate::bus::{Hello, Request, Response};
 use crate::client::{ClientError, ControlClient};
 use crate::discovery::{Discovery, DISCOVERY_FILE};
 use crate::frame::{read_json_line, write_json_line};
+use crate::midi::{
+    ImportChannelMap, ImportDrumMap, ImportEnhancedOptions, ImportMidiOptions, ImportRangeMode,
+    MidiPlan,
+};
 use crate::op::{CellNote, ExportFormat, Op, Playback, Scope, SelectTarget};
-use crate::outcome::{ChangeReport, Data, ErrorCode, JobInfo, JobStatus, Outcome};
+use crate::outcome::{BarOverview, ChangeReport, Data, ErrorCode, JobInfo, JobStatus, NoteCell, Outcome};
 use crate::server::{ControlServer, ServerConfig};
 use crate::task::{CancelOutcome, JobRegistry, SpawnReject};
 use crate::Inbox;
@@ -177,6 +181,100 @@ fn job_data_survives_the_real_wire() {
     }
 }
 
+/// MIDI 导入那一面有三条口径只能在线上验：省略的字段是「不出现」而不是 `null`、
+/// 预检归只读（否则一个模态框就把看一眼这件事挡死）、核对单摊平进 `Data` 不多出一个 `kind`。
+#[test]
+fn midi_import_surface_survives_the_wire() {
+    let options = ImportMidiOptions {
+        precision: Some(3),
+        channels: vec![ImportChannelMap {
+            channel: 0,
+            instrument: 5,
+            octave: -1,
+        }],
+        ..Default::default()
+    };
+    let enhanced = ImportEnhancedOptions {
+        enabled: Some(true),
+        range_mode: Some(ImportRangeMode::Fold),
+        ..Default::default()
+    };
+    let import = Op::ImportMidi {
+        path: "a/b.mid".to_string(),
+        discard_changes: true,
+        options: Some(options.clone()),
+        enhanced: Some(enhanced.clone()),
+        remember: Some(true),
+    };
+    let inspect = Op::InspectMidi {
+        path: "a/b.mid".to_string(),
+        options: Some(options.clone()),
+        enhanced: None,
+    };
+    for op in [import.clone(), inspect.clone()] {
+        let text = serde_json::to_string(&op).unwrap();
+        let back: Op =
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e} 读不回来：{text}"));
+        assert_eq!(back, op);
+    }
+    // `null` 会被读成「给了但没值」，和「省略 = 用编辑器基线」是两回事。
+    let bare = serde_json::to_string(&Op::InspectMidi {
+        path: "a/b.mid".to_string(),
+        options: None,
+        enhanced: None,
+    })
+    .unwrap();
+    assert!(!bare.contains("options") && !bare.contains("enhanced"), "{bare}");
+    let bare_import = serde_json::to_string(&Op::ImportMidi {
+        path: "a/b.mid".to_string(),
+        discard_changes: false,
+        options: None,
+        enhanced: None,
+        remember: None,
+    })
+    .unwrap();
+    assert!(!bare_import.contains("remember"), "{bare_import}");
+    // 预检只是把导入算法跑一遍，不该被写操作的闸门拦住。
+    assert!(inspect.is_read_only());
+    assert!(!import.is_read_only());
+
+    let plan = MidiPlan {
+        path: "a/b.mid".to_string(),
+        notes: 12,
+        layers: 2,
+        layer_names: vec!["Vibraphone".to_string(), "Percussion".to_string()],
+        applied: options,
+        applied_enhanced: enhanced,
+        ..Default::default()
+    };
+    let outcome = Outcome::ok(Data::MidiPlan(Box::new(plan)), report(9));
+    let text = serde_json::to_string(&outcome).unwrap();
+    assert_eq!(text.matches("\"kind\"").count(), 1, "线上出现了两个 kind：{text}");
+    let back: Outcome = serde_json::from_str(&text).unwrap();
+    assert_eq!(back, outcome);
+}
+
+/// 拼错的字段名不能读成「这一项没给」：那样回显看起来完全正常、用的却是基线，
+/// 而「导入时少勾了一项」这种事没人能从结果反推出来。所以这几个入参结构体不认未知字段。
+#[test]
+fn a_typo_in_the_import_options_is_rejected_not_ignored() {
+    for err in [
+        serde_json::from_str::<ImportMidiOptions>(r#"{"percision":3}"#).unwrap_err(),
+        serde_json::from_str::<ImportEnhancedOptions>(r#"{"susntain":true}"#).unwrap_err(),
+        serde_json::from_str::<ImportChannelMap>(r#"{"channl":0,"instrument":5}"#).unwrap_err(),
+        serde_json::from_str::<ImportDrumMap>(r#"{"note":36,"instalment":5,"key":40}"#).unwrap_err(),
+    ] {
+        assert!(err.to_string().contains("unknown field"), "{err}");
+    }
+    // 真字段照旧读得进；回显用的是同一批结构体，序列化不受这条属性影响。
+    let options = ImportMidiOptions {
+        precision: Some(3),
+        ..Default::default()
+    };
+    let text = serde_json::to_string(&options).unwrap();
+    assert_eq!(serde_json::from_str::<ImportMidiOptions>(&text).unwrap(), options);
+}
+
 #[test]
 fn error_codes_have_stable_strings() {
     for code in [
@@ -212,7 +310,9 @@ fn read_only_ops_are_the_safe_subset() {
         tick_from: Some(0),
         tick_to: Some(1),
         layer_from: None,
-        layer_to: None
+        layer_to: None,
+        ticks_per_bar: None,
+        bars: None
     }
     .is_read_only());
     assert!(Op::JobList.is_read_only());
@@ -225,6 +325,48 @@ fn read_only_ops_are_the_safe_subset() {
         args: None
     }
     .is_read_only());
+}
+
+/// 小节视图的两端都要过得在线格式上：入参那两个字段是给 AI 填的，`bar_overview` 是
+/// 编辑器拼好、桥接原样转出去的——任何一侧悄悄改名都会变成「参数没了」而不是报错。
+#[test]
+fn the_bar_view_survives_the_wire() {
+    let op = Op::GetNotes {
+        tick_from: None,
+        tick_to: None,
+        layer_from: None,
+        layer_to: None,
+        ticks_per_bar: Some(12),
+        bars: Some([0, 255]),
+    };
+    let text = serde_json::to_string(&op).unwrap();
+    assert!(text.contains("\"bars\":[0,255]"), "{text}");
+    assert_eq!(serde_json::from_str::<Op>(&text).unwrap(), op);
+
+    let data = Data::Notes {
+        cells: vec![NoteCell {
+            tick: 0,
+            layer: 0,
+            instrument: 1,
+            key: 39,
+            velocity: 100,
+            panning: 100,
+            pitch: 0,
+            out_of_range: false,
+        }],
+        truncated: false,
+        limit: 20_000,
+        bar_overview: vec![BarOverview {
+            bar: 0,
+            tick_from: 0,
+            tick_to: 11,
+            cells: 1,
+            text: "0:C4(1)".to_string(),
+        }],
+    };
+    let text = serde_json::to_string(&data).unwrap();
+    assert!(text.contains("\"bar_overview\""), "{text}");
+    assert_eq!(serde_json::from_str::<Data>(&text).unwrap(), data);
 }
 
 // ---------------------------------------------------------------- 帧

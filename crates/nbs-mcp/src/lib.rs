@@ -28,12 +28,12 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use schemars::JsonSchema;
 use serde::Serialize;
 
-pub use connect::{connect, parse_args, CallRequest, Command, Endpoint, USAGE};
+pub use connect::{connect, parse_args, ArgsSource, CallRequest, Command, Endpoint, USAGE};
 use nbs_control::{ControlClient, Op, Outcome, Playback};
 pub use params::{
-    BatchFieldArgs, CellRef, ClearSong, Export, GetNotes, ImportMidi, JobId, LayerAdd, LayerIndex,
-    LayerMove, LayerUpdate, OpenPath, RemoveCells, RevOnly, RunAction, SavePath, Seek, Select,
-    SetLoop, SetMetaArgs, SetNotes, Steps, Transpose,
+    BatchFieldArgs, CellRef, ClearSong, Export, GetNotes, ImportMidi, InspectMidi, JobId, LayerAdd,
+    LayerIndex, LayerMove, LayerUpdate, OpenPath, RemoveCells, RevOnly, RunAction, SavePath, Seek,
+    Select, SetLoop, SetMetaArgs, SetNotes, Steps, Transpose,
 };
 
 /// 一条工具回执。两个失败层各自点名自己的范围。
@@ -133,7 +133,7 @@ pub enum ToolList {
 
 /// 把工具面打出来：给人核对「AI 会看到什么口径」，不需要编辑器在场，也不碰 stdio 协议。
 ///
-/// `only` 是给 `--dump-tools <工具>` 用的：全表 38 条、每条带一份 schema，
+/// `only` 是给 `--dump-tools <工具>` 用的：全表 39 条、每条带一份 schema，
 /// 只想看一条时那输出比正文长十倍。名字不在表里返回 `Ok(false)`，让调用方说清
 /// 「这条没有」而不是打一份空表装作成功。
 pub fn dump_tools(
@@ -291,6 +291,9 @@ impl Bridge {
 
     /// 读一段范围内的音符格子。返回上限由服务端定，`truncated=true` 说明只给了一部分，
     /// 需要缩小 `tick_from..=tick_to` 再读。
+    /// 想按小节读 melody：给 `bars:[起,止]`（两头都含，一次最多 256 节），tick 区间由小节号算，
+    /// 回执的 `data.bar_overview` 每节一行 `tick:音名(音色)`——键号要心算才会唱，而错的那半音
+    /// 只有耳朵能发现，所以这份文字视图由状态栏同一张表生成。
     #[tool]
     async fn get_notes(&self, Parameters(a): Parameters<GetNotes>) -> Result<Json<Reply>, CallToolResult> {
         self.call(a.into()).await
@@ -425,7 +428,8 @@ impl Bridge {
 
     // -------------------------------------------------------------- 播放
 
-    /// 从当前落点起播（和界面播放按钮同一语义：停在歌尾会先回 0）。
+    /// 从当前落点起播。落点已经到或越过曲尾时**先归零再播**，回执会说一句归过零：
+    /// 刚 `clear_song` / `open_file` 换了一首更短的歌时，不归零就是「按下去立刻停」。
     #[tool]
     async fn play(&self) -> Result<Json<Reply>, CallToolResult> {
         self.call(Op::Playback(Playback::Play)).await
@@ -478,8 +482,23 @@ impl Bridge {
     }
 
     /// 导入 MIDI 并**替换**当前工程：撤销历史清空，有未保存改动时要带 `discard_changes=true`。
+    /// `options` / `enhanced` 省略 = 复刻人打开 MIDI 导入窗时的那份基线（标量取自偏好，
+    /// 通道与鼓映射按这个文件和当前 GM 表现算）；要改哪一项就只写哪一项。
+    /// `remember=true` 会写回用户的 GM 表和偏好，所以默认不动它，且只有传统路径会写回。
+    /// 回执 `data` 是完整的导入核对单（`MidiPlan`），`applied` / `applied_enhanced`
+    /// 回显这次**真正生效**的每一个字段——先 `inspect_midi` 预演、再拿同一份选项导，
+    /// 两边逐字段比得动。
     #[tool]
     async fn import_midi(&self, Parameters(a): Parameters<ImportMidi>) -> Result<Json<Reply>, CallToolResult> {
+        self.call(a.into()).await
+    }
+
+    /// 只读预演 MIDI 导入：读文件、按给定选项算出一整首歌，然后**把结果丢掉**，
+    /// 工程一点不动（`rev` 也不变）。回执和 `import_midi` 同一个形状，用来先看清
+    /// 「通道 3 是不是被我标成静音了」「层数会不会超」再动手。
+    /// 这一步在主线程算，大文件会给几十毫秒到几百毫秒的等待。
+    #[tool]
+    async fn inspect_midi(&self, Parameters(a): Parameters<InspectMidi>) -> Result<Json<Reply>, CallToolResult> {
         self.call(a.into()).await
     }
 
@@ -618,7 +637,7 @@ mod tests {
     }
 
     /// 报错文案里那句「形状看 `--dump-tools set_notes`」必须是真能跑的写法：
-    /// 全表 38 条带 schema，为了看一个参数读完整张表，等于没给答案。
+    /// 全表 39 条带 schema，为了看一个参数读完整张表，等于没给答案。
     #[test]
     fn tool_face_dumps_whole_or_one_by_one() {
         let mut all = Vec::new();

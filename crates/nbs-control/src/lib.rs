@@ -21,6 +21,7 @@ pub mod client;
 pub mod clients;
 pub mod discovery;
 pub mod frame;
+pub mod midi;
 pub mod op;
 pub mod outcome;
 pub mod server;
@@ -34,9 +35,14 @@ pub use frame::{read_json_line, write_json_line, MAX_FRAME_BYTES};
 pub use op::{
     BatchField, CellNote, ExportFormat, LayerSet, Op, Playback, Scope, SelectTarget, SetMeta,
 };
+pub use midi::{
+    ImportChannelMap, ImportDrumMap, ImportEnhancedChannel, ImportEnhancedOptions, ImportMidiOptions,
+    ImportRangeMode, ImportSlot, ImportSubstitution, MidiChannelPlan, MidiDrumPlan,
+    MidiEnhancedReport, MidiPartPlan, MidiPlan, MidiTrackInfo,
+};
 pub use outcome::{
-    ActionInfo, ChangeReport, Data, Diagnostics, ErrorCode, ErrorInfo, HistoryInfo, InstrumentInfo,
-    JobInfo, JobStatus, LayerInfo, NoteCell, Outcome, SelectionInfo, Snapshot,
+    ActionInfo, BarOverview, ChangeReport, Data, Diagnostics, ErrorCode, ErrorInfo, HistoryInfo,
+    InstrumentInfo, JobInfo, JobStatus, LayerInfo, NoteCell, Outcome, SelectionInfo, Snapshot,
 };
 pub use server::{ControlServer, ServerConfig};
 pub use task::{JobHandle, JobRegistry};

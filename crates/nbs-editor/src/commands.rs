@@ -2392,8 +2392,24 @@ fn import_schematic(state: &mut EditorState, path: &std::path::Path) {
 /// 用户的标量偏好和 `[midi_import]` 首选项一样留着；增强那侧目前连开关一起回出厂值
 /// （`for_midi` = `default` + 重算通道），要改成继承偏好得单独拍板。
 /// 两个生产入口（文件导入、转录导入）都走这里。
+/// 打开导入窗那一刻人看到的那套传统选项：14 个标量沿用状态里那份（= 偏好里上次留下的勾），
+/// 三张映射表按**这个文件** + 当前 GM 表现算。
+///
+/// 界面和外部控制都从这里取。导入窗的默认档位一旦在别处被重抄一遍，就会出现第二种
+/// 「默认导入」的语义——MCP 那侧原先正是抄了 `MidiImportOptions::default()`，
+/// 结果通道映射全成乐器 0、鼓映射空着，导进来的 MIDI 整首变钢琴且打击乐全哑。
+pub fn midi_options_base(
+    state: &EditorState,
+    midi: &nbs_io::midi::MidiData,
+) -> nbs_io::midi::MidiImportOptions {
+    let mut opts = state.midi_options.clone();
+    opts.reload_tables(midi, &state.midi_gm);
+    opts
+}
+
 pub fn load_midi_for_import(state: &mut EditorState, midi: nbs_io::midi::MidiData, name: String) {
-    state.midi_options.reload_tables(&midi, &state.midi_gm);
+    let base = midi_options_base(state, &midi);
+    state.midi_options = base;
     state.midi_enhanced = nbs_io::midi_enhanced::EnhancedMidiOptions::for_midi(&midi);
     state.midi_enhanced_options = state.midi_options.clone();
     state.midi_enhanced_check = None;

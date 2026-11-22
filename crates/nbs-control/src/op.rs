@@ -258,6 +258,14 @@ pub enum Op {
         layer_from: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         layer_to: Option<u32>,
+        /// 小节宽度（格数）。省略时用工程的 `time_signature * 4`，也就是界面画竖线的那对数。
+        /// 只给了它没给 `bars` 时，区间照原样读，文字视图按这个宽度切。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ticks_per_bar: Option<u32>,
+        /// `[起始小节, 结束小节]`，两头都含。给了就换成按小节算的 tick 区间，
+        /// 并且回执里带一份小节文字视图。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bars: Option<[u32; 2]>,
     },
     GetLayers,
     GetSelection,
@@ -378,11 +386,31 @@ pub enum Op {
     /// 存回当前文件名；没有文件名时报错，绝不弹「另存为」。
     Save,
     /// 导入 MIDI 并**替换**当前工程（历史清空，与界面导入一致）。
+    /// 选项全部可省略，省略 = 复刻人打开导入窗时那份基线，见 [`crate::midi::ImportMidiOptions`]。
     ImportMidi {
         path: String,
         /// 同 `OpenPath`：替换会丢掉当前工程的改动与历史。
         #[serde(default)]
         discard_changes: bool,
+        /// 传统导入的 14 个标量 + 通道/鼓映射 + 尾音声部；省略 = 基线。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<crate::midi::ImportMidiOptions>,
+        /// 增强导入那一套；省略 = 传统路径。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enhanced: Option<crate::midi::ImportEnhancedOptions>,
+        /// true = 把这次用到的通道/鼓映射写回 GM 表，并把标量存进偏好——
+        /// 那是**改用户的长期设置**，所以省略算 false，且增强路径不写回（和界面一致）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remember: Option<bool>,
+    },
+    /// 只算不写：把某个 MIDI 文件按给定选项走一遍导入计算，回报会得到什么。
+    /// 当前工程一点不动，所以它是 `import_midi` 之前的那一步核对。
+    InspectMidi {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<crate::midi::ImportMidiOptions>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enhanced: Option<crate::midi::ImportEnhancedOptions>,
     },
 
     // -------------------------------------------------------------- 重活 / 任务
@@ -427,6 +455,8 @@ impl Op {
                 | Op::GetHistory
                 | Op::JobStatus { .. }
                 | Op::JobList
+                // 读文件、算导入，但既不改工程也不落盘，所以弹窗挡在中间时照样该回答。
+                | Op::InspectMidi { .. }
         )
     }
 }

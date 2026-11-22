@@ -9,7 +9,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use nbs_control::{
-    BatchField, CellNote, ExportFormat, LayerSet, Op, Playback, Scope, SelectTarget, SetMeta,
+    BatchField, CellNote, ExportFormat, ImportEnhancedOptions, ImportMidiOptions, LayerSet, Op,
+    Playback, Scope, SelectTarget, SetMeta,
 };
 
 /// `run_action` 逃生舱的一条调用：动作名 + 它的参数原样。
@@ -183,6 +184,16 @@ pub struct GetNotes {
     #[schemars(description = "结束层号，含；省略 = 最后一层")]
     #[serde(default)]
     pub layer_to: Option<u32>,
+    #[schemars(
+        description = "小节宽度（格数），给 0 按 1 算；省略 = 工程的「拍号 × 4」，也就是界面画竖线的间距。给了它就额外回一份小节文字视图"
+    )]
+    #[serde(default)]
+    pub ticks_per_bar: Option<u32>,
+    #[schemars(
+        description = "[起始小节, 结束小节]，两头都含，一次最多 256 小节。给了就按小节算 tick 区间并回小节文字视图；和 tick_from / tick_to 互斥"
+    )]
+    #[serde(default)]
+    pub bars: Option<[u32; 2]>,
 }
 
 impl From<GetNotes> for Op {
@@ -192,6 +203,8 @@ impl From<GetNotes> for Op {
             tick_to: a.tick_to,
             layer_from: a.layer_from,
             layer_to: a.layer_to,
+            ticks_per_bar: a.ticks_per_bar,
+            bars: a.bars,
         }
     }
 }
@@ -533,6 +546,21 @@ pub struct ImportMidi {
     #[schemars(description = "当前工程有未保存改动时必须为 true：导入会替换整首歌并清空撤销历史")]
     #[serde(default)]
     pub discard_changes: bool,
+    #[schemars(
+        description = "传统导入的选项；整个字段省略 = 复刻人打开导入窗时的基线（标量取自偏好、通道/鼓映射按这个文件和当前 GM 表现算）。给了哪个字段就覆盖哪个，没给的仍走基线——注意出厂默认值不是基线，别拿它当'不设'"
+    )]
+    #[serde(default)]
+    pub options: Option<ImportMidiOptions>,
+    #[schemars(
+        description = "增强导入那一套；省略 = 走传统路径。要启用必须显式写 enabled=true，否则只给子字段会被拒（因为那些字段根本不会被读到）"
+    )]
+    #[serde(default)]
+    pub enhanced: Option<ImportEnhancedOptions>,
+    #[schemars(
+        description = "true = 把这次的通道/鼓映射写回 GM 表、标量存进偏好——这是改用户的长期设置，所以省略算 false。只有传统路径会写回，enhanced.enabled=true 时这个字段无效（和界面一致）"
+    )]
+    #[serde(default)]
+    pub remember: Option<bool>,
 }
 
 impl From<ImportMidi> for Op {
@@ -540,6 +568,33 @@ impl From<ImportMidi> for Op {
         Op::ImportMidi {
             path: a.path,
             discard_changes: a.discard_changes,
+            options: a.options,
+            enhanced: a.enhanced,
+            remember: a.remember,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct InspectMidi {
+    #[schemars(description = "要看的那个 .mid 路径，必须落在编辑器允许的目录里")]
+    pub path: String,
+    #[schemars(
+        description = "按哪套选项预演；形状和 import_midi.options 完全一致，省略 = 编辑器基线。想验证'就这么导会得到什么'，把准备发给 import_midi 的 options 原样发过来"
+    )]
+    #[serde(default)]
+    pub options: Option<ImportMidiOptions>,
+    #[schemars(description = "增强导入的预演，形状和 import_midi.enhanced 一致；省略 = 预演传统路径")]
+    #[serde(default)]
+    pub enhanced: Option<ImportEnhancedOptions>,
+}
+
+impl From<InspectMidi> for Op {
+    fn from(a: InspectMidi) -> Self {
+        Op::InspectMidi {
+            path: a.path,
+            options: a.options,
+            enhanced: a.enhanced,
         }
     }
 }

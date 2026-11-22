@@ -131,6 +131,8 @@ fn run(config: &Path, work: &Path) -> i32 {
             tick_to: Some(2),
             layer_from: Some(0),
             layer_to: Some(0),
+            ticks_per_bar: None,
+            bars: None,
         }),
     );
     show(
@@ -140,6 +142,19 @@ fn run(config: &Path, work: &Path) -> i32 {
             tick_to: None,
             layer_from: None,
             layer_to: None,
+            ticks_per_bar: None,
+            bars: None,
+        }),
+    );
+    show(
+        "GetNotes(按小节读前两节)",
+        client.request(Op::GetNotes {
+            tick_from: None,
+            tick_to: None,
+            layer_from: None,
+            layer_to: None,
+            ticks_per_bar: None,
+            bars: Some([0, 1]),
         }),
     );
     show(

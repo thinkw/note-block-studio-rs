@@ -16,9 +16,9 @@ use serde_json::Value;
 use nbs_control::{Data, Op, Outcome, Playback};
 
 use crate::params::{
-    BatchFieldArgs, ClearSong, Export, GetNotes, ImportMidi, JobId, LayerAdd, LayerIndex,
-    LayerMove, LayerUpdate, OpenPath, RemoveCells, RevOnly, RunAction, SavePath, Seek, Select,
-    SetLoop, SetMetaArgs, SetNotes, Steps, Transpose,
+    BatchFieldArgs, ClearSong, Export, GetNotes, ImportMidi, InspectMidi, JobId, LayerAdd,
+    LayerIndex, LayerMove, LayerUpdate, OpenPath, RemoveCells, RevOnly, RunAction, SavePath, Seek,
+    Select, SetLoop, SetMetaArgs, SetNotes, Steps, Transpose,
 };
 use crate::Reply;
 
@@ -125,6 +125,7 @@ pub fn op_for(name: &str, args: &Value) -> Result<Op, DispatchError> {
         "open_file" => Ok(typed::<OpenPath>(name, args)?.into()),
         "save_as" => Ok(typed::<SavePath>(name, args)?.into()),
         "import_midi" => Ok(typed::<ImportMidi>(name, args)?.into()),
+        "inspect_midi" => Ok(typed::<InspectMidi>(name, args)?.into()),
         "export" => Ok(typed::<Export>(name, args)?.into()),
         other => Err(DispatchError::Unknown(other.to_string())),
     }
@@ -284,6 +285,7 @@ mod tests {
             "open_file",
             "save_as",
             "import_midi",
+            "inspect_midi",
             "export",
         ];
         for name in table {
@@ -321,6 +323,29 @@ mod tests {
         assert!(op_for("get_notes", &payload()).is_ok());
     }
 
+    /// MIDI 选项里字段名拼错，意思是「这一项没生效、其余照旧」，而回执看着完全正常。
+    /// 这种失败在命令行这一层就该拦住，不用等编辑器答，也不该占一次 socket。
+    #[test]
+    fn a_typo_in_the_midi_options_is_a_bad_command() {
+        let err = op_for(
+            "inspect_midi",
+            &json!({"path":"a.mid","options":{"percision":3}}),
+        )
+        .unwrap_err();
+        assert!(matches!(err, DispatchError::BadArgs { .. }), "{err:?}");
+        assert!(err.message().contains("--dump-tools"), "{}", err.message());
+        assert!(
+            plan("import_midi", &json!({"path":"a.mid","enhanced":{"susntain":true}}))
+                .is_err(),
+            "计划阶段就该拒，别为了报错去开 socket"
+        );
+        assert!(op_for(
+            "inspect_midi",
+            &json!({"path":"a.mid","options":{"precision":3}})
+        )
+        .is_ok());
+    }
+
     /// 转换必须和工具面给的 `Op` 一字不差，否则命令行和 MCP 会走出两条路。
     #[test]
     fn params_land_on_the_same_op_as_the_tool_face() {
@@ -330,7 +355,21 @@ mod tests {
                 tick_from: Some(0),
                 tick_to: Some(31),
                 layer_from: None,
-                layer_to: None
+                layer_to: None,
+                ticks_per_bar: None,
+                bars: None
+            }
+        );
+        // 小节写法走的是数组，`--call` 的 JSON 和工具面入参必须落回同一个 Op。
+        assert_eq!(
+            op_for("get_notes", &json!({"bars": [0, 3], "ticks_per_bar": 12})).unwrap(),
+            Op::GetNotes {
+                tick_from: None,
+                tick_to: None,
+                layer_from: None,
+                layer_to: None,
+                ticks_per_bar: Some(12),
+                bars: Some([0, 3])
             }
         );
         assert_eq!(
