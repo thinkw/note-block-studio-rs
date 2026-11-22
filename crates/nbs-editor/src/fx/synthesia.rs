@@ -1,8 +1,9 @@
 //! 特效：钢琴瀑布（Synthesia 那种下落胶囊 + 击中处发光）。
 //!
-//! 它是**舞台**表面：接管中央面板，键盘由自己画（扁平款，不是底部那条精灵键盘），
-//! 因为瀑布的轨道必须和这块键盘严格对齐 —— 借用编辑区那条键盘的话，网格、滚动条
-//! 和琴键面板的高度关系一变，轨道就对不上。
+//! 它是**舞台**表面：接管中央面板，但键盘不自己画 —— 用底部那条真的琴键面板
+//! （`wants_piano`），胶囊就落在真键面上，键位高亮盖在面板上（画布的裁剪框由
+//! 调用方扩到琴键栏，见 `app::show`）。轨道因此和琴键栏同一套摆放，
+//! 不会出现两条键盘或对不齐。
 //!
 //! 时间一律走 [`super::timeline::FxTimeline`]：胶囊位置由「这枚音符还有几秒落到
 //! 击中线」决定，所以 Tempo Changer 的变速自动跟上，这里不再算一遍速度。
@@ -11,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use egui::{Color32, Pos2, Rect, Ui, Vec2};
 
-use super::keyboard::{is_white_key, KeyboardLayout, KEY_W, WHITE_HIT_H};
+use super::keyboard::{is_white_key, KeyboardLayout, BLACK_LIFT, WHITE_HIT_H};
 use super::stage::Frame;
 use super::tiles::instrument_color;
 use super::timeline::FxNote;
@@ -33,8 +34,6 @@ const PARTICLE_TTL: f32 = 0.55;
 pub struct Params {
     /// 一枚音符从屏幕顶落到击中线要几秒（越大越慢）。
     pub fall_seconds: f32,
-    /// 键盘高度倍率：1.0 就是原版琴键那 128px。
-    pub keyboard_scale: f32,
     /// 光晕向外扩散的像素。
     pub glow_px: f32,
     /// 画不画轨道分隔线。
@@ -49,7 +48,6 @@ impl Default for Params {
     fn default() -> Self {
         Self {
             fall_seconds: 2.4,
-            keyboard_scale: 1.0,
             glow_px: 12.0,
             lanes: true,
             particles: true,
@@ -95,15 +93,14 @@ impl Synthesia {
         }
     }
 
-    /// 舞台底部那条键盘的摆放：贴着舞台下缘，高度按参数缩放。
-    pub fn keyboard(area: Rect, scale: f32, keyboard_scale: f32) -> KeyboardLayout {
-        let height = WHITE_HIT_H * scale * keyboard_scale.max(0.2);
+    /// 键盘几何的兜底摆放：只在「已经要到琴键面板、但面板还没画出来」的头一帧用
+    /// （`piano_rect` 由面板每帧写回，第一帧是空的）。口径同 `panel_keyboard`——
+    /// 白键面顶边压在舞台上缘往下 = 区域下缘，击中线就是瀑布的地面。
+    fn fallback_keyboard(area: Rect, scale: f32) -> KeyboardLayout {
         let strip = Rect::from_min_size(
-            Pos2::new(area.min.x, area.max.y - height),
-            Vec2::new(area.width(), height),
+            Pos2::new(area.min.x, area.max.y - BLACK_LIFT * scale),
+            Vec2::new(area.width(), WHITE_HIT_H * scale),
         );
-        // `fit` 把白键顶边放在 strip 顶 + 黑键上探的那段；这里要的正是「整块键盘
-        // 贴在舞台下缘」，所以按它的原始语义排，顶边留出的下探区由面板底色吸收。
         KeyboardLayout::fit(strip, scale, 27)
     }
 
@@ -171,7 +168,8 @@ impl PlaybackEffect for Synthesia {
             name: tr("Piano waterfall", "钢琴瀑布"),
             surface: Surface::Stage,
             z: 0,
-            wants_piano: false,
+            // 键盘改用底部那条真琴键栏：瀑布的轨道、击中高亮都按它的摆放算。
+            wants_piano: true,
         }
     }
 
@@ -196,11 +194,6 @@ impl PlaybackEffect for Synthesia {
             )
             .changed();
         changed |= ui
-            .add(
-                egui::Slider::new(&mut p.keyboard_scale, 0.5..=2.0).text(tr("Keyboard height", "键盘高度")),
-            )
-            .changed();
-        changed |= ui
             .add(egui::Slider::new(&mut p.glow_px, 0.0..=40.0).text(tr("Glow spread", "光晕范围")))
             .changed();
         changed |= ui
@@ -220,7 +213,11 @@ impl PlaybackEffect for Synthesia {
 
     fn draw(&mut self, cx: &FxContext, out: &mut Frame) {
         let scale = cx.scale;
-        let layout = Self::keyboard(cx.area, scale, self.params.keyboard_scale);
+        // 轨道按底部琴键面板的摆放下：面板那一帧的矩形由 `fx_input` 换算成
+        // `KeyboardLayout` 传进来，`hit_y` 于是正好压在白键面沿上。
+        let layout = cx
+            .keyboard
+            .unwrap_or_else(|| Self::fallback_keyboard(cx.area, scale));
         let hit_y = layout.origin.y;
         let top_y = cx.area.min.y;
 
@@ -296,9 +293,7 @@ impl PlaybackEffect for Synthesia {
             }
         }
 
-        draw_keyboard(&layout, self.params, cx.accent, out);
-
-        // 击中线：瀑布的「地面」。
+        // 击中线：瀑布的「地面」，压在琴键面板的上沿。
         out.line(
             Pos2::new(cx.area.min.x, hit_y),
             Pos2::new(cx.area.max.x, hit_y),
@@ -334,37 +329,11 @@ fn capsule_color(base: Color32, key: u8, velocity: u8, ahead: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), (255.0 * v * fade) as u8)
 }
 
-/// 舞台自己那条扁平键盘：白键亮、黑键暗，选中/击中靠瀑布的发光体现。
-fn draw_keyboard(layout: &KeyboardLayout, params: Params, accent: Color32, out: &mut Frame) {
-    let scale = layout.scale;
-    for a in 0..layout.slots {
-        let white = layout.white_rect(a);
-        out.rect(white, Color32::from_gray(235), 0.0);
-        out.outlined(
-            white,
-            Color32::TRANSPARENT,
-            (1.0 * scale, Color32::from_gray(70)),
-            0.0,
-        );
-        if let Some(black) = layout.black_rect(a) {
-            out.rect(black, Color32::from_gray(26), 2.0 * scale);
-        }
-    }
-    // 键盘下缘一条强调色边，把「地面」和键盘本体分开。
-    let bottom = layout.origin.y + WHITE_HIT_H * scale * params.keyboard_scale;
-    out.line(
-        Pos2::new(layout.origin.x, bottom),
-        Pos2::new(layout.origin.x + layout.slots as f32 * KEY_W * scale, bottom),
-        2.0 * scale,
-        accent,
-    );
-}
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fx::keyboard::{BLACK_LIFT, WHITE_SLOTS};
+    use crate::fx::keyboard::{KEY_W, WHITE_SLOTS};
+    use crate::fx::stage::Primitive;
     use crate::fx::tiles::InstrumentBlocks;
     use crate::fx::timeline::FxTimeline;
     use egui::Context;
@@ -431,25 +400,55 @@ mod tests {
         assert!(Synthesia::capsule_y(0.0, 600.0, 1.0, 0.0).is_finite());
     }
 
+    /// 兜底摆放（琴键面板还没画出来的头一帧）：整副键盘都得有下落道，
+    /// 击中线压在舞台下缘，也就是后面那条琴键栏的面沿。
     #[test]
-    fn keyboard_sits_on_the_stage_floor_with_every_lane() {
-        let layout = Synthesia::keyboard(stage(), 1.0, 1.0);
+    fn the_fallback_keyboard_lands_on_the_stage_floor() {
+        let layout = Synthesia::fallback_keyboard(stage(), 1.0);
         assert_eq!(layout.slots, WHITE_SLOTS, "2200px 宽放得下整台键盘");
-        assert_eq!(layout.origin.y, 800.0 - WHITE_HIT_H + BLACK_LIFT);
+        assert_eq!(layout.origin.y, 800.0, "白键面顶边 = 舞台下缘");
         // 88 枚键都得有下落道，否则低音区的音符凭空消失。
         for key in 0..=KEY_MAX {
             assert!(layout.rect_of_key(key).is_some(), "键 {key} 没有轨道");
         }
-        // 键盘缩放只改高度，不改横向摆放；击中线就是键面上沿，键盘长高它跟着往上抬。
-        let tall = Synthesia::keyboard(stage(), 1.0, 2.0);
-        assert_eq!(tall.origin.x, layout.origin.x);
-        assert!(tall.origin.y < layout.origin.y, "键盘变高 → 击中线往上抬");
+        // 倍率只改横向尺寸，不改「贴下缘」这条。
+        let small = Synthesia::fallback_keyboard(stage(), 0.5);
+        assert_eq!(small.origin.y, layout.origin.y);
+        assert_eq!(small.lane_width(0), layout.lane_width(0) * 0.5);
 
         let narrow = Rect::from_min_size(Pos2::ZERO, Vec2::new(20.0 * KEY_W, 400.0));
-        let layout = Synthesia::keyboard(narrow, 1.0, 1.0);
-        assert_eq!(layout.slots, 20);
+        let layout = Synthesia::fallback_keyboard(narrow, 1.0);
+        assert_eq!(layout.slots, 20, "放不下多少白键就显示多少");
         assert!(layout.origin.x >= narrow.min.x);
-        assert!(layout.origin.y + WHITE_HIT_H <= narrow.max.y + BLACK_LIFT);
+    }
+
+    /// 键盘改用底部那条真琴键栏：轨道、击中高亮、粒子都按面板传来的摆放下，
+    /// 面板只显示一部分键时，栏外的键不再有轨道。
+    #[test]
+    fn capsules_follow_the_piano_panel_layout() {
+        let rig = Rig::new(&[(0, 0, 45), (1, 0, 60)]);
+        let panel = Rect::from_min_size(Pos2::new(100.0, 700.0), Vec2::new(20.0 * KEY_W, 128.0));
+        let panel_layout = crate::fx::panel_keyboard(Some(panel), 1.0, 10, 20).unwrap();
+        let mut cx = rig.cx(0.0, 0.0, false);
+        cx.keyboard = Some(panel_layout);
+        let mut fx = Synthesia::default();
+        let mut frame = Frame::default();
+        fx.draw(&cx, &mut frame);
+
+        // 击中线压在面板的白键面沿（700 + BLACK_LIFT），不是舞台下缘 800。
+        let hit = panel_layout.origin.y;
+        assert!(
+            frame.prims.iter().any(|prim| matches!(prim,
+                Primitive::Line { from, to, .. } if (from.y - hit).abs() < 0.01 && (to.y - hit).abs() < 0.01)),
+            "没有一条线压在琴键面沿上（击中线 y 应为 {hit}）"
+        );
+        // 面板放的是白键槽 10..30，即键号 17..51：45 号在栏里，60 号不在，只剩一枚胶囊。
+        let capsules = frame
+            .prims
+            .iter()
+            .filter(|prim| matches!(prim, Primitive::Rect { rounding, .. } if *rounding > 0.0))
+            .count();
+        assert_eq!(capsules, 1, "琴键栏放不下的音符不该有轨道");
     }
 
     #[test]
@@ -509,7 +508,7 @@ mod tests {
             frame.len()
         );
 
-        // 空曲子剩下的就是键盘 + 轨道 + 击中线那些静态图元。
+        // 空曲子剩下的只有轨道线和击中线（键盘由琴键面板画，不在这一帧里）。
         let quiet = Rig::new(&[]);
         let mut bare = Synthesia::default();
         let mut empty = Frame::default();
@@ -593,7 +592,7 @@ mod tests {
         let info = Synthesia::default().info();
         assert_eq!(info.id, Synthesia::ID);
         assert_eq!(info.surface, Surface::Stage);
-        assert!(!info.wants_piano, "舞台自画键盘，不该再要底部琴键栏");
+        assert!(info.wants_piano, "瀑布的轨道按底部琴键栏放下，得把面板顶出来");
         assert!(!info.name.is_empty());
     }
 }

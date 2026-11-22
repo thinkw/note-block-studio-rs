@@ -4675,7 +4675,7 @@ mod fx_wiring_tests {
 
     /// `visible_notes` 只有 `draw_grid` 会写，正好当「这一帧网格跑没跑」的探针。
     #[test]
-    fn a_stage_effect_takes_the_center_panel_and_the_piano_panel() {
+    fn a_stage_effect_takes_the_center_panel_and_keeps_the_piano_panel() {
         let _prefs = isolate_prefs();
         let ctx = egui::Context::default();
         let mut state = EditorState::for_test();
@@ -4695,10 +4695,26 @@ mod fx_wiring_tests {
             state.interaction.visible_notes, 0,
             "舞台接管中央面板后 draw_grid 不该再跑"
         );
-        assert!(state.piano_rect.is_none(), "键盘由舞台自己画，琴键面板要让位");
+        let panel = state
+            .piano_rect
+            .expect("瀑布的键盘就是底部那条面板，舞台期间它照样要画");
         assert!(
             state.fx.stack.frame().len() > 0,
             "舞台那一帧要真的排出图元"
+        );
+        // 「音符刚好落到琴键上」的口径：击中线压在面板的白键面沿，不是区域下缘。
+        let hit = panel.min.y + fx::keyboard::BLACK_LIFT * state.prefs.piano_scale.max(0.1);
+        assert!(
+            state
+                .fx
+                .stack
+                .frame()
+                .prims
+                .iter()
+                .any(|prim| matches!(prim,
+                    fx::stage::Primitive::Line { from, to, .. }
+                        if (from.y - hit).abs() < 0.5 && (to.y - hit).abs() < 0.5)),
+            "瀑布的击中线没压在琴键面沿 {hit} 上"
         );
     }
 

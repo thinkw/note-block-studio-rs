@@ -49,7 +49,8 @@ pub struct EffectInfo {
     pub surface: Surface,
     /// 同一表面内的叠放顺序，小的先画（压在下面）。
     pub z: i8,
-    /// 是否需要底部那条钢琴栏一起显示（舞台特效自己画键盘的话填 false）。
+    /// 是否需要底部那条钢琴栏一起显示：轨道要按那条键盘摆放的特效都填 true，
+    /// 舞台特效也一样（瀑布的胶囊就落在真键面上，画面里不会有两台键盘）。
     pub wants_piano: bool,
 }
 
@@ -427,7 +428,8 @@ impl FxState {
         self.stack.stage_id().is_some()
     }
 
-    /// 有没有需要底部钢琴栏跟着显示的特效（舞台自己画键盘，不算）。
+    /// 有没有需要底部钢琴栏跟着显示的特效。舞台特效也算：瀑布的轨道直接按
+    /// 面板那条键盘的摆放算，画面里不会出现两条键盘。
     pub fn wants_piano(&self) -> bool {
         self.stack.wants_piano()
     }
@@ -768,14 +770,18 @@ mod tests {
         fx.paint_overlay(&ctx, &input);
         assert!(fx.stack.frame().is_empty(), "同上，叠加路径也不该画东西");
 
-        // 舞台：空曲子也该画出自家键盘、轨道和击中线，并让中央面板认它。
+        // 舞台：空曲子也该画出轨道和击中线，并让中央面板认它。
         fx.stack.set_active(synthesia::Synthesia::ID, true);
         assert!(fx.stage_active());
         fx.paint_stage(&ctx, &input, &p);
-        assert!(fx.stack.frame().len() > 40, "舞台帧只剩 {} 个图元", fx.stack.frame().len());
         assert!(
-            !fx.wants_piano(),
-            "舞台自己画键盘，不该把琴键面板顶开"
+            (20..40).contains(&fx.stack.frame().len()),
+            "空曲子的静态帧该只剩轨道线 + 击中线（800px 放 20 槽 = 22 个），实际 {}",
+            fx.stack.frame().len()
+        );
+        assert!(
+            fx.wants_piano(),
+            "瀑布的键盘就是底部那条面板，得把它顶出来"
         );
 
         // 叠加：方块排要琴键栏；没曲子没贴图时是空帧，但不能炸。

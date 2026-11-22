@@ -59,6 +59,19 @@ fn fx_input(state: &EditorState, ctx: &Context, area: Rect) -> FxInput {
     }
 }
 
+/// 特效有没有把底部琴键栏钉死：开着舞台特效，或开着按琴键栏对齐的叠加特效。
+/// 这时面板画不画由特效说了算，`flags.show_piano` 那个开关点不动任何东西，
+/// 所以状态栏右下角那条「琴键」按钮要跟着收起（用户要求：直到关闭特效为止）。
+pub(crate) fn piano_forced_by_fx(state: &EditorState) -> bool {
+    !state.player && (state.fx.stage_active() || state.fx.wants_piano())
+}
+
+/// 图层栏的可见性。播放器没有它（原版 `control_draw.gml:308` 那个巨门），
+/// 舞台特效开着时也没有：那一栏把编辑区往右推，瀑布的轨道就对不上下面的琴键。
+fn layers_panel_shown(state: &EditorState, stage: bool) -> bool {
+    state.flags.show_layers && !state.player && !stage
+}
+
 pub fn show(ctx: &Context, state: &mut EditorState) {
     // 界面语言每帧跟 prefs 对齐；原版 language 只在设置菜单和读档时赋值，
     // 下拉切换后下一帧生效，这里的语义相同。
@@ -133,9 +146,9 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
     // 悬停琴键的五线谱：琴键面板里只登记请求，落笔延到中央面板之后（#112）。
     let mut chart: Option<ChartRequest> = None;
     // 原版 `control_draw.gml:2549`：钢琴调用条件是 `show_piano && !isplayer`。
-    // 端口自加：舞台特效自己画一条键盘，这时琴键面板要让位，不然画面里两条键盘；
-    // 反过来，按琴键栏对齐的叠加特效（方块排）开着时把关掉的面板顶回来。
-    let piano = fx_on && !stage && (state.flags.show_piano || state.fx.wants_piano());
+    // 端口自加：特效的轨道都按这条琴键栏摆放（瀑布直接把胶囊落在真键面上，方块排压在
+    // 键上方），所以用户关了面板，只要有任何特效要求就把它顶回来 —— 画面里始终只有一条键盘。
+    let piano = fx_on && (state.flags.show_piano || state.fx.wants_piano());
     if piano {
         // 端口自加（用户要求）：琴键面板独立缩放，高度跟 `piano_scale`，
         // 不随 `window_scale`（与 #80「钢琴栏不随界面缩放」一致）。
@@ -157,7 +170,7 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
     // 原版图层行绘制在 `control_draw.gml:308` 巨门内，播放器不画；但播放器中央
     // 信息区包在 `!fullscreen && show_layers` 门里（:2341），所以 show_layers
     // 开关本身仍要参与播放器分支的判定。
-    if state.flags.show_layers && !state.player {
+    if layers_panel_shown(state, stage) {
         // #108：侧栏横轴脱离界面缩放 —— 宽度取 `prefs.layer_panel_width`（屏幕像素，
         // 拖面板右边界改，双击回 264），只有栏内行高跟缩放；原版是整幅画面等比缩放。
         egui::SidePanel::left("nbs_layers")
@@ -176,7 +189,14 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
             // 舞台独占这块：网格这一帧不画，就地编辑和右键菜单跟着停。
             // 空间还是要照样认领，否则 egui 会把这块地方让给别的面板。
             ui.allocate_rect(area, Sense::hover());
-            let p = ui.painter().clone();
+            // 画笔自己凑，不用 `ui.painter()`：那条只裁到中央面板下缘，而瀑布的
+            // 胶囊和键位高亮要一路落到下面那条真琴键栏上。底色仍只铺 `area`
+            // （在 `paint_stage` 里按 `input.area` 刷），琴键栏不会被染黑。
+            let clip = match (piano, state.piano_rect) {
+                (true, Some(panel)) => area.union(panel),
+                _ => area,
+            };
+            let p = egui::Painter::new(ctx.clone(), egui::LayerId::background(), clip);
             let input = fx_input(state, ctx, area);
             state.fx.paint_stage(ctx, &input, &p);
         } else {
@@ -239,5 +259,81 @@ mod tests {
             area.min.y + fx::keyboard::BLACK_LIFT * 1.5,
             "原点顶到黑键上沿，和琴键面板同一套像素"
         );
+    }
+
+    /// 瀑布的「地面」和琴键面板必须同源：`hit_y` 取的就是这里给的 `origin.y`，
+    /// 也即面板顶边往下 `BLACK_LIFT × piano_scale`（白键面沿）。这条一断，
+    /// 音符就落在键上方或扎进键里，横坐标同理 —— 槽范围直接抄面板上报的
+    /// `piano_start / piano_keys_shown`，栏外的键没有轨道。
+    #[test]
+    fn the_waterfall_lands_on_the_keys_the_panel_draws() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let mut state = EditorState::for_test();
+        state.prefs.piano_scale = 1.0;
+        let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(1920.0, 900.0));
+        state.piano_rect = Some(Rect::from_min_size(
+            Pos2::new(0.0, area.max.y),
+            Vec2::new(1920.0, PANEL_HEIGHT),
+        ));
+        state.piano_keys_shown = 20;
+        state.piano_start = 20;
+        let layout = fx_input(&state, &ctx, area)
+            .keyboard
+            .expect("面板画过那一帧就该有摆放");
+
+        assert_eq!(layout.origin.y, area.max.y + fx::keyboard::BLACK_LIFT);
+        assert_eq!(
+            layout.origin.x,
+            ((1920.0 - 20.0 * fx::keyboard::KEY_W) / 2.0).floor()
+        );
+        assert!(layout.rect_of_key(60).is_some(), "栏内的键该有下落道");
+        assert!(layout.rect_of_key(20).is_none(), "琴键栏没显示到的键不该有道");
+        // 舞台画笔的裁剪框要一路盖到面板，否则越过区域下缘的那截被剪掉，
+        // 键位高亮根本看不见。
+        let clip = area.union(state.piano_rect.unwrap());
+        assert!(
+            clip.max.y >= layout.origin.y + fx::keyboard::WHITE_HIT_H,
+            "裁剪框没盖到白键面底：{} < {}",
+            clip.max.y,
+            layout.origin.y + fx::keyboard::WHITE_HIT_H
+        );
+    }
+
+    /// 两种特效都把底部琴键栏钉死：舞台瀑布的轨道按它放，方块排压在它上方。
+    /// 这时 `flags.show_piano` 那个开关点了没反应，状态栏右下角的「琴键」按钮
+    /// 要收起，特效关掉才放回来（用户要求）。
+    #[test]
+    fn an_effect_that_needs_the_keyboard_hides_the_keys_toggle() {
+        let _prefs = crate::isolate_prefs();
+        let mut state = EditorState::for_test();
+        assert!(!piano_forced_by_fx(&state), "一条特效都没开时开关照旧");
+
+        state.fx.stack.set_active(fx::synthesia::Synthesia::ID, true);
+        assert!(piano_forced_by_fx(&state), "舞台瀑布要用琴键面板");
+        state.fx.stack.set_active(fx::synthesia::Synthesia::ID, false);
+
+        state.fx.stack.set_active(fx::blockrow::BlockRow::ID, true);
+        assert!(piano_forced_by_fx(&state), "方块排按琴键面板对齐");
+        state.fx.stack.set_active(fx::blockrow::BlockRow::ID, false);
+        assert!(!piano_forced_by_fx(&state), "关掉特效按钮就回来");
+
+        state.player = true;
+        state.fx.stack.set_active(fx::synthesia::Synthesia::ID, true);
+        assert!(!piano_forced_by_fx(&state), "播放器那一套界面不接特效");
+    }
+
+    /// 舞台开着期间图层栏收起，关掉立刻回来。
+    #[test]
+    fn the_stage_swallows_the_layer_column() {
+        let _prefs = crate::isolate_prefs();
+        let mut state = EditorState::for_test();
+        assert!(layers_panel_shown(&state, false));
+        assert!(!layers_panel_shown(&state, true), "舞台开着时左侧那栏让路");
+        state.flags.show_layers = false;
+        assert!(!layers_panel_shown(&state, false), "用户自己关的照关");
+        state.flags.show_layers = true;
+        state.player = true;
+        assert!(!layers_panel_shown(&state, false), "播放器没有图层栏");
     }
 }

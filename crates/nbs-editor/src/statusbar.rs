@@ -127,42 +127,48 @@ pub fn show_status_bar(state: &mut EditorState, ui: &mut Ui) {
 
     // 端口自加（用户要求）：最右侧琴键开关。原版右端是 MIDI 设备名列
     // （实时 MIDI 未接，消息借用该位置显示），开关占最右一段、消息向左让位。
-    let btn = Rect::from_min_size(
-        pos2(
-            area.max.x - TOGGLE_W - 4.0,
-            area.min.y + (24.0 - TOGGLE_H) / 2.0,
-        ),
-        vec2(TOGGLE_W, TOGGLE_H),
-    );
-    let resp = ui.allocate_rect(btn, Sense::click());
-    if resp.clicked() {
-        state.emit(Command::ToggleFlag(Flag::ShowPiano));
+    // 特效把琴键栏钉死期间（舞台独占、方块排按键对齐）这个开关点了没反应，
+    // 整条收起来、消息回到右边缘，关掉特效才放回来（用户要求）。
+    let p = ui.painter().clone();
+    let forced = crate::app::piano_forced_by_fx(state);
+    if !forced {
+        let btn = Rect::from_min_size(
+            pos2(
+                area.max.x - TOGGLE_W - 4.0,
+                area.min.y + (24.0 - TOGGLE_H) / 2.0,
+            ),
+            vec2(TOGGLE_W, TOGGLE_H),
+        );
+        let resp = ui.allocate_rect(btn, Sense::click());
+        if resp.clicked() {
+            state.emit(Command::ToggleFlag(Flag::ShowPiano));
+        }
+        let on = state.flags.show_piano;
+        let (bg, fg) = if resp.hovered() {
+            (th.button_hover, th.text)
+        } else {
+            (th.button, if on { th.accent } else { th.text_dim })
+        };
+        p.rect_filled(btn, 3.0, bg);
+        p.rect_stroke(
+            btn,
+            3.0,
+            Stroke::new(1.0_f32, Color32::from_gray(128)),
+            StrokeKind::Inside,
+        );
+        p.text(
+            btn.center(),
+            Align2::CENTER_CENTER,
+            tr("Keys", "琴键").to_string(),
+            main_font(),
+            fg,
+        );
     }
-    let on = state.flags.show_piano;
-    let (bg, fg) = if resp.hovered() {
-        (th.button_hover, th.text)
-    } else {
-        (th.button, if on { th.accent } else { th.text_dim })
-    };
-    let p = ui.painter();
-    p.rect_filled(btn, 3.0, bg);
-    p.rect_stroke(
-        btn,
-        3.0,
-        Stroke::new(1.0_f32, Color32::from_gray(128)),
-        StrokeKind::Inside,
-    );
-    p.text(
-        btn.center(),
-        Align2::CENTER_CENTER,
-        tr("Keys", "琴键").to_string(),
-        main_font(),
-        fg,
-    );
+    let msg_right = area.max.x - if forced { 8.0 } else { TOGGLE_W + 12.0 };
 
     if let Some(msg) = state.active_message() {
         p.text(
-            pos2(area.max.x - TOGGLE_W - 12.0, area.min.y + TEXT_Y),
+            pos2(msg_right, area.min.y + TEXT_Y),
             Align2::RIGHT_TOP,
             msg.to_string(),
             main_font(),
