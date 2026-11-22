@@ -934,10 +934,23 @@ fn suggested_tempo(midi: &MidiData, opts: &MidiImportOptions, seconds: f32, enda
 }
 
 /// 增强导入的持音重敲方案；`None` 保持原版「每 tick 一块」的尾音。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct SustainTail {
     /// 重敲音量沿该乐器实测包络渐弱，关掉就是等音量持续。
     pub fade: bool,
+    /// `Some` = Miau `keep_note_length = 'sustain'` 的轨道白名单（MIDI 轨下标）；`None` = `'all'`。
+    pub tracks: Option<Vec<usize>>,
+    /// `true` = 每 tick 一块，同 Miau 的重敲步长；`false` = 按该乐器实测余音折算出的间隔。
+    pub every_tick: bool,
+}
+
+impl SustainTail {
+    /// 事件分组下标就是 MIDI 轨号：两条导入路径都按 `midi.tracks` 逐轨建 `events`。
+    fn keeps_track(&self, track: usize) -> bool {
+        self.tracks
+            .as_ref()
+            .map_or(true, |tracks| tracks.contains(&track))
+    }
 }
 
 /// 共用量化后事件的层分配、尾音、速度变化和层名逻辑。事件保持原轨/事件/槽顺序。
@@ -1051,14 +1064,18 @@ pub(super) fn import_resolved(
             }
 
             // 包络延音：重敲间隔 = 该乐器实测「还能听多久」，音量把同一条包络拉伸到整段持音时长上。
-            let envelope = match sustain {
-                Some(plan) if r.include_duration => SAMPLE_DECAYS.get(r.ins as usize).map(|decay| {
-                    (
-                        decay,
-                        plan.fade,
-                        (f64::from(decay.decay_ms) / ms_per_tick).round().max(1.0) as i64,
-                    )
-                }),
+            let envelope = match &sustain {
+                Some(plan) if r.include_duration && plan.keeps_track(t) => {
+                    SAMPLE_DECAYS.get(r.ins as usize).map(|decay| {
+                        // 密度档：Miau 恒每 tick 一块，实测档把该乐器的余音时长换算成 tick。
+                        let step = if plan.every_tick {
+                            1.0
+                        } else {
+                            (f64::from(decay.decay_ms) / ms_per_tick).round().max(1.0)
+                        };
+                        (decay, plan.fade, step as i64)
+                    })
+                }
                 _ => None,
             };
 

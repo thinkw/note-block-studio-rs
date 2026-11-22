@@ -1743,13 +1743,11 @@ fn push_note(
         (false, false) => BlockSet::Plain,
     };
     // 原版：`!use_colors && !use_shapes` 时帧号恒为 1（spr_block 只有一帧）；
-    // 自定义乐器按 `(index - first_custom) % 18 + first_custom` 循环取帧。
+    // 其余走 `block_frame` —— 瀑布胶囊的底色取的是同一帧，两边必须同一个算式。
     let frame = if matches!(set, BlockSet::Plain) {
         1
-    } else if iscustom {
-        (index - first_custom) % 18 + first_custom
     } else {
-        index
+        crate::icons::block_frame(index, first_custom)
     };
     bank.block(p, at, set, frame, size, block_alpha);
 

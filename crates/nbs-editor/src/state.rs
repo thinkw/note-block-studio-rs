@@ -182,6 +182,9 @@ pub enum WindowKind {
     /// 塞第六个页签会把页签条顶出窗口，而且这一页要显示端口、发现文件全路径、
     /// 目录列表这些长字符串——所以单开一窗，不冒充原版的排版。
     ExternalControl,
+    /// 端口自加（用户要求「要有个底座能扩展各种播放效果并可以切换」）：特效开关、
+    /// 各自的调参面板、叠加透明度。原版没有这一窗，排版用普通 egui 控件。
+    PlaybackEffects,
     Instruments,
     About,
     /// 原版 `w_tempotapper`（`draw_window_tempo_tapper.gml`）：按 T 打点测速。
@@ -264,6 +267,7 @@ impl WindowKind {
             Self::Preferences => tr("Preferences", "首选项"),
             // 我们自己的一页，标题就是菜单上那句。
             Self::ExternalControl => tr("External control (MCP)", "外部控制（MCP）"),
+            Self::PlaybackEffects => tr("Playback effects", "播放特效"),
             Self::Instruments => tr("Instruments", "音色设置"),
             // 原版 `draw_window_about.gml:10-11`：框内标题就一个「About」/「关于」。
             Self::About => tr("About", "关于"),
@@ -1294,6 +1298,9 @@ pub struct EditorState {
     /// 已经交给窗口管理器的图标档位（原版 `window_icon`）。`None` = 还没发过，
     /// 对应原版 `icon_display` 初值为 1：第一帧必发一次。
     pub applied_window_icon: Option<bool>,
+    /// 端口自加（用户要求 #119）：这一帧用户改了「垂直同步」，`Some(新值)` 留给宿主
+    /// （nbs-app）在帧外真切一次呈现层——编辑器够不着 GL，只能提要求。
+    pub vsync_request: Option<bool>,
     /// 原版精灵图（工具栏 / 图层栏 / 宏条的图标按钮）。
     pub icons: crate::icons::Icons,
     /// 原版 `showinsbox`：工具栏音色框是否展开成整窗网格。
@@ -1324,8 +1331,10 @@ pub struct EditorState {
     /// 原版会话全局 `settempo`：最近一次左键按下是否落在这格输入框里。
     /// 原版只有「按下不在框里、抬手也在框外」才提交（`draw_window_set_tempo.gml:26-31`）。
     pub tempo_press_in: bool,
-    /// 兼容性指示（原版 `compatible`），随 `song.rev` 重算。
+    /// 兼容性指示（原版 `compatible`），随 `song.rev` 重算；拖速度框时板上的数还没写进
+    /// 歌曲，所以判定用的那个速度也得进缓存键，否则徽标要等松手才改口。
     pub compat_rev: u64,
+    pub compat_tempo: f32,
     pub compat: u8,
     /// 原版 `block_outside` / `block_custom`：兼容性窗口那两条计数，
     /// 和 `compat` 同一次遍历算出、同一个 `compat_rev` 缓存。
@@ -1342,6 +1351,9 @@ pub struct EditorState {
     /// 原版 `wpaper` + `wpaperexist`：导入的背景图（糊好的贴图）。
     /// 原版既不写进 .nbs 也不写进 settings.ini，重启即失，端口一致。
     pub wallpaper: Option<crate::background::Wallpaper>,
+    /// 播放特效那一坨：烘出来的时间轴、乐器方块表、贴图、启用中的特效。
+    /// 缓存键是 `song.rev`（和 [`Self::compat_rev`]、[`Self::audio_rev`] 同一套路）。
+    pub fx: crate::fx::FxState,
 }
 
 impl Default for EditorState {
@@ -1607,6 +1619,7 @@ impl EditorState {
             last_prefs_save: Instant::now(),
             audio_rev: 0,
             applied_window_icon: None,
+            vsync_request: None,
             icons: crate::icons::Icons::default(),
             insbox_open: false,
             insbox_start: 0,
@@ -1621,6 +1634,7 @@ impl EditorState {
             tempo_input: None,
             tempo_press_in: false,
             compat_rev: u64::MAX,
+            compat_tempo: f32::NAN,
             compat: 1,
             compat_outside: 0,
             compat_custom: 0,
@@ -1628,7 +1642,13 @@ impl EditorState {
             rainbow_hue: 0.0,
             background_accent: false,
             wallpaper: None,
+            fx: crate::fx::FxState::default(),
         };
+        // 特效：存档里留过痕迹（启用列表或参数快照）才把快照灌回各特效，
+        // 出厂那两份空表不动，设置文件也就不多写这两段。
+        if !state.prefs.fx_active.is_empty() || !state.prefs.fx.is_empty() {
+            state.fx.stack.sync_prefs(&mut state.prefs);
+        }
         state.enter_startup();
         // 迁移那趟在设备表里认不出的老名字：在状态栏说一句，别让人以为还在自己
         // 点名的那台出声。引擎这时候已经跟着系统默认建好流了。
@@ -2081,11 +2101,25 @@ impl EditorState {
         (self.compat_outside, self.compat_custom)
     }
 
+    /// 速度框上此刻显示的那个数：没在拖就是歌曲自己的速度。原版在拖动过程中就把量化值
+    /// 写回 `real_tempo`（`control_draw.gml:2534`），所以框上的字和右上角徽标是同步动的；
+    /// 端口把拖动值暂存在 `tempo_drag`、松手才提交，判定这一侧也必须拿它，否则徽标会等松手。
+    pub fn shown_tempo(&self) -> f32 {
+        self.tempo_drag
+            .map(|raw| (raw * 4.0).floor() / 4.0)
+            .unwrap_or(self.doc.song.meta.tempo.max(0.25))
+    }
+
     fn refresh_compat(&mut self) {
-        if !self.doc.selection.notes.is_empty() || self.doc.song.rev == self.compat_rev {
+        let tempo = self.shown_tempo();
+        if !self.doc.selection.notes.is_empty()
+            || (self.doc.song.rev == self.compat_rev
+                && (tempo - self.compat_tempo).abs() < f32::EPSILON)
+        {
             return;
         }
         self.compat_rev = self.doc.song.rev;
+        self.compat_tempo = tempo;
         use nbs_core::model::{MC_KEY_MAX, MC_KEY_MIN};
         let (mut outside, mut custom, mut pitched) = (false, false, false);
         let (mut n_outside, mut n_custom) = (0usize, 0usize);
@@ -2105,8 +2139,7 @@ impl EditorState {
         self.compat = if outside || custom {
             0
         } else {
-            let t = self.doc.song.meta.tempo;
-            if tempo_schematic_ok(t) && !pitched {
+            if tempo_schematic_ok(tempo) && !pitched {
                 1
             } else {
                 2
@@ -2379,6 +2412,15 @@ impl EditorState {
         self.audio_rev = self.doc.song.rev;
     }
 
+    /// 帧首刷新播放特效：曲子一改（`song.rev` 变了）、或「是否播放锁定层」一改，
+    /// 时间轴重烘；导出选项里的乐器方块表一改，方块名表跟着重建；贴图目录只认一次。
+    /// 没有启用中的特效时这三条各是一次比较，不铺表。
+    pub fn refresh_fx(&mut self) {
+        let include_locked = self.prefs.include_locked_in_export;
+        self.fx
+            .refresh(&self.doc.song, include_locked, &self.schematic_options);
+    }
+
     /// 把当前会话状态同步回偏好对象。
     pub fn sync_prefs(&mut self) {
         self.prefs.theme = match self.theme.kind {
@@ -2431,6 +2473,8 @@ impl EditorState {
                 time: r.time,
             })
             .collect();
+        // 特效：只写不读。用 `sync_prefs` 会把调参面板刚滑出来的值覆盖回旧快照。
+        self.fx.stack.store(&mut self.prefs);
     }
 
     pub fn save_prefs(&mut self) {
@@ -2930,6 +2974,42 @@ mod tests {
             assert!(!tempo_schematic_ok(t), "{t} 不该被判成能导 Schematic");
             assert!(!tempo_datapack_good(t), "{t} 不该被判成好速度");
         }
+    }
+
+    /// 右上角那颗徽标不能落后于歌曲本身：换歌时 `Document::replace_song` 会把
+    /// `rev` 归到载入值（新载入的都是同一个数），缓存必须跟着作废。
+    #[test]
+    fn the_compat_badge_follows_a_swapped_song() {
+        use nbs_core::model::{Note, Song};
+        let mut st = EditorState::for_test();
+        let mut loud = Song::new();
+        loud.set(0, 0, Note::new(0, 100)); // 超出 MC 音域 → 只走数据包
+        st.doc.replace_song(loud);
+        assert_eq!(st.compatibility(), 0, "载入超音域的歌，徽标当帧就该改口");
+        st.doc.replace_song(Song::new());
+        assert_eq!(st.compatibility(), 1, "换回空歌不能把上一首的判定留下");
+    }
+
+    /// 原版拖速度框时把量化值实时写进 `real_tempo`（`control_draw.gml:2534`），
+    /// 徽标是跟着手走的；端口把拖动值暂存在 `tempo_drag`，判定也要读它。
+    #[test]
+    fn the_compat_badge_follows_a_live_tempo_drag() {
+        let mut st = EditorState::for_test();
+        assert_eq!(
+            st.doc.song.meta.tempo, 10.0,
+            "默认速度该是能导 Schematic 的那档"
+        );
+        assert_eq!(st.compatibility(), 1);
+        st.tempo_drag = Some(6.3); // 量化成 6.25，既不是 10/5/2.5 也没到数据包好速度
+        assert_eq!(
+            st.compatibility(),
+            2,
+            "拖动过程中徽标就该改成「仅限数据包」，不能等松手"
+        );
+        st.tempo_drag = Some(10.0);
+        assert_eq!(st.compatibility(), 1, "拖回 10 又该变回完全兼容");
+        st.tempo_drag = None;
+        assert_eq!(st.compatibility(), 1, "松手没提交（速度没变）就维持原判定");
     }
 
     /// 假选择器：按预设结果回话，顺便记下它收到了哪一次请求。

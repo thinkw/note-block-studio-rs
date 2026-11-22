@@ -407,10 +407,8 @@ fn header(
     let bpm_on = state.prefs.use_bpm;
     let tempo = state.doc.song.meta.tempo.max(0.25);
     // 拖速度框时先按 0.25 量化预览，松手才写进歌曲（原版 `tempo = floor(tempodrag * 4) / 4`）。
-    let shown = state
-        .tempo_drag
-        .map(|raw| (raw * 4.0).floor() / 4.0)
-        .unwrap_or(tempo) as f64;
+    // 右上角的兼容徽标拿的是同一个数（`EditorState::shown_tempo`），框和徽标一起动。
+    let shown = state.shown_tempo() as f64;
     let marker = state.marker();
     let total = song.song_length() as f64;
     let fluent = th.kind == ThemeKind::Fluent;
@@ -620,9 +618,13 @@ fn header(
         };
         let re = re.on_hover_text(tip);
         // 原版的收口条件只有一条：这次按下不在框里、这次抬手也在框外
-        // （`draw_window_set_tempo.gml:31`）。Enter 原样留给文本框、不算提交，
-        // Esc 只丢弃不改速度（`:47-51`），两条都顺带把 `settempo` 清回 0。
-        let finish_commit = released && !state.tempo_press_in && !inside;
+        // （`draw_window_set_tempo.gml:31`）；Enter 原样留给文本框、不算提交（`:29`
+        // 那行注释），Esc 只丢弃不改速度（`:47-51`），两条都顺带把 `settempo` 清回 0。
+        // 刻意偏离（用户要求 #118）：回车也算收口，填完数字按回车当场生效。
+        // 单行 TextEdit 自己会在回车时让出焦点（egui `text_edit/builder.rs:1000`），
+        // 所以判据取「这一帧失焦 + 这一帧按了回车」，和图层名那条输入框同一个写法。
+        let enter = re.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+        let finish_commit = (released && !state.tempo_press_in && !inside) || enter;
         let focused = re.has_focus();
         // 关框时顺手清掉「已经抢过焦点」的暂存，下次开框才会重新去抢。
         ui.ctx()

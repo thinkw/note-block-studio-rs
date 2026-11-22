@@ -20,6 +20,8 @@ pub mod background;
 pub mod commands;
 pub mod control;
 pub mod fonts;
+/// 播放特效底座与内置特效（`Surface::Overlay` 叠加 / `Surface::Stage` 独占中央面板）。
+pub mod fx;
 pub mod grid;
 pub mod icons;
 pub mod interaction;
@@ -3092,6 +3094,49 @@ mod gui_window_tests {
         assert!(back.layerhov_vppreview, "悬停层预览开关要落盘");
     }
 
+    /// 用户要求 #119：首选项「帧率限制」那一组里要有「垂直同步」这颗勾，
+    /// 并且点下去真的生效（改设置 + 落盘 + 把切换请求交给宿主），不是画个样子。
+    #[test]
+    fn the_preferences_page_has_a_working_vsync_toggle() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = Some(WindowKind::Preferences);
+        state.prefs_tab = 1; // 「界面」页才有帧率限制那一组
+        frame(&mut state, &ctx);
+        let out = frame_out(&mut state, &ctx, base_input());
+        let texts: Vec<String> = out
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t == "垂直同步"),
+            "帧率限制那一组里应有「垂直同步」，当前文本：{}",
+            texts.join(" | ")
+        );
+        assert!(state.prefs.vsync, "出厂垂直同步开着");
+        click_text(&mut state, &ctx, "垂直同步");
+        assert!(!state.prefs.vsync, "点标签要真的关掉垂直同步");
+        assert_eq!(
+            state.vsync_request,
+            Some(false),
+            "切换要求要交给宿主（nbs-app 才碰得到呈现层）"
+        );
+        assert_eq!(
+            nbs_io::prefs::Preferences::load().vsync,
+            false,
+            "关掉要落盘"
+        );
+        click_text(&mut state, &ctx, "垂直同步");
+        assert!(state.prefs.vsync, "再点一次要开回来");
+    }
+
     /// 标尺速度格的原版就地输入框（`w_settempo`）：开框时按
     /// `string_format(real_tempo * 倍数, 0, 2)` 播种，Esc 只关窗不提交，
     /// 离开输入框才提交。这里走的是精灵图缺位时图层栏的退路版那颗「速度…」按钮，
@@ -3167,6 +3212,61 @@ mod gui_window_tests {
             state.doc.song.meta.tempo, 12.0,
             "1200 要先除以 100 再夹进 median(0.25, 值, 180)"
         );
+    }
+
+    /// 用户要求 #118：就地速度框填好数字后按回车当场生效，不必再点别处。
+    /// 原版 Enter 是留给文本框自己的（`draw_window_set_tempo.gml:29` 那行注释
+    /// "Enter stays with the text field"），端口在这里刻意偏离。
+    #[test]
+    fn the_inline_tempo_box_commits_on_enter() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.use_bpm = false;
+        state.window = None;
+        state.doc.replace_song(nbs_core::model::Song::new());
+        state.doc.song.meta.tempo = 10.0;
+        let tap = |state: &mut EditorState, p: egui::Pos2| {
+            for pressed in [true, false] {
+                let mut raw = base_input();
+                raw.events.push(egui::Event::PointerMoved(p));
+                raw.events.push(egui::Event::PointerButton {
+                    pos: p,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                });
+                frame_out(state, &ctx, raw);
+            }
+        };
+        let key = |state: &mut EditorState, key: egui::Key| {
+            let mut raw = base_input();
+            raw.events.push(egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            });
+            frame_out(state, &ctx, raw);
+        };
+
+        frame_out(&mut state, &ctx, base_input());
+        let out = frame_out(&mut state, &ctx, base_input());
+        let on_box = text_center_if(&out.shapes, |t| t == "10.00 t / s");
+        tap(&mut state, on_box);
+        assert_eq!(state.tempo_input.as_deref(), Some("10.00"), "框要开着");
+        // 输入框在开框后的下一帧才抢到焦点，先让它拿到。
+        frame_out(&mut state, &ctx, base_input());
+        state.tempo_input = Some("12.5".into());
+        frame_out(&mut state, &ctx, base_input());
+        key(&mut state, egui::Key::Enter);
+        assert_eq!(
+            state.doc.song.meta.tempo, 12.5,
+            "回车要当场把速度设进去（用户要求 #118）"
+        );
+        assert_eq!(state.tempo_input, None, "回车后输入框要关掉");
     }
 
     /// 原版 `w_tempotapper`（速度测量器）：按 T 打点 → 界面按速度单位显示测到的值，
@@ -4787,5 +4887,154 @@ mod gui_piano_tests {
             !images(&out).iter().any(|r| (r.width() - 320.0).abs() < 0.6),
             "开关关闭时不应出现五线谱面板"
         );
+    }
+}
+
+/// 播放特效的接线：`app::show` 里那三扇「谁占中央面板 / 琴键面板开不开 / 全都不开」
+/// 的门，以及启用状态与调参的落盘回读。要跑整帧，所以放在这里而不是 `fx/`。
+#[cfg(test)]
+mod fx_wiring_tests {
+    use super::*;
+
+    /// 跑一帧并把画到的文字全捞出来：菜单项、特效清单这些只能这样查。
+    fn frame(state: &mut EditorState, ctx: &egui::Context) -> Vec<String> {
+        crate::fonts::warm_up(ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1440.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let out = ctx.run(input, |ctx| {
+            let _lock = frame_lock();
+            crate::show(ctx, state)
+        });
+        assert!(!out.shapes.is_empty(), "窗口应当真的画出内容");
+        out.shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `visible_notes` 只有 `draw_grid` 会写，正好当「这一帧网格跑没跑」的探针。
+    #[test]
+    fn a_stage_effect_takes_the_center_panel_and_keeps_the_piano_panel() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+
+        frame(&mut state, &ctx);
+        assert!(
+            state.interaction.visible_notes > 0,
+            "一条特效都没开时网格照跑"
+        );
+        assert!(state.piano_rect.is_some(), "show_piano 出厂为真，琴键面板要上报矩形");
+
+        state.interaction.visible_notes = 0;
+        state.fx.stack.set_active("synthesia", true);
+        frame(&mut state, &ctx);
+        assert_eq!(
+            state.interaction.visible_notes, 0,
+            "舞台接管中央面板后 draw_grid 不该再跑"
+        );
+        let panel = state
+            .piano_rect
+            .expect("瀑布的键盘就是底部那条面板，舞台期间它照样要画");
+        assert!(
+            !state.fx.stack.frame().is_empty(),
+            "舞台那一帧要真的排出图元"
+        );
+        // 「音符刚好落到琴键上」的口径：击中线压在面板的白键面沿，不是区域下缘。
+        let hit = panel.min.y + fx::keyboard::BLACK_LIFT * state.prefs.piano_scale.max(0.1);
+        assert!(
+            state
+                .fx
+                .stack
+                .frame()
+                .prims
+                .iter()
+                .any(|prim| matches!(prim,
+                    fx::stage::Primitive::Line { from, to, .. }
+                        if (from.y - hit).abs() < 0.5 && (to.y - hit).abs() < 0.5)),
+            "瀑布的击中线没压在琴键面沿 {hit} 上"
+        );
+    }
+
+    /// 叠加类特效不动网格，但 `wants_piano` 会把用户关掉的琴键面板顶回来。
+    #[test]
+    fn an_overlay_effect_keeps_the_grid_and_demands_the_piano_panel() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.flags.show_piano = false;
+
+        frame(&mut state, &ctx);
+        assert!(state.piano_rect.is_none(), "琴键面板关掉后矩形要清空");
+        assert!(state.interaction.visible_notes > 0, "网格照跑");
+
+        state.fx.stack.set_active("block_row", true);
+        frame(&mut state, &ctx);
+        assert!(state.fx.wants_piano(), "乐器方块排要求底部有琴键");
+        assert!(
+            state.piano_rect.is_some(),
+            "开着 wants_piano 的特效时琴键面板要被顶回来"
+        );
+        assert!(
+            state.interaction.visible_notes > 0,
+            "叠加类特效不接管中央面板"
+        );
+    }
+
+    #[test]
+    fn fx_prefs_survive_a_restart() {
+        let _prefs = isolate_prefs();
+        let mut state = EditorState::for_test();
+        state.fx.stack.set_active("synthesia", true);
+        state.fx.stack.set_opacity(0.4);
+        state.sync_prefs();
+        assert_eq!(state.prefs.fx_active, vec!["synthesia".to_owned()]);
+        assert!((state.prefs.fx_opacity - 0.4).abs() < 1e-6);
+        assert!(
+            state.prefs.fx.contains_key("synthesia"),
+            "参数快照要和启用状态一起存"
+        );
+        state.save_prefs();
+
+        let back = EditorState::new();
+        assert!(back.fx.stack.is_active("synthesia"), "重启后勾选状态要回来");
+        assert!(
+            (back.fx.stack.opacity() - 0.4).abs() < 1e-3,
+            "透明度落在 prefs.fx_opacity 那一档"
+        );
+    }
+
+    /// 「设置 → 播放特效…」那扇窗：清单是全量枚举注册表来的，两条内置特效各带
+    /// 自己的身份（舞台 / 叠加）。底座不该认识任何一条具体特效。
+    #[test]
+    fn the_effects_window_lists_every_registered_effect() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        assert_eq!(state.fx.stack.ids().len(), 2, "内置两条特效");
+
+        state.window = Some(WindowKind::PlaybackEffects);
+        // 两帧：egui 的 Window 第一帧只定下尺寸，文字在第二帧的 shapes 里才捞得到。
+        frame(&mut state, &ctx);
+        let texts = frame(&mut state, &ctx);
+        for (name, kind) in [("钢琴瀑布", "舞台"), ("乐器方块排", "叠加")] {
+            let row = texts
+                .iter()
+                .find(|t| t.contains(name) && t.contains(kind))
+                .unwrap_or_else(|| panic!("清单里少了「{name}（{kind}）」这一行：{texts:?}"));
+            assert!(row.starts_with(name), "行首是特效名，勾在它前面：{row}");
+        }
     }
 }

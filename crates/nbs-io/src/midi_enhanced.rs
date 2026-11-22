@@ -51,16 +51,40 @@ pub struct InstrumentSubstitution {
     pub low: Option<u8>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SustainMode {
+    /// 不动尾音，沿用传统导入的「每 tick 一块」。
+    #[default]
+    Off,
+    /// 所有轨道的长音都按包络重敲。Miau 的 `'all'` 只保持时长、不套包络，这里相当于 `'all'` 再加渐弱。
+    All,
+    /// 只有 `sustain_tracks` 列出的 MIDI 轨按包络重敲，对应 Miau 的 `'sustain'`。
+    Tracks,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SustainDensity {
+    /// 重敲间隔 = 该乐器采样实测余音换算的 tick 数。
+    #[default]
+    Measured,
+    /// 每 tick 一块，和 Miau 的 `for (t = 1; t < noteLength; t++)` 同一步长。
+    EveryTick,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnhancedMidiOptions {
     pub enabled: bool,
     pub range_mode: RangeMode,
     pub smart_substitute: bool,
     pub force_fold: bool,
-    /// Retrigger held notes on each instrument's measured decay instead of one block per tick.
-    pub sustain: bool,
+    /// 哪些长音改按实测衰减重敲；Miau 的 `keep_note_length` 三态。
+    pub sustain: SustainMode,
+    /// `SustainMode::Tracks` 的白名单，存 MIDI 轨下标。
+    pub sustain_tracks: Vec<usize>,
     /// Taper those retriggers along the measured envelope; off holds them at one level.
     pub sustain_fade: bool,
+    /// 重敲排多密；`EveryTick` 是为了和 Miau 对齐而留的档位。
+    pub sustain_density: SustainDensity,
     /// Split one MIDI channel into two NBS voices, following Miau's `separate_voices`.
     pub separate_voices: bool,
     /// Ignore MIDI track metadata in that split and fall back to pitch clustering (`voice_ignore_metadata`).
@@ -78,8 +102,10 @@ impl Default for EnhancedMidiOptions {
             range_mode: RangeMode::Octave,
             smart_substitute: true,
             force_fold: false,
-            sustain: false,
+            sustain: SustainMode::default(),
+            sustain_tracks: Vec::new(),
             sustain_fade: true,
+            sustain_density: SustainDensity::default(),
             separate_voices: false,
             voice_ignore_metadata: false,
             dedupe_notes: false,
@@ -211,6 +237,80 @@ impl EnhancedMidiOptions {
     }
 }
 
+/// 一条 MIDI 轨的音符时值分布，对应 Miau 解析信息里 `trackInfoList` 的那几项。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TrackLengthStats {
+    /// MIDI 轨下标，与白名单、`import_resolved` 的事件分组同口径。
+    pub track: usize,
+    /// 该轨 note-on 条数；没配对到 note-off 的也算，按时值 0 计入分母。
+    pub notes: usize,
+    /// 时值达到一拍的音符数，即 Miau 的 `trackLongNoteCount`。
+    pub long_notes: usize,
+    /// 音符时值总和，单位是文件 tick（未量化），对应 `trackDurationSum`。
+    pub total_ticks: i64,
+}
+
+impl TrackLengthStats {
+    /// Miau `long_note_ratio`。
+    pub fn long_ratio(&self) -> f64 {
+        if self.notes == 0 {
+            0.0
+        } else {
+            self.long_notes as f64 / self.notes as f64
+        }
+    }
+
+    /// Miau `avg_duration_ticks`（原版取整，这里留小数给界面显示）。
+    pub fn avg_ticks(&self) -> f64 {
+        if self.notes == 0 {
+            0.0
+        } else {
+            self.total_ticks as f64 / self.notes as f64
+        }
+    }
+
+    /// Miau `28-midi-dialog.js:1797-1800`：长音占比 ≥0.75 且平均时值 ≥2 拍。
+    pub fn is_sustain_candidate(&self, beat_ticks: i64) -> bool {
+        self.long_ratio() >= 0.75 && self.avg_ticks() >= beat_ticks.max(1) as f64 * 2.0
+    }
+}
+
+/// 每轨时值统计；没有音符的轨道不出现，同 Miau 只列 `event_count > 0` 的轨。
+pub fn track_length_stats(midi: &MidiData) -> Vec<TrackLengthStats> {
+    let beat = i64::from(midi.ppq().max(1));
+    midi.tracks
+        .iter()
+        .enumerate()
+        .filter_map(|(track, data)| {
+            let mut stats = TrackLengthStats {
+                track,
+                ..TrackLengthStats::default()
+            };
+            for ev in &data.events {
+                stats.notes += 1;
+                let duration = (ev.until - ev.pos).max(0);
+                stats.total_ticks += duration;
+                if duration >= beat {
+                    stats.long_notes += 1;
+                }
+            }
+            (stats.notes > 0).then_some(stats)
+        })
+        .collect()
+}
+
+/// Miau「智能识别延音轨」里按时值的那半边。
+/// 按 SF2 音色的那半边没搬：本项目只有 20 个内置乐器，实测最长的采样余音 440 ms，
+/// 那份「哪些 GM 音色本身能持续」的清单在这里没有对应数据。
+pub fn sustain_candidate_tracks(midi: &MidiData) -> Vec<usize> {
+    let beat = i64::from(midi.ppq().max(1));
+    track_length_stats(midi)
+        .into_iter()
+        .filter(|stats| stats.is_sustain_candidate(beat))
+        .map(|stats| stats.track)
+        .collect()
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EnhancedImportReport {
     /// Final Song.total_blocks, including duration tails and tempo events.
@@ -268,6 +368,21 @@ fn dedupe_notes(song: &mut Song) -> usize {
     }
     song.recalculate();
     drops.len()
+}
+
+/// 三态延音翻成尾音方案。白名单外的轨道仍是传统那套「每 tick 一块」的尾音：
+/// 「要不要保持时长」在本项目是传统导入就有的 `note_duration` 开关，不像 Miau 由这三态独占。
+fn sustain_plan(enhanced: &EnhancedMidiOptions) -> Option<SustainTail> {
+    let tracks = match enhanced.sustain {
+        SustainMode::Off => return None,
+        SustainMode::All => None,
+        SustainMode::Tracks => Some(enhanced.sustain_tracks.clone()),
+    };
+    Some(SustainTail {
+        fade: enhanced.sustain_fade,
+        tracks,
+        every_tick: enhanced.sustain_density == SustainDensity::EveryTick,
+    })
 }
 
 /// Unsupported NBS keys fail without clamping; native-range outliers remain in the song.
@@ -386,7 +501,7 @@ pub fn import_midi_enhanced(
         }
         events.push(expanded);
     }
-    let sustain = enhanced.sustain.then_some(SustainTail { fade: enhanced.sustain_fade });
+    let sustain = sustain_plan(enhanced);
     let mut song = import_resolved(midi, opts, &events, sustain);
     if enhanced.dedupe_notes {
         report.deduped = dedupe_notes(&mut song);
@@ -1249,6 +1364,101 @@ mod tests {
         );
     }
 
+    /// 一条轨的音符：`(文件 tick 起点, 文件 tick 松开，-1 = 没配对到 note-off)`。
+    fn notes_at(notes: &[(i64, i64)]) -> Vec<MidiEvent> {
+        notes
+            .iter()
+            .map(|&(pos, until)| MidiEvent {
+                pos,
+                until,
+                channel: 0,
+                note: 60,
+                velocity: 100,
+                patch: 0,
+                part: 0,
+            })
+            .collect()
+    }
+
+    fn stats_midi(tracks: Vec<Vec<MidiEvent>>) -> MidiData {
+        MidiData {
+            division: 480,
+            tracks: tracks
+                .into_iter()
+                .map(|events| MidiTrack {
+                    name: String::new(),
+                    events,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn track_length_stats_counts_per_beat_and_skips_noteless_tracks() {
+        // 一拍 = 480 tick。第 0 轨四个整拍音，第 1 轨没有音符。
+        let midi = stats_midi(vec![
+            notes_at(&[(0, 480), (480, 960), (960, 1440), (1440, 1920)]),
+            Vec::new(),
+        ]);
+        let stats = track_length_stats(&midi);
+        assert_eq!(stats.len(), 1, "没有音符的轨道不列出，同 Miau 只收 event_count > 0");
+        assert_eq!(
+            stats[0],
+            TrackLengthStats {
+                track: 0,
+                notes: 4,
+                long_notes: 4,
+                total_ticks: 1920
+            }
+        );
+        assert_eq!(stats[0].long_ratio(), 1.0);
+        assert_eq!(stats[0].avg_ticks(), 480.0);
+        assert!(
+            !stats[0].is_sustain_candidate(480),
+            "长音占比 100% 但平均只有一拍，Miau 的 ≥2 拍门槛要拦住"
+        );
+    }
+
+    #[test]
+    fn unpaired_notes_count_in_the_denominator_with_zero_length() {
+        // Miau 的 duration_ticks 初值就是 0，没松开也算一条音符。
+        let midi = stats_midi(vec![notes_at(&[(0, 1920), (2000, 3920), (4000, -1)])]);
+        let stats = track_length_stats(&midi);
+        assert_eq!(stats[0].notes, 3);
+        assert_eq!(stats[0].long_notes, 2);
+        assert_eq!(stats[0].total_ticks, 3840);
+        assert!(stats[0].long_ratio() < 0.75, "占比应低于门槛");
+        assert!(
+            stats[0].avg_ticks() > 960.0,
+            "平均时值反而够，实得 {}",
+            stats[0].avg_ticks()
+        );
+        assert!(
+            !stats[0].is_sustain_candidate(480),
+            "两条门槛是「且」，平均够不代表能预选"
+        );
+    }
+
+    #[test]
+    fn sustain_candidate_tracks_uses_both_miau_thresholds() {
+        // 第 0 轨八分音符跑动，第 1 轨四小节铺底，第 2 轨正好踩在 0.75 占比的边界上。
+        let midi = stats_midi(vec![
+            notes_at(&[(0, 240), (240, 480), (480, 720), (720, 960)]),
+            notes_at(&[(0, 1920), (1920, 3840), (3840, 5760), (5760, 7680)]),
+            notes_at(&[(0, 1920), (2000, 3920), (4000, 5920), (6000, -1)]),
+        ]);
+        let stats = track_length_stats(&midi);
+        assert_eq!(stats[0].long_ratio(), 0.0, "八分音符不该算长音");
+        assert_eq!(stats[2].long_ratio(), 0.75);
+        assert_eq!(stats[2].avg_ticks(), 1440.0);
+        assert_eq!(
+            sustain_candidate_tracks(&midi),
+            vec![1, 2],
+            "Miau 两处都用 >= 比较，占比恰好 0.75 的边界轨应入选"
+        );
+    }
+
     fn held_note(key: i32, ticks: i64) -> MidiData {
         let mut midi = midi_keys(&[key]);
         midi.tracks[0].events[0].until = ticks * 120;
@@ -1284,7 +1494,7 @@ mod tests {
         let head = placed(&dense)[0].1;
 
         let mut config = enhanced();
-        config.sustain = true;
+        config.sustain = SustainMode::All;
         config.sustain_fade = false;
         let (song, _) = import_midi_enhanced(&midi, &opts, &config).unwrap();
         assert_eq!(song.meta.tempo, dense.meta.tempo, "延音不许改速度");
@@ -1311,11 +1521,37 @@ mod tests {
     }
 
     #[test]
+    fn every_tick_density_uses_miau_step_with_the_envelope_volume() {
+        let midi = held_note(39, 40);
+        let opts = held_opts();
+        let mut config = enhanced();
+        config.sustain = SustainMode::All;
+        config.sustain_density = SustainDensity::EveryTick;
+        config.sustain_fade = false;
+        let (song, _) = import_midi_enhanced(&midi, &opts, &config).unwrap();
+        let placed = placed(&song);
+        assert_eq!(
+            placed.iter().map(|(x, _)| *x).collect::<Vec<_>>(),
+            (0..40u32).collect::<Vec<_>>(),
+            "密度档选每 tick 时步长就该是 1，和 Miau 的 for 循环一致"
+        );
+        let head = placed[0].1;
+        assert!(
+            placed.iter().all(|(_, vel)| *vel == head),
+            "关渐弱时保持音头音量 {head}，而不是传统尾音的半音量：{placed:?}"
+        );
+        assert!(
+            notes(&song).iter().all(|(_, _, note)| note.panning == 100),
+            "包络延音不参与原版的左右交替，否则试听里听不出是包络在起作用"
+        );
+    }
+
+    #[test]
     fn sustain_fade_tapers_along_the_measured_envelope_and_stops_at_silence() {
         let midi = held_note(39, 40);
         let opts = held_opts();
         let mut config = enhanced();
-        config.sustain = true;
+        config.sustain = SustainMode::All;
         let (song, _) = import_midi_enhanced(&midi, &opts, &config).unwrap();
         let placed = placed(&song);
         let head = placed[0].1;
@@ -1348,6 +1584,77 @@ mod tests {
                 "第 {i} 敲 tick={tick} 音量 {vel}，包络应给 {expected}"
             );
         }
+    }
+
+    /// 两轨各持音 40 tick，音高、通道、patch 全一样，只差轨道号。
+    fn two_held_tracks() -> (MidiData, MidiImportOptions) {
+        let mut midi = held_note(39, 40);
+        let mut second = midi.tracks[0].events.clone();
+        for ev in &mut second {
+            ev.part = 1;
+        }
+        midi.tracks.push(MidiTrack {
+            name: "Pad".into(),
+            events: second,
+        });
+        midi.parts.push(MidiPart {
+            track: 1,
+            channel: 0,
+            patch: 0,
+            note_duration: true,
+        });
+        let opts = MidiImportOptions {
+            part_durations: vec![true, true],
+            ..held_opts()
+        };
+        (midi, opts)
+    }
+
+    #[test]
+    fn sustain_tracks_mode_leaves_other_tracks_on_the_legacy_tail() {
+        let (midi, opts) = two_held_tracks();
+        let mut config = enhanced();
+        config.sustain = SustainMode::Tracks;
+        config.sustain_tracks = vec![1];
+        config.sustain_fade = false;
+        let (song, _) = import_midi_enhanced(&midi, &opts, &config).unwrap();
+        let step = (f64::from(crate::midi_decay::SAMPLE_DECAYS[0].decay_ms)
+            / (1000.0 / f64::from(song.meta.tempo)))
+            .round()
+            .max(1.0) as usize;
+        let by_layer = |layer: u32| -> Vec<(u32, u8)> {
+            notes(&song)
+                .into_iter()
+                .filter(|(_, y, _)| *y == layer)
+                .map(|(x, _, n)| (x, n.velocity))
+                .collect()
+        };
+        let unlisted = by_layer(0);
+        let listed = by_layer(1);
+        let head = unlisted[0].1;
+        assert_eq!(
+            unlisted.iter().map(|(x, _)| *x).collect::<Vec<_>>(),
+            (0..40u32).collect::<Vec<_>>(),
+            "白名单外的第 0 轨仍是每 tick 一块"
+        );
+        assert!(
+            unlisted[1..].iter().all(|(_, vel)| *vel == head / 2),
+            "原版尾音固定在音头的一半音量（{head}→{}）：{unlisted:?}",
+            head / 2
+        );
+        assert_eq!(
+            listed.iter().map(|(x, _)| *x).collect::<Vec<_>>(),
+            (0..40u32).step_by(step).collect::<Vec<_>>(),
+            "白名单里的第 1 轨按实测衰减每 {step} tick 重敲"
+        );
+        assert_eq!(
+            listed[0].1, head,
+            "两条轨的音头音量应一致，否则这个对照不成立：{listed:?}"
+        );
+        assert!(
+            listed.iter().all(|(_, vel)| *vel == head),
+            "关渐弱时白名单轨保持音头音量 {head}：{listed:?}"
+        );
     }
 
     #[test]

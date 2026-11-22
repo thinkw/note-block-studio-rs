@@ -324,6 +324,57 @@ fn env_control_switch(value: Option<String>) -> Option<bool> {
 }
 
 
+/// 把当前 GL 上下文的换帧间隔改成 `on` 要的档（= 垂直同步）。
+/// Windows 上取 `wglSwapIntervalEXT`：它要求调用线程有可用的 GL 上下文，
+/// eframe 的 glow 后端正是在 UI 线程上建上下文、且 `App::update` 期间一直是当前上下文。
+/// 拿不到入口（非 Windows、驱动不支持）返回 `false`，调用方据此说明「下次启动生效」。
+#[cfg(windows)]
+fn set_swap_interval(on: bool) -> bool {
+    use std::ffi::c_void;
+    use std::sync::OnceLock;
+
+    type SwapIntervalFn = unsafe extern "system" fn(i32) -> i32;
+
+    #[link(name = "opengl32")]
+    extern "system" {
+        fn wglGetProcAddress(name: *const i8) -> *const c_void;
+    }
+
+    fn lookup() -> Option<SwapIntervalFn> {
+        let name = b"wglSwapIntervalEXT\0";
+        let raw = unsafe { wglGetProcAddress(name.as_ptr().cast::<i8>()) };
+        // 失败时返回 NULL 或 (HPROC)-1，MSDN 规定小于 4096 的返回值一律算无效。
+        if raw.is_null() || (raw as usize) < 4096 {
+            None
+        } else {
+            Some(unsafe { std::mem::transmute::<*const c_void, SwapIntervalFn>(raw) })
+        }
+    }
+
+    // 只缓存成功那一次：首帧之前没有上下文，缓存 None 会把后面所有切换都判死。
+    static FN: OnceLock<Option<SwapIntervalFn>> = OnceLock::new();
+    let f = match FN.get() {
+        Some(cached) => *cached,
+        None => {
+            let found = lookup();
+            if found.is_some() {
+                let _ = FN.set(found);
+            }
+            found
+        }
+    };
+    match f {
+        Some(f) => unsafe { f(i32::from(on)) != 0 },
+        None => false,
+    }
+}
+
+/// 非 Windows 没有 `wglSwapIntervalEXT`：只走 `NativeOptions.vsync`（下次启动生效）。
+#[cfg(not(windows))]
+fn set_swap_interval(_on: bool) -> bool {
+    false
+}
+
 impl Drop for NbsApp {
     fn drop(&mut self) {
         // 退出时持久化主题、音频参数、最近文件等偏好
@@ -394,6 +445,33 @@ impl eframe::App for NbsApp {
         // 而帧内它正被借去画界面；起 socket、写发现文件也不该发生在绘制路径里。
         if let Some(change) = self.state.control_change.take() {
             self.apply_control_change(change, ctx);
+        }
+        // 用户要求 #119：首选项那颗「垂直同步」。eframe 只在建窗时读
+        // `NativeOptions.vsync`，运行中没有任何公开入口，所以这里直接改当前 GL
+        // 上下文的换帧间隔；改不动（非 Windows、驱动不认）时设置也已经落盘，
+        // 下次启动由上面的 NativeOptions 接上——状态栏那句话按实际结果说。
+        if let Some(on) = self.state.vsync_request.take() {
+            let done = set_swap_interval(on);
+            self.state.set_message(if done {
+                nbs_editor::tr(
+                    if on {
+                        "VSync on: each frame waits for the display refresh."
+                    } else {
+                        "VSync off: frames reach the screen as soon as they are drawn."
+                    },
+                    if on {
+                        "垂直同步已打开：每帧等显示器刷新后再上屏。"
+                    } else {
+                        "垂直同步已关闭：画完即上屏，节拍只由帧率限制决定。"
+                    },
+                )
+            } else {
+                nbs_editor::tr(
+                    "VSync setting saved; it applies to the next window this program opens.",
+                    "垂直同步设置已保存；这台机器改不了当前窗口的同步，下次启动生效。",
+                )
+            });
+            ctx.request_repaint();
         }
     }
 }
@@ -498,6 +576,8 @@ fn main() -> eframe::Result<()> {
     }
     let options = eframe::NativeOptions {
         viewport,
+        // 用户要求 #119：垂直同步跟着首选项走（eframe 出厂为 true，出厂值一致）。
+        vsync: prefs.vsync,
         ..Default::default()
     };
     eframe::run_native(
