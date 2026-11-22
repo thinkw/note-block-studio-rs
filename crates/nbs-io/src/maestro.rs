@@ -161,7 +161,8 @@ pub(crate) const DIR_SECTION_INSTRUMENT: [[u8; 6]; 4] = [
 /// 16..19 四颗怪物头，见 [`INSTRUMENT_BASE_BLOCKS`] 与 [`DIR_SECTION_INSTRUMENT`]），
 /// 和 NBS 文件里的 16..19（MC 26.1 的铜块一族）不是同一批东西。
 /// [`transcribe_events`] 就是这两套编号之间唯一的桥。
-const MOB_SOUNDS: [(&str, u8); 11] = [
+// 自定义乐器采样名 -> 怪物头；fractal 导出走同一张表，别各写一份。
+pub(crate) const MOB_SOUNDS: [(&str, u8); 11] = [
     ("minecraft/mob/enderdragon/growl1.ogg", 16),
     ("minecraft/mob/enderdragon/growl2.ogg", 16),
     ("minecraft/mob/enderdragon/growl3.ogg", 16),
@@ -390,7 +391,7 @@ impl MaestroReport {
 }
 
 /// `1.75` 打印成 `1.75`，`2.0` 打印成 `2`。
-fn trim_num(v: f64) -> String {
+pub(crate) fn trim_num(v: f64) -> String {
     if v.is_finite() && (v - v.round()).abs() < 1e-9 {
         format!("{}", v.round() as i64)
     } else {
@@ -402,7 +403,7 @@ fn trim_num(v: f64) -> String {
 }
 
 /// 带插值的文案：`tr` 借的是入参的生命周期，所以 `format!` 出来的串要走这里落成 owned。
-fn msg<T: Into<String>>(en: T, zh: T) -> String {
+pub(crate) fn msg<T: Into<String>>(en: T, zh: T) -> String {
     if crate::lang() == 1 {
         zh.into()
     } else {

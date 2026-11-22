@@ -266,6 +266,23 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                         state.emit(Command::OpenMaestroExport);
                         ui.close_menu();
                     }
+                    // 端口自加：nbs-fractal 的整机投影（.litematic），自带红石，贴下去就响。
+                    if ui
+                        .button(tr("Fractal machine...", "Fractal 机体投影…"))
+                        .clicked()
+                    {
+                        state.emit(Command::OpenFractalExport);
+                        ui.close_menu();
+                    }
+                    // 端口自加：唱片工坊那一档的编码唱片数据箱（.litematic），只有箱子，
+                    // 要贴在已建好的机体里才出声。
+                    if ui
+                        .button(tr("Encoded disc chests...", "编码唱片数据箱…"))
+                        .clicked()
+                    {
+                        state.emit(Command::OpenDiscChestExport);
+                        ui.close_menu();
+                    }
                     if ui.button(tr("Pattern...", "片段 (.nbp)…")).clicked() {
                         state.emit(Command::OpenDialog(
                             crate::state::DialogAction::ExportPattern,

@@ -166,6 +166,11 @@ impl Nbt {
         self.header(3, name);
         self.buf.extend_from_slice(&v.to_be_bytes());
     }
+    /// `TAG_Long(name, value)`——投影模组的 `TimeCreated` / `BlockStates` 元素用得到。
+    pub fn long(&mut self, name: &str, v: i64) {
+        self.header(4, name);
+        self.buf.extend_from_slice(&v.to_be_bytes());
+    }
     /// `TAG_Float(name, value)`
     pub fn float(&mut self, name: &str, v: f32) {
         self.header(5, name);
@@ -195,6 +200,17 @@ impl Nbt {
             .extend_from_slice(&(v.len() as i32).to_be_bytes());
         for x in v {
             self.item_int(*x);
+        }
+    }
+    /// `TAG_Long_Array(name, values)`——投影模组（Litematica）的 `BlockStates` 用的正是这一档。
+    /// 与 [`Self::int_array`] 只差元素宽度（8 字节），同样属数组标签：元素类型由标签本身决定，
+    /// 每个元素前面不再写类型字节。
+    pub fn long_array(&mut self, name: &str, v: &[i64]) {
+        self.header(12, name);
+        self.buf
+            .extend_from_slice(&(v.len() as i32).to_be_bytes());
+        for x in v {
+            self.buf.extend_from_slice(&x.to_be_bytes());
         }
     }
     /// `TAG_List(name, length, type)` —— 参数顺序照原版：先长度后类型。
