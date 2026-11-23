@@ -17,6 +17,7 @@
 //! 取用只能走 [`SongStore::lift`] / [`SongStore::swap_active`] 这两条会挪动
 //! 所有权的入口。
 
+use nbs_core::model::Note;
 use nbs_core::Document;
 use slotmap::{new_key_type, SlotMap};
 
@@ -26,16 +27,59 @@ new_key_type! {
     pub struct SongId;
 }
 
+/// 每标签一份的界面状态（刀 1）。
+///
+/// 字段逐条对照原版 `obj_song/Create_0.gml`：`instrument`、`starta`/`startb`、
+/// `marker_pos`、`section_exists`/`section_start`/`section_end`、`insbox_start`、
+/// `midifile`（取证见 `.work/songtabs-20261123/gml/obj_song_Create_0.gml`）。
+/// 原版把这些直接写在 `current_song` 上，端口集中到切标签那一刻收/装一次。
+///
+/// 刻意做成一个独立结构、而不是散进 [`SongTab`]：收和装这两端都走解构赋值
+/// （`state.rs` 的 `TabUi::grab` / `TabUi::restore`），以后往这里加字段会在
+/// 两端同时编译不过，不会只改一半（用户要求 #131）。
+#[derive(Clone, Debug, Default)]
+pub struct TabUi {
+    /// 原版 `instrument`：画笔当前乐器（含 key/vel/pan/pit 默认值）。
+    pub brush: Note,
+    /// 原版 `starta`：视口左上角那一列。界面缩放是全局的，滚动位置不是。
+    pub scroll_tick: u32,
+    /// 原版 `startb`：视口左上角那一层。
+    pub scroll_layer: u32,
+    /// 原版 `marker_pos`：播放头所在刻。端口真身在播放时钟里，切标签时收/装。
+    pub playhead: f64,
+    /// 原版 `section_exists`。
+    pub section_exists: bool,
+    /// 原版 `section_start`。
+    pub section_start: i64,
+    /// 原版 `section_end`。
+    pub section_end: i64,
+    /// 原版 `insbox_start`：乐器面板滚到第几个色块。写它的那几行用的是
+    /// `current_song.insbox_start`（`control_draw.gml:2007-2012`），所以每首一份。
+    pub insbox_start: usize,
+    /// 原版 `midifile`：MIDI 导入窗左下角显示的那个文件名。
+    pub midi_file: String,
+}
+
 /// 一首歌在标签条上的一份记录。
 ///
 /// `doc` 是 `Option`：台前那份被 `EditorState.doc` 持有，对应槽位留 `None`。
-/// 原版挂在 `obj_song` 上的其余每标签标量（`marker_*`、`section_*`、`sb_sel`、
-/// 画笔乐器、滚动位置……）在刀 1 逐个搬进来，本刀先只有文档与身份。
 pub struct SongTab {
     /// 缓存身份，全局单调、永不复用。见 [`crate::state::EditorState::song_session`]。
     pub session: u64,
     /// `None` = 已取出到台前。
     pub doc: Option<Document>,
+    /// 这一首的界面状态；台前那份在 `EditorState` 上，收装时机见
+    /// [`crate::state::EditorState::switch_tab`]。
+    pub ui: TabUi,
+}
+
+/// [`SongStore::close`] 的结果。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Closed {
+    /// 关掉之后站在台前的标签；表被关空了是 `None`。
+    pub active: Option<SongId>,
+    /// 关的是不是台前那一个（决定调用方要不要重挂音频、清选区）。
+    pub was_active: bool,
 }
 
 /// 标签槽位表：原版 `global.songs[]` + `global.song`。
@@ -71,14 +115,33 @@ impl SongStore {
     }
 
     /// 新增一个标签槽（后台，不动台前）。id 在标签关掉之前一直有效。
+    /// 界面状态取默认值：原版 `new_song()` / `open_song_nbs.gml` 建的都是
+    /// 刚 `create(obj_song)` 出来的那份出厂值。
     pub fn insert(&mut self, doc: Document) -> SongId {
         let session = self.next_session();
         let id = self.slots.insert(SongTab {
             session,
             doc: Some(doc),
+            ui: TabUi::default(),
         });
         self.order.push(id);
         id
+    }
+
+    /// 存某个标签的界面状态（台前那份收进槽里）。标签不存在返回 `false`。
+    pub fn set_ui(&mut self, id: SongId, ui: TabUi) -> bool {
+        match self.slots.get_mut(id) {
+            Some(tab) => {
+                tab.ui = ui;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 读某个标签的界面状态。
+    pub fn ui(&self, id: SongId) -> Option<&TabUi> {
+        self.slots.get(id).map(|t| &t.ui)
     }
 
     /// 把某个标签的文档取到台前（原版 `set_song` 的「装入」那一半）。
@@ -117,6 +180,53 @@ impl SongStore {
         self.slots[prev].doc = Some(std::mem::replace(current, incoming));
         self.active = Some(id);
         true
+    }
+
+    /// 关掉一个标签：槽位与标签条顺序拿掉，返回关掉之后台前是哪一首。
+    ///
+    /// 只搬状态，不问保存、不删备份文件——那是 [`crate::state::EditorState::close_tab`]
+    /// 和退出流程的事（原版把这两件事都放在 `close_song` 的前半段，取证见
+    /// `.work/songtabs-20261123/gml/close_song.gml`）。
+    ///
+    /// 关后台标签不动台前（id 稳定，这正是槽位表相对数组的好处）；关台前标签时
+    /// `stage` 就地换成邻居的文档，邻居按原版的下标规则挑：
+    /// `if (song > sid || song >= array_length(songs)) song--`（`close_song.gml:24`）——
+    /// 落在被关标签后面那一首，关的是最后一个就退到新的最后一个。表被关空了
+    /// 就把 `stage` 换成一首空曲并返回 `active: None`，由调用方决定补不补标签
+    /// （原版交互路径 `close_song(i)` 补，退出路径 `close_song(i, 1, 1)` 不补）。
+    /// id 不存在时不动任何状态。
+    pub fn close(&mut self, id: SongId, stage: &mut Document) -> Closed {
+        let Some(idx) = self.index_of(id) else {
+            return Closed {
+                active: self.active,
+                was_active: false,
+            };
+        };
+        let was_active = self.active == Some(id);
+        let active_id = self.active;
+        self.slots.remove(id);
+        self.order.remove(idx);
+        if !was_active {
+            // 台前那份还在台上（它自己的槽位是 `None`），不能去 lift 它。
+            return Closed {
+                active: active_id,
+                was_active,
+            };
+        }
+        let next = if self.order.is_empty() {
+            None
+        } else {
+            self.order.get(idx.min(self.order.len() - 1)).copied()
+        };
+        self.active = None;
+        *stage = match next {
+            Some(n) => self.lift(n).expect("刚关掉的不是它，槽里的文档一定取得到"),
+            None => Document::new(),
+        };
+        Closed {
+            active: next,
+            was_active,
+        }
     }
 
     /// 台前标签的 id（原版 `global.song`，没有标签时 `None`）。
@@ -181,6 +291,7 @@ impl SongStore {
 mod tests {
     use super::*;
     use nbs_core::model::Note;
+    use slotmap::Key as _;
 
     #[test]
     fn sessions_are_unique_and_never_reused() {
@@ -281,5 +392,178 @@ mod tests {
         assert_eq!(store.order(), &[b, a, c]);
         assert_eq!(store.index_of(b), Some(0));
         assert_eq!(store.session(b), session_b);
+    }
+
+    /// 造一首只在 (tick, layer) 有一格的曲子，用来确认「台前摆的是哪一首」。
+    fn marked(tick: u32, layer: u32) -> Document {
+        let mut doc = Document::new();
+        doc.place_note(tick, layer, Note::new(0, 45));
+        doc
+    }
+
+    fn note_at(doc: &Document, tick: u32, layer: u32) -> bool {
+        doc.song.get(tick, layer) == Some(Note::new(0, 45))
+    }
+
+    #[test]
+    fn tab_ui_roundtrips_through_the_slot() {
+        let mut store = SongStore::new();
+        let a = store.insert(marked(1, 0));
+        let b = store.insert(marked(2, 0));
+        // 出厂值 = 原版 obj_song Create 里那份（画笔第 0 号乐器、C4、滚到左上）。
+        let fresh = store.ui(a).unwrap();
+        assert_eq!(fresh.brush, Note::default());
+        assert_eq!((fresh.scroll_tick, fresh.scroll_layer), (0, 0));
+        assert_eq!(fresh.playhead, 0.0);
+        assert!(!fresh.section_exists);
+        assert!(fresh.midi_file.is_empty());
+
+        let mut stage = store.lift(a).unwrap();
+        let mut stage_ui = TabUi {
+            brush: Note::new(7, 60),
+            scroll_tick: 40,
+            scroll_layer: 3,
+            playhead: 12.5,
+            section_exists: true,
+            section_start: 4,
+            section_end: 9,
+            insbox_start: 21,
+            midi_file: "song.mid".into(),
+        };
+        // 切到 b：a 的那份存回槽，b 的默认值装上台。
+        assert!(store.swap_active(b, &mut stage));
+        store.set_ui(a, std::mem::take(&mut stage_ui));
+        let on_b = store.ui(b).unwrap().clone();
+        assert_eq!((on_b.scroll_tick, on_b.scroll_layer), (0, 0));
+        assert_eq!(on_b.brush, Note::default());
+        // 切回 a：原样回来，一格不差。
+        assert!(store.swap_active(a, &mut stage));
+        store.set_ui(b, on_b);
+        let back = store.ui(a).unwrap().clone();
+        assert_eq!(back.brush, Note::new(7, 60));
+        assert_eq!((back.scroll_tick, back.scroll_layer), (40, 3));
+        assert_eq!(back.playhead, 12.5);
+        assert_eq!(
+            (back.section_exists, back.section_start, back.section_end),
+            (true, 4, 9)
+        );
+        assert_eq!(back.insbox_start, 21);
+        assert_eq!(back.midi_file, "song.mid");
+        // 不存在的 id 既存不进也读不出。
+        let ghost = SongId::null();
+        assert!(!store.set_ui(ghost, back.clone()));
+        assert!(store.ui(ghost).is_none());
+    }
+
+    #[test]
+    fn closing_a_background_tab_leaves_the_stage_alone() {
+        let mut store = SongStore::new();
+        let a = store.insert(marked(1, 0));
+        let b = store.insert(marked(2, 0));
+        let c = store.insert(marked(3, 0));
+        let mut stage = store.lift(a).unwrap();
+        let out = store.close(b, &mut stage);
+        assert_eq!(
+            out,
+            Closed {
+                active: Some(a),
+                was_active: false
+            }
+        );
+        // 台前完全没动，顺序里少了中间那首。
+        assert!(note_at(&stage, 1, 0));
+        assert_eq!(store.order(), &[a, c]);
+        assert_eq!(store.len(), 2);
+        assert!(store.parked_doc(c).is_some());
+        assert!(!store.contains(b));
+        // a 的缓存身份不受影响（关别人的号不会顶掉自己）。
+        assert_eq!(store.session(a), Some(1));
+        assert_eq!(store.active_session(), 1);
+    }
+
+    #[test]
+    fn closing_the_active_tab_lands_like_the_original() {
+        let mut store = SongStore::new();
+        let a = store.insert(marked(1, 0));
+        let b = store.insert(marked(2, 0));
+        let c = store.insert(marked(3, 0));
+        let mut stage = store.lift(b).unwrap();
+        // 三首、台前是中间那首：关掉它落在「原来后面那一首」（close_song 的 song 不变 = 新下标 1）。
+        let out = store.close(b, &mut stage);
+        assert_eq!(
+            out,
+            Closed {
+                active: Some(c),
+                was_active: true
+            }
+        );
+        assert!(note_at(&stage, 3, 0));
+        assert_eq!(store.active_session(), 3);
+        // 排在被关那首前面的不受影响，文档还留在自己槽里。
+        assert!(store.parked_doc(a).is_some());
+
+        // 关最后一个：下标越界要退一位，落在新的末尾。
+        let d = store.insert(marked(4, 0));
+        assert!(store.swap_active(d, &mut stage));
+        let out = store.close(d, &mut stage);
+        assert_eq!(
+            out,
+            Closed {
+                active: Some(c),
+                was_active: true
+            }
+        );
+        assert!(note_at(&stage, 3, 0));
+
+        // 再关倒数第二首：表里还剩最前面那首，落在它身上（下标退一位）。
+        let out = store.close(c, &mut stage);
+        assert_eq!(
+            out,
+            Closed {
+                active: Some(a),
+                was_active: true
+            }
+        );
+        assert!(note_at(&stage, 1, 0));
+        assert_eq!(store.order(), &[a]);
+
+        // 关掉最后一首：表空，台前换成空曲。
+        let out = store.close(a, &mut stage);
+        assert_eq!(
+            out,
+            Closed {
+                active: None,
+                was_active: true
+            }
+        );
+        assert!(store.is_empty());
+        assert_eq!(store.active_session(), 0);
+        assert_eq!(stage.song.total_blocks, 0);
+        // 空表上再关同一个 id：不动状态。
+        let out = store.close(a, &mut stage);
+        assert_eq!(
+            out,
+            Closed {
+                active: None,
+                was_active: false
+            }
+        );
+    }
+
+    #[test]
+    fn closed_id_stays_closed() {
+        let mut store = SongStore::new();
+        let a = store.insert(marked(1, 0));
+        let b = store.insert(marked(2, 0));
+        let mut stage = store.lift(a).unwrap();
+        store.close(b, &mut stage);
+        // MCP 长期持有的那个号：关掉的标签再也切不过去、也读不出来。
+        assert!(!store.swap_active(b, &mut stage));
+        assert!(store.lift(b).is_none());
+        assert!(store.parked_doc(b).is_none());
+        assert!(store.ui(b).is_none());
+        // 新标签拿的是新号，不会复用被关掉那个。
+        let fresh = store.insert(marked(5, 0));
+        assert_eq!(store.session(fresh), Some(3));
     }
 }
