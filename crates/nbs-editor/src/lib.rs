@@ -4087,6 +4087,78 @@ mod gui_window_tests {
         }
     }
 
+    /// 只把指针平移过去、不按下，连走 `n` 帧，返回最后一帧画到屏幕上的文字。
+    /// `drawn_texts` 走的是不带指针事件的输入，测「移开就关」必须自己喂 PointerMoved。
+    fn hover_for(
+        state: &mut EditorState,
+        ctx: &egui::Context,
+        p: egui::Pos2,
+        n: usize,
+    ) -> Vec<String> {
+        let mut texts = Vec::new();
+        for _ in 0..n {
+            let mut input = base_input();
+            input.events.push(egui::Event::PointerMoved(p));
+            let out = frame_out(state, ctx, input);
+            texts = out
+                .shapes
+                .iter()
+                .filter_map(|cs| match &cs.shape {
+                    egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                    _ => None,
+                })
+                .collect();
+        }
+        texts
+    }
+
+    /// #124：菜单栏的下拉要「鼠标移开就收」，不用再点一下别处或按 Esc。真点一下「文件」
+    /// 打开，然后分三种走法验：指针停在条目上（不能误关）、停在子菜单里（父菜单不能跟着关）、
+    /// 移到窗口角落的空处（要关）。写 Close 的那一帧菜单还会画一次，所以每种都走三帧。
+    #[test]
+    fn menubar_dropdown_closes_when_the_pointer_moves_away() {
+        let ctx = egui::Context::default();
+        let mut state = state_with_selection();
+        state.theme.apply(&ctx);
+        click_text(&mut state, &ctx, "文件");
+        let open = drawn_at(&mut state, &ctx);
+        let item = open
+            .iter()
+            .find(|(t, _)| t == "另存为")
+            .map(|(_, p)| *p)
+            .expect("测试前提：「文件」的下拉是开着的");
+        // 指针压在条目上：这是正常悬停，菜单必须留着。
+        let texts = hover_for(&mut state, &ctx, item + egui::vec2(12.0, 6.0), 3);
+        assert!(
+            texts.iter().any(|t| t == "另存为"),
+            "指针还在下拉里，不该关：{texts:?}"
+        );
+        // 换到「编辑 → 快捷键......」两层深的子菜单：指针在子菜单里、已经出了父菜单的框，
+        // 父菜单不能把整棵树一起带走。
+        click_text(&mut state, &ctx, "编辑");
+        click_text(&mut state, &ctx, "快捷键......");
+        let rows = drawn_at(&mut state, &ctx);
+        let macro_row = rows
+            .iter()
+            .find(|(t, _)| t == "Tremolo...  Ctrl+Shift+A")
+            .map(|(_, p)| *p)
+            .expect("测试前提：宏子菜单是开着的");
+        let texts = hover_for(&mut state, &ctx, macro_row + egui::vec2(20.0, 6.0), 3);
+        assert!(
+            texts.iter().any(|t| t == "Tremolo...  Ctrl+Shift+A")
+                && texts.iter().any(|t| t == "快捷键......"),
+            "指针在子菜单里，父菜单不该跟着关：{texts:?}"
+        );
+        // 最后移到时间轴那块空处（不按下）：下一帧起下拉就该没了。
+        let texts = hover_for(&mut state, &ctx, egui::pos2(1380.0, 860.0), 3);
+        for gone in ["Tremolo...  Ctrl+Shift+A", "另存为"] {
+            assert!(
+                !texts.iter().any(|t| t == gone),
+                "鼠标移开后「{gone}」还画着：{texts:?}"
+            );
+        }
+    }
+
     // ---- 主题色取色器 `w_setaccent`（draw_window_set_accent.gml）----
 
     /// 屏幕上某个尺寸的实心矩形，按绘制顺序返回。

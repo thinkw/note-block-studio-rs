@@ -555,6 +555,27 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                 ui.close_menu();
             }
         });
+
+        // #124：下拉要「鼠标移开就收」。原版靠指针位置自己收，egui 只在「按住键点到菜单
+        // 外面」那一支才收（menu.rs `stationary_interaction` 的 primary_down 分支），光把指针
+        // 挪走会一直挂着，得再点一下别处或按 Esc。这里在菜单栏这一帧画完之后补一次判断：
+        // `BarState` 里挂着当前那棵菜单的根，`MenuState::area_contains` 会把子菜单一路算进去
+        // （矩形由 egui 自己维护，不必我们逐帧记），指针既不在整棵下拉里、也不在菜单栏这条
+        // 上，就把根节点的 response 写成 Close。`menu_state` 是父子共享的那个 Arc，写它等价于
+        // 在菜单闭包里调 `ui.close_menu()`，好处是不必给 15 处菜单逐个加。
+        // 指针读不到时（移出窗口，`hover_pos` 变 None）不动：离屏用例里的空档帧也是 None，
+        // 当成「已离开」会把所有点菜单的用例打断。
+        if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+            if !ui.max_rect().contains(pos) {
+                let bar_state = egui::menu::BarState::load(ui.ctx(), ui.id());
+                // 两层公开 Deref：BarState → MenuRootManager → Option<MenuRoot>。
+                if let Some(root) = &**bar_state {
+                    if !root.menu_state.read().area_contains(pos) {
+                        root.menu_state.write().close();
+                    }
+                }
+            }
+        }
     });
 }
 
