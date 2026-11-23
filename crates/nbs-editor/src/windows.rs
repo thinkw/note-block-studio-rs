@@ -160,7 +160,6 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::FileOpen => file_dialog(state, ui, false),
             WindowKind::FileSave => file_dialog(state, ui, true),
             WindowKind::LayerRename(layer) => layer_rename(state, ui, *layer),
-            WindowKind::ConfirmNew => confirm_new(state, ui),
             WindowKind::AudioExport => audio_export_window(state, ui),
             WindowKind::AudioSettings => audio_settings_window(state, ui),
             WindowKind::MidiImport => midi_import_window(state, ui),
@@ -5432,21 +5431,6 @@ fn event_stopper_window(state: &mut EditorState, ui: &mut Ui, tick: u32, layer: 
         state.emit(c);
         state.emit(Command::CloseWindow);
     }
-}
-
-fn confirm_new(state: &mut EditorState, ui: &mut Ui) {
-    ui.label(tr(
-        "The current song has unsaved changes. Create a new song anyway?",
-        "当前歌曲有未保存的修改，确定新建？",
-    ));
-    ui.horizontal(|ui| {
-        if ui.button(tr("OK", "确定")).clicked() {
-            state.emit(Command::ConfirmNew);
-        }
-        if ui.button(tr("Cancel", "取消")).clicked() {
-            state.emit(Command::CloseWindow);
-        }
-    });
 }
 
 /// 原版 `draw_window_about.gml`：580×410。左半是 logo + 「Note Block Studio」+ 版本

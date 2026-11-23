@@ -212,7 +212,6 @@ pub enum WindowKind {
     FileOpen,
     FileSave,
     LayerRename(u32),
-    ConfirmNew,
     AudioExport,
     AudioSettings,
     DatapackExport,
@@ -303,7 +302,6 @@ impl WindowKind {
             Self::FileOpen => tr("Open Song", "打开歌曲"),
             Self::FileSave => tr("Save Song", "保存歌曲"),
             Self::LayerRename(_) => tr("Rename layer", "重命名图层"),
-            Self::ConfirmNew => tr("New song", "新建歌曲"),
             Self::AudioExport => tr("Audio Export", "音频导出"),
             Self::AudioSettings => tr("Audio Settings", "音频设置"),
             // 原版 `draw_window_datapack_export.gml:13`：CN "导出数据包"。

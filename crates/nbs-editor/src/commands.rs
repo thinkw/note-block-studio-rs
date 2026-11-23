@@ -10,7 +10,7 @@ use nbs_core::model::{
     panning_velocity_to_short, short_to_panning_velocity, LockMode, Note, Song, SongMeta, KEY_MAX,
     PAN_MAX, PIT_MAX, VEL_MAX,
 };
-use nbs_core::Macro;
+use nbs_core::{Document, Macro};
 
 use crate::state::{
     DialogAction, EditMode, EditorState, FileDialog, Flag, Modal, ModalQueue, PrefsFolder,
@@ -22,7 +22,6 @@ use crate::tr;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     New,
-    ConfirmNew,
     Open,
     Save,
     SaveAs,
@@ -355,22 +354,12 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
     crate::set_language(state.prefs.language);
     match cmd {
         Command::New => {
-            if state.doc.song.dirty {
-                state.window = Some(WindowKind::ConfirmNew);
-            } else {
-                dispatch(state, Command::ConfirmNew, ctx);
-            }
-        }
-        Command::ConfirmNew => {
-            state.doc.replace_song(Song::new());
-            // 原版换歌 = 新实例 id，声源分配方案随之失效。
-            state.reissue_session();
-            state.prepare_audio();
-            state.viewport.start_tick = 0;
-            state.viewport.start_layer = 0;
-            state.set_marker(0.0);
-            state.clear_section();
-            state.window = None;
+            // 原版 `new_song.gml:3-5`：新建 = 再建一首压进 `songs[]` 并切过去，
+            // 源码里 `confirm()` 那几行是注释掉的，所以台前脏了也**不问**，
+            // 当前那份仍留在自己的标签上。端口此前是「原地换歌 + 自建确认窗」
+            // （`WindowKind::ConfirmNew`），属自加行为，这次按原版改回新建标签，
+            // 那扇窗随之删除（用户要求 #131）。
+            state.open_tab(Document::with_song(Song::new()));
             state.set_message(tr("New song created", "已新建歌曲"));
         }
         Command::Open => {
@@ -1206,13 +1195,11 @@ machine that is already built; change the machine or its speed and these chests 
             state.midi_data = None;
             state.midi_file.clear();
             state.midi_tab = 0;
-            state.doc.replace_song(song);
-            state.reissue_session();
-            state.prepare_audio();
-            state.viewport.start_tick = 0;
-            state.viewport.start_layer = 0;
-            state.set_marker(0.0);
-            state.clear_section();
+            // 原版 `open_midi.gml:35-37`：`create(obj_song)` + `array_push(songs, ...)`
+            // + 直接把 `song` 指到最后一个，也就是另开一个标签，不覆盖台前那首
+            // （`replace = isplayer`，播放器模式没实现，永远走新建）。视口、播放头、
+            // 区间跟着新标签那份出厂界面状态一起归零（用户要求 #131）。
+            state.open_tab(Document::with_song(song));
             state.save_prefs();
             state.set_message(match report {
                 Some(report) if crate::lang() == 1 => format!(
@@ -2547,13 +2534,10 @@ fn open_nbs_at(state: &mut EditorState, path: &std::path::Path, backup: bool) {
             // 原版 `load_song.gml:64` 的 `window != w_instruments` 判的是换歌**之前**
             // 开着的那扇窗，所以要在 `replace_song` 前先记下来。
             let on_instruments = state.window == Some(WindowKind::Instruments);
-            state.doc.replace_song(song);
-            state.reissue_session();
-            state.prepare_audio();
-            state.viewport.start_tick = 0;
-            state.viewport.start_layer = 0;
-            state.set_marker(0.0);
-            state.clear_section();
+            // 原版 `open_song_nbs.gml:50-53`：建实例压进 `songs[]` → `set_song` → `reset_add`，
+            // 也就是另开一个标签，不覆盖台前那首。视口、播放头、区间跟着新标签
+            // 那份出厂界面状态一起归零（用户要求 #131）。
+            state.open_tab(Document::with_song(song));
             if backup {
                 // 原版 :68-70：备份档不写最近列表，反而把 `changed` 标成 1（还原出来算未保存）。
                 state.doc.song.dirty = true;
@@ -2616,13 +2600,11 @@ fn import_schematic(state: &mut EditorState, path: &std::path::Path) {
         Ok(info) => {
             let inputs = info.inputs;
             let n = info.added_notes;
-            state.doc.replace_song(info.song);
-            state.reissue_session();
-            state.prepare_audio();
-            state.viewport.start_tick = 0;
-            state.viewport.start_layer = 0;
-            state.set_marker(0.0);
-            state.clear_section();
+            // 原版 `open_schematic.gml:13-15`：`reset_add()` → `array_push(songs,
+            // create(obj_song))` → `set_song(最后一个)`，也就是另开一个标签，不覆盖
+            // 台前那首。视口、播放头、区间跟着新标签那份出厂界面状态一起归零
+            // （用户要求 #131）。
+            state.open_tab(Document::with_song(info.song));
             state.set_message(if crate::lang() == 1 {
                 format!("Schematic 导入完成：{n} 个音符，{inputs} 个输入")
             } else {
@@ -3563,10 +3545,58 @@ mod tests {
         let _ = std::fs::remove_file(&current);
     }
 
+    /// 刀 1（用户要求 #131）：新建 / 打开都是「另开一个标签」，台前那首整份退回
+    /// 自己的槽位。原版 `new_song.gml:2-5` 里的 `confirm()` 是注释掉的，所以台前
+    /// 脏了也**不弹确认**——端口此前的「原地换歌 + 自建确认窗」是自加行为。
+    #[test]
+    fn new_and_open_push_a_new_tab_and_never_ask() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let mut first = Song::new();
+        first.set(5, 2, Note::new(0, 45));
+        first.recalculate();
+        let mut state = state_with(first);
+        let home = state.active_tab().unwrap();
+        state.doc.song.dirty = true;
+        state.window = Some(WindowKind::Preferences);
+        let home_rev = state.doc.song.rev;
+
+        dispatch(&mut state, Command::New, &ctx);
+        assert_eq!(state.store.len(), 2, "新建是再加一个标签");
+        assert_ne!(state.active_tab(), Some(home));
+        assert_eq!(state.doc.song.total_blocks, 0, "台前换成了一首空曲");
+        // 上一首没被覆盖：内容、rev、脏标记都跟着自己的标签走。
+        let parked = state.parked_doc(home).expect("上一首退回后台");
+        assert_eq!(parked.song.get(5, 2), Some(Note::new(0, 45)));
+        assert_eq!(parked.song.rev, home_rev);
+        assert!(parked.song.dirty);
+        // 原版不问：没有确认弹窗，只有 `reset_add` 把前台窗关掉。
+        assert!(state.modals.is_empty());
+        assert_eq!(state.window, None);
+
+        let file = std::env::temp_dir().join("nbs_rust_tab_open.nbs");
+        let mut second = Song::new();
+        second.set(9, 1, Note::new(3, 50));
+        second.recalculate();
+        nbs_core::nbs::save(&file, &second, nbs_core::nbs::NBS_VERSION).unwrap();
+        dispatch(&mut state, Command::OpenPath(file.clone()), &ctx);
+        assert_eq!(state.store.len(), 3, "打开文件也是新标签，三首同时在");
+        assert_eq!(state.doc.song.get(9, 1), Some(Note::new(3, 50)));
+        assert_eq!(state.doc.song.filename.as_deref(), Some(file.as_path()));
+        let loaded = state.active_tab().unwrap();
+
+        assert!(state.switch_tab(home));
+        assert_eq!(state.doc.song.get(5, 2), Some(Note::new(0, 45)));
+        assert!(state.doc.song.dirty, "脏标记跟着标签走");
+        assert!(state.parked_doc(loaded).unwrap().song.get(9, 1).is_some());
+        let _ = std::fs::remove_file(&file);
+    }
+
     /// 原版 `obj_song/Create_0.gml:22-24`：区间属于「这一首歌」，每首开出来都是
-    /// 无区间、两端归零。端口把它放在 `EditorState` 上，所以四条整首换歌的路线
-    /// 都得清掉，否则上一首的区间会留在标尺上，还会继续当 `marker_end` 的停点。
-    /// （MIDI 导入和图样导入两条走的是同样的三件套，这里不重复铺样本。）
+    /// 无区间、两端归零。刀 1 之后这一条由新标签那份出厂 [`crate::tabs::TabUi`]
+    /// 带上来（见 `open_tab`），这里守着新建 / 打开两条入口确实拿到了出厂值，
+    /// 否则上一首的区间会留在标尺上，还会继续当 `marker_end` 的停点。
+    /// （MIDI 导入和图样导入两条走的是同一个 `open_tab`，这里不重复铺样本。）
     #[test]
     fn song_replacement_clears_the_section() {
         let _prefs = crate::isolate_prefs();
@@ -3579,8 +3609,8 @@ mod tests {
         };
 
         arm(&mut state);
-        dispatch(&mut state, Command::ConfirmNew, &ctx);
-        assert!(!state.section_exists, "新建歌曲要清掉区间");
+        dispatch(&mut state, Command::New, &ctx);
+        assert!(!state.section_exists, "新建标签要清掉区间");
         assert_eq!((state.section_start, state.section_end), (0, 0));
 
         let file = std::env::temp_dir().join("nbs_rust_section_reset.nbs");
