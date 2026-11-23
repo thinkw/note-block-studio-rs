@@ -76,21 +76,14 @@ pub struct Particle {
 }
 
 /// 钢琴瀑布。
+#[derive(Default)]
 pub struct Synthesia {
     params: Params,
     particles: Vec<Particle>,
     /// 上一帧的播放头（tick）：靠它认出「这一帧跨过了音符」，也认出回绕/拖动。
-    last_position: f64,
-}
-
-impl Default for Synthesia {
-    fn default() -> Self {
-        Self {
-            params: Params::default(),
-            particles: Vec::new(),
-            last_position: 0.0,
-        }
-    }
+    /// `None` = 这个特效还没画过一帧：中途开启时播放头可能已在半路，那一帧只
+    /// 登记位置，不把之前「跨过」的音符一口气补撒出来。
+    last_position: Option<f64>,
 }
 
 impl Synthesia {
@@ -128,12 +121,15 @@ impl Synthesia {
         }
     }
 
-    /// 一枚音符击中时撒的那一束（角度按序号摊开：同一帧撒出来要对称，
-    /// 纯随机看着像噪声）。
+    /// 一枚音符击中时撒的那一束。角度围绕正上方对称摊开（同一帧撒出来要对称，
+    /// 纯随机看着像噪声），且两端等距：旧口径取 `0.12 + 0.76 × i/N`，六粒只摊到
+    /// 0.753π，中点落在 0.437π —— 右半边的水平射程比左半边长一截，看起来
+    /// 「左边少了一点」。端点含入的等分才绕着 0.5π 对称。
     fn spawn(&mut self, center_x: f32, hit_y: f32, velocity: u8, now: f64) {
         let accent = self.hit_color(velocity);
         for i in 0..PARTICLES_PER_HIT {
-            let angle = std::f32::consts::PI * (0.12 + 0.76 * (i as f32 / PARTICLES_PER_HIT as f32));
+            let t = i as f32 / (PARTICLES_PER_HIT - 1) as f32 - 0.5;
+            let angle = std::f32::consts::PI * (0.5 + 0.76 * t);
             let speed = 90.0 + 130.0 * (velocity.min(100) as f32 / 100.0);
             self.particles.push(Particle {
                 pos: Pos2::new(center_x, hit_y),
@@ -231,6 +227,16 @@ impl PlaybackEffect for Synthesia {
         changed
     }
 
+    /// 舞台底色这条口径也交给琴键面板用：勾了「黑色背景」面板一起黑，
+    /// 没勾就跟编辑区同色 —— 面板上探的那 7px 不再露出窗口底色。
+    fn backdrop(&self, grid_bg: Color32) -> Color32 {
+        if self.params.dark_background {
+            STAGE_BACKDROP
+        } else {
+            grid_bg
+        }
+    }
+
     fn draw(&mut self, cx: &FxContext, out: &mut Frame) {
         let scale = cx.scale;
         // 轨道按底部琴键面板的摆放下：面板那一帧的矩形由 `fx_input` 换算成
@@ -240,6 +246,9 @@ impl PlaybackEffect for Synthesia {
             .unwrap_or_else(|| Self::fallback_keyboard(cx.area, scale));
         let hit_y = layout.origin.y;
         let top_y = cx.area.min.y;
+        // 键盘剪影的顶：黑键比白键高出 BLACK_LIFT，击中线压在这条沿上才不会
+        // 横穿黑键。胶囊仍落在白键面沿（`hit_y`），线只是「地面」的记号。
+        let keyline_y = hit_y - BLACK_LIFT * scale;
 
         // 舞台底色：默认跟主界面编辑区同色（浅色主题就是那块白），勾上「黑色背景」
         // 才回到原来那块。参考线和键位高亮的明暗跟着它翻，否则白底上整条线看不见。
@@ -252,7 +261,8 @@ impl PlaybackEffect for Synthesia {
         out.rect(cx.area, back, 0.0);
 
         if self.params.lanes {
-            // 轨道线从键盘上缘拉到屏幕顶，间距就是白键宽。
+            // 轨道线从键盘上缘拉到屏幕顶，间距就是白键宽；下端同样停在键盘剪影
+            // 的顶，不然会戳进黑键上探的那 7px。
             let guide = if light {
                 Color32::from_black_alpha(20)
             } else {
@@ -260,7 +270,7 @@ impl PlaybackEffect for Synthesia {
             };
             for a in 0..=layout.slots {
                 let x = layout.slot_x(a);
-                out.line(Pos2::new(x, top_y), Pos2::new(x, hit_y), 1.0 * scale, guide);
+                out.line(Pos2::new(x, top_y), Pos2::new(x, keyline_y), 1.0 * scale, guide);
             }
         }
 
@@ -273,22 +283,27 @@ impl PlaybackEffect for Synthesia {
             .tick_at_seconds(now_seconds + self.params.fall_seconds as f64);
 
         // 播放头倒退（拖动、循环回绕）时丢掉旧粒子，不然会在两处同时冒。
-        if cx.position + 0.5 < self.last_position {
-            self.particles.clear();
-        }
-        if self.params.particles && cx.playing {
-            let crossed = cx.timeline.notes_in(self.last_position.max(0.0), cx.position);
-            let mut spawned = 0;
-            for note in crossed {
-                if layout.rect_of_key(note.key).is_some() && spawned < 40 {
-                    let x = layout.lane_center(note.key).unwrap_or(cx.area.center().x);
-                    self.spawn(x, hit_y, note.velocity, cx.now);
-                    spawned += 1;
+        // 击中判定用精确窗口（`notes_crossed`）：画胶囊那份 `notes_in` 两端放宽了
+        // 一列，播放头在同一列里走的每一帧都会把那枚音符再当一次「刚跨过」，
+        // 一帧补一束——连续击中时粒子翻几倍，把上限挤爆后更早的束会被中途抽走。
+        if let Some(last) = self.last_position {
+            if cx.position + 0.5 < last {
+                self.particles.clear();
+            }
+            if self.params.particles && cx.playing {
+                let crossed = cx.timeline.notes_crossed(last, cx.position);
+                let mut spawned = 0;
+                for note in crossed {
+                    if layout.rect_of_key(note.key).is_some() && spawned < 40 {
+                        let x = layout.lane_center(note.key).unwrap_or(cx.area.center().x);
+                        self.spawn(x, hit_y, note.velocity, cx.now);
+                        spawned += 1;
+                    }
                 }
             }
         }
         Self::step_particles(&mut self.particles, cx.dt * cx.speed, cx.now);
-        self.last_position = cx.position;
+        self.last_position = Some(cx.position);
 
         for note in cx.timeline.notes_in(from, to) {
             let Some(rect) = layout.rect_of_key(note.key) else {
@@ -355,10 +370,10 @@ impl PlaybackEffect for Synthesia {
             }
         }
 
-        // 击中线：瀑布的「地面」，压在琴键面板的上沿。
+        // 击中线：瀑布的「地面」，压在键盘剪影的顶（面板上沿）——黑键就顶在这条线上。
         out.line(
-            Pos2::new(cx.area.min.x, hit_y),
-            Pos2::new(cx.area.max.x, hit_y),
+            Pos2::new(cx.area.min.x, keyline_y),
+            Pos2::new(cx.area.max.x, keyline_y),
             2.0 * scale,
             Color32::from_rgba_unmultiplied(cx.accent.r(), cx.accent.g(), cx.accent.b(), 210),
         );
@@ -519,12 +534,12 @@ mod tests {
         let mut frame = Frame::default();
         fx.draw(&cx, &mut frame);
 
-        // 击中线压在面板的白键面沿（700 + BLACK_LIFT），不是舞台下缘 800。
-        let hit = panel_layout.origin.y;
+        // 击中线压在键盘剪影的顶（白键面沿 707 再上探 BLACK_LIFT = 700），不是舞台下缘 800。
+        let hit = panel_layout.origin.y - BLACK_LIFT;
         assert!(
             frame.prims.iter().any(|prim| matches!(prim,
                 Primitive::Line { from, to, .. } if (from.y - hit).abs() < 0.01 && (to.y - hit).abs() < 0.01)),
-            "没有一条线压在琴键面沿上（击中线 y 应为 {hit}）"
+            "没有一条线压在黑键顶上（击中线 y 应为 {hit}）"
         );
         // 面板放的是白键槽 10..30，即键号 17..51：45 号在栏里，60 号不在，只剩一枚胶囊。
         let capsules = frame
@@ -577,6 +592,65 @@ mod tests {
         fx.draw(&rig.cx(0.0, 6.0, false), &mut frame);
         fx.draw(&rig.cx(4.0, 7.0, false), &mut frame);
         assert!(fx.particles.is_empty(), "没在播就不撒火花");
+    }
+
+    /// 同一枚音符只撒一次：击中判定用精确窗口（`from ≤ tick ≤ to`）。旧的
+    /// `notes_in` 两端放宽一列，播放头在同一列里走的每帧都把那枚音符再报一次，
+    /// 一帧补一束连撒六七帧 —— 连续击中时粒子翻几倍，1500 上限从队头抽走
+    /// 更早的束（用户看到的「连续击中只播一部分」），40 束/帧的预算也被吃掉。
+    #[test]
+    fn a_note_sparks_once_no_matter_how_long_the_playhead_lingers() {
+        let rig = Rig::new(&[(3, 0, 60)]);
+        let mut fx = Synthesia::default();
+        let mut frame = Frame::default();
+        fx.draw(&rig.cx(0.0, 0.0, true), &mut frame);
+        fx.draw(&rig.cx(3.1, 0.1, true), &mut frame);
+        assert_eq!(fx.particles.len(), PARTICLES_PER_HIT, "跨过第 3 列撒一束");
+        // 播放头还在第 3 列里走（10 t/s 下一列要走好几帧）：不许再补。
+        fx.draw(&rig.cx(3.5, 0.2, true), &mut frame);
+        fx.draw(&rig.cx(3.9, 0.3, true), &mut frame);
+        fx.draw(&rig.cx(4.3, 0.4, true), &mut frame);
+        assert_eq!(
+            fx.particles.len(),
+            PARTICLES_PER_HIT,
+            "同一列里走的后续帧不许再补"
+        );
+    }
+
+    /// 中途开启特效的第一帧只登记播放头：不把之前「跨过」的音符补撒出来。
+    /// 旧代码从 last=0 起算，播放到一半才开特效的话一开就把半首歌各撒一束。
+    #[test]
+    fn enabling_mid_song_only_registers_the_playhead() {
+        let rig = Rig::new(&(0..40u32).map(|t| (t, 0, 60)).collect::<Vec<_>>());
+        let mut fx = Synthesia::default();
+        let mut frame = Frame::default();
+        fx.draw(&rig.cx(150.0, 1.0, true), &mut frame);
+        assert!(fx.particles.is_empty(), "第一帧只登记位置");
+        fx.draw(&rig.cx(150.3, 1.2, true), &mut frame);
+        assert!(fx.particles.is_empty(), "第 150 列没有音符");
+    }
+
+    /// 一束火花左右对称：角度绕正上方等分摊开，最左和最右的水平初速一样大。
+    /// 旧口径的六粒摊在 0.12π..0.753π，中点 0.437π，右半边射程长一截。
+    #[test]
+    fn a_burst_spreads_symmetrically_around_up() {
+        let mut fx = Synthesia::default();
+        fx.spawn(0.0, 0.0, 100, 0.0);
+        let mut left = 0.0_f32;
+        let mut right = 0.0_f32;
+        for p in &fx.particles {
+            assert!(p.vel.y < 0.0, "出生时全部向上");
+            if p.vel.x < 0.0 {
+                left = left.min(p.vel.x);
+            } else {
+                right = right.max(p.vel.x);
+            }
+        }
+        assert!(left < 0.0 && right > 0.0, "两边都得有粒子，不能挤在一边");
+        assert!(
+            (left + right).abs() < 1e-3,
+            "最左 {left} 和最右 {right} 的水平射程要一样远"
+        );
     }
 
     #[test]
@@ -828,5 +902,58 @@ mod tests {
         assert_eq!(info.surface, Surface::Stage);
         assert!(info.wants_piano, "瀑布的轨道按底部琴键栏放下，得把面板顶出来");
         assert!(!info.name.is_empty());
+    }
+
+    /// 击中线不能横穿黑键：黑键比白键高出 BLACK_LIFT，线必须压在键盘剪影的顶，
+    /// 白键面沿那条 y 上不再有任何横线。
+    #[test]
+    fn the_hit_line_tops_the_keyboard_silhouette() {
+        let rig = Rig::new(&[]);
+        let panel = Rect::from_min_size(Pos2::new(100.0, 700.0), Vec2::new(20.0 * KEY_W, 128.0));
+        let layout = crate::fx::panel_keyboard(Some(panel), 1.0, 10, 20).unwrap();
+        let mut cx = rig.cx(0.0, 0.0, false);
+        cx.keyboard = Some(layout);
+        let mut fx = Synthesia::default();
+        let mut frame = Frame::default();
+        fx.draw(&cx, &mut frame);
+
+        let top = layout.origin.y - BLACK_LIFT;
+        let horizontals: Vec<f32> = frame
+            .prims
+            .iter()
+            .filter_map(|p| match p {
+                Primitive::Line { from, to, .. }
+                    if (from.y - to.y).abs() < 0.01 && to.x - from.x > 100.0 =>
+                {
+                    Some(from.y)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            horizontals,
+            vec![top],
+            "击中线该压在黑键顶 {top}（只有这一条横线）"
+        );
+        assert_ne!(
+            layout.origin.y,
+            top,
+            "测试摆放里白键顶和黑键顶必须是两个高度"
+        );
+    }
+
+    /// 琴键面板的底色口径跟着「黑色背景」走：勾了就一起黑，没勾就跟编辑区同色。
+    #[test]
+    fn the_panel_backdrop_follows_the_dark_background_switch() {
+        let grid_bg = Color32::from_rgb(249, 249, 249);
+        let fx = Synthesia::default();
+        assert_eq!(
+            fx.backdrop(grid_bg),
+            grid_bg,
+            "默认跟编辑区同色，面板不另起一套"
+        );
+        let mut dark = Synthesia::default();
+        dark.params.dark_background = true;
+        assert_eq!(dark.backdrop(grid_bg), STAGE_BACKDROP);
     }
 }

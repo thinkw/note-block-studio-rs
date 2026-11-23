@@ -202,6 +202,21 @@ impl FxTimeline {
         let (a, b) = self.window(from, to);
         &self.notes[a..b]
     }
+
+    /// 播放头从 `from` 走到 `to` 这一帧**真正跨过**的音符：`from ≤ tick ≤ to`，
+    /// 两端都不取整放宽。`notes_in` 的 floor/ceil 放宽是给画胶囊用的（窗口宽一列
+    /// 只是多画几个，反正有 ahead 过滤）；击中判定必须精确，不然同一枚音符在
+    /// 它所在的那个整列里每帧都被当成「刚跨过」，一帧一束连撒好几帧。
+    /// 相邻两帧的窗口首尾相接（上一帧的 to 就是这一帧的 from），所以一枚音符
+    /// 至多中一次；恰好压在起播位置上的那枚也算跨过（原版起播先派发落点列）。
+    pub fn notes_crossed(&self, from: f64, to: f64) -> &[FxNote] {
+        if self.notes.is_empty() || !from.is_finite() || !to.is_finite() {
+            return &[];
+        }
+        let start = self.notes.partition_point(|n| (n.tick as f64) < from);
+        let end = self.notes.partition_point(|n| (n.tick as f64) <= to);
+        &self.notes[start..end.max(start)]
+    }
 }
 
 #[cfg(test)]
@@ -329,6 +344,29 @@ mod tests {
         assert!(tl.notes_in(-5.0, -1.0).is_empty());
         // from > to（往回拖）也是空，不是反向切片。
         assert!(tl.notes_in(9.0, 2.0).is_empty());
+    }
+
+    /// 击中判定用的精确窗口：`from ≤ tick ≤ to`，不做 floor/ceil 放宽。
+    /// 播放头在一列里要走上好几帧，放宽的窗口会把同一枚音符每帧再报一次。
+    #[test]
+    fn crossed_notes_use_the_exact_window() {
+        let tl = FxTimeline::bake(&song(), false); // 0..39 每列一枚
+        assert_eq!(
+            tl.notes_crossed(2.9, 3.1)
+                .iter()
+                .map(|n| n.tick)
+                .collect::<Vec<_>>(),
+            vec![3],
+            "跨过第 3 列的那一帧只报这一枚"
+        );
+        // 播放头还在同一列里走的后续帧：没有「刚跨过」的音符。
+        assert!(tl.notes_crossed(3.1, 3.5).is_empty());
+        assert!(tl.notes_crossed(3.5, 3.9).is_empty());
+        // 两端都含：恰好压在起播位置上的那枚算跨过；窗口挪过之后不再重复报。
+        assert_eq!(tl.notes_crossed(3.0, 3.0).len(), 1);
+        assert!(tl.notes_crossed(3.000_001, 3.5).is_empty());
+        // 往回走不是「跨过」。
+        assert!(tl.notes_crossed(9.0, 2.0).is_empty());
     }
 
     /// `tick_at_seconds` 是 `seconds_at` 的反函数：特效算「可见窗口到哪一列」全靠它，

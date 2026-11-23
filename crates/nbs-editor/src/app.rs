@@ -155,8 +155,15 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
         // 不随 `window_scale`（与 #80「钢琴栏不随界面缩放」一致）。
         // #109：高度含黑键高出的 7px（见 `piano::PANEL_HEIGHT`），并且关掉 egui 面板
         // 默认自带的可拖边界和那条分隔线——原版没有，分隔线还会横穿黑键顶部。
+        // 舞台接管时面板底色跟舞台特效同源：面板比可见琴键高出一截，黑键之间
+        // 那 7px 什么都不画，不填就露出窗口底色 —— 深色舞台下面横着一条白边。
+        let panel_frame = if stage {
+            tight().fill(state.fx.stage_backdrop(state.theme.grid_bg))
+        } else {
+            tight()
+        };
         chart = egui::TopBottomPanel::bottom("nbs_piano")
-            .frame(tight())
+            .frame(panel_frame)
             .resizable(false)
             .show_separator_line(false)
             .exact_height(PANEL_HEIGHT * state.prefs.piano_scale)
