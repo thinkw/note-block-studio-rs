@@ -1068,7 +1068,11 @@ pub fn tap_clock_ms() -> i64 {
 }
 
 pub struct EditorState {
+    /// 台前标签的文档：真身住在 [`Self::store`] 的槽位里，这份是切标签时交换过来的
+    /// （见 [`Self::switch_tab`]）。现有 658 处 `state.doc` 引用照旧直接用。
     pub doc: Document,
+    /// 原版 `global.songs[]` + `global.song` 的替身：歌曲标签槽位表。
+    pub store: crate::tabs::SongStore,
     pub viewport: Viewport,
     /// 原版 `hires`（`control_create.gml:110`：`window_scale > 1.25`，绝对倍率含
     /// DPI）：Fluent 主题的画布精灵换 4 倍源图。每帧随 `apply_ui_scale` 更新。
@@ -1266,8 +1270,9 @@ pub struct EditorState {
     pub schematic_command_plan: Option<nbs_io::mc_export::Plan>,
     /// 原版 `sch_command_signature`：方案缓存签名，歌/选项任一变化即失效。
     pub schematic_command_signature: String,
-    /// 原版 `string(o.songs[o.song])` 的替代：开档 / 新建才变化的会话号，
-    /// 内容编辑不变（与原版实例 id 语义一致）。
+    /// 原版 `string(o.songs[o.song])` 的替代：台前标签的缓存身份，号由
+    /// [`crate::tabs::SongStore`] 发，开档 / 新建 / 整首替换才变，内容编辑不变
+    /// （与原版实例 id 语义一致）。
     pub song_session: u64,
     /// 原版 `obj_controller.log_strs`：导出报告等日志行（暂不落盘文件）。
     pub log_strs: Vec<String>,
@@ -1521,8 +1526,16 @@ impl EditorState {
             .map(nbs_io::MidiGmTable::from_persist)
             .unwrap_or_default();
 
+        // 刀 0：文档住进标签槽位表，台前再取一份出来。`state.doc` 于是是「台前镜像」，
+        // 缓存身份 `song_session` 由槽位表发号（原版每首曲子是一个独立 obj_song 实例）。
+        let mut store = crate::tabs::SongStore::new();
+        let first_tab = store.insert(Document::with_song(song));
+        let doc = store.lift(first_tab).expect("刚入槽的标签一定取得到文档");
+        let song_session = store.active_session();
+
         let mut state = Self {
-            doc: Document::with_song(song),
+            doc,
+            store,
             viewport,
             canvas_hires: false,
             hide_note_text: false,
@@ -1615,7 +1628,7 @@ impl EditorState {
             disc_chest_error: None,
             schematic_command_plan: None,
             schematic_command_signature: String::new(),
-            song_session: 1,
+            song_session,
             log_strs: Vec::new(),
             schematic_stats: nbs_io::schematic::SchematicStats::default(),
             schematic_tab: 0,
@@ -1692,6 +1705,58 @@ impl EditorState {
             ));
         }
         state
+    }
+
+    /// 切到某个歌曲标签（原版 `set_song.gml`）。本刀只做「换文档 + 换缓存身份」
+    /// 这一半；停播、清选区、歌词镜像那几项副作用在刀 1 / 刀 4 补齐。
+    /// 标签不存在、或它本来就在台前时返回 false，且什么都不动。
+    pub fn switch_tab(&mut self, id: crate::tabs::SongId) -> bool {
+        if !self.store.swap_active(id, &mut self.doc) {
+            return false;
+        }
+        self.song_session = self.store.active_session();
+        self.invalidate_derived_caches();
+        true
+    }
+
+    /// 新开一个标签，放在标签条末尾、**不在台前**（原版 `open_song_nbs.gml:50-53`
+    /// 就是建实例压进 `songs[]`，切过去是另一步 `set_song`）。
+    pub fn push_tab(&mut self, song: nbs_core::model::Song) -> crate::tabs::SongId {
+        self.store.insert(Document::with_song(song))
+    }
+
+    /// 台前标签（原版 `global.song`）。
+    pub fn active_tab(&self) -> Option<crate::tabs::SongId> {
+        self.store.active()
+    }
+
+    /// 读后台标签的文档（刀 5 的 MCP 跨标签读走这里）；台前那份就是 `self.doc`。
+    pub fn parked_doc(&self, id: crate::tabs::SongId) -> Option<&Document> {
+        self.store.parked_doc(id)
+    }
+
+    /// 台前这一首被整份换掉了（新建 / 载入 / 导入）：换一个新的缓存身份。
+    /// 替掉原来散在五处的 `state.song_session += 1`。
+    pub fn reissue_session(&mut self) {
+        if let Some(session) = self.store.reissue_session() {
+            self.song_session = session;
+        }
+    }
+
+    /// 作废所有按 `doc.song.rev` 缓存的派生态，下一次比较必然落空重算。
+    ///
+    /// 缓存不随标签走是实测定的：整表重算兼容性只要 0.71 ms（10 万音符），而事件表
+    /// 和特效烘焙本来就是「下次播放才建」——切标签即停播，常驻只会把内存乘以标签数
+    /// （特效时间轴 + 事件表实测 4.0 + 1.5 MiB/首）。理由与代价见
+    /// `.work/songtabs-20261123/正式方案.md` 3.2 / 3.4（用户要求 #131）。
+    fn invalidate_derived_caches(&mut self) {
+        // u64::MAX 撞不上：`rev` 只会从当前值往上加，加不到 2^64。
+        self.audio_rev = u64::MAX;
+        self.compat_rev = u64::MAX;
+        // NAN 和任何数比都不相等，`refresh_compat` 的速度档同样落空。
+        self.compat_tempo = f32::NAN;
+        self.schematic_command_signature.clear();
+        self.fx.invalidate_bake();
     }
 
     /// 原版 `control_create.gml` 结尾的开机流程：捐赠横幅按静音到期日重新亮出、
@@ -2799,6 +2864,100 @@ fn apply_audio_prefs(audio: &mut dyn AudioEngine, p: &Preferences) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 刀 0 不变量（用户要求 #131）：切走再切回，台前那份文档整份还原——内容、
+    /// `rev`、撤销历史、脏标记、缓存身份都跟着自己的标签走，不串到隔壁那一首。
+    #[test]
+    fn switch_tab_roundtrips_the_whole_document() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = EditorState::for_test();
+        let home = st.active_tab().expect("启动就有台前标签");
+        let home_session = st.song_session;
+        st.doc.place_note(7, 0, Note::new(0, 45));
+        st.doc.song.dirty = true;
+        let home_rev = st.doc.song.rev;
+        let home_history = st.doc.history.len();
+
+        let other = st.push_tab(nbs_core::model::Song::new());
+        let other_rev = st.parked_doc(other).expect("后台标签读得到文档").song.rev;
+        assert_ne!(other, home);
+        assert_ne!(st.store.session(other), Some(home_session));
+
+        assert!(st.switch_tab(other));
+        assert_eq!(st.song_session, st.store.session(other).unwrap());
+        assert_eq!(st.doc.song.rev, other_rev);
+        assert_eq!(st.doc.history.len(), 0);
+        assert!(!st.doc.song.dirty);
+        assert!(st.doc.song.get(7, 0).is_none());
+        // 台前这一首的槽位是空的（文档在台前），槽里只剩后台那一首。
+        assert!(st.parked_doc(other).is_none());
+
+        assert!(st.switch_tab(home));
+        assert_eq!(st.song_session, home_session);
+        assert_eq!(st.doc.song.rev, home_rev);
+        assert_eq!(st.doc.history.len(), home_history);
+        assert!(st.doc.song.dirty);
+        assert_eq!(st.doc.song.get(7, 0), Some(Note::new(0, 45)));
+        assert!(st.parked_doc(home).is_none());
+        assert!(st.parked_doc(other).unwrap().song.get(7, 0).is_none());
+        // 同一首歌切回来不重演一遍：标签条顺序不变、身份不变。
+        assert_eq!(st.store.order(), &[home, other]);
+        // 台前那一首再切一次是被拒绝的（原版 `set_song` 对同一首直接返回）。
+        assert!(!st.switch_tab(home));
+        assert_eq!(st.doc.song.rev, home_rev);
+    }
+
+    /// 刀 0 不变量：两首曲子算出**同一个 `rev`** 时也不许复用上一首的派生态。
+    /// 只拿 `rev` 当键的下游有四处（右上角徽标、音频事件表、特效烘焙、声源分配方案），
+    /// 串台就是 #116 那个徽标滞后的多标签版本。
+    #[test]
+    fn switch_invalidates_caches_even_when_revs_collide() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = EditorState::for_test();
+        // 台前换成一首音域内的曲子（MC 键域 33..=57）。
+        let mut ok_song = nbs_core::model::Song::new();
+        ok_song.set(2, 0, Note::new(0, 50));
+        ok_song.recalculate();
+        st.doc.replace_song(ok_song);
+        // 后台压一首越界的，且让它和台前撞在同一个 rev 上。
+        let mut bad_song = nbs_core::model::Song::new();
+        bad_song.set(2, 0, Note::new(0, 60));
+        bad_song.set(3, 0, Note::new(0, 61));
+        bad_song.recalculate();
+        let mut bad_doc = Document::new();
+        bad_doc.replace_song(bad_song);
+        assert_eq!(bad_doc.song.rev, st.doc.song.rev);
+        let other = st.store.insert(bad_doc);
+
+        let ok_compat = st.compatibility();
+        st.sync_audio_events();
+        // 关着特效时 refresh 一帧都不烘，这里要验的是「切标签后重烘」，先打开瀑布。
+        st.fx
+            .stack
+            .set_active(crate::fx::synthesia::Synthesia::ID, true);
+        st.refresh_fx();
+        assert_eq!(st.audio_rev, st.doc.song.rev);
+        assert_eq!(st.compat_rev, st.doc.song.rev);
+        assert_eq!(st.fx.baked_for, (st.doc.song.rev, false));
+        assert_eq!(st.fx.timeline.note_count(), 1);
+
+        assert!(st.switch_tab(other));
+        // 四处缓存全被打回哨兵值，而不是「rev 相等就算命中」。
+        assert_eq!(st.audio_rev, u64::MAX);
+        assert_eq!(st.compat_rev, u64::MAX);
+        assert_eq!(st.fx.baked_for, (u64::MAX, false));
+        assert!(st.schematic_command_signature.is_empty());
+        // 重算拿到的是新那首的结论。
+        assert_eq!(st.doc.song.iter_notes().count(), 2, "换过来的文档");
+        st.refresh_fx();
+        assert_eq!(
+            st.fx.timeline.note_count(),
+            2,
+            "切标签之后特效还在画上一首的音符"
+        );
+        assert_ne!(st.compatibility(), ok_compat, "徽标沿用了上一首的判定");
+        assert_eq!(st.compat, 0);
+    }
 
     /// 原版 `update_window_caption.gml`：播放器标题 = 歌名 + " - Player Mode"，
     /// 无歌名退回文件名主干。

@@ -33,6 +33,8 @@ pub mod shortcuts;
 pub mod sound_import;
 pub mod state;
 pub mod statusbar;
+/// 歌曲标签槽位表（原版 `global.songs[]`），见模块注释。
+pub mod tabs;
 pub mod theme;
 pub mod toolbar;
 pub mod transcription;

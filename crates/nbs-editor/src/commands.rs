@@ -364,7 +364,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         Command::ConfirmNew => {
             state.doc.replace_song(Song::new());
             // 原版换歌 = 新实例 id，声源分配方案随之失效。
-            state.song_session += 1;
+            state.reissue_session();
             state.prepare_audio();
             state.viewport.start_tick = 0;
             state.viewport.start_layer = 0;
@@ -1207,7 +1207,7 @@ machine that is already built; change the machine or its speed and these chests 
             state.midi_file.clear();
             state.midi_tab = 0;
             state.doc.replace_song(song);
-            state.song_session += 1;
+            state.reissue_session();
             state.prepare_audio();
             state.viewport.start_tick = 0;
             state.viewport.start_layer = 0;
@@ -2548,7 +2548,7 @@ fn open_nbs_at(state: &mut EditorState, path: &std::path::Path, backup: bool) {
             // 开着的那扇窗，所以要在 `replace_song` 前先记下来。
             let on_instruments = state.window == Some(WindowKind::Instruments);
             state.doc.replace_song(song);
-            state.song_session += 1;
+            state.reissue_session();
             state.prepare_audio();
             state.viewport.start_tick = 0;
             state.viewport.start_layer = 0;
@@ -2617,7 +2617,7 @@ fn import_schematic(state: &mut EditorState, path: &std::path::Path) {
             let inputs = info.inputs;
             let n = info.added_notes;
             state.doc.replace_song(info.song);
-            state.song_session += 1;
+            state.reissue_session();
             state.prepare_audio();
             state.viewport.start_tick = 0;
             state.viewport.start_layer = 0;

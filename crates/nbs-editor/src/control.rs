@@ -1615,7 +1615,7 @@ fn keep_or_replace(
 /// 会话号、音频事件表、视口、落点、区间标记缺一不可。
 fn apply_replacement(state: &mut EditorState, song: Song) {
     state.doc.replace_song(song);
-    state.song_session += 1;
+    state.reissue_session();
     state.prepare_audio();
     state.viewport.start_tick = 0;
     state.viewport.start_layer = 0;
