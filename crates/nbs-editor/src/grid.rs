@@ -538,9 +538,15 @@ fn handle_timeline_input(state: &mut EditorState, input: &InputSnapshot, rect: R
 /// `window = 0` 这道门：滚轮换音色/换键在 `control_draw.gml:227`、悬停音符改属性在
 /// :125 的总闸里、滚动条的滚轮和拖拽在 `draw_scrollbar.gml:22/51/161/188`、
 /// 标尺手柄在 `:132-151`；工具栏音色框展开也写成 `window = w_insbox`（:1975）。
-/// 端口把这几样拆成了三个字段，这里合成回同一个判断。
+/// 端口把这几样拆成了四个字段，这里合成回同一个判断。
+/// 第四条 `menubar_open` 是顶部菜单的下拉：原版走的是同一个 `window += w_menu`
+/// （show_menu_ext.gml:21），egui 的菜单不认画布这套裸输入，只能自己补上这道门
+/// （用户要求 #129）。
 fn canvas_blocked(state: &EditorState) -> bool {
-    state.window.is_some() || state.insbox_open || state.context_menu.is_some()
+    state.window.is_some()
+        || state.insbox_open
+        || state.context_menu.is_some()
+        || state.menubar_open
 }
 
 fn handle_grid_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect) {

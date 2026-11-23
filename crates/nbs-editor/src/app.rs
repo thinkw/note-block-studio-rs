@@ -225,8 +225,46 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
 
     show_windows(state, ctx);
     flush_all(state, ctx);
+    // 原版 `window += w_menu`（show_menu_ext.gml:21）：下拉开着的时候，这一帧全屏的
+    // 输入闸门都是抬着的（用户要求 #129：点菜单以外的地方只用来收菜单，
+    // 不会顺手按到底下的按钮）。画布/琴键那几路读的是裸输入，各自有门
+    // （`canvas_blocked`、`piano::show_piano`）；这里挡的是 egui 控件——
+    // 工具栏图标、状态栏、图层行、窗口里的按钮，一处盖住比逐个面板加门可靠。
+    if state.menubar_open {
+        click_shield(ctx);
+    }
     // 对应原版每步结尾的 `prevwindow = window`：窗口自己的 Ctrl+P 关窗要等下一帧才生效。
     state.window_prev = state.window.clone();
+}
+
+/// 一层看不见的挡板：从菜单栏下缘盖到屏幕底。
+///
+/// 三条线定在这几处：
+/// - `Order::Middle` 压在面板/画布（`LayerId::background()`）之上，仍在 egui 菜单弹层
+///   （`Order::Foreground`，见 `menu.rs` 的 `Area` 摆法）之下——菜单条目照点不误。
+/// - 顶部留出一条 `MENU_HEIGHT`：那是菜单栏自己那一行，点别的标题要能切换/收起，
+///   这是 egui 原生行为，原版也是（`window = 0` 只管画布侧，不管菜单行）。
+/// - 在本帧所有面板和 `show_windows` 之后建：`egui::Window` 同样落在 `Middle`，
+///   同层按登记顺序后建的在上，挡板建早了会被窗体反压，那次点击就穿到窗口控件上了。
+///
+/// 挡板吞掉点击，但收菜单那一下不靠它——`menu.rs` 的 `stationary_interaction` 是拿
+/// 原始输入比 `area_contains` 判定的，不看谁赢得了这次点击。
+fn click_shield(ctx: &Context) {
+    let screen = ctx.screen_rect();
+    let top = screen.min.y + MENU_HEIGHT;
+    if top >= screen.max.y {
+        return;
+    }
+    let shield = Rect::from_min_max(egui::pos2(screen.min.x, top), screen.max);
+    egui::Area::new(egui::Id::new("nbs_menu_click_shield"))
+        .order(egui::Order::Middle)
+        .fixed_pos(shield.min)
+        .default_size(shield.size())
+        .sense(Sense::hover())
+        .show(ctx, |ui| {
+            // 空白 Area 本身只有 hover，真正吃掉点击的是这块带 `CLICK` 的子矩形。
+            ui.allocate_rect(shield, Sense::CLICK);
+        });
 }
 
 #[cfg(test)]

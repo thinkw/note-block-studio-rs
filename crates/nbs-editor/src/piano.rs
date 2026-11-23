@@ -234,8 +234,12 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) -> Option<ChartRequest> 
     };
 
     let pointer = ui.input(|i| i.pointer.hover_pos());
-    let holding = ui.input(|i| i.pointer.any_down());
-    let pressing = ui.input(|i| i.pointer.any_pressed());
+    // 原版 `draw_piano.gml:25/44/88` 三段鼠标判定都带 `window = 0`，:124/:132 那两条
+    // 「松手才停边缘平移」没有，所以按住/按下这一路要让位给顶栏下拉（用户要求 #129），
+    // `down` 留给 :124/:132 用原值。
+    let down = ui.input(|i| i.pointer.any_down());
+    let holding = down && !state.menubar_open;
+    let pressing = ui.input(|i| i.pointer.any_pressed()) && !state.menubar_open;
     let dt = ui.input(|i| i.stable_dt).min(0.1);
     let opts = DrawOpts {
         names: state.flags.show_keynames,
@@ -393,7 +397,7 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) -> Option<ChartRequest> 
 
     // 原版 `d` + `delay`：停在边缘白键上（没按住鼠标时）每 0.1 秒平移一个音。
     state.piano_scroll_delay = (state.piano_scroll_delay - dt).max(0.0);
-    if edge != 0 && !holding {
+    if edge != 0 && !down {
         // 还能不能再往这一侧挪：左到头是槽 0，右到头是槽 `52 - keysshow`。
         let can_pan = (edge < 0 && startkey > 0)
             || (edge > 0 && startkey + keysshow < WHITE_SLOTS);

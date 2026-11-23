@@ -83,6 +83,12 @@ impl Bar {
 }
 
 pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
+    // `menubar_open_end` 进函数时是上一帧帧末的结论，也就是「本帧开始时下拉开着吗」。
+    // 收菜单那一下的判定就在本帧的某个 `menu_button` 里（egui 的 `stationary_interaction`
+    // 拿原始输入比 `area_contains`），只认帧末会让闸门同一帧就落下——画布和琴键
+    // 恰好漏掉这次点击（用例 `a_dismiss_click_on_the_canvas_only_closes_the_menu` 实测到）。
+    // 所以闸门取「开始时开着 或 结束时仍开着」；关掉之后下一帧两侧都是 false，不粘住。
+    let open_at_frame_start = state.menubar_open_end;
     egui::menu::bar(ui, |ui| {
         // 标签和条目名照原版 control_draw.gml 的 `if (language != 1)` 英文分支；
         // 移植版自己加的条目（PNG 谱面 / 自动备份 / 清空所有音符）没有
@@ -555,27 +561,13 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                 ui.close_menu();
             }
         });
-
-        // #124：下拉要「鼠标移开就收」。原版靠指针位置自己收，egui 只在「按住键点到菜单
-        // 外面」那一支才收（menu.rs `stationary_interaction` 的 primary_down 分支），光把指针
-        // 挪走会一直挂着，得再点一下别处或按 Esc。这里在菜单栏这一帧画完之后补一次判断：
-        // `BarState` 里挂着当前那棵菜单的根，`MenuState::area_contains` 会把子菜单一路算进去
-        // （矩形由 egui 自己维护，不必我们逐帧记），指针既不在整棵下拉里、也不在菜单栏这条
-        // 上，就把根节点的 response 写成 Close。`menu_state` 是父子共享的那个 Arc，写它等价于
-        // 在菜单闭包里调 `ui.close_menu()`，好处是不必给 15 处菜单逐个加。
-        // 指针读不到时（移出窗口，`hover_pos` 变 None）不动：离屏用例里的空档帧也是 None，
-        // 当成「已离开」会把所有点菜单的用例打断。
-        if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
-            if !ui.max_rect().contains(pos) {
-                let bar_state = egui::menu::BarState::load(ui.ctx(), ui.id());
-                // 两层公开 Deref：BarState → MenuRootManager → Option<MenuRoot>。
-                if let Some(root) = &**bar_state {
-                    if !root.menu_state.read().area_contains(pos) {
-                        root.menu_state.write().close();
-                    }
-                }
-            }
-        }
+        // 原版 `window += w_menu`（show_menu_ext.gml:21）：下拉一开，全局输入闸门就抬起来。
+        // egui 自己维护这条 bar 的开合状态，存在 bar 的 id 下（`menu_button` 里的
+        // `bar_id = ui.id()`），这里在闭包末尾读一次就是本帧结束时的结论。
+        // 两层 Deref：`BarState` → `MenuRootManager` → `Option<MenuRoot>`，`None` 即没开。
+        let bar = egui::menu::BarState::load(ui.ctx(), ui.id());
+        state.menubar_open_end = (&**bar).is_some();
+        state.menubar_open = open_at_frame_start || state.menubar_open_end;
     });
 }
 

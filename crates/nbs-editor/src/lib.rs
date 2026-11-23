@@ -1027,6 +1027,153 @@ mod gui_window_tests {
         assert!(state.piano_rect.is_some(), "重新打开后矩形要恢复上报");
     }
 
+    /// 用真鼠标点开顶栏一个标题，并确认这一帧闸门已经抬起（`menubar_open` 由
+    /// `toolbar::show_menu_bar` 每帧从 egui 的 bar 状态读出来）。
+    fn open_menubar(state: &mut EditorState, ctx: &egui::Context, title: &str) {
+        click_text(state, ctx, title);
+        assert!(state.menubar_open, "{title} 的下拉应当是开着的");
+    }
+
+    /// 按下 → 继续按住 → 抬起，三点同一处。挡板要吃掉的是「按下」那一下：
+    /// egui 的 `clicked` 要按下与抬起落在同一个控件，抬指单独落下不算。
+    fn click_point(state: &mut EditorState, ctx: &egui::Context, at: egui::Pos2) {
+        drag_between(state, ctx, at, at);
+    }
+
+    fn has_note(state: &EditorState, tick: u32, layer: u32) -> bool {
+        state
+            .doc
+            .song
+            .columns
+            .get(&tick)
+            .is_some_and(|c| c.notes.contains_key(&layer))
+    }
+
+    /// 用户要求 #129：菜单改回「鼠标移开不关」，但关掉它的那一次点击不许穿透到别处。
+    /// 原版只有一道门：`show_menu_ext.gml:21` 的 `window += w_menu`——菜单在屏期间
+    /// 全屏的输入轮询整帧停摆，`menu_draw.gml:202` 松开手才把它自毁。
+    /// 端口这边读输入的三路各有各的算法（画布走 `canvas_blocked`、egui 控件走
+    /// `app::click_shield` 那层挡板、琴键读裸指针），所以三路各钉一条用例，
+    /// 每条都带一次「菜单没开时同一个点真的会起作用」的对照。
+    #[test]
+    fn a_dismiss_click_on_the_canvas_only_closes_the_menu() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        let _ = frame_out(&mut state, &ctx, base_input());
+        // 取靠右下的一格：既要离「文件」那条下拉远些（落在弹层上就不算穿透测试），
+        // 也要避开标尺手柄和两侧的滚动条带。
+        let (tick, layer) = (24i64, 6i64);
+        let at = state.viewport.cell_rect(tick, layer).center();
+        let (tick, layer) = (tick as u32, layer as u32);
+        assert!(!has_note(&state, tick, layer), "这一格得是空的才好对照");
+
+        open_menubar(&mut state, &ctx, "文件");
+        click_point(&mut state, &ctx, at);
+        assert!(!state.menubar_open, "菜单外的一次点击应已收掉菜单");
+        assert!(
+            !has_note(&state, tick, layer),
+            "关菜单那次点击不许穿透到画布落下音符"
+        );
+
+        click_point(&mut state, &ctx, at);
+        assert!(
+            has_note(&state, tick, layer),
+            "对照：没有菜单时同一个点会落一个音符"
+        );
+    }
+
+    /// 挡板那一路：状态栏最右的「琴键」开关是 egui 控件（`Sense::click` 的矩形），
+    /// 画布的 `canvas_blocked` 管不到它，靠 `Order::Middle` 那层透明挡板盖住。
+    #[test]
+    fn a_dismiss_click_on_a_status_bar_button_only_closes_the_menu() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        let _ = frame_out(&mut state, &ctx, base_input());
+        let piano = state.piano_rect.expect("琴键开着时每帧要有 piano_rect");
+        // 与上面那条开关用例同一套坐标：距右缘 4、宽 42，y 取状态栏中线。
+        let at = egui::pos2(1440.0 - 42.0 - 4.0 + 21.0, piano.max.y + 12.0);
+        let before = state.flags.show_piano;
+
+        open_menubar(&mut state, &ctx, "文件");
+        click_point(&mut state, &ctx, at);
+        assert!(!state.menubar_open, "菜单外的一次点击应已收掉菜单");
+        assert_eq!(
+            state.flags.show_piano, before,
+            "关菜单那次点击不该按到状态栏的「琴键」开关"
+        );
+
+        click_point(&mut state, &ctx, at);
+        assert_ne!(
+            state.flags.show_piano, before,
+            "对照：没有菜单时同一个点就是「琴键」开关"
+        );
+    }
+
+    /// 琴键那一路：面板读的是裸指针位置（原版 `draw_piano.gml:25/44/88` 三段各带
+    /// `window = 0`），挡板与画布门都够不着，只能自己让位。
+    #[test]
+    fn a_dismiss_click_on_the_keyboard_only_closes_the_menu() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        let _ = frame_out(&mut state, &ctx, base_input());
+        let panel = state.piano_rect.expect("琴键开着时每帧要有 piano_rect");
+        let at = panel.center();
+        let before = state.current.key;
+
+        open_menubar(&mut state, &ctx, "文件");
+        click_point(&mut state, &ctx, at);
+        assert!(!state.menubar_open, "菜单外的一次点击应已收掉菜单");
+        assert_eq!(state.current.key, before, "关菜单那次点击不该选中琴键");
+
+        click_point(&mut state, &ctx, at);
+        assert_ne!(
+            state.current.key, before,
+            "对照：没有菜单时同一个点会选中一个键"
+        );
+    }
+
+    /// #124 的回退面（用户要求 #129「菜单移开即收改回原来的」）：鼠标从标题移开、
+    /// 在画布上晃几帧，下拉必须还开着——原版只有抬手和 ESC 才收
+    /// （`menu_draw.gml:202` 的自毁条件是松开左键）。
+    #[test]
+    fn moving_the_pointer_away_keeps_the_dropdown_open() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        let _ = frame_out(&mut state, &ctx, base_input());
+        open_menubar(&mut state, &ctx, "文件");
+        for _ in 0..4 {
+            let far = egui::pos2(700.0, 620.0);
+            let mut raw = base_input();
+            raw.events.push(egui::Event::PointerMoved(far));
+            frame_out(&mut state, &ctx, raw);
+        }
+        assert!(
+            state.menubar_open,
+            "鼠标移开不该收起下拉（那是 #124，已回退）"
+        );
+
+        press_key(&mut state, &ctx, egui::Key::Escape);
+        // 闸门口径是「本帧开过」，收菜单那一帧仍为真，收干净要再看一帧。
+        frame(&mut state, &ctx);
+        assert!(!state.menubar_open, "ESC 应当收起下拉");
+    }
+
     /// 帮助菜单倒数第二条（原版 `control_draw.gml:1783/1878` 的 `Changelist...` /
     /// 「更新历史......」）＝ `menu_click.gml:224/229` 的 `window = w_changelist`。
     #[test]
@@ -4083,78 +4230,6 @@ mod gui_window_tests {
                 (win.max.y - ok.max.y - 23.0).abs() < 0.6,
                     "{kind:?}：按钮下沿离窗底应是 23（原版 16 + 边框 7），实得 {:.1}，按钮 {ok:?}、窗 {win:?}",
                     win.max.y - ok.max.y
-            );
-        }
-    }
-
-    /// 只把指针平移过去、不按下，连走 `n` 帧，返回最后一帧画到屏幕上的文字。
-    /// `drawn_texts` 走的是不带指针事件的输入，测「移开就关」必须自己喂 PointerMoved。
-    fn hover_for(
-        state: &mut EditorState,
-        ctx: &egui::Context,
-        p: egui::Pos2,
-        n: usize,
-    ) -> Vec<String> {
-        let mut texts = Vec::new();
-        for _ in 0..n {
-            let mut input = base_input();
-            input.events.push(egui::Event::PointerMoved(p));
-            let out = frame_out(state, ctx, input);
-            texts = out
-                .shapes
-                .iter()
-                .filter_map(|cs| match &cs.shape {
-                    egui::Shape::Text(t) => Some(t.galley.text().to_string()),
-                    _ => None,
-                })
-                .collect();
-        }
-        texts
-    }
-
-    /// #124：菜单栏的下拉要「鼠标移开就收」，不用再点一下别处或按 Esc。真点一下「文件」
-    /// 打开，然后分三种走法验：指针停在条目上（不能误关）、停在子菜单里（父菜单不能跟着关）、
-    /// 移到窗口角落的空处（要关）。写 Close 的那一帧菜单还会画一次，所以每种都走三帧。
-    #[test]
-    fn menubar_dropdown_closes_when_the_pointer_moves_away() {
-        let ctx = egui::Context::default();
-        let mut state = state_with_selection();
-        state.theme.apply(&ctx);
-        click_text(&mut state, &ctx, "文件");
-        let open = drawn_at(&mut state, &ctx);
-        let item = open
-            .iter()
-            .find(|(t, _)| t == "另存为")
-            .map(|(_, p)| *p)
-            .expect("测试前提：「文件」的下拉是开着的");
-        // 指针压在条目上：这是正常悬停，菜单必须留着。
-        let texts = hover_for(&mut state, &ctx, item + egui::vec2(12.0, 6.0), 3);
-        assert!(
-            texts.iter().any(|t| t == "另存为"),
-            "指针还在下拉里，不该关：{texts:?}"
-        );
-        // 换到「编辑 → 快捷键......」两层深的子菜单：指针在子菜单里、已经出了父菜单的框，
-        // 父菜单不能把整棵树一起带走。
-        click_text(&mut state, &ctx, "编辑");
-        click_text(&mut state, &ctx, "快捷键......");
-        let rows = drawn_at(&mut state, &ctx);
-        let macro_row = rows
-            .iter()
-            .find(|(t, _)| t == "Tremolo...  Ctrl+Shift+A")
-            .map(|(_, p)| *p)
-            .expect("测试前提：宏子菜单是开着的");
-        let texts = hover_for(&mut state, &ctx, macro_row + egui::vec2(20.0, 6.0), 3);
-        assert!(
-            texts.iter().any(|t| t == "Tremolo...  Ctrl+Shift+A")
-                && texts.iter().any(|t| t == "快捷键......"),
-            "指针在子菜单里，父菜单不该跟着关：{texts:?}"
-        );
-        // 最后移到时间轴那块空处（不按下）：下一帧起下拉就该没了。
-        let texts = hover_for(&mut state, &ctx, egui::pos2(1380.0, 860.0), 3);
-        for gone in ["Tremolo...  Ctrl+Shift+A", "另存为"] {
-            assert!(
-                !texts.iter().any(|t| t == gone),
-                "鼠标移开后「{gone}」还画着：{texts:?}"
             );
         }
     }

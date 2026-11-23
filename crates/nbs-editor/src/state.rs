@@ -1321,6 +1321,15 @@ pub struct EditorState {
     pub icons: crate::icons::Icons,
     /// 原版 `showinsbox`：工具栏音色框是否展开成整窗网格。
     pub insbox_open: bool,
+    /// 原版 `window += w_menu`（show_menu_ext.gml:21）：顶栏下拉在这一帧里开过。
+    /// 三条输入闸门都读它——画布（grid.rs 的 `canvas_blocked`）、琴键（piano.rs）、
+    /// egui 控件（app.rs 那层挡板）。用户要求 #129：关菜单的那一次点击不许穿透到别处。
+    /// 口径是「本帧开过」而不是「帧末还开着」：收菜单那一下的判定就发生在本帧的
+    /// `menu_button` 里，只认帧末会让闸门同一帧落下，那一下点击照样穿透
+    /// （`a_dismiss_click_on_the_canvas_only_closes_the_menu` 实测到过）。
+    pub menubar_open: bool,
+    /// 上一帧帧末的原始开合，只用来算出本帧的 `menubar_open`（见 `show_menu_bar`）。
+    pub menubar_open_end: bool,
     /// 原版 `insbox_start`：收起状态下这一行从第几个音色开始画。
     pub insbox_start: usize,
     /// 原版 `forward`：按住快退 / 快进时的滚动方向（-1 / 0 / +1）。
@@ -1639,6 +1648,8 @@ impl EditorState {
             vsync_request: None,
             icons: crate::icons::Icons::default(),
             insbox_open: false,
+            menubar_open: false,
+            menubar_open_end: false,
             insbox_start: 0,
             scrub: 0,
             record: false,
