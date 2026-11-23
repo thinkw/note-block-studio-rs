@@ -4830,6 +4830,118 @@ mod gui_window_tests {
         );
     }
 
+    /// 用户要求 #130：打开歌曲后弹的那张信息卡要能用 ESC 关掉。原版没有这条
+    /// （`draw_window_songinfo.gml:139` 只读版认全屏左键、:133/136 带按钮版认「确定」），
+    /// 两版同一扇窗、同一个绘制函数，所以各钉一次。
+    #[test]
+    fn esc_closes_both_song_info_variants() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        for kind in [WindowKind::SongInfo, WindowKind::SongInfoEdit] {
+            let mut state = EditorState::for_test();
+            state.prefs.language = 1;
+            state.theme.apply(&ctx);
+            state.doc.song.meta.name = "Ring".into();
+            state.window = Some(kind.clone());
+            frame(&mut state, &ctx);
+            assert_eq!(state.window, Some(kind.clone()), "前提：{kind:?} 开着");
+            press_key(&mut state, &ctx, egui::Key::Escape);
+            assert_eq!(state.window, None, "ESC 该关掉 {kind:?}");
+        }
+    }
+
+    /// 同一次 ESC 只收下拉、不关窗（原版 `draw_windows.gml:31-38` 的两步规则）。
+    /// 顶栏那一路必须靠 #129 的 `menubar_open`：egui 在 `menu.rs:366` 就把这次 Escape
+    /// 用掉了，等画到信息窗时 `any_popup_open()` 已经是假，只看它会让一按既收下拉又关窗。
+    /// 用带按钮那一版：只读版「点任意处即关」（:139），点开下拉的那一下本身就会把它带走，
+    /// 两扇在真实操作里不可能同时挂着（下面 first_click_dismisses 那条就是这个）。
+    #[test]
+    fn esc_under_an_open_dropdown_only_closes_the_dropdown() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.prefs.language = 1;
+        state.theme.apply(&ctx);
+        state.doc.song.meta.name = "Ring".into();
+        state.window = Some(WindowKind::SongInfoEdit);
+        frame(&mut state, &ctx);
+        open_menubar(&mut state, &ctx, "文件");
+        assert_eq!(
+            state.window,
+            Some(WindowKind::SongInfoEdit),
+            "前提：带按钮那一版不会被这一下点没"
+        );
+
+        press_key(&mut state, &ctx, egui::Key::Escape);
+        assert_eq!(
+            state.window,
+            Some(WindowKind::SongInfoEdit),
+            "收下拉这一下不该顺手关窗口"
+        );
+        // 闸门口径是「本帧开过」（#129），收下拉那一帧仍为真，收干净要再看一帧。
+        frame(&mut state, &ctx);
+        assert!(!state.menubar_open, "ESC 该把顶栏下拉收掉");
+
+        press_key(&mut state, &ctx, egui::Key::Escape);
+        assert_eq!(state.window, None, "第二次 ESC 才是关窗");
+    }
+
+    /// 真实键盘的「按下」和「抬起」多半落在不同帧（eframe 每个原始事件催一帧），
+    /// 所以这条把两个事件拆到两帧喂。闸门若认「抬起」：抬起那帧下拉已经收干净、
+    /// `menubar_open` 也翻回假，同一次 ESC 就会既收菜单又关窗，违反原版
+    /// `draw_windows.gml:31-38` 的两步规则。原版窗口级 ESC 本身就取按下
+    /// （`draw_windows.gml:28` 的 `keyboard_check_pressed(vk_escape)`）。
+    #[test]
+    fn esc_split_across_frames_still_only_closes_the_dropdown() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.prefs.language = 1;
+        state.theme.apply(&ctx);
+        state.doc.song.meta.name = "Ring".into();
+        state.window = Some(WindowKind::SongInfoEdit);
+        frame(&mut state, &ctx);
+        open_menubar(&mut state, &ctx, "文件");
+        assert_eq!(
+            state.window,
+            Some(WindowKind::SongInfoEdit),
+            "前提：窗还开着"
+        );
+
+        let mk = |pressed: bool| egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Default::default(),
+        };
+        let mut press = base_input();
+        press.events.push(mk(true));
+        frame_out(&mut state, &ctx, press);
+        assert_eq!(
+            state.window,
+            Some(WindowKind::SongInfoEdit),
+            "按下这一下只该收下拉"
+        );
+
+        let mut lift = base_input();
+        lift.events.push(mk(false));
+        frame_out(&mut state, &ctx, lift);
+        assert_eq!(
+            state.window,
+            Some(WindowKind::SongInfoEdit),
+            "抬起那帧不该补一刀关窗"
+        );
+        frame(&mut state, &ctx);
+        assert!(!state.menubar_open, "下拉该已收掉");
+
+        let mut esc = base_input();
+        esc.events.push(mk(true));
+        esc.events.push(mk(false));
+        frame_out(&mut state, &ctx, esc);
+        assert_eq!(state.window, None, "第二次 ESC 才是关窗");
+    }
+
     /// 原版 `load_song.gml:64`：`if (window != w_instruments && newsong.song_name != "") window = w_songinfo`。
     /// 拆成三条闸门——歌名非空才弹、音色窗开着不抢、整段又在 `if (!backup)` 里；
     /// 弹的是没按钮、按左键即关的那一版（`:110/138-143`），不是工具栏开的带按钮版。
