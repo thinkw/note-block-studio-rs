@@ -410,9 +410,31 @@ pub fn parse_language(locale: &str) -> u8 {
     }
 }
 
-/// 原版 `control_draw.gml:47-50` 的 `game_set_speed` 档位表，也是首选项下拉里的五项。
+/// 原版 `control_draw.gml:47-50` 的 `game_set_speed` 档位表。
 /// 0 档源码不调 `game_set_speed`，走的是房间默认的 30 帧，下拉里同样写「30帧」。
-pub const REFRESH_RATES: [u32; 5] = [30, 60, 120, 144, 240];
+/// 下标就是原版的 `refreshrate`，也是写进 prefs.json 的那个数，所以新档位只往表尾加
+/// （用户要求 #126 的 165 落在下标 5）：插进 144 和 240 之间会把老配置里存的 4 —— 也就是
+/// 原版那一档 240 —— 静默换成 165，而选过 240 的恰好是群里最在意高刷的人。
+pub const REFRESH_RATES: [u32; 6] = [30, 60, 120, 144, 240, 165];
+
+/// 按帧数从小到大排的下标。首选项下拉和 F7 循环都走这个顺序，让「列表里的上下关系」跟
+/// 数值一致（#126 偏离：代价是表尾的 165 排在下标 4 那档 240 前面，见 `REFRESH_RATES`）。
+pub fn refresh_rate_order() -> Vec<usize> {
+    let mut order: Vec<usize> = (0..REFRESH_RATES.len()).collect();
+    order.sort_by_key(|&i| REFRESH_RATES[i]);
+    order
+}
+
+/// 某一档（存的是 `refreshrate` 下标）在升序展示里排第几——下拉里要打勾的那一项、
+/// 框里显示的那一行、F7 循环的下一步，都从这里换算。越界下标先取模，和 `refresh_limit` 一致。
+pub fn refresh_rate_pos(rate: u8) -> usize {
+    let order = refresh_rate_order();
+    let cur = rate as usize % REFRESH_RATES.len();
+    order
+        .iter()
+        .position(|&i| i == cur)
+        .expect("order 覆盖 0..len 全部下标，取模后必命中")
+}
 
 impl Preferences {
     /// 原版 `if (autosave && …)`：开关关掉后间隔就不参与倒计时。
@@ -1028,7 +1050,8 @@ mod tests {
         );
     }
 
-    /// 原版 `control_draw.gml:47-50` + 首选项下拉：0..4 = 30 / 60 / 120 / 144 / 240。
+    /// 原版 `control_draw.gml:47-50`：0..4 = 30 / 60 / 120 / 144 / 240；#126 追加的
+    /// 165 占下标 5，老下标的含义一个都没动。
     #[test]
     fn refresh_rate_maps_to_original_frames() {
         let mut p = Preferences::default();
@@ -1037,10 +1060,27 @@ mod tests {
             30.0,
             "出厂 refreshrate = 0（control_create.gml:130），对应 30 帧"
         );
-        for (rate, fps) in [(1u8, 60.0), (2, 120.0), (3, 144.0), (4, 240.0)] {
+        for (rate, fps) in [(1u8, 60.0), (2, 120.0), (3, 144.0), (4, 240.0), (5, 165.0)] {
             p.refresh_rate = rate;
             assert_eq!(p.refresh_limit(), fps);
         }
+    }
+
+    /// #126：表尾追加的那一档在界面上要按帧数升序出现，而不是按存储下标。
+    #[test]
+    fn refresh_rate_display_order_is_ascending() {
+        let order = refresh_rate_order();
+        let shown: Vec<u32> = order.iter().map(|&i| REFRESH_RATES[i]).collect();
+        assert_eq!(
+            shown,
+            vec![30, 60, 120, 144, 165, 240],
+            "下拉与 F7 循环的展示顺序"
+        );
+        assert_eq!(
+            order.iter().copied().collect::<Vec<usize>>(),
+            vec![0, 1, 2, 3, 5, 4],
+            "展示位次要能反查回存储下标，否则选中的不是自己看到的那一档"
+        );
     }
 
     /// 原版出厂的 `window_scale` 是 `dpi / 96`，「重置」按钮只在两者相等时锁住。

@@ -1926,12 +1926,15 @@ impl EditorState {
         }
     }
 
-    /// 原版 F7（`control_draw.gml:840-867`）：0→1→2→3→4→0 循环，每档回显一句
-    /// 「帧数上限 => N FPS」。原版只改内存里的 `refreshrate`（退出时才统一
-    /// `save_settings`），这里立刻落盘，理由是端口把帧率上限当成偏好项，
-    /// 首选项下拉和它是同一份数据，不落盘就会出现「界面显示 144、重启回到 30」。
+    /// 原版 F7（`control_draw.gml:840-867`）：档位 +1 取模循环，每档回显一句
+    /// 「帧数上限 => N FPS」，且只改运行值、不写 settings.ini —— 落盘留给首选项「确定」，
+    /// `f7_cycles_the_frame_cap_and_reports_it` 就是钉这一条的。
+    /// 循环走 `refresh_rate_order` 的升序而不是存储下标（#126 偏离）：165 只能追加在表尾，
+    /// 按下标循环会变成「240 → 165」，和下拉里看到的上下顺序对不上。
     pub fn cycle_refresh_rate(&mut self) {
-        let next = (self.prefs.refresh_rate as usize + 1) % REFRESH_RATES.len();
+        let order = nbs_io::prefs::refresh_rate_order();
+        let pos = nbs_io::prefs::refresh_rate_pos(self.prefs.refresh_rate);
+        let next = order[(pos + 1) % order.len()];
         self.prefs.refresh_rate = next as u8;
         self.set_message(format!(
             "{} => {} FPS",

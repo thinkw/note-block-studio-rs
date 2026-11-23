@@ -554,7 +554,7 @@ pub fn shortcut_help() -> Vec<(&'static str, &'static str)> {
             "F7",
             "F7",
             "Cycle the frame-rate cap (30 / 60 / 120 / 144 / 240, while stopped)",
-            "循环切换帧数上限（30 / 60 / 120 / 144 / 240，停止播放时）",
+            "循环切换帧数上限（30 / 60 / 120 / 144 / 165 / 240，停止播放时）",
         ),
         (
             "F10 / F11",
@@ -856,7 +856,7 @@ mod tests {
         assert!(
             has(
                 "F7",
-                "循环切换帧数上限（30 / 60 / 120 / 144 / 240，停止播放时）",
+                "循环切换帧数上限（30 / 60 / 120 / 144 / 165 / 240，停止播放时）",
                 "Cycle the frame-rate cap (30 / 60 / 120 / 144 / 240, while stopped)"
             ),
             "缺 F7 行"

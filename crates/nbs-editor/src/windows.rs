@@ -1718,10 +1718,11 @@ fn prefs_interface(
     // 原版 `draw_areaheader(x1 + 258, y1 + 74, 220, 60, "帧率限制")`。
     pg.header(258.0, 74.0, 220.0, 60.0, tr("Max. frame rate", "帧率限制"));
     pg.frame_box(274.0, 95.0, 374.0, 115.0);
-    let rate = state.prefs.refresh_rate as usize % rate_items().len();
+    let items = rate_items();
+    let shown = nbs_io::prefs::refresh_rate_pos(state.prefs.refresh_rate);
     pg.text(
         pg.row(277.0, 98.0),
-        rate_items()[rate],
+        items[shown].as_str(),
         PREFS_FONT,
         pg.ink(),
     );
@@ -2363,17 +2364,26 @@ fn theme_menu(state: &mut EditorState, ui: &Ui, at: Pos2) {
     }
 }
 
-/// 原版 `show_menu_ext("refreshrate", …)`：框里显示的那一行和菜单五项是同一串字。
+/// 原版 `show_menu_ext("refreshrate", …)`：框里显示的那一行和下拉清单是同一串字。
 fn rate_menu(state: &mut EditorState, ui: &Ui, at: Pos2) {
     let th = state.theme.clone();
     let bank = state.icons.bank();
     let items = rate_items();
-    // 原版五项都有 `check(refreshrate = i)`，当前帧率那一项前面要打勾。
-    let sel = state.prefs.refresh_rate as usize;
-    let (picked, dismissed) =
-        popup_list(ui, "prefs_rate_menu", at, &items, sel, &th, bank.as_deref());
+    let labels: Vec<&str> = items.iter().map(String::as_str).collect();
+    // 原版每一项都带 `check(refreshrate = i)`，当前帧率那一项前面要打勾。
+    let sel = nbs_io::prefs::refresh_rate_pos(state.prefs.refresh_rate);
+    let (picked, dismissed) = popup_list(
+        ui,
+        "prefs_rate_menu",
+        at,
+        &labels,
+        sel,
+        &th,
+        bank.as_deref(),
+    );
     if let Some(i) = picked {
-        state.prefs.refresh_rate = i as u8;
+        // 清单按帧数升序排，选中的位次要先换算回存储下标（#126）。
+        state.prefs.refresh_rate = nbs_io::prefs::refresh_rate_order()[i] as u8;
         state.emit(Command::SavePreferences);
     }
     if picked.is_some() || dismissed {
@@ -2412,13 +2422,23 @@ const PREFS_FONT: f32 = crate::fonts::MAIN_SIZE;
 /// 分组标题与页签：原版 `fnt_info_med` 11pt = 14.67px（`fonts::INFO_MED_SIZE`）。
 const PREFS_FONT_MED: f32 = crate::fonts::INFO_MED_SIZE;
 
-/// 原版「帧率限制」下拉的五项，下标就是 `refreshrate`。
-fn rate_items() -> [&'static str; 5] {
-    if crate::lang() == 1 {
-        ["30帧", "60帧", "120帧", "144帧", "240帧"]
-    } else {
-        ["30FPS", "60FPS", "120FPS", "144FPS", "240FPS"]
-    }
+/// 原版「帧率限制」下拉的五项（`draw_window_preferences.gml:336-337` 那串
+/// `check(refreshrate = N) + "NFPS"`），字面由 `REFRESH_RATES` 生成。顺序按帧数升序而
+/// 不是存储下标（#126，见 `refresh_rate_order`），所以下标不等于 `refresh_rate`，
+/// 来回换算走 `refresh_rate_pos`。
+fn rate_items() -> Vec<String> {
+    let zh = crate::lang() == 1;
+    nbs_io::prefs::refresh_rate_order()
+        .into_iter()
+        .map(|i| {
+            let fps = nbs_io::prefs::REFRESH_RATES[i];
+            if zh {
+                format!("{fps}帧")
+            } else {
+                format!("{fps}FPS")
+            }
+        })
+        .collect()
 }
 
 /// 端口自加（用户要求「有一个底座可以在上面扩展各种播放效果并可以切换」）：特效清单。

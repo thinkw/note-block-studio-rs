@@ -3794,8 +3794,9 @@ mod tests {
         assert_eq!(state.viewport.start_layer, 18, "End = 原版 startb = endb");
     }
 
-    /// 原版 F7（`control_draw.gml:840-866`）：档位 0→1→2→3→4→0，每档把帧数写进状态栏，
+    /// 原版 F7（`control_draw.gml:840-866`）：档位循环 +1 取模，每档把帧数写进状态栏，
     /// 而且只改运行值、不写 settings.ini —— 落盘留给首选项「确定」。
+    /// 循环顺序按帧数升序（#126 追加的 165 在下标 5，展示位次在 240 前面）。
     #[test]
     fn f7_cycles_the_frame_cap_and_reports_it() {
         let _prefs = crate::isolate_prefs();
@@ -3803,7 +3804,7 @@ mod tests {
         let mut state = state_with(Song::new());
         state.prefs.refresh_rate = 3;
         state.save_prefs();
-        for (want_rate, want_fps) in [(4u8, 240u32), (0, 30), (1, 60), (2, 120)] {
+        for (want_rate, want_fps) in [(5u8, 165u32), (4, 240), (0, 30), (1, 60), (2, 120)] {
             dispatch(&mut state, Command::CycleRefreshRate, &ctx);
             assert_eq!(state.prefs.refresh_rate, want_rate, "F7 档位循环顺序");
             assert_eq!(
