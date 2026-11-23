@@ -4949,8 +4949,9 @@ mod fx_wiring_tests {
             !state.fx.stack.frame().is_empty(),
             "舞台那一帧要真的排出图元"
         );
-        // 「音符刚好落到琴键上」的口径：击中线压在面板的白键面沿，不是区域下缘。
-        let hit = panel.min.y + fx::keyboard::BLACK_LIFT * state.prefs.piano_scale.max(0.1);
+        // 「音符刚好落到琴键上」的口径：击中线压在面板上沿（黑键顶出来的那条剪影线），
+        // 不横穿黑键；胶囊落点仍是白键面沿 panel.min.y + BLACK_LIFT × 缩放。
+        let hit = panel.min.y;
         assert!(
             state
                 .fx
@@ -4961,7 +4962,7 @@ mod fx_wiring_tests {
                 .any(|prim| matches!(prim,
                     fx::stage::Primitive::Line { from, to, .. }
                         if (from.y - hit).abs() < 0.5 && (to.y - hit).abs() < 0.5)),
-            "瀑布的击中线没压在琴键面沿 {hit} 上"
+            "瀑布的击中线没压在键盘剪影的顶 {hit} 上"
         );
     }
 

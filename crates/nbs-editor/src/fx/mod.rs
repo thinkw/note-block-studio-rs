@@ -133,6 +133,14 @@ pub trait PlaybackEffect {
     fn note(&self) -> Option<String> {
         None
     }
+
+    /// 舞台接管时，底部琴键栏那条面板的底色该用什么。
+    /// 面板比可见琴键高出一截（黑键上探的 7px），这段本来什么都不画，露出来的是
+    /// 窗口底色 —— 浅色界面里看不出来，深色舞台往上一压就是一条白边。跟舞台
+    /// 底色同源才接得上。`grid_bg` 是主题编辑区的底色，没有特别要求的照旧用它。
+    fn backdrop(&self, grid_bg: Color32) -> Color32 {
+        grid_bg
+    }
 }
 
 /// 当前启用中的特效集合，按 z 序合成。
@@ -260,6 +268,19 @@ impl FxStack {
             .iter()
             .find(|a| self.info(a).map(|i| i.surface) == Some(Surface::Stage))
             .cloned()
+    }
+
+    /// 琴键面板在舞台接管时该填的底色：取启用中那个舞台特效的口径（[`PlaybackEffect::backdrop`]）。
+    /// 没有舞台在画时也返回主题底色 —— 面板填不填由 `app.rs` 另行判断。
+    pub fn stage_backdrop(&self, grid_bg: Color32) -> Color32 {
+        self.stage_id()
+            .and_then(|id| {
+                self.effects
+                    .iter()
+                    .find(|e| e.info().id == id)
+                    .map(|e| e.backdrop(grid_bg))
+            })
+            .unwrap_or(grid_bg)
     }
 
     /// 有没有特效要求底部钢琴栏跟着显示。
@@ -510,6 +531,12 @@ impl FxState {
     /// 面板那条键盘的摆放算，画面里不会出现两条键盘。
     pub fn wants_piano(&self) -> bool {
         self.stack.wants_piano()
+    }
+
+    /// 琴键面板在舞台接管时该填的底色（取启用中舞台特效的口径，见
+    /// [`FxStack::stage_backdrop`]）。
+    pub fn stage_backdrop(&self, grid_bg: Color32) -> Color32 {
+        self.stack.stage_backdrop(grid_bg)
     }
 
     /// 有没有画在叠加层上的特效。`app.rs` 靠它决定要不要为叠加那一路凑一份输入
@@ -795,6 +822,25 @@ mod tests {
         assert_eq!(layout.slots, 52);
         assert_eq!(layout.origin.y, 500.0 + BLACK_LIFT);
         assert_eq!(layout.slot_white_key(0), Some(0));
+    }
+
+    /// 舞台接管时琴键面板的底色取自启用中的舞台特效：默认跟编辑区同色，
+    /// 勾了「黑色背景」就一起黑。没有舞台在画（或被叠加特效换下）时回落编辑区底色。
+    #[test]
+    fn stage_backdrop_comes_from_the_active_stage_effect() {
+        let grid_bg = Color32::from_rgb(249, 249, 249);
+        let mut stack = FxStack::new();
+        assert_eq!(stack.stage_backdrop(grid_bg), grid_bg, "没有舞台在画");
+        stack.set_active("synthesia", true);
+        assert_eq!(stack.stage_backdrop(grid_bg), grid_bg, "默认跟编辑区同色");
+        stack.effects[0].set_params(&serde_json::json!({ "dark_background": true }));
+        assert_eq!(stack.stage_backdrop(grid_bg), STAGE_BACKDROP, "面板要跟舞台一起黑");
+        stack.set_active("synthesia", false);
+        assert_eq!(
+            stack.stage_backdrop(grid_bg),
+            grid_bg,
+            "舞台关掉后回落到编辑区底色"
+        );
     }
 
     /// `store` 只写不读：调参面板改的是特效自己的字段，落盘必须拿新值。
