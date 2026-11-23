@@ -4030,6 +4030,63 @@ mod gui_window_tests {
         assert_eq!(state.window, None, "无选区时开不了宏窗口");
     }
 
+    /// #125：「仅限资源包」那扇窗的「确定」原先压在窗底外面。原版窗口是
+    /// `draw_window(x1, y1, x1 + 490, y1 + 450)`（`draw_window_minecraft.gml:10`），按钮
+    /// 在 `(x1 + 240 - 36, y1 + 413)` 高 21（`:495`）——按钮下沿离窗底 16 像素。端口先前把
+    /// 内容高度写成 `450 - 38`（比 450 - 30/26 少 8/12 像素），又没按首选项那套把 Fluent
+    /// 的 22 减回去：Fluent（出厂主题）下按钮整颗往下挪 26 像素，下沿超出窗底 7 像素被裁掉。
+    /// 这里四套主题各量一次：按钮下沿离窗底都是 23 = 原版那 16 + egui 自己的 7 像素边框余量。
+    #[test]
+    fn compat_window_ok_button_stays_inside_the_frame() {
+        for kind in [
+            crate::theme::ThemeKind::Aqua,
+            crate::theme::ThemeKind::Retro,
+            crate::theme::ThemeKind::Dark,
+            crate::theme::ThemeKind::Fluent,
+        ] {
+            let ctx = egui::Context::default();
+            let mut state = state_with_selection();
+            state.theme = crate::theme::Theme::new(kind);
+            state.theme.apply(&ctx);
+            state.window = Some(WindowKind::MinecraftCompat);
+            frame_out(&mut state, &ctx, base_input());
+            let out = frame_out(&mut state, &ctx, base_input());
+            let win = ctx
+                .memory(|m| m.area_rect(egui::Id::new("nbs_win_MinecraftCompat")))
+                .expect("窗口矩形已记账");
+            // 「确定」这颗窗里只有一颗：先按文字定位，再取套住它的那颗按钮矩形。
+            let label = out
+                .shapes
+                .iter()
+                .filter_map(|cs| match &cs.shape {
+                    egui::Shape::Text(t) if t.galley.text() == "确定" => Some(t.pos),
+                    _ => None,
+                })
+                .next()
+                .expect("窗口里画了「确定」");
+            let ok = out
+                .shapes
+                .iter()
+                .filter_map(|cs| match &cs.shape {
+                    egui::Shape::Rect(r)
+                        if (r.rect.width() - 71.0).abs() < 4.0
+                            && r.rect.height() < 30.0
+                            && r.rect.contains(label) =>
+                    {
+                        Some(r.rect)
+                    }
+                    _ => None,
+                })
+                .next()
+                .unwrap_or_else(|| panic!("{kind:?}：没找到套住「确定」的按钮矩形"));
+            assert!(
+                (win.max.y - ok.max.y - 23.0).abs() < 0.6,
+                    "{kind:?}：按钮下沿离窗底应是 23（原版 16 + 边框 7），实得 {:.1}，按钮 {ok:?}、窗 {win:?}",
+                    win.max.y - ok.max.y
+            );
+        }
+    }
+
     // ---- 主题色取色器 `w_setaccent`（draw_window_set_accent.gml）----
 
     /// 屏幕上某个尺寸的实心矩形，按绘制顺序返回。

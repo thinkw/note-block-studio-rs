@@ -9313,7 +9313,13 @@ fn minecraft_compat_window(state: &mut EditorState, ui: &mut Ui) {
     let margin = ui.spacing().window_margin;
     let (ml, mr) = (margin.left as f32, margin.right as f32);
     // 和首选项窗口同一套换算：原版 `draw_window` 的 (x1, y1) 对应这里的行坐标 0。
-    let body = ui.allocate_exact_size(egui::vec2(490.0 - ml - mr, 450.0 - 38.0), Sense::hover());
+    // 原版 `draw_window(x1, y1, x1 + 490, y1 + 450 + navigation_space)`。内容高度按
+    // 首选项那一套换算：原版总高减掉 egui 标题栏占的 30（Fluent）/ 26（其余），
+    // 先前钉死 `450 - 38` 少了 8/12 像素，「确定」就掉到窗底外面。
+    let body = ui.allocate_exact_size(
+        egui::vec2(490.0 - ml - mr, if fluent { 420.0 } else { 424.0 }),
+        Sense::hover(),
+    );
     let o = body.0.min - egui::vec2(ml, 0.0);
     let ry = if fluent { -8.0 } else { -26.0 };
 
@@ -9760,8 +9766,11 @@ fn minecraft_compat_window(state: &mut EditorState, ui: &mut Ui) {
         }
     }
 
-    // 原版 `draw_button2(x1 + 240 - 36, y1 + 413, 72, "确定")`。
-    if pg.button(204.0, 413.0, 72.0, tr("OK", "确定"), false) {
+    // 原版 `draw_button2(x1 + 240 - 36, y1 + 413 + navigation_space, 72, "确定")`：
+    // 这一行不带 `(theme = 3) * 22`，所以 Fluent 要把那 22 减回去，否则按钮比原版低
+    // 一整档（和首选项「确定」先前是同一个毛病）。
+    let ok_n = 413.0 - if fluent { 22.0 } else { 0.0 };
+    if pg.button(204.0, ok_n, 72.0, tr("OK", "确定"), false) {
         state.emit(Command::CloseWindow);
     }
 }
