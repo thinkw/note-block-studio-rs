@@ -95,11 +95,132 @@ impl Reply {
     }
 }
 
-/// 一条到编辑器的连接。一条连接一次只能问一句，所以用 `Mutex` 串行化；
+/// 手里那条连接的可信状态。锁只护这两格，网络读全在锁外做。
+#[derive(Default)]
+struct Link {
+    /// `None` = 现在没有可信连接：还没连上，或者上一条刚刚在传输层失败。
+    client: Option<ControlClient>,
+    /// 最近一次握手时编辑器自报的应用名，给每条回执定范围。
+    app: String,
+}
+
+/// 一条到编辑器的连接，外加「断了就重新连上」。一次只能问一句，所以用 `Mutex` 串行化；
 /// 要并行就再起一个桥接进程，别在一条通道上抢答。
+///
+/// **为什么必须重连**（2026-11-23）：编辑器那条服务端的连接线程把读超时设成
+/// `request_timeout × 2`（默认 60s），空闲满 60s 就退出。IDE 里的 MCP 会话正是长时间空闲的那个，
+/// 症状是「开局几条全成，放着不动一会儿之后每条都失败，且失败得越来越离谱」——
+/// 因为旧桥接把断掉的连接一直攥在手里。重连是唯一的止血办法。
 pub struct Bridge {
-    client: Arc<Mutex<ControlClient>>,
-    channel: String,
+    endpoint: Endpoint,
+    link: Arc<Mutex<Link>>,
+}
+
+/// 锁中毒只说明上一次持有它时 panic 过，连接本身的状态由对端说了算，
+/// 拿回守卫继续用比把整个工具面卡死好。
+fn link_guard(link: &Arc<Mutex<Link>>) -> std::sync::MutexGuard<'_, Link> {
+    link.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// 传输层彻底失败之后怎么说、怎么收尾：把连接重建一次（但不重发），
+/// 让下一问站在一条新连接上，同时把「现在到底连不连得上」如实报出来。
+fn lost_link(endpoint: &Endpoint, link: &Arc<Mutex<Link>>, reason: &str, read_only: bool) -> String {
+    let now = match connect(endpoint) {
+        Ok(fresh) => {
+            let mut guard = link_guard(link);
+            guard.app = fresh.server_app().to_string();
+            guard.client = Some(fresh);
+            "编辑器现在连得上，下一问走的是重建好的新连接".to_string()
+        }
+        Err(e) => format!("现在重新连也连不上：{e}"),
+    };
+    if read_only {
+        format!("{reason}；读操作已经自动重发过一次，还是不通。{now}")
+    } else {
+        format!(
+            "{reason}；这条连接已丢掉并重新连上，但**没有**替你重发这一问\
+             （写操作不自动重发：请求可能已经落进主线程收件箱，重发就是改两遍）。\
+             先 get_snapshot 对一眼 rev 和变更量，再决定要不要重放。{now}"
+        )
+    }
+}
+
+/// 投递一次请求。
+///
+/// 传输层失败一律把这条连接丢掉（`nbs-control` 那边已经 `shutdown` 了 socket，
+/// 这里丢的是句柄本身）：晚到的回执照对不到「还能继续用」——
+/// 下一问若在这条连接上读，先读到的是上一问那张过期回执，看着像答对了其实答的是旧事。
+///
+/// `resend` 决定要不要在重连之后**自动重发一次**，调用方按 `Op::is_read_only()` 给：
+/// 读操作重发没有副作用；写操作绝不重发。
+///
+/// 返回的第二个值是「这一答是重发之后拿到的」，用来在回执里补一句说明。
+fn dispatch_link(
+    endpoint: &Endpoint,
+    link: &Arc<Mutex<Link>>,
+    op: Op,
+    resend: bool,
+) -> Result<(Outcome, bool), String> {
+    let read_only = op.is_read_only();
+    let mut resent = false;
+    loop {
+        let mut client = {
+            let mut guard = link_guard(link);
+            match guard.client.take() {
+                Some(client) => client,
+                None => {
+                    let fresh = connect(endpoint)?;
+                    guard.app = fresh.server_app().to_string();
+                    fresh
+                }
+            }
+        };
+        match client.request(op.clone()) {
+            Ok(outcome) => {
+                link_guard(link).client = Some(client);
+                return Ok((outcome, resent));
+            }
+            Err(err) if resent || !resend => {
+                return Err(lost_link(endpoint, link, &err.to_string(), read_only))
+            }
+            Err(_) => resent = true,
+        }
+    }
+}
+
+impl Bridge {
+    /// 已经连着一条时用这个；`endpoint` 留着给断了之后重连。
+    pub fn new(endpoint: Endpoint, client: ControlClient) -> Self {
+        let app = client.server_app().to_string();
+        Self {
+            endpoint,
+            link: Arc::new(Mutex::new(Link {
+                client: Some(client),
+                app,
+            })),
+        }
+    }
+
+    /// 还没连上也要能把 MCP 服务开起来：工具面照样列得出，第一问再去连，
+    /// 连不上就每条回一句 `transport` 说清「翻过哪个目录、怎么起编辑器」。
+    /// 旧做法是启动时连不上就 `exit(2)`，客户端只看见「MCP 服务起不来」，
+    /// 编辑器随后开起来也没用——得重启 IDE 才行。
+    pub fn detached(endpoint: Endpoint) -> Self {
+        Self {
+            endpoint,
+            link: Arc::new(Mutex::new(Link::default())),
+        }
+    }
+
+    /// 这条通道连的是哪个应用；没连上过时给个占位，别把空串当结论。
+    pub fn channel(&self) -> String {
+        let app = link_guard(&self.link).app.clone();
+        if app.is_empty() {
+            "nbs-rs".to_string()
+        } else {
+            app
+        }
+    }
 }
 
 /// 一条 `Reply` 怎么落成 MCP 的结果。
@@ -193,22 +314,6 @@ pub fn dump_tools(
 
 #[tool_router]
 impl Bridge {
-    pub fn new(client: ControlClient) -> Self {
-        let app = client.server_app().to_string();
-        Self {
-            client: Arc::new(Mutex::new(client)),
-            channel: if app.is_empty() {
-                "nbs-rs".to_string()
-            } else {
-                app
-            },
-        }
-    }
-
-    pub fn channel(&self) -> &str {
-        &self.channel
-    }
-
     /// 发一条 `Op` 并等回执，然后按 [`to_result`] 的口径交给 MCP。
     /// 阻塞的网络读放在 `exec` 的 `spawn_blocking` 里，免得占住异步线程。
     async fn call(&self, op: Op) -> Result<Json<Reply>, CallToolResult> {
@@ -217,19 +322,21 @@ impl Bridge {
 
     /// [`call`](Self::call) 的无包装版本，给 `--call` 用。
     pub async fn exec(&self, op: Op) -> Reply {
-        let client = Arc::clone(&self.client);
-        let joined = tokio::task::spawn_blocking(move || {
-            // 锁中毒只说明上一次持有它时 panic 过，连接本身的状态由对端说了算，
-            // 拿回守卫继续用比把整个工具面卡死好。
-            let mut guard = client
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.request(op)
-        })
-        .await;
+        let endpoint = self.endpoint.clone();
+        let link = Arc::clone(&self.link);
+        let channel = self.channel();
+        let resend = op.is_read_only();
+        let joined = tokio::task::spawn_blocking(move || dispatch_link(&endpoint, &link, op, resend))
+            .await;
         match joined {
-            Ok(Ok(outcome)) => Reply::from_outcome(outcome, &self.channel),
-            Ok(Err(err)) => Reply::transport(err.to_string()),
+            // 重发之后拿到的那一答是新连接上现算的，`rev` 也是那时的，正文不用改；
+            // 但「中间断过一次」这件事要能被人从日志里翻出来，走 stderr（stdout 是协议流）。
+            Ok(Ok((outcome, true))) => {
+                eprintln!("nbs-mcp: 连接断过一次，这一答是重发之后从编辑器现问的");
+                Reply::from_outcome(outcome, &channel)
+            }
+            Ok(Ok((outcome, false))) => Reply::from_outcome(outcome, &channel),
+            Ok(Err(reason)) => Reply::transport(reason),
             Err(_) => Reply::transport("桥接内部：等待编辑器回执的任务被取消了"),
         }
     }
@@ -237,22 +344,68 @@ impl Bridge {
     /// 按计划发一条。校验由 [`call::plan`] 在连端口之前做完，所以这里只管发。
     pub async fn run(&self, plan: call::Plan) -> Reply {
         match plan {
-            call::Plan::BridgeInfo => self.bridge_info(),
+            call::Plan::BridgeInfo => self.bridge_info().await,
             call::Plan::Editor(op) => self.exec(op).await,
         }
     }
 
-    /// 这条通道连的是什么（桥接自己答，不敲编辑器）。`server_info` 工具的同一条内容。
-    pub fn bridge_info(&self) -> Reply {
-        Reply {
-            outcome: Some(serde_json::json!({
-                "ok": true,
-                "channel": self.channel(),
+    /// 编辑器现在接不接得住：当场敲一次 `ping`。顺带把这条连接走通一遍——
+    /// 空闲被编辑器关掉的话，这一次就会重连上，问出来的答案也是重连之后的。
+    /// `Err` 里是「为什么接不住」，那句话直接给调用方看。
+    async fn server_probe(&self) -> Result<String, String> {
+        let endpoint = self.endpoint.clone();
+        let link = Arc::clone(&self.link);
+        let channel = self.channel();
+        match tokio::task::spawn_blocking(move || {
+            dispatch_link(&endpoint, &link, Op::Ping, true)
+        })
+        .await
+        {
+            Ok(Ok((outcome, _))) if outcome.ok => Ok(format!(
+                "通：{channel}，协议 v{} 对得上",
+                nbs_control::PROTOCOL_VERSION
+            )),
+            Ok(Ok((outcome, _))) => Err(format!(
+                "{channel} 连上了，但把探活这一问拒了：{}",
+                outcome
+                    .error
+                    .map(|e| e.message)
+                    .unwrap_or_else(|| "没有说明原因".to_string())
+            )),
+            Ok(Err(reason)) => Err(format!("编辑器没连上：{reason}")),
+            Err(_) => Err("桥接内部：探活的任务被取消了".to_string()),
+        }
+    }
+
+    /// 这条通道连的是什么：`bridge` 那格是桥接自己（不用编辑器在场也答得出），
+    /// `editor` 那格是当场问出来的。
+    ///
+    /// 两格分开答，别混成一格：「桥接活着」和「编辑器接得住」在空闲断线那件事上是
+    /// 两个状态，只报前者就会出现「面板 ready、一调就错」。
+    /// 接不住时整条走 `transport`：`isError` 要能停住调用方，`--call` 的退出码
+    /// 也该是 2（没连上）而不是 0（成功）。
+    pub async fn bridge_info(&self) -> Reply {
+        let channel = self.channel();
+        let face = |ok: bool, editor: &str| {
+            serde_json::json!({
+                "ok": ok,
+                "channel": channel,
                 "bridge": env!("CARGO_PKG_VERSION"),
                 "protocol": nbs_control::PROTOCOL_VERSION,
-            })),
-            transport: None,
-            channel: Some(self.channel().to_string()),
+                "editor": editor,
+            })
+        };
+        match self.server_probe().await {
+            Ok(status) => Reply {
+                outcome: Some(face(true, &status)),
+                transport: None,
+                channel: Some(channel.clone()),
+            },
+            Err(reason) => Reply {
+                outcome: Some(face(false, &reason)),
+                transport: Some(reason),
+                channel: Some(channel),
+            },
         }
     }
 
@@ -585,11 +738,12 @@ impl Bridge {
 
     // -------------------------------------------------------------- 桥接自己
 
-    /// 这条 MCP 通道连的是哪个编辑器、用什么参数连上的。
-    /// 不带网络请求——回执只描述桥接这一侧，别把它当成编辑器的状态。
+    /// 这条 MCP 通道连的是哪个编辑器、用什么参数连上的，以及**现在**编辑器接不接得住。
+    /// 会当场敲一次 `ping`：「桥接活着」和「编辑器接得住」是两个状态，只报前者会出现
+    /// 面板 ready、一调就错。接不住时这条的 `transport` 有值。
     #[tool]
     async fn server_info(&self) -> Result<Json<Reply>, CallToolResult> {
-        to_result(self.bridge_info())
+        to_result(self.bridge_info().await)
     }
 }
 
@@ -917,6 +1071,235 @@ mod tests {
                 expect_rev: Some(3),
             },
             r#""kind":"place_selection""#,
+        );
+    }
+
+    // -------------------------------------------------- 空闲断线之后怎么办
+    //
+    // 编辑器那条服务端的连接线程读超时 = `request_timeout × 2`（默认 60s），空闲满就退出。
+    // 下面的假编辑器把「答一句就把这条连接丢掉」当默认行为，观察的是连接数和请求数：
+    // 前者证明真重连了，后者证明写操作没被重发第二遍。
+
+    use std::io::BufReader;
+    use std::net::{Ipv4Addr, TcpListener};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// `AnswerOnce`：答完第一问就把连接关掉（空闲被服务端关掉之后的样子）。
+    /// `QuitAfterHello`：握手成功但一句不答就关（下一问写出去再没人接）。
+    #[derive(Clone, Copy)]
+    enum Fate {
+        AnswerOnce,
+        QuitAfterHello,
+    }
+
+    struct FakeEditor {
+        endpoint: Endpoint,
+        connections: Arc<AtomicUsize>,
+        requests: Arc<AtomicUsize>,
+    }
+
+    impl FakeEditor {
+        /// 每条连接按 `fates` 的顺序办事，用完之后一直沿用最后一条。
+        /// 顺序是这条夹具的关键：写操作那一问要「第一条连接死掉、第二条活着」，
+        /// 否则重发与否在两边都看不见，测试咬不动（第一版就是这样漏的）。
+        fn start(fates: &[Fate]) -> Self {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let connections = Arc::new(AtomicUsize::new(0));
+            let requests = Arc::new(AtomicUsize::new(0));
+            let fates = Arc::new(fates.to_vec());
+            let (cn, rq, fates) = (Arc::clone(&connections), Arc::clone(&requests), fates);
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(stream) = stream else { return };
+                    let index = cn.fetch_add(1, Ordering::SeqCst);
+                    let fate = fates[index.min(fates.len() - 1)];
+                    let rq = Arc::clone(&rq);
+                    std::thread::spawn(move || {
+                        let Ok(clone) = stream.try_clone() else { return };
+                        let mut reader = BufReader::new(clone);
+                        let mut writer = stream;
+                        let hello: Option<nbs_control::bus::Hello> =
+                            match nbs_control::read_json_line(&mut reader) {
+                                Ok(hello) => hello,
+                                Err(_) => return,
+                            };
+                        if hello.is_none() {
+                            return;
+                        }
+                        let ack = nbs_control::bus::HelloAck {
+                            hello: true,
+                            protocol: nbs_control::PROTOCOL_VERSION,
+                            app: "nbs-fake 0.0.0-test".to_string(),
+                            snapshot: None,
+                        };
+                        if nbs_control::write_json_line(&mut writer, &ack).is_err() {
+                            return;
+                        }
+                        if let Fate::QuitAfterHello = fate {
+                            // 一句不答就走：下一问写出去就再没人接。
+                            return;
+                        }
+                        let asked: Option<nbs_control::bus::Request> =
+                            match nbs_control::read_json_line(&mut reader) {
+                                Ok(asked) => asked,
+                                Err(_) => return,
+                            };
+                        let Some(req) = asked else { return };
+                        rq.fetch_add(1, Ordering::SeqCst);
+                        let outcome = nbs_control::Outcome::ok(
+                            nbs_control::Data::Empty,
+                            nbs_control::ChangeReport {
+                                rev: 7,
+                                ..Default::default()
+                            },
+                        );
+                        let resp = nbs_control::bus::Response {
+                            id: req.id,
+                            outcome,
+                        };
+                        let _ = nbs_control::write_json_line(&mut writer, &resp);
+                        // 答完就走：这条已经被服务端丢掉，下一问要撞上的就是这件事。
+                    });
+                }
+            });
+            Self {
+                endpoint: Endpoint {
+                    config_dir: std::env::temp_dir(),
+                    direct: Some((port, "tok".to_string())),
+                    client_name: "test".to_string(),
+                },
+                connections,
+                requests,
+            }
+        }
+
+        fn live(&self) -> Bridge {
+            let client = connect(&self.endpoint).expect("假编辑器连不上");
+            Bridge::new(self.endpoint.clone(), client)
+        }
+    }
+
+    /// 重连之后的新连接是异步登记的，断言之前等一下（正常路径一次就过）。
+    fn settled<F: FnMut() -> bool>(what: &str, mut f: F) {
+        for _ in 0..500 {
+            if f() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        panic!("等不到{what}");
+    }
+
+    #[tokio::test]
+    async fn a_dead_link_does_not_stick_the_bridge_forever() {
+        // 旧行为：连接被服务端关掉之后桥接一直攥着它，此后每条调用都失败，
+        // 只能重启 IDE 或重新加载 MCP 服务。
+        let fake = FakeEditor::start(&[Fate::AnswerOnce]);
+        let bridge = fake.live();
+        let first = bridge.exec(Op::GetSnapshot).await;
+        assert!(first.succeeded(), "第一问该成：{:?}", first.transport);
+
+        let second = bridge.exec(Op::GetSnapshot).await;
+        assert!(
+            second.succeeded(),
+            "空闲断线之后读操作该自动重连重发，实际 transport = {:?}",
+            second.transport
+        );
+        assert_eq!(
+            fake.requests.load(Ordering::SeqCst),
+            2,
+            "读操作重发一次，服务端该收到两问"
+        );
+        settled("第二条连接在册", || {
+            fake.connections.load(Ordering::SeqCst) >= 2
+        });
+    }
+
+    #[tokio::test]
+    async fn a_dead_link_never_resends_a_write() {
+        // 写操作不重发：请求可能已经落进主线程收件箱，重发就是改两遍。
+        // 但它照样要重连一条备着，失败文案也得指路「先对一眼 rev 再决定重放」。
+        let fake = FakeEditor::start(&[Fate::QuitAfterHello, Fate::AnswerOnce]);
+        let bridge = fake.live();
+        let reply = bridge
+            .exec(Op::ClearSong {
+                expect_rev: None,
+                discard_changes: true,
+            })
+            .await;
+        let text = reply.transport.expect("撞上断线的写操作必须报 transport");
+        assert!(text.contains("没有"), "文案要说清没重发：{text}");
+        assert!(
+            text.contains("get_snapshot"),
+            "文案要指路先对一眼 rev：{text}"
+        );
+        assert_eq!(reply.outcome, None, "没送到就不该编造一份编辑器回执");
+        assert_eq!(
+            fake.requests.load(Ordering::SeqCst),
+            0,
+            "第二条连接是会答话的：这一句变成 1，就说明写操作被重发了"
+        );
+        settled("重连好的第二条连接在册", || {
+            fake.connections.load(Ordering::SeqCst) >= 2
+        });
+    }
+
+    #[tokio::test]
+    async fn a_detached_bridge_answers_the_first_question() {
+        // 编辑器还没开窗就要能把 MCP 服务开起来（IDE 常常比窗口先起）。
+        // 旧做法开局连不上直接 exit(2)，窗口后来开了也没用，得重启 IDE。
+        let fake = FakeEditor::start(&[Fate::AnswerOnce]);
+        let bridge = Bridge::detached(fake.endpoint.clone());
+        let reply = bridge.exec(Op::GetSnapshot).await;
+        assert!(
+            reply.succeeded(),
+            "detached 的第一问该自己连上：{:?}",
+            reply.transport
+        );
+        assert_eq!(fake.connections.load(Ordering::SeqCst), 1, "只该连一条");
+    }
+
+    #[tokio::test]
+    async fn server_info_answers_whether_the_editor_is_reachable() {
+        // 「桥接活着」不等于「编辑器接得住」：这条工具现在要如实答出后者。
+        let fake = FakeEditor::start(&[Fate::AnswerOnce]);
+        let live = Bridge::detached(fake.endpoint.clone());
+        let info = live.bridge_info().await;
+        assert!(
+            info.succeeded(),
+            "编辑器在的时候该答成：{:?}",
+            info.transport
+        );
+        let editor = info.outcome.expect("有正文")["editor"]
+            .as_str()
+            .expect("editor 是字符串")
+            .to_string();
+        assert!(editor.contains("通"), "editor 那一格要说通：{editor}");
+
+        // 端口上没人 listening：连接被拒，得说清是「没连上」而不是「编辑器答不」。
+        let dead_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let dead_port = dead_listener.local_addr().unwrap().port();
+        drop(dead_listener);
+        let dead = Bridge::detached(Endpoint {
+            config_dir: std::env::temp_dir(),
+            direct: Some((dead_port, "tok".to_string())),
+            client_name: "test".to_string(),
+        });
+        let info = dead.bridge_info().await;
+        assert!(
+            !info.succeeded(),
+            "没人 listening 却说成功：{:?}",
+            info.outcome
+        );
+        let reason = info.transport.clone().expect("该有 transport");
+        assert!(reason.contains("编辑器没连上"), "要说清是没连上：{reason}");
+        assert_eq!(
+            crate::call::exit_code(&info),
+            2,
+            "探活失败的退出码要和「没连上」同一档，实际正文：{:?}",
+            info.outcome
         );
     }
 }
