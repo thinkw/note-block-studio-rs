@@ -1414,6 +1414,8 @@ fn preferences(state: &mut EditorState, ui: &mut Ui) {
                 i.key_released(egui::Key::Escape),
             )
         });
+        // 原版 `draw_windows.gml:31-38`：下拉正展开时这一下归下拉，窗口留住。
+        let esc = esc && !state.close_prefs_dropdowns(pg.ui.ctx());
         if esc || (ctrl_p && state.window_prev == state.window) {
             state.emit(Command::CloseWindow);
         }
@@ -1716,10 +1718,11 @@ fn prefs_interface(
     // 原版 `draw_areaheader(x1 + 258, y1 + 74, 220, 60, "帧率限制")`。
     pg.header(258.0, 74.0, 220.0, 60.0, tr("Max. frame rate", "帧率限制"));
     pg.frame_box(274.0, 95.0, 374.0, 115.0);
-    let rate = state.prefs.refresh_rate as usize % rate_items().len();
+    let items = rate_items();
+    let shown = nbs_io::prefs::refresh_rate_pos(state.prefs.refresh_rate);
     pg.text(
         pg.row(277.0, 98.0),
-        rate_items()[rate],
+        items[shown].as_str(),
         PREFS_FONT,
         pg.ink(),
     );
@@ -2361,17 +2364,26 @@ fn theme_menu(state: &mut EditorState, ui: &Ui, at: Pos2) {
     }
 }
 
-/// 原版 `show_menu_ext("refreshrate", …)`：框里显示的那一行和菜单五项是同一串字。
+/// 原版 `show_menu_ext("refreshrate", …)`：框里显示的那一行和下拉清单是同一串字。
 fn rate_menu(state: &mut EditorState, ui: &Ui, at: Pos2) {
     let th = state.theme.clone();
     let bank = state.icons.bank();
     let items = rate_items();
-    // 原版五项都有 `check(refreshrate = i)`，当前帧率那一项前面要打勾。
-    let sel = state.prefs.refresh_rate as usize;
-    let (picked, dismissed) =
-        popup_list(ui, "prefs_rate_menu", at, &items, sel, &th, bank.as_deref());
+    let labels: Vec<&str> = items.iter().map(String::as_str).collect();
+    // 原版每一项都带 `check(refreshrate = i)`，当前帧率那一项前面要打勾。
+    let sel = nbs_io::prefs::refresh_rate_pos(state.prefs.refresh_rate);
+    let (picked, dismissed) = popup_list(
+        ui,
+        "prefs_rate_menu",
+        at,
+        &labels,
+        sel,
+        &th,
+        bank.as_deref(),
+    );
     if let Some(i) = picked {
-        state.prefs.refresh_rate = i as u8;
+        // 清单按帧数升序排，选中的位次要先换算回存储下标（#126）。
+        state.prefs.refresh_rate = nbs_io::prefs::refresh_rate_order()[i] as u8;
         state.emit(Command::SavePreferences);
     }
     if picked.is_some() || dismissed {
@@ -2410,13 +2422,23 @@ const PREFS_FONT: f32 = crate::fonts::MAIN_SIZE;
 /// 分组标题与页签：原版 `fnt_info_med` 11pt = 14.67px（`fonts::INFO_MED_SIZE`）。
 const PREFS_FONT_MED: f32 = crate::fonts::INFO_MED_SIZE;
 
-/// 原版「帧率限制」下拉的五项，下标就是 `refreshrate`。
-fn rate_items() -> [&'static str; 5] {
-    if crate::lang() == 1 {
-        ["30帧", "60帧", "120帧", "144帧", "240帧"]
-    } else {
-        ["30FPS", "60FPS", "120FPS", "144FPS", "240FPS"]
-    }
+/// 原版「帧率限制」下拉的五项（`draw_window_preferences.gml:336-337` 那串
+/// `check(refreshrate = N) + "NFPS"`），字面由 `REFRESH_RATES` 生成。顺序按帧数升序而
+/// 不是存储下标（#126，见 `refresh_rate_order`），所以下标不等于 `refresh_rate`，
+/// 来回换算走 `refresh_rate_pos`。
+fn rate_items() -> Vec<String> {
+    let zh = crate::lang() == 1;
+    nbs_io::prefs::refresh_rate_order()
+        .into_iter()
+        .map(|i| {
+            let fps = nbs_io::prefs::REFRESH_RATES[i];
+            if zh {
+                format!("{fps}帧")
+            } else {
+                format!("{fps}FPS")
+            }
+        })
+        .collect()
 }
 
 /// 端口自加（用户要求「有一个底座可以在上面扩展各种播放效果并可以切换」）：特效清单。
@@ -8655,6 +8677,17 @@ fn vis_types() -> [(&'static str, &'static str); 7] {
 }
 
 fn datapack_export_window(state: &mut EditorState, ui: &mut Ui) {
+    // 原版 `draw_window_datapack_export.gml:89-91`：← / → 在两页之间绕圈。
+    let (left, right) = ui.input(|i| {
+        (
+            i.key_pressed(egui::Key::ArrowLeft),
+            i.key_pressed(egui::Key::ArrowRight),
+        )
+    });
+    if left || right {
+        let step = right as i32 - left as i32;
+        state.datapack_tab = (state.datapack_tab as i32 + step).rem_euclid(2) as u8;
+    }
     ui.horizontal(|ui| {
         for (i, tab) in [tr("Settings", "设置"), tr("Visualizer", "效果")]
             .iter()
@@ -9280,7 +9313,13 @@ fn minecraft_compat_window(state: &mut EditorState, ui: &mut Ui) {
     let margin = ui.spacing().window_margin;
     let (ml, mr) = (margin.left as f32, margin.right as f32);
     // 和首选项窗口同一套换算：原版 `draw_window` 的 (x1, y1) 对应这里的行坐标 0。
-    let body = ui.allocate_exact_size(egui::vec2(490.0 - ml - mr, 450.0 - 38.0), Sense::hover());
+    // 原版 `draw_window(x1, y1, x1 + 490, y1 + 450 + navigation_space)`。内容高度按
+    // 首选项那一套换算：原版总高减掉 egui 标题栏占的 30（Fluent）/ 26（其余），
+    // 先前钉死 `450 - 38` 少了 8/12 像素，「确定」就掉到窗底外面。
+    let body = ui.allocate_exact_size(
+        egui::vec2(490.0 - ml - mr, if fluent { 420.0 } else { 424.0 }),
+        Sense::hover(),
+    );
     let o = body.0.min - egui::vec2(ml, 0.0);
     let ry = if fluent { -8.0 } else { -26.0 };
 
@@ -9727,8 +9766,11 @@ fn minecraft_compat_window(state: &mut EditorState, ui: &mut Ui) {
         }
     }
 
-    // 原版 `draw_button2(x1 + 240 - 36, y1 + 413, 72, "确定")`。
-    if pg.button(204.0, 413.0, 72.0, tr("OK", "确定"), false) {
+    // 原版 `draw_button2(x1 + 240 - 36, y1 + 413 + navigation_space, 72, "确定")`：
+    // 这一行不带 `(theme = 3) * 22`，所以 Fluent 要把那 22 减回去，否则按钮比原版低
+    // 一整档（和首选项「确定」先前是同一个毛病）。
+    let ok_n = 413.0 - if fluent { 22.0 } else { 0.0 };
+    if pg.button(204.0, ok_n, 72.0, tr("OK", "确定"), false) {
         state.emit(Command::CloseWindow);
     }
 }

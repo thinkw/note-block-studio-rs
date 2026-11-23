@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use egui::Context;
 use nbs_audio::{export_wav, ExportOptions, DEFAULT_MAX_VOICES, EXTENDED_MAX_VOICES};
+use nbs_core::document::SelProp;
 use nbs_core::model::{
     panning_velocity_to_short, short_to_panning_velocity, LockMode, Note, Song, SongMeta, KEY_MAX,
     PAN_MAX, PIT_MAX, VEL_MAX,
@@ -98,6 +99,9 @@ pub enum Command {
     SetVel(i32),
     SetPan(i32),
     SetPit(i32),
+    /// 原版 `mode_action.gml:7-50`：1~6 号「按当前编辑模式」的动作，键盘 Ctrl+E/D/R/F/T/G
+    /// 与音符右键菜单共用同一份（标签来自 `get_mode_actions.gml`）。
+    ModeAction(u8),
     /// 原版 `control_draw.gml:736-751`：Ctrl+滚轮 / Ctrl+± 沿固定档位改整窗口缩放
     /// （`window_scale`）。端口按用户要求只缩画布：倍率落到 `viewport.scale`
     /// （每格 `32 × scale` px），菜单 / 工具栏 / 状态栏 / 钢琴栏不动。
@@ -109,9 +113,9 @@ pub enum Command {
     PianoScaleDown,
     /// 原版 `control_draw.gml:732-735`：Ctrl+0 回到出厂缩放 `get_default_window_scale()`。
     WindowScaleReset,
-    /// 按页平移视口（Home/End/PageUp/PageDown）。
-    PageHorizontal(i32),
-    PageVertical(i32),
+    /// 原版 `control_draw.gml:684-704`：Home / End / PageUp / PageDown 翻的是
+    /// 「最后碰过的那根滚动条」（`sb_sel`）指向的那一轴，播放头不动。
+    ScrollAxis(crate::state::AxisScroll),
     PlayPause,
     Stop,
     SeekHome,
@@ -125,6 +129,9 @@ pub enum Command {
     ToggleFlag(Flag),
     /// 原版 Ctrl+Shift+F5（仅 theme 3）：切换界面强调色彩虹循环。
     ToggleRainbow,
+    /// 原版 F7（`control_draw.gml:840-867`）：帧率上限 30→60→120→144→240→30 循环。
+    /// 原版这段在 `window = 0` 闸门之外，只受 `playing = 0` 约束。
+    CycleRefreshRate,
     /// 原版 F11：`fullscreen = !fullscreen`（`control_draw.gml:122-134`）。
     ToggleFullscreen,
     Transpose(i32),
@@ -780,23 +787,46 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.current.pitch =
                 (state.current.pitch as i32 + d).clamp(-PIT_MAX as i32, PIT_MAX as i32) as i16;
         }
+        // 原版 `mode_action.gml`：六条全部作用在**选区**上（`selection_change*` 系），
+        // 不碰画笔值。1~4 是步进（音高模式一大步 = 12 半音，其余三种模式源码写的是 10，
+        // 小步一律 1），5 打开该属性的批量设置窗，6 把它设回出厂值（音量/声道 100、微调 0）。
+        // 音高模式（m_key）没有 5、6：原版 `control_draw.gml:644-645` 用
+        // `editmode != m_key` 把这两条整个跳过，这里同样什么都不做。
+        Command::ModeAction(n) => match (state.tool, n) {
+            (EditMode::Key, 1) => state.doc.selection_change(SelProp::Key, 12, true),
+            (EditMode::Key, 2) => state.doc.selection_change(SelProp::Key, -12, true),
+            (EditMode::Key, 3) => state.doc.selection_change(SelProp::Key, 1, true),
+            (EditMode::Key, 4) => state.doc.selection_change(SelProp::Key, -1, true),
+            (EditMode::Velocity, 1) => state.doc.selection_change(SelProp::Velocity, 10, true),
+            (EditMode::Velocity, 2) => state.doc.selection_change(SelProp::Velocity, -10, true),
+            (EditMode::Velocity, 3) => state.doc.selection_change(SelProp::Velocity, 1, true),
+            (EditMode::Velocity, 4) => state.doc.selection_change(SelProp::Velocity, -1, true),
+            (EditMode::Panning, 1) => state.doc.selection_change(SelProp::Panning, 10, true),
+            (EditMode::Panning, 2) => state.doc.selection_change(SelProp::Panning, -10, true),
+            (EditMode::Panning, 3) => state.doc.selection_change(SelProp::Panning, 1, true),
+            (EditMode::Panning, 4) => state.doc.selection_change(SelProp::Panning, -1, true),
+            (EditMode::Pitch, 1) => state.doc.selection_change(SelProp::Pitch, 10, true),
+            (EditMode::Pitch, 2) => state.doc.selection_change(SelProp::Pitch, -10, true),
+            (EditMode::Pitch, 3) => state.doc.selection_change(SelProp::Pitch, 1, true),
+            (EditMode::Pitch, 4) => state.doc.selection_change(SelProp::Pitch, -1, true),
+            (EditMode::Velocity, 5) => {
+                dispatch(state, Command::ShowWindow(WindowKind::SetVelocity), ctx)
+            }
+            (EditMode::Panning, 5) => {
+                dispatch(state, Command::ShowWindow(WindowKind::SetPanning), ctx)
+            }
+            (EditMode::Pitch, 5) => dispatch(state, Command::ShowWindow(WindowKind::SetPitch), ctx),
+            (EditMode::Velocity, 6) => state.doc.selection_change(SelProp::Velocity, 100, false),
+            (EditMode::Panning, 6) => state.doc.selection_change(SelProp::Panning, 100, false),
+            (EditMode::Pitch, 6) => state.doc.selection_change(SelProp::Pitch, 0, false),
+            _ => {}
+        },
         Command::WindowScaleUp => state.step_window_scale(ctx, true),
         Command::WindowScaleDown => state.step_window_scale(ctx, false),
         Command::WindowScaleReset => state.reset_window_scale(ctx),
         Command::PianoScaleUp => state.step_piano_scale(ctx, true),
         Command::PianoScaleDown => state.step_piano_scale(ctx, false),
-        Command::PageHorizontal(d) => {
-            let cols = state.viewport.columns() as i64;
-            let max = state.doc.song.enda.max(64) as i64;
-            state.viewport.start_tick =
-                (state.viewport.start_tick as i64 + d as i64 * cols).clamp(0, max) as u32;
-        }
-        Command::PageVertical(d) => {
-            let rows = state.viewport.rows() as i64;
-            let max = state.doc.song.layer_count().max(8) as i64;
-            state.viewport.start_layer =
-                (state.viewport.start_layer as i64 + d as i64 * rows).clamp(0, max) as u32;
-        }
+        Command::ScrollAxis(op) => state.scroll_axis(op),
         Command::PlayPause => {
             state.transcription.stop_preview();
             let playing = state.is_playing();
@@ -1291,6 +1321,11 @@ machine that is already built; change the machine or its speed and these chests 
         Command::ToggleRainbow => {
             state.toggle_rainbow();
             state.theme.apply(ctx);
+        }
+        Command::CycleRefreshRate => {
+            // 原版 F7（`control_draw.gml:840-866`）只 game_set_speed + set_msg，不写
+            // settings.ini；写盘归首选项「确定」那条路。落盘的顺序问题也就不存在了。
+            state.cycle_refresh_rate();
         }
         Command::ToggleFullscreen => {
             // 原版把全屏记在自己的 `fullscreen` 变量上，这里同理：egui 的
@@ -3723,6 +3758,68 @@ mod tests {
         assert_eq!(state.prefs.piano_scale, 4.0, "琴键上界与窗口一致为 4");
     }
 
+    /// 原版 Home / End / PageUp / PageDown 只翻最后碰过的那根条：横向条被点过时，
+    /// 四个键全走列；换成纵向条后全走层；PageUp 朝曲尾、PageDown 朝曲首。
+    #[test]
+    fn home_end_page_keys_move_only_the_touched_bar() {
+        use crate::state::AxisScroll;
+        let ctx = Context::default();
+        let mut song = Song::new();
+        song.enda = 300;
+        song.endb = 18;
+        let mut state = state_with(song);
+        state.viewport.size = egui::vec2(320.0, 320.0); // 10 列 × 10 行
+        state.sb_sel = 0;
+        dispatch(&mut state, Command::ScrollAxis(AxisScroll::Page(1)), &ctx);
+        let cols = state.viewport.columns();
+        assert_eq!(state.viewport.start_tick, cols, "PageUp 往曲尾翻一页");
+        assert_eq!(state.viewport.start_layer, 0, "另一轴不该跟着动");
+        dispatch(&mut state, Command::ScrollAxis(AxisScroll::Page(-1)), &ctx);
+        assert_eq!(state.viewport.start_tick, 0, "PageDown 翻回来");
+        dispatch(&mut state, Command::ScrollAxis(AxisScroll::End), &ctx);
+        assert_eq!(
+            state.viewport.start_tick, state.doc.song.enda,
+            "End = 原版 starta = enda"
+        );
+        assert_eq!(state.viewport.start_layer, 0);
+        dispatch(&mut state, Command::ScrollAxis(AxisScroll::Home), &ctx);
+        assert_eq!(state.viewport.start_tick, 0, "Home = 原版 starta = 0");
+
+        state.sb_sel = 1;
+        let rows = state.viewport.rows();
+        dispatch(&mut state, Command::ScrollAxis(AxisScroll::Page(1)), &ctx);
+        assert_eq!(state.viewport.start_layer, rows, "纵向条被碰过，翻页走层");
+        assert_eq!(state.viewport.start_tick, 0, "列轴保持不动");
+        dispatch(&mut state, Command::ScrollAxis(AxisScroll::End), &ctx);
+        assert_eq!(state.viewport.start_layer, 18, "End = 原版 startb = endb");
+    }
+
+    /// 原版 F7（`control_draw.gml:840-866`）：档位循环 +1 取模，每档把帧数写进状态栏，
+    /// 而且只改运行值、不写 settings.ini —— 落盘留给首选项「确定」。
+    /// 循环顺序按帧数升序（#126 追加的 165 在下标 5，展示位次在 240 前面）。
+    #[test]
+    fn f7_cycles_the_frame_cap_and_reports_it() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        state.prefs.refresh_rate = 3;
+        state.save_prefs();
+        for (want_rate, want_fps) in [(5u8, 165u32), (4, 240), (0, 30), (1, 60), (2, 120)] {
+            dispatch(&mut state, Command::CycleRefreshRate, &ctx);
+            assert_eq!(state.prefs.refresh_rate, want_rate, "F7 档位循环顺序");
+            assert_eq!(
+                state.active_message(),
+                Some(format!("帧数上限 => {want_fps} FPS").as_str()),
+                "F7 要回显当前上限"
+            );
+        }
+        assert_eq!(
+            nbs_io::prefs::Preferences::load().refresh_rate,
+            3,
+            "原版 F7 不写盘：设置文件应停在上一次「确定」时那一档"
+        );
+    }
+
     /// 原版 `game_set_speed(N, gamespeed_fps)`：帧数上限压的是整个程序的步进，
     /// 我们这边对应压住连续重绘的间隔。
     #[test]
@@ -3779,6 +3876,71 @@ mod tests {
         state.vsync_request = None;
         dispatch(&mut state, Command::SetVsync(false), &ctx);
         assert_eq!(state.vsync_request, Some(false));
+    }
+
+    /// 用户要求 #120a：那六条走原版的选区语义 —— 改的是选区里每条音符，画笔值不动；
+    /// 音高模式的大步是一个八度，且没有 5、6 号。
+    #[test]
+    fn mode_action_steps_the_selection_not_the_brush() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        let mut n = Note::new(0, 48);
+        n.velocity = 50;
+        state.doc.place_note(0, 0, n);
+        state.doc.select_rect(0, 0, 0, 0, false, false, false);
+        state.current.velocity = 77;
+        state.tool = EditMode::Velocity;
+        dispatch(&mut state, Command::ModeAction(1), &ctx);
+        assert_eq!(
+            state.doc.selection.at(0, 0).unwrap().velocity,
+            60,
+            "1 号 = 选区音量 +10"
+        );
+        assert_eq!(state.current.velocity, 77, "原版 mode_action 从不改画笔值");
+        dispatch(&mut state, Command::ModeAction(3), &ctx);
+        assert_eq!(
+            state.doc.selection.at(0, 0).unwrap().velocity,
+            61,
+            "3 号 = 小步 +1"
+        );
+        // 5 号开该模式的批量设置窗，6 号设回出厂值。
+        dispatch(&mut state, Command::ModeAction(5), &ctx);
+        assert_eq!(state.window, Some(WindowKind::SetVelocity));
+        state.window = None;
+        dispatch(&mut state, Command::ModeAction(6), &ctx);
+        assert_eq!(
+            state.doc.selection.at(0, 0).unwrap().velocity,
+            100,
+            "6 号 = 直接设成 100"
+        );
+        // 音高模式：1 号是一个八度，5、6 号原版没有。
+        state.doc.deselect();
+        state.tool = EditMode::Key;
+        state.doc.place_note(2, 0, Note::new(0, 48));
+        state.doc.select_rect(2, 0, 2, 0, false, false, false);
+        dispatch(&mut state, Command::ModeAction(1), &ctx);
+        assert_eq!(
+            state.doc.selection.at(0, 0).unwrap().key,
+            60,
+            "1 号 = 升八度"
+        );
+        dispatch(&mut state, Command::ModeAction(5), &ctx);
+        assert_eq!(state.window, None, "音高模式没有第 5 条");
+        dispatch(&mut state, Command::ModeAction(6), &ctx);
+        assert_eq!(
+            state.doc.selection.at(0, 0).unwrap().key,
+            60,
+            "音高模式没有第 6 条"
+        );
+        // 空选区：六条都点不动，也不给历史添步子。
+        state.doc.deselect();
+        let steps = state.doc.history.len();
+        for slot in 1..=6 {
+            dispatch(&mut state, Command::ModeAction(slot), &ctx);
+        }
+        assert_eq!(state.doc.history.len(), steps, "空选区不该留历史");
+        assert_eq!(state.window, None);
     }
 
     /// 跑一帧，取这一帧交给平台层的窗口图标命令。

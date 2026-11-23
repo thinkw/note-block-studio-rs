@@ -2226,9 +2226,9 @@ mod gui_window_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 音色窗口：v6 起列出 20 种内置乐器，但快捷键只印原版真绑了的那 16 个
-    /// （`control_draw.gml:822-843`：Ctrl+1..9 → 0..8，Ctrl+Shift+1..7 → 9..15）。
-    /// 铜块一族按了没反应，就不许在界面上给它们编一个组合键。
+    /// 音色窗口：v6 起列出 20 种内置乐器，但快捷键只印原版真绑了的那 18 个
+    /// （`control_draw.gml:735-757`：Ctrl+1..9 → 0..8，Ctrl+Shift+1..9 → 9..17）。
+    /// 铜块一族的后两个按了没反应，就不许在界面上给它们编一个组合键。
     #[test]
     fn instruments_window_lists_twenty_and_advertises_only_real_bindings() {
         let ctx = egui::Context::default();
@@ -2268,8 +2268,8 @@ mod gui_window_tests {
                 .iter()
                 .filter(|t| t.starts_with("Ctrl+Shift+"))
                 .count(),
-            7,
-            "Ctrl+Shift+数字应当只有 7 个"
+            9,
+            "Ctrl+Shift+数字应当只有 9 个（#122：原版到索引 17）"
         );
         assert_eq!(
             texts
@@ -2738,6 +2738,79 @@ mod gui_window_tests {
         assert!(state.prefs.check_prerelease, "答「是」要真的打开");
     }
 
+    /// #122：原版 `draw_windows.gml:31-38` —— Escape 先收展开的下拉，同一帧不再
+    /// 关窗。端口原先是「下拉开合不管，Escape 一律关窗」。
+    #[test]
+    fn escape_in_preferences_closes_the_dropdown_before_the_window() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = Some(WindowKind::Preferences);
+        state.prefs_tab = 1;
+        frame(&mut state, &ctx);
+        state.prefs_language_menu = true;
+        frame(&mut state, &ctx);
+        press_key(&mut state, &ctx, egui::Key::Escape);
+        assert_eq!(
+            state.window,
+            Some(WindowKind::Preferences),
+            "下拉开着时 Escape 不该把窗口一起关掉"
+        );
+        assert!(!state.prefs_language_menu, "Escape 要把下拉收掉");
+        press_key(&mut state, &ctx, egui::Key::Escape);
+        assert_eq!(state.window, None, "没有下拉时 Escape 照常关窗");
+    }
+
+    /// #122：数据打包窗的 ← / → 翻页签（`draw_window_datapack_export.gml:89-91`），
+    /// 两页之间绕圈。原版另有五扇窗同款，端口早已实现，这里补上漏掉的这一扇。
+    #[test]
+    fn datapack_window_pages_tabs_with_arrow_keys() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = Some(WindowKind::DatapackExport);
+        frame(&mut state, &ctx);
+        assert_eq!(state.datapack_tab, 0, "开窗固定在设置页");
+        press_key(&mut state, &ctx, egui::Key::ArrowRight);
+        assert_eq!(state.datapack_tab, 1, "→ 翻到效果页");
+        press_key(&mut state, &ctx, egui::Key::ArrowRight);
+        assert_eq!(state.datapack_tab, 0, "两页之间绕圈");
+        press_key(&mut state, &ctx, egui::Key::ArrowLeft);
+        assert_eq!(state.datapack_tab, 1, "← 反向绕圈");
+    }
+
+    /// #122：F1「快捷键一览」这张表此前没有任何用例碰过，先证明它真画得出来。
+    /// 表格比窗口高，可见的只有开头几行；新补的 PageUp / F7 两行落在滚动区下面，
+    /// 由 `shortcuts::tests::help_table_lists_the_newly_ported_keys` 在数据面钉住。
+    #[test]
+    fn shortcuts_window_renders_the_help_table() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        dispatch(
+            &mut state,
+            commands::Command::ShowWindow(WindowKind::Shortcuts),
+            &ctx,
+        );
+        let t = drawn_texts(&mut state, &ctx);
+        for want in [
+            "左键单击",
+            "放置 / 覆盖音符",
+            "整窗口缩放（原版档位 0.5..4）",
+        ] {
+            assert!(
+                t.iter().any(|x| x == want),
+                "F1 窗没把表格画出来，缺「{want}」"
+            );
+        }
+    }
+
     /// 原版 draw_window_preferences.gml:412-421：界面页的语言下拉。
     /// 标题跟着语言切换，框里的值始终是两种语言的专名；菜单里选中文要写回
     /// prefs.language 并收起菜单，下一帧 app::show 把全局开关同步成中文。
@@ -3096,6 +3169,193 @@ mod gui_window_tests {
 
     /// 用户要求 #119：首选项「帧率限制」那一组里要有「垂直同步」这颗勾，
     /// 并且点下去真的生效（改设置 + 落盘 + 把切换请求交给宿主），不是画个样子。
+    /// 用户要求 #120a：顶部「编辑」菜单里那六条和右键菜单是同一份标签表
+    /// （原版 `control_draw.gml:1741-1746`），也要跟着编辑模式变、真的改选区。
+    #[test]
+    fn the_edit_menu_mode_actions_follow_the_edit_mode() {
+        let ctx = egui::Context::default();
+        let mut state = state_with_selection();
+        state.theme.apply(&ctx);
+        // 音高模式：四条移调，没有 5、6 号。
+        state.tool = crate::state::EditMode::Key;
+        click_text(&mut state, &ctx, "编辑");
+        let texts = drawn_texts(&mut state, &ctx);
+        for t in [
+            "升八度  Ctrl+E",
+            "降八度  Ctrl+D",
+            "升半音  Ctrl+R",
+            "降半音  Ctrl+F",
+        ] {
+            assert!(texts.iter().any(|s| s == t), "编辑菜单缺「{t}」");
+        }
+        assert!(
+            !texts
+                .iter()
+                .any(|s| s.contains("设定音量") || s.contains("重置音量")),
+            "音高模式不该有第 5、6 条"
+        );
+        click_text(&mut state, &ctx, "升八度  Ctrl+E");
+        for dx in 0..3u32 {
+            assert_eq!(
+                state.doc.selection.at(dx, 0).unwrap().key,
+                [62u8, 64, 67][dx as usize],
+                "选区里每条都要升一个八度（不是只动画笔）"
+            );
+        }
+        // 声道模式：六条换成声道的叫法，点第 1 条真的把选区声像 +10。
+        state.doc.place_selection();
+        state.doc.select_all();
+        state.tool = crate::state::EditMode::Panning;
+        click_text(&mut state, &ctx, "编辑");
+        let texts = drawn_texts(&mut state, &ctx);
+        for t in [
+            "向右声道移动 10  Ctrl+E",
+            "设定音符声道……  Ctrl+T",
+            "重置立体声  Ctrl+G",
+        ] {
+            assert!(texts.iter().any(|s| s == t), "声道模式的编辑菜单缺「{t}」");
+        }
+        assert!(
+            !texts.iter().any(|s| s.contains("升八度")),
+            "声道模式不该还挂着升八度"
+        );
+        click_text(&mut state, &ctx, "向右声道移动 10  Ctrl+E");
+        assert_eq!(
+            state.doc.selection.at(0, 0).unwrap().panning,
+            110,
+            "第 1 条 = 选区声像 +10"
+        );
+    }
+
+    /// 用户要求 #120a：音符右键菜单里那几条要跟着编辑模式变（原版
+    /// `get_mode_actions.gml` 出标签，`control_draw.gml:550-555` 在音高模式下整条
+    /// 不画第 5、6 项），音量模式下不该还是「升八度 / 降八度」。
+    #[test]
+    fn the_grid_context_menu_items_follow_the_edit_mode() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        let mut song = nbs_core::model::Song::new();
+        let mut n = nbs_core::model::Note::new(0, 48);
+        n.velocity = 50;
+        song.set(4, 0, n);
+        state.doc.replace_song(song);
+        state.doc.select_rect(4, 0, 4, 0, false, false, false);
+        let open_menu = |state: &mut EditorState| {
+            state.context_menu = Some(crate::state::ContextMenu {
+                pos: egui::pos2(300.0, 300.0),
+                cell: (4, 0),
+                kind: crate::state::ContextKind::Grid,
+            });
+        };
+        let has = |texts: &[String], t: &str| texts.iter().any(|s| s == t);
+
+        // 音高模式：四条移调，没有第 5、6 条。
+        state.tool = crate::state::EditMode::Key;
+        open_menu(&mut state);
+        let texts = drawn_texts(&mut state, &ctx);
+        for t in [
+            "升八度  Ctrl+E",
+            "降八度  Ctrl+D",
+            "升半音  Ctrl+R",
+            "降半音  Ctrl+F",
+        ] {
+            assert!(
+                has(&texts, t),
+                "音高模式菜单缺「{t}」：{}",
+                texts.join(" | ")
+            );
+        }
+        assert!(
+            !texts
+                .iter()
+                .any(|s| s.contains("设定音量") || s.contains("重置音量")),
+            "音高模式不该有第 5、6 条：{}",
+            texts.join(" | ")
+        );
+
+        // 力度模式：原版那六条，且不该再挂移调。
+        state.tool = crate::state::EditMode::Velocity;
+        open_menu(&mut state);
+        let texts = drawn_texts(&mut state, &ctx);
+        for t in [
+            "增加 10 音量  Ctrl+E",
+            "减小 10 音量  Ctrl+D",
+            "增加音量  Ctrl+R",
+            "减小音量  Ctrl+F",
+            "设定音量……  Ctrl+T",
+            "重置音量  Ctrl+G",
+        ] {
+            assert!(
+                has(&texts, t),
+                "音量模式菜单缺「{t}」：{}",
+                texts.join(" | ")
+            );
+        }
+        assert!(
+            !texts.iter().any(|s| s.contains("升八度")),
+            "音量模式不该还是升八度：{}",
+            texts.join(" | ")
+        );
+
+        // 点「增加 10 音量」：动的是选区里那条音符的力度，画笔值不碰，菜单收起。
+        let brush = state.current.velocity;
+        click_text(&mut state, &ctx, "增加 10 音量  Ctrl+E");
+        assert_eq!(
+            state.doc.selection.at(0, 0).unwrap().velocity,
+            60,
+            "音量模式第 1 条要把选区音量 +10"
+        );
+        assert_eq!(state.current.velocity, brush, "原版 mode_action 不动画笔值");
+        assert!(state.context_menu.is_none(), "点中条目要收菜单");
+
+        // 声道 / 微调模式各用各的标签。
+        state.tool = crate::state::EditMode::Panning;
+        open_menu(&mut state);
+        let texts = drawn_texts(&mut state, &ctx);
+        for t in [
+            "向右声道移动 10  Ctrl+E",
+            "向左声道移动 10  Ctrl+D",
+            "向右声道移动  Ctrl+R",
+            "向左声道移动  Ctrl+F",
+            "设定音符声道……  Ctrl+T",
+            "重置立体声  Ctrl+G",
+        ] {
+            assert!(
+                has(&texts, t),
+                "声道模式菜单缺「{t}」：{}",
+                texts.join(" | ")
+            );
+        }
+        state.tool = crate::state::EditMode::Pitch;
+        open_menu(&mut state);
+        let texts = drawn_texts(&mut state, &ctx);
+        for t in [
+            "上调 10 微分  Ctrl+E",
+            "下调 10 微分  Ctrl+D",
+            "上调 1 微分  Ctrl+R",
+            "下调 1 微分  Ctrl+F",
+            "设定音高……  Ctrl+T",
+            "重置音高  Ctrl+G",
+        ] {
+            assert!(
+                has(&texts, t),
+                "微调模式菜单缺「{t}」：{}",
+                texts.join(" | ")
+            );
+        }
+
+        // 没有选区时六条整条点不动（原版 `inactive(current_song.selected = 0)`）。
+        state.tool = crate::state::EditMode::Velocity;
+        state.doc.deselect();
+        open_menu(&mut state);
+        click_text(&mut state, &ctx, "增加 10 音量  Ctrl+E");
+        assert!(state.context_menu.is_some(), "置灰条目点不动，菜单不该收");
+    }
+
     #[test]
     fn the_preferences_page_has_a_working_vsync_toggle() {
         let _prefs = isolate_prefs();
@@ -3768,6 +4028,135 @@ mod gui_window_tests {
         );
         frame(&mut state, &ctx);
         assert_eq!(state.window, None, "无选区时开不了宏窗口");
+    }
+
+    /// #125：「仅限资源包」那扇窗的「确定」原先压在窗底外面。原版窗口是
+    /// `draw_window(x1, y1, x1 + 490, y1 + 450)`（`draw_window_minecraft.gml:10`），按钮
+    /// 在 `(x1 + 240 - 36, y1 + 413)` 高 21（`:495`）——按钮下沿离窗底 16 像素。端口先前把
+    /// 内容高度写成 `450 - 38`（比 450 - 30/26 少 8/12 像素），又没按首选项那套把 Fluent
+    /// 的 22 减回去：Fluent（出厂主题）下按钮整颗往下挪 26 像素，下沿超出窗底 7 像素被裁掉。
+    /// 这里四套主题各量一次：按钮下沿离窗底都是 23 = 原版那 16 + egui 自己的 7 像素边框余量。
+    #[test]
+    fn compat_window_ok_button_stays_inside_the_frame() {
+        for kind in [
+            crate::theme::ThemeKind::Aqua,
+            crate::theme::ThemeKind::Retro,
+            crate::theme::ThemeKind::Dark,
+            crate::theme::ThemeKind::Fluent,
+        ] {
+            let ctx = egui::Context::default();
+            let mut state = state_with_selection();
+            state.theme = crate::theme::Theme::new(kind);
+            state.theme.apply(&ctx);
+            state.window = Some(WindowKind::MinecraftCompat);
+            frame_out(&mut state, &ctx, base_input());
+            let out = frame_out(&mut state, &ctx, base_input());
+            let win = ctx
+                .memory(|m| m.area_rect(egui::Id::new("nbs_win_MinecraftCompat")))
+                .expect("窗口矩形已记账");
+            // 「确定」这颗窗里只有一颗：先按文字定位，再取套住它的那颗按钮矩形。
+            let label = out
+                .shapes
+                .iter()
+                .filter_map(|cs| match &cs.shape {
+                    egui::Shape::Text(t) if t.galley.text() == "确定" => Some(t.pos),
+                    _ => None,
+                })
+                .next()
+                .expect("窗口里画了「确定」");
+            let ok = out
+                .shapes
+                .iter()
+                .filter_map(|cs| match &cs.shape {
+                    egui::Shape::Rect(r)
+                        if (r.rect.width() - 71.0).abs() < 4.0
+                            && r.rect.height() < 30.0
+                            && r.rect.contains(label) =>
+                    {
+                        Some(r.rect)
+                    }
+                    _ => None,
+                })
+                .next()
+                .unwrap_or_else(|| panic!("{kind:?}：没找到套住「确定」的按钮矩形"));
+            assert!(
+                (win.max.y - ok.max.y - 23.0).abs() < 0.6,
+                    "{kind:?}：按钮下沿离窗底应是 23（原版 16 + 边框 7），实得 {:.1}，按钮 {ok:?}、窗 {win:?}",
+                    win.max.y - ok.max.y
+            );
+        }
+    }
+
+    /// 只把指针平移过去、不按下，连走 `n` 帧，返回最后一帧画到屏幕上的文字。
+    /// `drawn_texts` 走的是不带指针事件的输入，测「移开就关」必须自己喂 PointerMoved。
+    fn hover_for(
+        state: &mut EditorState,
+        ctx: &egui::Context,
+        p: egui::Pos2,
+        n: usize,
+    ) -> Vec<String> {
+        let mut texts = Vec::new();
+        for _ in 0..n {
+            let mut input = base_input();
+            input.events.push(egui::Event::PointerMoved(p));
+            let out = frame_out(state, ctx, input);
+            texts = out
+                .shapes
+                .iter()
+                .filter_map(|cs| match &cs.shape {
+                    egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                    _ => None,
+                })
+                .collect();
+        }
+        texts
+    }
+
+    /// #124：菜单栏的下拉要「鼠标移开就收」，不用再点一下别处或按 Esc。真点一下「文件」
+    /// 打开，然后分三种走法验：指针停在条目上（不能误关）、停在子菜单里（父菜单不能跟着关）、
+    /// 移到窗口角落的空处（要关）。写 Close 的那一帧菜单还会画一次，所以每种都走三帧。
+    #[test]
+    fn menubar_dropdown_closes_when_the_pointer_moves_away() {
+        let ctx = egui::Context::default();
+        let mut state = state_with_selection();
+        state.theme.apply(&ctx);
+        click_text(&mut state, &ctx, "文件");
+        let open = drawn_at(&mut state, &ctx);
+        let item = open
+            .iter()
+            .find(|(t, _)| t == "另存为")
+            .map(|(_, p)| *p)
+            .expect("测试前提：「文件」的下拉是开着的");
+        // 指针压在条目上：这是正常悬停，菜单必须留着。
+        let texts = hover_for(&mut state, &ctx, item + egui::vec2(12.0, 6.0), 3);
+        assert!(
+            texts.iter().any(|t| t == "另存为"),
+            "指针还在下拉里，不该关：{texts:?}"
+        );
+        // 换到「编辑 → 快捷键......」两层深的子菜单：指针在子菜单里、已经出了父菜单的框，
+        // 父菜单不能把整棵树一起带走。
+        click_text(&mut state, &ctx, "编辑");
+        click_text(&mut state, &ctx, "快捷键......");
+        let rows = drawn_at(&mut state, &ctx);
+        let macro_row = rows
+            .iter()
+            .find(|(t, _)| t == "Tremolo...  Ctrl+Shift+A")
+            .map(|(_, p)| *p)
+            .expect("测试前提：宏子菜单是开着的");
+        let texts = hover_for(&mut state, &ctx, macro_row + egui::vec2(20.0, 6.0), 3);
+        assert!(
+            texts.iter().any(|t| t == "Tremolo...  Ctrl+Shift+A")
+                && texts.iter().any(|t| t == "快捷键......"),
+            "指针在子菜单里，父菜单不该跟着关：{texts:?}"
+        );
+        // 最后移到时间轴那块空处（不按下）：下一帧起下拉就该没了。
+        let texts = hover_for(&mut state, &ctx, egui::pos2(1380.0, 860.0), 3);
+        for gone in ["Tremolo...  Ctrl+Shift+A", "另存为"] {
+            assert!(
+                !texts.iter().any(|t| t == gone),
+                "鼠标移开后「{gone}」还画着：{texts:?}"
+            );
+        }
     }
 
     // ---- 主题色取色器 `w_setaccent`（draw_window_set_accent.gml）----

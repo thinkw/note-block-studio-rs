@@ -1034,6 +1034,9 @@ fn handle_scrollbar_input(state: &mut EditorState, input: &InputSnapshot, hbar: 
 
     if input.primary_pressed {
         if hbar.contains(pos) {
+            // 原版 `draw_scrollbar.gml:54`：按到哪根条就把 `sb_sel` 置成那条的号，之后
+            // Home / End / PageUp / PageDown 一直翻这一根，直到碰到另一根。
+            state.sb_sel = 0;
             if ht.contains(pos) {
                 state.interaction.mode = DragMode::DragScrollbarH {
                     grab: pos.x - ht.min.x,
@@ -1043,6 +1046,7 @@ fn handle_scrollbar_input(state: &mut EditorState, input: &InputSnapshot, hbar: 
                 state.viewport.start_tick = bar_value(ratio, hm, hmax);
             }
         } else if vbar.contains(pos) {
+            state.sb_sel = 1;
             if vt.contains(pos) {
                 state.interaction.mode = DragMode::DragScrollbarV {
                     grab: pos.y - vt.min.y,
@@ -1887,6 +1891,51 @@ fn note_value(tool: EditMode, note: Note) -> String {
 
 // ---------------------------------------------------------------- 右键菜单
 
+/// 原版 `get_mode_actions.gml` 的标签表：同一条动作在四种编辑模式下的叫法，
+/// EN / ZH 两份逐字照抄（EN 的 "Set velocity..." 用三点，ZH 用「……」，原版就这样）。
+/// 音高模式（m_key）只有 1~4 —— 原版 5、6 号返回空串，菜单外面还套着
+/// `condstr((editmode != m_key), ...)`，所以这里是 `None`：整条不画，而不是画个灰的。
+pub(crate) fn mode_action_label(mode: EditMode, slot: u8) -> Option<(&'static str, &'static str)> {
+    match (mode, slot) {
+        (EditMode::Key, 1) => Some(("Transpose one octave up", "升八度")),
+        (EditMode::Key, 2) => Some(("Transpose one octave down", "降八度")),
+        (EditMode::Key, 3) => Some(("Transpose up", "升半音")),
+        (EditMode::Key, 4) => Some(("Transpose down", "降半音")),
+        (EditMode::Velocity, 1) => Some(("Increase velocity by 10", "增加 10 音量")),
+        (EditMode::Velocity, 2) => Some(("Decrease velocity by 10", "减小 10 音量")),
+        (EditMode::Velocity, 3) => Some(("Increase velocity", "增加音量")),
+        (EditMode::Velocity, 4) => Some(("Decrease velocity", "减小音量")),
+        (EditMode::Velocity, 5) => Some(("Set velocity...", "设定音量……")),
+        (EditMode::Velocity, 6) => Some(("Reset velocity", "重置音量")),
+        (EditMode::Panning, 1) => Some(("Pan right by 10", "向右声道移动 10")),
+        (EditMode::Panning, 2) => Some(("Pan left by 10", "向左声道移动 10")),
+        (EditMode::Panning, 3) => Some(("Pan right", "向右声道移动")),
+        (EditMode::Panning, 4) => Some(("Pan left", "向左声道移动")),
+        (EditMode::Panning, 5) => Some(("Set panning...", "设定音符声道……")),
+        (EditMode::Panning, 6) => Some(("Reset panning", "重置立体声")),
+        (EditMode::Pitch, 1) => Some(("Detune +10 cents", "上调 10 微分")),
+        (EditMode::Pitch, 2) => Some(("Detune -10 cents", "下调 10 微分")),
+        (EditMode::Pitch, 3) => Some(("Detune +1 cent", "上调 1 微分")),
+        (EditMode::Pitch, 4) => Some(("Detune -1 cent", "下调 1 微分")),
+        (EditMode::Pitch, 5) => Some(("Set pitch...", "设定音高……")),
+        (EditMode::Pitch, 6) => Some(("Reset pitch", "重置音高")),
+        _ => None,
+    }
+}
+
+/// 原版 `get_hotkey.gml:43-70` 的 action_1..6（非 macOS 那一支）：菜单里印在标签后面的
+/// 那串键。#123 把快捷键做成可自定义之后，这里要换成读用户的键位表。
+pub(crate) fn mode_action_hotkey(slot: u8) -> &'static str {
+    match slot {
+        1 => "Ctrl+E",
+        2 => "Ctrl+D",
+        3 => "Ctrl+R",
+        4 => "Ctrl+F",
+        5 => "Ctrl+T",
+        _ => "Ctrl+G",
+    }
+}
+
 fn draw_context_menu(state: &mut EditorState, ui: &Ui) {
     let Some(menu) = state.context_menu.clone() else {
         return;
@@ -1934,19 +1983,20 @@ fn draw_context_menu(state: &mut EditorState, ui: &Ui) {
                         close = true;
                     }
                     ui.separator();
-                    if item(
-                        ui,
-                        &format!("{}  +12", tr("Transpose one octave up", "升八度")),
-                    ) {
-                        cmds.push(Command::Transpose(12));
-                        close = true;
-                    }
-                    if item(
-                        ui,
-                        &format!("{}  -12", tr("Transpose one octave down", "降八度")),
-                    ) {
-                        cmds.push(Command::Transpose(-12));
-                        close = true;
+                    // 原版 `control_draw.gml:550-555`：这六条的标签来自
+                    // `get_mode_actions(editmode)`，跟着当前编辑模式走，音高模式下
+                    // 第 5、6 项整条不画；六条共同的置灰条件是
+                    // `inactive(current_song.selected = 0)`。
+                    let has_sel = !state.doc.selection.is_empty();
+                    for slot in 1..=6u8 {
+                        let Some((en, zh)) = mode_action_label(state.tool, slot) else {
+                            continue;
+                        };
+                        let label = format!("{}  {}", tr(en, zh), mode_action_hotkey(slot));
+                        if ui.add_enabled(has_sel, egui::Button::new(&label)).clicked() {
+                            cmds.push(Command::ModeAction(slot));
+                            close = true;
+                        }
                     }
                     if item(ui, tr("Paste here", "在此粘贴到此处")) {
                         cmds.push(Command::Paste);

@@ -14,6 +14,7 @@ use egui::{pos2, Align2, Color32, Id, OpenUrl, Pos2, Rect, Sense, Ui, Vec2};
 
 use crate::commands::Command;
 use crate::fonts::bold_font;
+use crate::grid::{mode_action_hotkey, mode_action_label};
 use crate::icons::{frame, Bank, IconHit};
 use crate::state::{EditMode, EditorState, WindowKind};
 use crate::theme::{Theme, ThemeKind};
@@ -381,27 +382,19 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                 // 判空（宏窗口和宏本体各自在 `selected = 0` 时早退）。
                 // 原版这里没有「移调…」窗口，也没有「批量设置」二级菜单——三个
                 // Set velocity / panning / pitch... 都在 `Macros...` 子菜单里。
+                // 原版顶部「编辑」菜单与右键菜单用的是同一份标签表
+                // （`control_draw.gml:1741-1746`）：六条跟着编辑模式变、都带
+                // `inactive(selected = 0)`，音高模式下第 5、6 项整条不画。
                 let has_sel = !state.doc.selection.is_empty();
-                let (up_oct, down_oct) = match state.tool {
-                    crate::state::EditMode::Key => (
-                        tr("Transpose one octave up", "升八度"),
-                        tr("Transpose one octave down", "降八度"),
-                    ),
-                    _ => (tr("Increase by 10", "升 10"), tr("Decrease by 10", "降 10")),
-                };
-                if ui
-                    .add_enabled(has_sel, egui::Button::new(format!("{up_oct} +12")))
-                    .clicked()
-                {
-                    state.emit(Command::Transpose(12));
-                    ui.close_menu();
-                }
-                if ui
-                    .add_enabled(has_sel, egui::Button::new(format!("{down_oct} -12")))
-                    .clicked()
-                {
-                    state.emit(Command::Transpose(-12));
-                    ui.close_menu();
+                for slot in 1..=6u8 {
+                    let Some((en, zh)) = mode_action_label(state.tool, slot) else {
+                        continue;
+                    };
+                    let label = format!("{}  {}", tr(en, zh), mode_action_hotkey(slot));
+                    if ui.add_enabled(has_sel, egui::Button::new(&label)).clicked() {
+                        state.emit(Command::ModeAction(slot));
+                        ui.close_menu();
+                    }
                 }
                 ui.separator();
                 instrument_menus(state, ui);
@@ -562,6 +555,27 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                 ui.close_menu();
             }
         });
+
+        // #124：下拉要「鼠标移开就收」。原版靠指针位置自己收，egui 只在「按住键点到菜单
+        // 外面」那一支才收（menu.rs `stationary_interaction` 的 primary_down 分支），光把指针
+        // 挪走会一直挂着，得再点一下别处或按 Esc。这里在菜单栏这一帧画完之后补一次判断：
+        // `BarState` 里挂着当前那棵菜单的根，`MenuState::area_contains` 会把子菜单一路算进去
+        // （矩形由 egui 自己维护，不必我们逐帧记），指针既不在整棵下拉里、也不在菜单栏这条
+        // 上，就把根节点的 response 写成 Close。`menu_state` 是父子共享的那个 Arc，写它等价于
+        // 在菜单闭包里调 `ui.close_menu()`，好处是不必给 15 处菜单逐个加。
+        // 指针读不到时（移出窗口，`hover_pos` 变 None）不动：离屏用例里的空档帧也是 None，
+        // 当成「已离开」会把所有点菜单的用例打断。
+        if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+            if !ui.max_rect().contains(pos) {
+                let bar_state = egui::menu::BarState::load(ui.ctx(), ui.id());
+                // 两层公开 Deref：BarState → MenuRootManager → Option<MenuRoot>。
+                if let Some(root) = &**bar_state {
+                    if !root.menu_state.read().area_contains(pos) {
+                        root.menu_state.write().close();
+                    }
+                }
+            }
+        }
     });
 }
 
