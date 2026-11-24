@@ -22,6 +22,8 @@
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
+use nbs_editor::commands::Command;
+use nbs_editor::state::QuitMode;
 use nbs_editor::EditorState;
 
 #[cfg(windows)]
@@ -96,6 +98,7 @@ impl NbsApp {
                 match nbs_core::nbs::load(&path) {
                     Ok(song) => {
                         state.doc.replace_song(song);
+                        state.song_backup_path = None;
                         state.prepare_audio();
                         state.add_recent(path);
                         state.set_message(nbs_editor::tr(
@@ -418,6 +421,12 @@ impl eframe::App for NbsApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 原生窗口关闭先拦住：原版 control_end 不可取消，但逐标签问完仍要保留失败恢复文件。
+        // eframe 允许用 CancelClose 把退出推迟到这些决定办完；已确认的退出不再拦。
+        if ctx.input(|i| i.viewport().close_requested()) && !self.state.quit_confirmed {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.state.emit(Command::BeginQuit(QuitMode::NativeClose));
+        }
         // 「旧图标」开关切换的那一帧，`EditorState` 才把 egui 的图标命令发出去，而这条命令要等
         // 帧末才冲刷给平台层；winit 收到后只写 ICON_SMALL，还是没缩放的 256x256。所以这里以
         // `applied_window_icon`（= 上一帧确实发过命令）为准，晚一帧再写 WM_SETICON，

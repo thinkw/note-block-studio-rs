@@ -17,6 +17,8 @@
 //! 取用只能走 [`SongStore::lift`] / [`SongStore::swap_active`] 这两条会挪动
 //! 所有权的入口。
 
+use std::path::PathBuf;
+
 use nbs_core::model::Note;
 use nbs_core::Document;
 use slotmap::{new_key_type, SlotMap};
@@ -71,6 +73,8 @@ pub struct SongTab {
     /// 这一首的界面状态；台前那份在 `EditorState` 上，收装时机见
     /// [`crate::state::EditorState::switch_tab`]。
     pub ui: TabUi,
+    /// 原版 `song_backup_path`：只删这一首确实写过的恢复文件，不凭文件名认领别人的备份。
+    pub backup_path: Option<PathBuf>,
 }
 
 /// [`SongStore::close`] 的结果。
@@ -123,6 +127,7 @@ impl SongStore {
             session,
             doc: Some(doc),
             ui: TabUi::default(),
+            backup_path: None,
         });
         self.order.push(id);
         id
@@ -142,6 +147,22 @@ impl SongStore {
     /// 读某个标签的界面状态。
     pub fn ui(&self, id: SongId) -> Option<&TabUi> {
         self.slots.get(id).map(|t| &t.ui)
+    }
+
+    /// 记下这一首最近一次成功写出的备份路径；失败时保留上一份。
+    pub fn set_backup_path(&mut self, id: SongId, path: Option<PathBuf>) -> bool {
+        match self.slots.get_mut(id) {
+            Some(tab) => {
+                tab.backup_path = path;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 读这一首拥有的备份路径；标签不存在或从未备份时返回 `None`。
+    pub fn backup_path(&self, id: SongId) -> Option<&PathBuf> {
+        self.slots.get(id).and_then(|t| t.backup_path.as_ref())
     }
 
     /// 把某个标签的文档取到台前（原版 `set_song` 的「装入」那一半）。
@@ -193,7 +214,8 @@ impl SongStore {
     /// `if (song > sid || song >= array_length(songs)) song--`（`close_song.gml:24`）——
     /// 落在被关标签后面那一首，关的是最后一个就退到新的最后一个。表被关空了
     /// 就把 `stage` 换成一首空曲并返回 `active: None`，由调用方决定补不补标签
-    /// （原版交互路径 `close_song(i)` 补，退出路径 `close_song(i, 1, 1)` 不补）。
+    /// （原版交互路径 `close_song(sid)` 和退出路径 `close_song(i, 1, 1)` 的
+    /// `!nonew || noconfirm` 都成立；只有欢迎窗替换首标签的 `close_song(0, 1)` 不补）。
     /// id 不存在时不动任何状态。
     pub fn close(&mut self, id: SongId, stage: &mut Document) -> Closed {
         let Some(idx) = self.index_of(id) else {

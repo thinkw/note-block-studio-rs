@@ -435,6 +435,29 @@ pub struct PendingClose {
     pub previous: Option<crate::tabs::SongId>,
 }
 
+/// 原版两条退出链：`request_quit()` 可取消；原生窗口关闭走 `control_end()`，不能取消。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuitMode {
+    Request,
+    NativeClose,
+}
+
+/// 逐标签退出流程的现场（用户要求 #131）。
+#[derive(Clone, Debug)]
+pub struct QuitState {
+    pub mode: QuitMode,
+    /// 原版从 `array_length(songs) - 1` 往下问，快照保证中途换标签也不丢顺序。
+    pub tabs: Vec<crate::tabs::SongId>,
+    pub next: usize,
+    pub previous: Option<crate::tabs::SongId>,
+    /// 原版 `clear_backups`：只要有一首需要恢复，就保留所有标签的已有备份。
+    pub clear_backups: bool,
+    /// 开始退出前按每首当时的文件名记下备份路径；另存为改文件名后仍要删原备份。
+    pub backup_paths: Vec<PathBuf>,
+    /// 无文件名或重试另存为时，文件框还没回来。
+    pub awaiting_save: Option<crate::tabs::SongId>,
+}
+
 /// 最近歌曲一条（原版 `recent_song[a]` + `recent_song_time[a]`）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecentPath {
@@ -471,6 +494,21 @@ impl ModalQueue {
             .collect(),
             then: Some(then),
             then_no: None,
+        }
+    }
+
+    /// 两键问句，但「否」也要继续走另一条路（原生关闭时「不保存」仍会退出）。
+    pub fn yes_no(title: &'static str, text: &str, then: Command, then_no: Command) -> Self {
+        Self {
+            items: [Modal {
+                title,
+                text: text.into(),
+                buttons: ModalButtons::YesNo,
+            }]
+            .into_iter()
+            .collect(),
+            then: Some(then),
+            then_no: Some(then_no),
         }
     }
 
@@ -1121,6 +1159,8 @@ pub struct EditorState {
     pub doc: Document,
     /// 原版 `global.songs[]` + `global.song` 的替身：歌曲标签槽位表。
     pub store: crate::tabs::SongStore,
+    /// 原版台前 `song.song_backup_path`：切标签时与文档一起收装。
+    pub song_backup_path: Option<PathBuf>,
     pub viewport: Viewport,
     /// 原版 `hires`（`control_create.gml:110`：`window_scale > 1.25`，绝对倍率含
     /// DPI）：Fluent 主题的画布精灵换 4 倍源图。每帧随 `apply_ui_scale` 更新。
@@ -1200,6 +1240,10 @@ pub struct EditorState {
     pub pending_dialog: Option<FileDialog>,
     /// 关标签走到「先保存」这一步时挂住的现场（用户要求 #131）。
     pub pending_close: Option<PendingClose>,
+    /// 原版 `quit_prompting` + 逐标签确认现场；`None` 表示当前没在退出确认。
+    pub quit: Option<QuitState>,
+    /// 原版 `quit_confirmed`：确认全部完成后，`control_end` 不再重复问。
+    pub quit_confirmed: bool,
     /// 原版 `recent_song[0..10]`（路径 + 打开时间）。
     pub recent_files: Vec<RecentPath>,
     /// 开机更新检查的共享结果。没开「检查更新」时状态一直是 0（原版 `update_http = -1`）。
@@ -1586,6 +1630,7 @@ impl EditorState {
         let mut state = Self {
             doc,
             store,
+            song_backup_path: None,
             viewport,
             canvas_hires: false,
             hide_note_text: false,
@@ -1624,6 +1669,8 @@ impl EditorState {
             control_info: None,
             pending_dialog: None,
             pending_close: None,
+            quit: None,
+            quit_confirmed: false,
             recent_files,
             update_check: std::sync::Arc::new(std::sync::Mutex::new(UpdateCheck::default())),
             update_question: false,
@@ -1850,7 +1897,10 @@ impl EditorState {
         }
         if let Some(prev) = outgoing {
             self.store.set_ui(prev, ui_out);
+            self.store
+                .set_backup_path(prev, self.song_backup_path.clone());
         }
+        self.song_backup_path = self.store.backup_path(id).cloned();
         self.song_session = self.store.active_session();
         self.clear_tab_transients();
         self.invalidate_derived_caches();
@@ -1902,11 +1952,13 @@ impl EditorState {
         self.invalidate_derived_caches();
         match out.active {
             Some(next) => {
+                self.song_backup_path = self.store.backup_path(next).cloned();
                 let ui = self.store.ui(next).cloned().unwrap_or_default();
                 self.apply_tab_ui(ui);
             }
             // 表关空了：`store.close` 已经把台前换成一首空曲，界面状态跟着回出厂值。
             None => {
+                self.song_backup_path = None;
                 let ui = crate::tabs::TabUi::default();
                 self.apply_tab_ui(ui);
             }
@@ -2448,6 +2500,7 @@ impl EditorState {
         {
             self.last_autosave = Instant::now();
             if let Ok(p) = nbs_io::prefs::autosave(&self.doc.song, &self.prefs) {
+                self.song_backup_path = Some(p.clone());
                 let name = p
                     .file_name()
                     .unwrap_or_default()

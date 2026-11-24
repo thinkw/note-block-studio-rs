@@ -599,13 +599,8 @@ pub fn save_song_atomic(song: &Song, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// 自动保存一份备份（不改动当前文件名/脏标记）。
-pub fn autosave(song: &Song, prefs: &Preferences) -> Result<PathBuf, String> {
-    let dir = Preferences::backup_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| {
-        crate::tr(&format!("Failed to create backup directory: {e}"), &format!("创建备份目录失败: {e}"))
-            .to_string()
-    })?;
+/// 当前端口自动备份的固定路径（`{safe}.autosave.nbs`）。
+pub fn backup_path(song: &Song) -> PathBuf {
     let base = song
         .filename
         .as_ref()
@@ -614,11 +609,55 @@ pub fn autosave(song: &Song, prefs: &Preferences) -> Result<PathBuf, String> {
         .unwrap_or_else(|| "untitled".into());
     let safe: String = base
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    let path = dir.join(format!("{safe}.autosave.nbs"));
+    Preferences::backup_dir().join(format!("{safe}.autosave.nbs"))
+}
+
+/// 自动保存一份备份（不改动当前文件名/脏标记）。
+pub fn autosave(song: &Song, prefs: &Preferences) -> Result<PathBuf, String> {
+    let dir = Preferences::backup_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        crate::tr(&format!("Failed to create backup directory: {e}"), &format!("创建备份目录失败: {e}"))
+            .to_string()
+    })?;
+    let path = backup_path(song);
     save_song_atomic(song, &path)?;
     let _ = prefs;
+    Ok(path)
+}
+
+/// 原版 `save_unsaved()`：退出流程里另写一份恢复文件，不覆盖已有自动备份。
+pub fn save_shutdown_recovery(song: &Song) -> Result<PathBuf, String> {
+    let dir = Preferences::backup_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        crate::tr(
+            &format!("Failed to create backup directory: {e}"),
+            &format!("创建备份目录失败: {e}"),
+        )
+        .to_string()
+    })?;
+    let source = song
+        .filename
+        .as_ref()
+        .and_then(|p| p.file_stem())
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "untitled".into());
+    let stem: String = source.chars().take(48).collect();
+    let base = format!("{stem} (unsaved on exit)");
+    let mut path = dir.join(format!("{base}.nbs"));
+    let mut number = 2;
+    while path.exists() {
+        path = dir.join(format!("{base} {number}.nbs"));
+        number += 1;
+    }
+    save_song_atomic(song, &path)?;
     Ok(path)
 }
 
@@ -975,6 +1014,15 @@ mod tests {
         assert_eq!(back.total_blocks, 1);
         assert!(!p.with_extension("nbs.tmp").exists());
         let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn backup_path_uses_the_same_safe_stem_as_autosave() {
+        let mut song = Song::new();
+        song.filename = Some(PathBuf::from("C:/songs/我的 曲子!.nbs"));
+        let path = backup_path(&song);
+        assert_eq!(path.file_name().and_then(|s| s.to_str()), Some("我的_曲子_.autosave.nbs"));
+        assert_eq!(path.parent(), Some(Preferences::backup_dir().as_path()));
     }
 
     #[test]

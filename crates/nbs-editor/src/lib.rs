@@ -2106,6 +2106,32 @@ mod gui_window_tests {
         assert!(state.parked_doc(second).unwrap().song.dirty);
     }
 
+    /// 退出确认也必须走真实命令闸门：点第三键后回到原标签，窗口保持打开。
+    #[test]
+    fn quit_cancel_button_is_drawn_and_keeps_the_editor_open() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        let home = state.active_tab().expect("开机至少有一首");
+        let mut other = nbs_core::model::Song::new();
+        other.filename = Some(PathBuf::from("quit-gui.nbs"));
+        other.set(4, 0, nbs_core::model::Note::new(0, 48));
+        other.recalculate();
+        state.push_tab(other);
+
+        dispatch(&mut state, commands::Command::Exit, &ctx);
+        frame(&mut state, &ctx);
+        click_text(&mut state, &ctx, "取消");
+        assert!(state.modals.is_empty());
+        assert!(state.quit.is_none());
+        assert!(!state.quit_confirmed);
+        assert_eq!(state.store.len(), 2);
+        assert_eq!(state.active_tab(), Some(home));
+    }
+
     /// 真点鼠标走完原版 Schematic 导出流程：菜单 → `calculate_size()` 的提问 →
     /// 设计页三个单选 → 「使用默认值」的确认 → 方块页下拉 → 导出 → 磁盘上的 gzip 字节。
     #[test]

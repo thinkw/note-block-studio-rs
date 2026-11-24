@@ -1615,6 +1615,7 @@ fn keep_or_replace(
 /// 会话号、音频事件表、视口、落点、区间标记缺一不可。
 fn apply_replacement(state: &mut EditorState, song: Song) {
     state.doc.replace_song(song);
+    state.song_backup_path = None;
     state.reissue_session();
     state.prepare_audio();
     state.viewport.start_tick = 0;
@@ -3456,17 +3457,18 @@ const ACTIONS: &[(&str, ActionSpec)] = &[
     (
         "exit",
         ActionSpec {
-            description: "退出程序。界面那颗「退出」是不问就关的，所以这里在有未保存改动时先拒；确认要丢就带 discard_changes=true。默认关掉",
+            description: "退出程序。界面退出会逐标签询问；MCP 当前工程有未保存改动时仍先拒，确认要丢就带 discard_changes=true 立即退出。默认关掉",
             args: Some(r#"{"discard_changes":true}"#),
             mutating: false,
             danger: true,
             build: |state, args| {
-                keep_or_replace(
-                    state,
-                    arg_bool_or(args, "discard_changes")?,
-                    ("退出", "Quitting"),
-                )?;
-                Ok(Some(Command::Exit))
+                let discard = arg_bool_or(args, "discard_changes")?;
+                keep_or_replace(state, discard, ("退出", "Quitting"))?;
+                Ok(Some(if discard {
+                    Command::ExitDiscard
+                } else {
+                    Command::Exit
+                }))
             },
         },
     ),
@@ -4523,6 +4525,25 @@ mod tests {
                 assert!(out.ok, "{:?}", out.error);
             }
         }
+    }
+
+    #[test]
+    fn exit_action_keeps_the_explicit_discard_contract() {
+        let _prefs = crate::isolate_prefs();
+        let mut state = EditorState::for_test();
+        state.doc.song.dirty = true;
+        let spec = find_action("exit").unwrap();
+        assert!(
+            (spec.build)(&state, None).is_err(),
+            "脏工程必须先显式确认丢弃"
+        );
+        let discard = json!({ "discard_changes": true });
+        assert_eq!(
+            (spec.build)(&state, Some(&discard)).unwrap(),
+            Some(Command::ExitDiscard)
+        );
+        state.doc.song.dirty = false;
+        assert_eq!((spec.build)(&state, None).unwrap(), Some(Command::Exit));
     }
 
     fn code(out: &Outcome) -> ErrorCode {
