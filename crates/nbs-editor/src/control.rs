@@ -4461,7 +4461,7 @@ fn notes_in_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{Modal, WindowKind};
+    use crate::state::{Modal, ModalButtons, WindowKind};
     use nbs_control::LayerSet;
 
     fn cell(tick: u32, layer: u32, instrument: u8, key: u8) -> CellNote {
@@ -4936,7 +4936,7 @@ mod tests {
         h.state.modals.items.push_back(Modal {
             title: "Confirm",
             text: String::new(),
-            yes_no: true,
+            buttons: ModalButtons::YesNo,
         });
 
         let out = h.run(&Op::SetNotes {

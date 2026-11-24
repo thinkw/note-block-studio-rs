@@ -13,8 +13,8 @@ use nbs_core::model::{
 use nbs_core::{Document, Macro};
 
 use crate::state::{
-    DialogAction, EditMode, EditorState, FileDialog, Flag, Modal, ModalQueue, PrefsFolder,
-    WindowKind,
+    DialogAction, EditMode, EditorState, FileDialog, Flag, Modal, ModalButtons, ModalQueue,
+    PrefsFolder, WindowKind,
 };
 use crate::theme::{Theme, ThemeKind};
 use crate::tr;
@@ -238,6 +238,18 @@ pub enum Command {
     MidiImportCancel,
     /// 回答当前模态框，`false` = 「否」（丢弃整个待弹队列）。
     AnswerModal(bool),
+    /// 回答当前模态框的第三键「取消」（原版 `message_yesnocancel` 返回 -1）：
+    /// 队列和两条续作一起丢掉，什么都不办。
+    CancelModal,
+    /// 原版 `close_song(sid)`：关掉一个歌曲标签（用户要求 #131）。
+    CloseTab(crate::tabs::SongId),
+    /// 关标签问句答「是」：先把这一首存下来，存成了才接着关。
+    CloseTabSave(crate::tabs::SongId),
+    /// 关标签的收尾：切回原来那一首，再从表里拿掉这一首（原版 `close_song` 后半段）。
+    CloseTabFinish(crate::tabs::SongId),
+    /// 文件选择框被取消 = 原版 `save_song` 返回 0 = `confirm` 返回 -1：
+    /// 正挂在它上面的那次关标签作废。
+    DialogCancelled,
     /// 文件对话框确定。
     DialogConfirm(PathBuf),
     RunMacro(Macro),
@@ -347,6 +359,47 @@ pub(crate) fn record_note_at(state: &mut EditorState, note: Note) {
     state.audio.preview_note(&note);
 }
 
+/// 原版 `save_song.gml` 落盘的那一段：写文件、记下文件名、清脏标记、进最近列表、
+/// 关窗、报状态。返回 `false` = 原版 `save_song` 返回 0（播放器档位、写盘失败），
+/// 关标签那条路要靠它把这次关闭作废（用户要求 #131）。
+fn save_stage(state: &mut EditorState, path: PathBuf) -> bool {
+    // 原版 `save_song.gml:20` 第一句就是 `if (isplayer) return 0`。
+    if state.player {
+        return false;
+    }
+    let version = state.doc.song.meta.save_version;
+    match nbs_core::nbs::save(&path, &state.doc.song, version) {
+        Ok(()) => {
+            state.doc.song.filename = Some(path.clone());
+            state.doc.song.dirty = false;
+            state.add_recent(path);
+            state.window = None;
+            state.set_message(tr("Song saved", "歌曲已保存"));
+            true
+        }
+        Err(e) => {
+            state.set_message(if crate::lang() == 1 {
+                format!("保存失败: {e}")
+            } else {
+                format!("Save failed: {e}")
+            });
+            false
+        }
+    }
+}
+
+/// 原版 `close_song.gml:12-15`：问完之后**无条件**把台前切回问之前那一首
+/// （`if (song != previous_song) set_song(previous_song)`，它排在 `decision < 0`
+/// 那句返回之前）。没有挂起的关标签时是空操作 —— 别的文件框取消也走这条命令。
+fn restore_previous_tab(state: &mut EditorState) {
+    let Some(pending) = state.pending_close.take() else {
+        return;
+    };
+    if let Some(prev) = pending.previous {
+        state.switch_tab(prev);
+    }
+}
+
 /// 供右键菜单/快捷键共用的入口。
 pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
     // 界面语言跟着 prefs 走：生产路径 dispatch 都在帧内（app::show 已同步过），
@@ -391,24 +444,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         }
         Command::OpenPath(path) => open_nbs_at(state, &path, false),
         Command::SavePath(path) => {
-            if state.player {
-                return;
-            }
-            let version = state.doc.song.meta.save_version;
-            match nbs_core::nbs::save(&path, &state.doc.song, version) {
-                Ok(()) => {
-                    state.doc.song.filename = Some(path.clone());
-                    state.doc.song.dirty = false;
-                    state.add_recent(path);
-                    state.window = None;
-                    state.set_message(tr("Song saved", "歌曲已保存"));
-                }
-                Err(e) => state.set_message(if crate::lang() == 1 {
-                    format!("保存失败: {e}")
-                } else {
-                    format!("Save failed: {e}")
-                }),
-            }
+            save_stage(state, path);
         }
         Command::Undo => {
             if state.doc.undo() {
@@ -883,6 +919,11 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             state.context_menu = None;
         }
         Command::CloseWindow => {
+            // 系统组件起不来时兜底的自绘文件框，关掉它 = 原生框点了取消：
+            // 正挂在关标签上的那次保存作废（用户要求 #131）。
+            if matches!(state.window, Some(WindowKind::FileOpen | WindowKind::FileSave)) {
+                dispatch(state, Command::DialogCancelled, ctx);
+            }
             let return_to_preview = (state.window == Some(WindowKind::MidiImport) && state.transcription.import_from_preview)
                 || (matches!(state.window, Some(WindowKind::FileOpen | WindowKind::FileSave)) && state.dialog_return == Some(WindowKind::Transcription));
             if return_to_preview {
@@ -930,7 +971,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     } else {
                         "The exported schematic is currently only compatible with Minecraft: Java Edition 1.12 and below. To import it in 1.13 and above, please use the export to structure block function.\n\nThis warning will never be shown again.".into()
                     },
-                    yes_no: false,
+                    buttons: ModalButtons::Ok,
                 });
                 // 原版在这里 `save_settings()`，把“已看过”落盘。
                 state.prefs.warning_schematic = true;
@@ -940,14 +981,14 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 items.push_back(Modal {
                     title: tr("Minecraft Compatibility", "Minecraft 兼容性"),
                     text: q,
-                    yes_no: true,
+                    buttons: ModalButtons::YesNo,
                 });
             }
             if let Some(t) = st.tempo_notice() {
                 items.push_back(Modal {
                     title: tr("Tempo", "速度"),
                     text: t.into(),
-                    yes_no: false,
+                    buttons: ModalButtons::Ok,
                 });
             }
             let guard = nbs_io::schematic::open_guard(st);
@@ -955,12 +996,13 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 items.push_back(Modal {
                     title: tr("Error", "错误"),
                     text: e.clone(),
-                    yes_no: false,
+                    buttons: ModalButtons::Ok,
                 });
             }
             state.modals = ModalQueue {
                 items,
                 then: guard.ok().map(|_| Command::ShowWindow(target.clone())),
+                then_no: None,
             };
             if state.modals.is_empty() {
                 dispatch(state, Command::ShowWindow(target), ctx);
@@ -972,7 +1014,13 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 if state.sound_import.replace_asked {
                     crate::sound_import::answer_replace(&mut state.sound_import, false);
                 }
+                // 答「否」丢掉整个队列（原版 `calculate_size()` 返回 0 那一类）。
+                // 例外是关标签：原版「否」= 不保存、照关，那条续作要留着走。
+                let then_no = state.modals.then_no.take();
                 state.modals = ModalQueue::default();
+                if let Some(cmd) = then_no {
+                    dispatch(state, cmd, ctx);
+                }
             } else {
                 state.modals.items.pop_front();
                 if state.modals.is_empty() {
@@ -981,6 +1029,103 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                     }
                 }
             }
+        }
+        Command::CancelModal => {
+            // 原版 `message_yesnocancel` 的取消键返回 -1：队列连同两条续作一起作废。
+            state.modals = ModalQueue::default();
+            // 这问句是关标签弹的：`close_song.gml:15-16` 先无条件切回原来那一首，
+            // 再因为 `decision < 0` 直接返回，这一首保持打开（用户要求 #131）。
+            restore_previous_tab(state);
+        }
+        Command::CloseTab(id) => {
+            // 原版 `close_song(sid)`。标签已经没了、或上一首的问句还没答完都不动 ——
+            // 原版的对话框是阻塞的，答完之前开不出第二个。
+            if !state.store.contains(id) || !state.modals.is_empty() {
+                return;
+            }
+            // 记下站在台前的那一首（原版 `previous_song`），再把要关的摆上台：
+            // 答「是」时的保存动作落在被关的那首上，这一点和原版一致。
+            let previous = state.store.active();
+            if previous != Some(id) {
+                state.switch_tab(id);
+            } else {
+                // `confirm.gml:5` 进函数就先 `playing = 0`：切标签那条分支由
+                // `clear_tab_transients` 顺带做掉，本来就在台上时这里补上。
+                state.audio.stop();
+            }
+            state.pending_close = Some(crate::state::PendingClose { id, previous });
+            // 原版 `confirm` 的闸门是 `if (changed && !isplayer)`：没改过、或播放器档位
+            // 都不问，返回 0 直接往下关。
+            if !state.doc.song.dirty || state.player {
+                dispatch(state, Command::CloseTabFinish(id), ctx);
+                return;
+            }
+            // 文案带「（第 N 个）」：N 是标签条上的序号，从 1 数（`confirm.gml:23/33/47/57`）。
+            let n = state.store.index_of(id).unwrap_or(0) + 1;
+            let text = match state.doc.song.filename.as_deref() {
+                Some(path) => {
+                    // 原版用 `filename_name()`，那是**带扩展名**的文件名（取证见
+                    // `.work/songtabs-20261123/gml/` 里的 `backup_clear.gml:69`）。
+                    let name = path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    if crate::lang() == 1 {
+                        format!("你想保存未保存的歌曲{name}（第 {n} 个）吗？")
+                    } else {
+                        format!("Do you want to save the changes made in {name} (tab {n})?")
+                    }
+                }
+                None => {
+                    if crate::lang() == 1 {
+                        format!("你想保存未保存的歌曲（第 {n} 个）吗？")
+                    } else {
+                        format!("Do you want to save the song (tab {n})?")
+                    }
+                }
+            };
+            state.modals = ModalQueue::yes_no_cancel(
+                tr("Confirm", "确定"),
+                &text,
+                Command::CloseTabSave(id),
+                Command::CloseTabFinish(id),
+            );
+        }
+        Command::CloseTabSave(id) => {
+            if state.pending_close.map(|p| p.id) != Some(id) {
+                return;
+            }
+            // 原版 `confirm` 答「是」→ `save_song(有文件名就存回原文件，没有就传 "")`
+            // 走另存为；存下了才继续关，存不下（返回 0）整条作废。
+            match state.doc.song.filename.clone() {
+                Some(path) => {
+                    if save_stage(state, path) {
+                        dispatch(state, Command::CloseTabFinish(id), ctx);
+                    } else {
+                        dispatch(state, Command::DialogCancelled, ctx);
+                    }
+                }
+                None => dispatch(state, Command::OpenDialog(DialogAction::SaveSong), ctx),
+            }
+        }
+        Command::CloseTabFinish(id) => {
+            if state.pending_close.map(|p| p.id) != Some(id) {
+                return;
+            }
+            // 原版顺序：`close_song.gml:15` 切回 `previous_song` → :19 删备份
+            // → :24-25 销毁并从 `songs[]` 拿掉 → :27 表空了就 `new_song()`。
+            // 备份文件按文件名存（`prefs.rs` 的 `{safe}.autosave.nbs`），跨标签可能
+            // 同名，删它归退出流程一起定夺，这一段先不动（用户要求 #131）。
+            restore_previous_tab(state);
+            let closed = state.close_tab(id);
+            if closed.active.is_none() {
+                state.refill_tab_after_last_close();
+            }
+        }
+        Command::DialogCancelled => {
+            // 文件选择框点了取消 = 原版 `save_song` 返回 0 = `confirm` 返回 -1。
+            // 没挂在关标签上时是空操作。
+            restore_previous_tab(state);
         }
         Command::ResetSchematicOptions => {
             state.schematic_options.reset();
@@ -1011,7 +1156,7 @@ music machine. It carries no sound by itself and will not build the machine for 
 the machine in your world before pasting this structure.\n\nThis warning will never be shown again."
                             .into()
                     },
-                    yes_no: false,
+                    buttons: ModalButtons::Ok,
                 });
                 state.prefs.warning_maestro = true;
                 let _ = state.prefs.save();
@@ -1021,6 +1166,7 @@ the machine in your world before pasting this structure.\n\nThis warning will ne
             state.modals = ModalQueue {
                 items,
                 then: Some(Command::ShowWindow(WindowKind::MaestroExport)),
+                then_no: None,
             };
             if state.modals.is_empty() {
                 dispatch(state, Command::ShowWindow(WindowKind::MaestroExport), ctx);
@@ -1068,7 +1214,7 @@ blocks, repeaters, pistons and wiring are all inside it, so it plays once pasted
 need a prebuilt machine.\n\nThis warning will never be shown again."
                             .into()
                     },
-                    yes_no: false,
+                    buttons: ModalButtons::Ok,
                 });
                 state.prefs.warning_fractal = true;
                 let _ = state.prefs.save();
@@ -1078,6 +1224,7 @@ need a prebuilt machine.\n\nThis warning will never be shown again."
             state.modals = ModalQueue {
                 items,
                 then: Some(Command::ShowWindow(WindowKind::FractalExport)),
+                then_no: None,
             };
             if state.modals.is_empty() {
                 dispatch(state, Command::ShowWindow(WindowKind::FractalExport), ctx);
@@ -1124,7 +1271,7 @@ machine that is already built; change the machine or its speed and these chests 
 \n\nThis warning will never be shown again."
                             .into()
                     },
-                    yes_no: false,
+                    buttons: ModalButtons::Ok,
                 });
                 state.prefs.warning_disc_chest = true;
                 let _ = state.prefs.save();
@@ -1134,6 +1281,7 @@ machine that is already built; change the machine or its speed and these chests 
             state.modals = ModalQueue {
                 items,
                 then: Some(Command::ShowWindow(WindowKind::DiscChestExport)),
+                then_no: None,
             };
             if state.modals.is_empty() {
                 dispatch(state, Command::ShowWindow(WindowKind::DiscChestExport), ctx);
@@ -1615,11 +1763,12 @@ machine that is already built; change the machine or its speed and these chests 
                 items: [Modal {
                     title: "",
                     text: folder.tip().into(),
-                    yes_no: false,
+                    buttons: ModalButtons::Ok,
                 }]
                 .into_iter()
                 .collect(),
                 then: Some(Command::OpenDialog(DialogAction::PickFolder(folder))),
+                then_no: None,
             };
         }
         Command::OpenDialog(action) => {
@@ -1715,7 +1864,17 @@ machine that is already built; change the machine or its speed and these chests 
                 .unwrap_or(DialogAction::OpenSong);
             match action {
                 DialogAction::OpenSong => dispatch(state, Command::OpenPath(path), ctx),
-                DialogAction::SaveSong => dispatch(state, Command::SavePath(path), ctx),
+                // 保存框交回来的落盘就是 `Command::SavePath` 那一整套；这里直接调
+                // 它抽出来的 `save_stage`，好拿到成没成 —— 关标签正挂在这个框上时，
+                // 存成了才接着关，存不下就作废（用户要求 #131）。
+                DialogAction::SaveSong => {
+                    let saved = save_stage(state, path);
+                    match state.pending_close {
+                        Some(p) if saved => dispatch(state, Command::CloseTabFinish(p.id), ctx),
+                        Some(_) => dispatch(state, Command::DialogCancelled, ctx),
+                        None => {}
+                    }
+                }
                 DialogAction::PickFolder(folder) => {
                     // 原版 `songfolder = filename_dir(a)`：认的是对话框当时所在的那个目录。
                     // `windows.rs` 的目录模式直接把 `dialog.dir` 传过来，不带文件名。
@@ -2991,9 +3150,14 @@ mod tests {
                 .modals
                 .items
                 .iter()
-                .map(|m| m.yes_no)
+                .map(|m| m.buttons)
                 .collect::<Vec<_>>(),
-            vec![true, true, true, false],
+            vec![
+                ModalButtons::YesNo,
+                ModalButtons::YesNo,
+                ModalButtons::YesNo,
+                ModalButtons::Ok
+            ],
             "只有提问会中断导出，速度提示是 message"
         );
         assert!(matches!(
@@ -3235,7 +3399,7 @@ mod tests {
         dispatch(&mut state, Command::OpenSchematicExport, &ctx);
         assert_eq!(titles(&state), vec!["错误"]);
         assert_eq!(texts(&state), vec!["没有方块可以导出！"]);
-        assert!(!state.modals.items[0].yes_no);
+        assert_eq!(state.modals.items[0].buttons, ModalButtons::Ok);
         assert!(state.modals.then.is_none(), "闸门没过就没有后续动作");
         dispatch(&mut state, Command::AnswerModal(true), &ctx);
         assert_eq!(state.window, None);
@@ -3590,6 +3754,322 @@ mod tests {
         assert!(state.doc.song.dirty, "脏标记跟着标签走");
         assert!(state.parked_doc(loaded).unwrap().song.get(9, 1).is_some());
         let _ = std::fs::remove_file(&file);
+    }
+
+    /// 原版 `close_song.gml:9-11`：没改过的标签不问，直接关；关完回到问之前那一首。
+    #[test]
+    fn closing_a_clean_tab_never_asks_and_restores_the_previous_song() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let mut first = Song::new();
+        first.set(5, 2, Note::new(0, 45));
+        first.recalculate();
+        let mut state = state_with(first);
+        let home = state.active_tab().unwrap();
+        state.doc.song.dirty = true;
+        dispatch(&mut state, Command::New, &ctx);
+        let fresh = state.active_tab().unwrap();
+        assert!(!state.doc.song.dirty, "新建那首出厂就是干净的");
+
+        dispatch(&mut state, Command::CloseTab(fresh), &ctx);
+        assert!(state.modals.is_empty(), "没改过就不该弹确认");
+        assert_eq!(state.store.len(), 1);
+        assert_eq!(state.active_tab(), Some(home));
+        assert_eq!(state.doc.song.get(5, 2), Some(Note::new(0, 45)));
+        assert!(state.doc.song.dirty, "原来那首的脏标记没有被清掉");
+        assert!(state.pending_close.is_none());
+    }
+
+    /// 原版 `confirm.gml:47/57`：问句带「（第 N 个）」，N 是标签序号；取消返回 -1，
+    /// 所以这一首不关，台前先切回原来那一首。
+    #[test]
+    fn dirty_close_prompt_has_three_buttons_and_cancel_keeps_the_tab() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        let home = state.active_tab().unwrap();
+        let mut other = Song::new();
+        other.filename = Some(PathBuf::from("C:/nbs-rust 测试/样例曲.nbs"));
+        other.set(7, 0, Note::new(0, 60));
+        other.recalculate();
+        let second = state.push_tab(other);
+
+        dispatch(&mut state, Command::CloseTab(second), &ctx);
+        assert_eq!(titles(&state), vec!["确定"]);
+        assert_eq!(
+            texts(&state),
+            vec!["你想保存未保存的歌曲样例曲.nbs（第 2 个）吗？"]
+        );
+        assert_eq!(state.modals.items[0].buttons, ModalButtons::YesNoCancel);
+        assert_eq!(state.active_tab(), Some(second), "保存前先把要关的摆上台");
+        assert_eq!(
+            state.pending_close.map(|p| (p.id, p.previous)),
+            Some((second, Some(home)))
+        );
+
+        dispatch(&mut state, Command::CancelModal, &ctx);
+        assert!(state.modals.is_empty());
+        assert_eq!(state.store.len(), 2);
+        assert_eq!(state.active_tab(), Some(home));
+        assert!(state.pending_close.is_none());
+        assert!(state.parked_doc(second).unwrap().song.dirty);
+
+        state.prefs.language = 0;
+        dispatch(&mut state, Command::CloseTab(second), &ctx);
+        assert_eq!(titles(&state), vec!["Confirm"]);
+        assert_eq!(
+            texts(&state),
+            vec!["Do you want to save the changes made in 样例曲.nbs (tab 2)?"]
+        );
+        dispatch(&mut state, Command::CancelModal, &ctx);
+        assert_eq!(state.store.len(), 2);
+        assert_eq!(state.active_tab(), Some(home));
+    }
+
+    /// 原版 `confirm` 答「否」返回 0，不 < 0，所以照关，只是不落盘。
+    #[test]
+    fn answering_no_closes_without_saving() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let file =
+            std::env::temp_dir().join(format!("nbs_rust_close_no_{}.nbs", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let mut state = state_with(Song::new());
+        let home = state.active_tab().unwrap();
+        let mut other = Song::new();
+        other.filename = Some(file.clone());
+        other.set(3, 0, Note::new(0, 52));
+        other.recalculate();
+        let second = state.push_tab(other);
+
+        dispatch(&mut state, Command::CloseTab(second), &ctx);
+        dispatch(&mut state, Command::AnswerModal(false), &ctx);
+        assert_eq!(state.store.len(), 1);
+        assert_eq!(state.active_tab(), Some(home));
+        assert!(state.modals.is_empty());
+        assert!(state.pending_close.is_none());
+        assert!(!file.exists(), "答否是丢弃改动，不该写出文件");
+    }
+
+    /// 原版 `confirm.gml:38-40`：答「是」先存回原文件名，存下了才继续关。
+    #[test]
+    fn answering_yes_saves_the_named_song_before_closing() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let file =
+            std::env::temp_dir().join(format!("nbs_rust_close_yes_{}.nbs", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let mut state = state_with(Song::new());
+        let home = state.active_tab().unwrap();
+        let mut other = Song::new();
+        other.filename = Some(file.clone());
+        other.set(9, 1, Note::new(3, 50));
+        other.recalculate();
+        let second = state.push_tab(other);
+
+        dispatch(&mut state, Command::CloseTab(second), &ctx);
+        dispatch(&mut state, Command::AnswerModal(true), &ctx);
+        assert!(file.exists(), "关标签前必须真的保存");
+        let saved = nbs_core::nbs::load(&file).unwrap();
+        assert_eq!(saved.get(9, 1), Some(Note::new(3, 50)));
+        assert_eq!(state.store.len(), 1);
+        assert_eq!(state.active_tab(), Some(home));
+        assert!(state.modals.is_empty());
+        assert!(state.pending_close.is_none());
+        let _ = std::fs::remove_file(&file);
+    }
+
+    /// 原版 `save_song` 返回 0 时 `confirm` 返回 -1：保存失败就整条作废，标签仍在。
+    #[test]
+    fn failed_save_aborts_the_close() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let blocker =
+            std::env::temp_dir().join(format!("nbs_rust_close_blocker_{}", std::process::id()));
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let bad = blocker.join("song.nbs");
+        let mut state = state_with(Song::new());
+        let home = state.active_tab().unwrap();
+        let mut other = Song::new();
+        other.filename = Some(bad);
+        other.set(4, 0, Note::new(0, 48));
+        other.recalculate();
+        let second = state.push_tab(other);
+
+        dispatch(&mut state, Command::CloseTab(second), &ctx);
+        dispatch(&mut state, Command::AnswerModal(true), &ctx);
+        assert_eq!(state.store.len(), 2, "保存失败不能把标签关掉");
+        assert!(state.store.contains(second));
+        assert_eq!(state.active_tab(), Some(home));
+        assert!(state.pending_close.is_none());
+        assert!(state.modals.is_empty());
+        assert!(
+            state
+                .message
+                .as_ref()
+                .is_some_and(|(m, _)| m.starts_with("保存失败")),
+            "失败要留下原因: {:?}",
+            state.message
+        );
+        let _ = std::fs::remove_file(&blocker);
+    }
+
+    /// 原版 `close_song.gml:27-29`：表空了就 `new_song()`，所以关掉最后一首也留一首空曲。
+    #[test]
+    fn closing_the_last_tab_refills_with_a_blank_song() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let mut only = Song::new();
+        only.set(2, 0, Note::new(0, 47));
+        only.recalculate();
+        let mut state = state_with(only);
+        let old = state.active_tab().unwrap();
+
+        dispatch(&mut state, Command::CloseTab(old), &ctx);
+        dispatch(&mut state, Command::AnswerModal(false), &ctx);
+        assert_eq!(state.store.len(), 1, "空表要补回首标签");
+        let fresh = state.active_tab().expect("补出来的新标签");
+        assert_ne!(fresh, old);
+        assert!(!state.store.contains(old));
+        assert_eq!(state.doc.song.total_blocks, 0);
+        assert!(state.doc.song.filename.is_none());
+        assert!(!state.doc.song.dirty);
+        assert!(state.pending_close.is_none());
+    }
+
+    /// 关后台标签时，台前那首要原样回来；后台标签自己的内容不能漏到台前。
+    #[test]
+    fn closing_a_background_tab_lands_back_on_the_previous_one() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let mut first = Song::new();
+        first.set(6, 0, Note::new(0, 45));
+        first.recalculate();
+        let mut state = state_with(first);
+        let home = state.active_tab().unwrap();
+        state.doc.song.dirty = true;
+        let second = state.push_tab(Song::new());
+
+        dispatch(&mut state, Command::CloseTab(second), &ctx);
+        assert_eq!(state.store.len(), 1);
+        assert_eq!(state.active_tab(), Some(home));
+        assert_eq!(state.doc.song.get(6, 0), Some(Note::new(0, 45)));
+        assert!(state.doc.song.dirty);
+        assert!(state.modals.is_empty());
+    }
+
+    /// 没有文件名的那首，答「是」会走另存为；框里确认并保存成功后才关。
+    #[test]
+    fn untitled_yes_uses_the_save_dialog_and_confirm_finishes() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let file =
+            std::env::temp_dir().join(format!("nbs_rust_close_dialog_{}.nbs", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let mut state = state_with(Song::new());
+        let home = state.active_tab().unwrap();
+        let mut other = Song::new();
+        other.set(8, 0, Note::new(0, 51));
+        other.recalculate();
+        let second = state.push_tab(other);
+
+        dispatch(&mut state, Command::CloseTab(second), &ctx);
+        dispatch(&mut state, Command::AnswerModal(true), &ctx);
+        assert!(state.modals.is_empty());
+        assert_eq!(state.window, Some(WindowKind::FileSave));
+        assert_eq!(
+            state.file_dialog.as_ref().map(|d| d.action),
+            Some(DialogAction::SaveSong)
+        );
+        assert_eq!(state.pending_close.map(|p| p.id), Some(second));
+
+        dispatch(&mut state, Command::DialogConfirm(file.clone()), &ctx);
+        assert!(file.exists());
+        assert_eq!(
+            nbs_core::nbs::load(&file).unwrap().get(8, 0),
+            Some(Note::new(0, 51))
+        );
+        assert_eq!(state.store.len(), 1);
+        assert_eq!(state.active_tab(), Some(home));
+        assert_eq!(state.window, None);
+        assert!(state.file_dialog.is_none());
+        assert!(state.pending_close.is_none());
+        let _ = std::fs::remove_file(&file);
+    }
+
+    /// 另存为框取消 = `save_song` 返回 0 = 这次关闭作废；自绘框的「取消」也走同一条路。
+    #[test]
+    fn cancelling_the_untitled_save_dialog_aborts() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        let home = state.active_tab().unwrap();
+        let mut other = Song::new();
+        other.set(8, 0, Note::new(0, 51));
+        other.recalculate();
+        let second = state.push_tab(other);
+
+        dispatch(&mut state, Command::CloseTab(second), &ctx);
+        dispatch(&mut state, Command::AnswerModal(true), &ctx);
+        assert_eq!(state.window, Some(WindowKind::FileSave));
+        dispatch(&mut state, Command::CloseWindow, &ctx);
+        assert_eq!(state.window, None);
+        assert_eq!(state.store.len(), 2);
+        assert_eq!(state.active_tab(), Some(home));
+        assert!(state.pending_close.is_none());
+        assert!(state.parked_doc(second).unwrap().song.dirty);
+    }
+
+    struct CancelClosePicker;
+
+    impl crate::state::FilePicker for CancelClosePicker {
+        fn pick(&self, _dialog: &FileDialog) -> crate::state::PickResult {
+            crate::state::PickResult::Cancelled
+        }
+    }
+
+    /// 原生另存为框取消也要把挂起的关标签作废；这条经过帧外回调和命令队列。
+    #[test]
+    fn cancelling_the_native_save_dialog_aborts() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        state.picker = Some(std::sync::Arc::new(CancelClosePicker));
+        let home = state.active_tab().unwrap();
+        let mut other = Song::new();
+        other.set(8, 0, Note::new(0, 51));
+        other.recalculate();
+        let second = state.push_tab(other);
+
+        dispatch(&mut state, Command::CloseTab(second), &ctx);
+        dispatch(&mut state, Command::AnswerModal(true), &ctx);
+        assert!(state.pending_dialog.is_some(), "原生请求应挂到帧外");
+        assert!(state.window.is_none(), "原生框不该打开自绘窗口");
+        assert!(state.run_pending_dialog());
+        assert!(state.file_dialog.is_none());
+
+        state.flush(&ctx);
+        assert_eq!(state.store.len(), 2);
+        assert_eq!(state.active_tab(), Some(home));
+        assert!(state.pending_close.is_none());
+        assert!(state.parked_doc(second).unwrap().song.dirty);
+    }
+
+    /// 原版 `confirm.gml:20` 的 `&& !isplayer`：播放器档位即使脏了也不问，直接关。
+    #[test]
+    fn player_mode_closes_a_dirty_tab_without_asking() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        state.player = true;
+        let only = state.active_tab().unwrap();
+        state.doc.song.dirty = true;
+
+        dispatch(&mut state, Command::CloseTab(only), &ctx);
+        assert!(state.modals.is_empty());
+        assert_eq!(state.store.len(), 1);
+        assert_ne!(state.active_tab(), Some(only));
+        assert_eq!(state.doc.song.total_blocks, 0);
     }
 
     /// 原版 `obj_song/Create_0.gml:22-24`：区间属于「这一首歌」，每首开出来都是

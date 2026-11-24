@@ -9,8 +9,8 @@
 //!
 //! 与原版的已知差异：
 //! - F1 原版是打开教学视频链接，这里指向本端口自建的「快捷键一览」窗口（用户定案 #71）。
-//! - Ctrl+W 关当前文件（`get_hotkey.gml` 的 close_song → `control_draw.gml:647`）不接：
-//!   端口是单文档，没有「关掉这一首」这一步，绑上去只能是一个不做事的假动作。
+//! - Ctrl+W（`control_draw.gml:647`）在 macOS 上原版不认（那行前面写着
+//!   `os_type != os_macosx`，且没有 mac 分支补上），本端口照抄这个平台条件。
 //! - F3 一族（调试浮层、日志浮层、强切窗口，`control_draw.gml:868-899`）不接：原版的
 //!   调试后门，界面上没有任何入口、帮助页也不列，普通用户按不到也不该按到。
 //! - 参考音频静音 / 独奏 / 混音（`control_step.gml:36-48`）与琴键改键
@@ -199,6 +199,16 @@ pub fn collect_shortcuts(state: &EditorState, ctx: &Context) -> Vec<Command> {
                 }
                 if p(Key::P) {
                     out.push(Command::ShowWindow(WindowKind::Preferences));
+                }
+                // 原版 `control_draw.gml:647`：`close_song(song)` 关的是台前这一首，
+                // 问不问、怎么切回去全在命令里。这一行没有 `!isplayer`（播放器档位
+                // 照样能关标签），但写着 `os_type != os_macosx`；整段和 Ctrl+O/P 一样
+                // 包在 `if (playing = 0)` 里 —— GML 的 `=` 在条件里是比较，所以播放中
+                // 这一键不响应。
+                if !cfg!(target_os = "macos") && p(Key::W) {
+                    if let Some(id) = state.active_tab() {
+                        out.push(Command::CloseTab(id));
+                    }
                 }
 
                 // 原版 `control_draw.gml:640-645`：这六个键就是 `mode_action(1..6)`，
@@ -475,6 +485,12 @@ pub fn shortcut_help() -> Vec<(&'static str, &'static str)> {
         ),
         ("Ctrl+P", "Ctrl+P", "Preferences", "首选项"),
         (
+            "Ctrl+W",
+            "Ctrl+W",
+            "Close the active song tab",
+            "关闭当前歌曲标签",
+        ),
+        (
             "Ctrl+1..9",
             "Ctrl+1..9",
             "Pick instruments 1-9 (velocity / panning / pitch reset + preview)",
@@ -682,6 +698,59 @@ mod tests {
         let mut out = Vec::new();
         let _ = ctx.run(raw, |c| out = collect_shortcuts(state, c));
         out
+    }
+
+    /// 原版 `control_draw.gml:647`：Ctrl+W 关台前标签，Shift 键和前台窗口都能挡掉；
+    /// 这一行没有 `!isplayer`，所以播放器档位仍能关标签。macOS 条件留在实现处。
+    #[test]
+    fn ctrl_w_closes_the_active_tab_only_when_the_gates_clear() {
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        let both = egui::Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Default::default()
+        };
+        let closes = |c: &Command| matches!(c, Command::CloseTab(_));
+        let state = fresh_state();
+        let active = state.active_tab().expect("开机至少有一首");
+        let got = cmds_in(&state, vec![key(Key::W, true, ctrl)]);
+        assert_eq!(got.iter().filter(|c| closes(c)).count(), 1, "{got:?}");
+        assert!(
+            got.iter()
+                .any(|c| matches!(c, Command::CloseTab(id) if *id == active)),
+            "要关的是台前那首: {got:?}"
+        );
+
+        let got = cmds(vec![key(Key::W, true, both)]);
+        assert!(!got.iter().any(closes), "Ctrl+Shift+W 是淡出宏: {got:?}");
+        let got = cmds(vec![key(Key::W, true, egui::Modifiers::NONE)]);
+        assert!(!got.iter().any(closes), "单按 W 不关标签: {got:?}");
+
+        let mut blocked = fresh_state();
+        blocked.window = Some(WindowKind::Preferences);
+        let got = cmds_in(&blocked, vec![key(Key::W, true, ctrl)]);
+        assert!(!got.iter().any(closes), "窗口开着时快捷键全被挡: {got:?}");
+
+        let mut playing = fresh_state();
+        playing.audio.clock_mut().play();
+        assert!(playing.is_playing(), "测试前提：播放时钟确实在走");
+        let got = cmds_in(&playing, vec![key(Key::W, true, ctrl)]);
+        assert!(
+            !got.iter().any(closes),
+            "原版 playing = 0 是比较闸门: {got:?}"
+        );
+
+        let mut player = fresh_state();
+        player.player = true;
+        let got = cmds_in(&player, vec![key(Key::W, true, ctrl)]);
+        assert!(
+            got.iter().any(closes),
+            "原版这一行没有 isplayer 闸门: {got:?}"
+        );
+        assert!(shortcut_help().iter().any(|row| row.0 == "Ctrl+W"));
     }
 
     /// 用户要求 #120a：Ctrl+E/D/R/F/T/G 在原版是 `mode_action(1..6)`，走的是选区那条路

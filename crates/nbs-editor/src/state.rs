@@ -389,13 +389,25 @@ pub enum MidiMenu {
     PercPitch(usize),
 }
 
-/// 原版的 `message()` / `question()` 模态框。`yes_no` 对应 `question()`，
-/// 答「否」会丢掉整个待弹队列（即 `calculate_size()` 返回 0，不打开导出窗口）。
+/// 原版三种弹窗的按钮组：`message()` 只有确定、`question()` 是/否、
+/// `message_yesnocancel()` 是/否/取消。第三键的返回值是从出货二进制里反汇编
+/// 确认的（是 = 1 / 否 = 0 / 取消 = -1，见
+/// `.work/songtabs-20261123/gml/message_yesnocancel_返回值.md`），所以「取消」
+/// 和「保存失败」在原版里是同一个值，都表示这条路作废。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModalButtons {
+    Ok,
+    YesNo,
+    YesNoCancel,
+}
+
+/// 原版的 `message()` / `question()` / `message_yesnocancel()` 模态框。
+/// `YesNo` 答「否」会丢掉整个待弹队列（即 `calculate_size()` 返回 0，不打开导出窗口）。
 #[derive(Clone, Debug)]
 pub struct Modal {
     pub title: &'static str,
     pub text: String,
-    pub yes_no: bool,
+    pub buttons: ModalButtons,
 }
 
 /// 一组待弹的模态框，队列走完后执行 `then`。
@@ -403,6 +415,24 @@ pub struct Modal {
 pub struct ModalQueue {
     pub items: std::collections::VecDeque<Modal>,
     pub then: Option<Command>,
+    /// 只有带「否」按钮的问句用得上：答「否」也要继续走，但走的是另一条路。
+    /// 原版 `close_song` 里「否」= 不保存、照关（`confirm` 返回 0，不 < 0），
+    /// 和答「是」的「先保存再关」不是一件事，所以得分开挂（用户要求 #131）。
+    pub then_no: Option<Command>,
+}
+
+/// 关标签进行中的挂起状态（用户要求 #131）。
+///
+/// 原版 `close_song(sid)` 从头到尾是阻塞的：先把要关的那首摆上台，问完再切回
+/// 原来那首，最后才真正销毁。端口里「先保存」这一步可能弹原生文件选择框，
+/// 一帧完不了，所以得把「正在关哪首 / 关完切回哪首」记下来，等对话框回来接着走。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingClose {
+    /// 正在关闭的那首。
+    pub id: crate::tabs::SongId,
+    /// 问之前站在台前的那一首（原版 `previous_song`）：问完先切回它，再销毁。
+    /// 要关的就是它时两者相同，切回去是空操作。
+    pub previous: Option<crate::tabs::SongId>,
 }
 
 /// 最近歌曲一条（原版 `recent_song[a]` + `recent_song_time[a]`）。
@@ -435,11 +465,30 @@ impl ModalQueue {
             items: [Modal {
                 title,
                 text: text.into(),
-                yes_no: true,
+                buttons: ModalButtons::YesNo,
             }]
             .into_iter()
             .collect(),
             then: Some(then),
+            then_no: None,
+        }
+    }
+
+    /// 单个原版 `message_yesnocancel(正文, 标题)`：三键问句。
+    /// 「是」走 `then`、「否」走 `then_no`（不保存也要办完的那条路）、
+    /// 「取消」两条都不走 —— 原版的 `close_song` 只在 `decision < 0` 时中止，
+    /// 而取消键返回的就是 -1。
+    pub fn yes_no_cancel(title: &'static str, text: &str, then: Command, then_no: Command) -> Self {
+        Self {
+            items: [Modal {
+                title,
+                text: text.into(),
+                buttons: ModalButtons::YesNoCancel,
+            }]
+            .into_iter()
+            .collect(),
+            then: Some(then),
+            then_no: Some(then_no),
         }
     }
 
@@ -449,11 +498,12 @@ impl ModalQueue {
             items: [Modal {
                 title,
                 text: text.into(),
-                yes_no: false,
+                buttons: ModalButtons::Ok,
             }]
             .into_iter()
             .collect(),
             then: None,
+            then_no: None,
         }
     }
 }
@@ -1148,6 +1198,8 @@ pub struct EditorState {
     /// 等着被原生选择器处理的请求。在帧外（`raw_input_hook`）取走，避免在 egui 帧内
     /// 起一个会泵消息的模态框。
     pub pending_dialog: Option<FileDialog>,
+    /// 关标签走到「先保存」这一步时挂住的现场（用户要求 #131）。
+    pub pending_close: Option<PendingClose>,
     /// 原版 `recent_song[0..10]`（路径 + 打开时间）。
     pub recent_files: Vec<RecentPath>,
     /// 开机更新检查的共享结果。没开「检查更新」时状态一直是 0（原版 `update_http = -1`）。
@@ -1571,6 +1623,7 @@ impl EditorState {
             control_change: None,
             control_info: None,
             pending_dialog: None,
+            pending_close: None,
             recent_files,
             update_check: std::sync::Arc::new(std::sync::Mutex::new(UpdateCheck::default())),
             update_question: false,
@@ -1831,7 +1884,7 @@ impl EditorState {
 
     /// 关掉一个标签：状态搬移（原版 `close_song.gml` 的后半段）。
     ///
-    /// 保存确认、备份文件删除都不在这里——那是调用方（`Command::CloseTabRequested`
+    /// 保存确认、备份文件删除都不在这里——那是调用方（`Command::CloseTab`
     /// 与退出流程）的事，对应原版 `close_song` 前半段的 `confirm` 和
     /// `backup_delete_own_tab`。原版关任何一首都要经过两次 `set_song`
     /// （`close_song.gml:15/27`），所以**关后台标签同样停播**、清 fade/metronome/mono；
@@ -1863,6 +1916,20 @@ impl EditorState {
         self.sync_loop_params();
         self.sync_section_stop();
         out
+    }
+
+    /// 最后一个标签关掉后补一首空曲（原版 `close_song.gml:27-29`：表空了就
+    /// `new_song()`）。闸门是 `!nonew || noconfirm`：Ctrl+W / 菜单关标签（`close_song(sid)`）
+    /// 和退出流程（`close_song(i, 1, 1)`）都成立，只有欢迎窗和启动文件那条
+    /// 「替换第 1 个标签」的路（`close_song(0, 1)`）不补——那条路紧接着就载入新歌。
+    /// [`crate::tabs::SongStore::close`] 已经换上一首空曲在台前（不在表里，
+    /// `active_tab()` 是 `None`），这里把它搬进槽位表、台上再放一首。
+    pub fn refill_tab_after_last_close(&mut self) -> Option<crate::tabs::SongId> {
+        if !self.store.is_empty() {
+            return self.store.active();
+        }
+        let blank = std::mem::replace(&mut self.doc, Document::new());
+        Some(self.open_tab(blank))
     }
 
     /// 新开一个标签，放在标签条末尾、**不在台前**（原版 `open_song_nbs.gml:50-53`
@@ -2019,6 +2086,10 @@ impl EditorState {
             }
             PickResult::Cancelled => {
                 self.file_dialog = None;
+                // 关标签正等在这个框上时，取消 = 原版 `save_song` 返回 0 = `confirm`
+                // 返回 -1：这一首不关，切回原来那首（用户要求 #131）。
+                // 只有 `Command::CloseTab` 会置挂起记录，别的请求取消时这条是空操作。
+                self.emit(Command::DialogCancelled);
             }
             PickResult::Unavailable => {
                 // 自绘兜底框会把原窗口顶掉，记住顶掉的是哪个，选完放回去。
@@ -2068,8 +2139,14 @@ impl EditorState {
         let cmds = std::mem::take(&mut self.pending);
         for cmd in cmds {
             // 原版 `message()` / `question()` 会冻结整个游戏循环：模态队列没答完之前，
-            // 背景界面产生的命令一律丢弃，只接受「回答当前模态框」这一条。
-            if !self.modals.is_empty() && !matches!(cmd, crate::commands::Command::AnswerModal(_)) {
+            // 背景界面产生的命令一律丢弃，只接受回答当前模态框（是 / 否 / 取消）。
+            if !self.modals.is_empty()
+                && !matches!(
+                    cmd,
+                    crate::commands::Command::AnswerModal(_)
+                        | crate::commands::Command::CancelModal
+                )
+            {
                 continue;
             }
             crate::commands::dispatch(self, cmd, ctx);

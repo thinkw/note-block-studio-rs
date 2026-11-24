@@ -2060,9 +2060,50 @@ mod gui_window_tests {
             let Some(front) = state.modals.items.front().cloned() else {
                 return;
             };
-            click_text(state, ctx, if front.yes_no { "是" } else { "确定" });
+            click_text(
+                state,
+                ctx,
+                match front.buttons {
+                    state::ModalButtons::Ok => "确定",
+                    state::ModalButtons::YesNo | state::ModalButtons::YesNoCancel => "是",
+                },
+            );
         }
         panic!("模态框一直没答完，流程可能卡住了");
+    }
+
+    /// 三键确认框必须真的画出「是 / 否 / 取消」；点取消后这一首还在，并回到原来那首。
+    #[test]
+    fn close_tab_cancel_button_is_drawn_and_works() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        let home = state.active_tab().expect("开机至少有一首");
+        let mut other = nbs_core::model::Song::new();
+        other.filename = Some(PathBuf::from("gui-close.nbs"));
+        other.set(4, 0, nbs_core::model::Note::new(0, 48));
+        other.recalculate();
+        let second = state.push_tab(other);
+
+        dispatch(&mut state, commands::Command::CloseTab(second), &ctx);
+        assert_eq!(state.modals.items.len(), 1, "脏标签应先弹确认");
+        assert_eq!(state.pending_close.map(|p| p.id), Some(second));
+        frame_out(&mut state, &ctx, base_input());
+        let out = frame_out(&mut state, &ctx, base_input());
+        assert_eq!(state.modals.items.len(), 1, "模态框画完也应还在");
+        let x = |label: &str| text_center_if(&out.shapes, |t| t == label).x;
+        assert!(x("是") < x("否"), "按钮顺序应是 是 / 否 / 取消");
+        assert!(x("否") < x("取消"), "取消键必须真的画在第三位");
+
+        click_text(&mut state, &ctx, "取消");
+        assert!(state.modals.is_empty());
+        assert_eq!(state.store.len(), 2, "取消不能把标签关掉");
+        assert_eq!(state.active_tab(), Some(home));
+        assert!(state.pending_close.is_none());
+        assert!(state.parked_doc(second).unwrap().song.dirty);
     }
 
     /// 真点鼠标走完原版 Schematic 导出流程：菜单 → `calculate_size()` 的提问 →
@@ -2116,7 +2157,7 @@ mod gui_window_tests {
         // 「使用默认值」先问「你确定吗？」，答否保持原样。
         click_text(&mut state, &ctx, "使用默认值");
         assert_eq!(state.modals.items.len(), 1, "原版这里先弹确认");
-        assert!(state.modals.items[0].yes_no);
+        assert_eq!(state.modals.items[0].buttons, state::ModalButtons::YesNo);
         click_text(&mut state, &ctx, "否");
         assert_eq!(state.schematic_options.layout, 0, "答否不该还原");
 
@@ -2270,7 +2311,8 @@ mod gui_window_tests {
         assert_eq!(s2.modals.items.len(), 1, "失败要弹模态，不只是状态栏一行字");
         assert_eq!(s2.modals.items[0].title, "Error");
         assert_eq!(
-            s2.modals.items[0].yes_no, false,
+            s2.modals.items[0].buttons,
+            state::ModalButtons::Ok,
             "原版这里是 message()，只有确定键"
         );
         assert!(
@@ -2881,7 +2923,7 @@ mod gui_window_tests {
         assert!(!state.prefs.check_prerelease);
         click_text(&mut state, &ctx, "检查开发版本");
         assert_eq!(state.modals.items.len(), 1, "开启开发版检查要先弹警告");
-        assert!(state.modals.items[0].yes_no);
+        assert_eq!(state.modals.items[0].buttons, state::ModalButtons::YesNo);
         assert!(!state.prefs.check_prerelease, "答之前不能先改值");
         click_text(&mut state, &ctx, "是");
         assert!(state.prefs.check_prerelease, "答「是」要真的打开");
@@ -4709,7 +4751,7 @@ mod gui_window_tests {
 
         click_text(&mut state, &ctx, "使用默认值");
         assert_eq!(state.modals.items.len(), 1, "原版这里先弹一句确认");
-        assert!(state.modals.items[0].yes_no);
+        assert_eq!(state.modals.items[0].buttons, state::ModalButtons::YesNo);
         assert_eq!(state.theme.accent_base, [200, 20, 60], "答之前不改");
         click_text(&mut state, &ctx, "否");
         frame(&mut state, &ctx);
