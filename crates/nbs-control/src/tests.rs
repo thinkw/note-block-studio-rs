@@ -1010,3 +1010,110 @@ fn the_transcription_ops_round_trip_and_refuse_typo_fields() {
     strs.dedup();
     assert_eq!(strs.len(), JobKind::ALL.len(), "kind 字符串撞车了：{strs:?}");
 }
+
+/// 只讲协议、不碰编辑器的假服务端：认下握手，收到第一问后晚 `delay` 才回。
+///
+/// `hold_open` = 答完再撑一会儿才关。这一条是给「迟到的回执」那个现场用的：
+/// 服务端一答就断开，连接被关掉会替「不作废连接」遮掩住缺陷，测试就咬不动了。
+/// `answer` = false 时握完手一句回执都不发就把连接丢掉（真窗口上就是空闲 60s 被服务端关掉）。
+fn fake_server(
+    answer: bool,
+    delay: Duration,
+    hold_open: bool,
+) -> (u16, Arc<std::sync::Mutex<Vec<u64>>>, std::thread::JoinHandle<()>) {
+    use crate::bus::HelloAck;
+
+    let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let answered: Arc<std::sync::Mutex<Vec<u64>>> = Arc::default();
+    let sink = Arc::clone(&answered);
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut writer = stream;
+        let _hello: Hello = read_json_line(&mut reader).unwrap().unwrap();
+        write_json_line(
+            &mut writer,
+            &HelloAck {
+                hello: true,
+                protocol: crate::PROTOCOL_VERSION,
+                app: "nbs-fake 0.0.0-test".to_string(),
+                snapshot: None,
+            },
+        )
+        .unwrap();
+        let req: Request = read_json_line(&mut reader).unwrap().unwrap();
+        if !answer {
+            // 一问不答就走：下一问写出去就再没人接。
+            return;
+        }
+        std::thread::sleep(delay);
+        sink.lock().unwrap().push(req.id);
+        // 本端这时候可能早就不等了：写得成写不成都不算服务端错，别 unwrap。
+        let _ = write_json_line(
+            &mut writer,
+            &Response {
+                id: req.id,
+                outcome: Outcome::done(report(1)),
+            },
+        );
+        if hold_open {
+            std::thread::sleep(Duration::from_millis(1_500));
+        }
+    });
+    (port, answered, server)
+}
+
+/// 现场：编辑器主线程排队到 600ms 才回，而本端只等 200ms（真窗口上是「正在跑导出」）。
+#[test]
+fn a_reply_later_than_the_wait_does_not_answer_the_next_request() {
+    let (port, answered, server) = fake_server(true, Duration::from_millis(600), true);
+    let mut client = ControlClient::connect_with_reply_wait(
+        port,
+        "",
+        "test",
+        Duration::from_secs(2),
+        Duration::from_millis(200),
+    )
+    .unwrap();
+    let first = client.request(Op::Ping);
+    assert!(
+        matches!(first, Err(ClientError::TimedOut)),
+        "等满上限要说成「没按时回答」，实际：{first:?}"
+    );
+
+    // 等那张回执真的落到本端的接收缓冲里再问第二句。不这么排，第二问会在它到达之前
+    // 就自己超时，正好错过要钉的那个缺陷。
+    std::thread::sleep(Duration::from_millis(750));
+
+    // 这一问是整条修复的重点：第二问绝不能把第一问那张迟到回执当成自己的答案。
+    // 旧 rev、旧计数读起来像「答对了」，比直接报错危险得多。
+    let second = client.request(Op::GetSnapshot);
+    match second {
+        Err(ClientError::Closed) | Err(ClientError::Unreachable(_)) | Err(ClientError::TimedOut) => {}
+        other => panic!("第二问不该拿到东西，实际：{other:?}"),
+    }
+    server.join().unwrap();
+    assert_eq!(*answered.lock().unwrap(), vec![1], "服务端只该收到第一问");
+}
+
+/// 对端已经不认这条连接了（真窗口上就是空闲 60s 被服务端关掉）。
+#[test]
+fn a_dropped_link_says_closed_instead_of_bad_reply() {
+    let (port, _answered, server) = fake_server(false, Duration::ZERO, false);
+
+    let mut client = ControlClient::connect_with_reply_wait(
+        port,
+        "",
+        "test",
+        Duration::from_secs(2),
+        Duration::from_millis(200),
+    )
+    .unwrap();
+    let out = client.request(Op::Ping);
+    assert!(
+        matches!(out, Err(ClientError::Closed)),
+        "连接断了要说成「断了」，报成 BadReply 会把人支去改参数：{out:?}"
+    );
+    server.join().unwrap();
+}

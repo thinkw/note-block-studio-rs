@@ -1443,4 +1443,44 @@ mod tests {
             assert_eq!(got, want, "{dir} 帧数不对，音符盒会画到错误的形状上");
         }
     }
+
+    /// `spr_marker` 的「细身」帧（播放头 1/7/9，区间边界 3/5）实测只有 x=7、x=8 两根
+    /// 完全不透明的列，另外 14 列整列透明。贴图原点取 x=8，所以指针落在整像素上时
+    /// 屏幕上正好是 2 根实列 —— `grid.rs` 那条线宽断言和「落点必须吸附到整物理像素」
+    /// 的修法都以这两根实列为前提（不吸附时 LINEAR 会把它摊成 3~4 列渐变，即用户实测
+    /// 的「指针后面跟着一条浅蓝色的线」）。换贴图必须同步改那边，故钉在这里。
+    #[test]
+    fn the_marker_body_is_exactly_two_solid_columns() {
+        let root = asset_root().expect("找不到 assets/icons");
+        for frame in [1, 3, 5, 7, 9] {
+            let path = root.join("marker").join(format!("{frame:02}.png"));
+            let img = image::open(&path)
+                .unwrap_or_else(|e| panic!("{} 读不到：{e}", path.display()))
+                .into_rgba8();
+            assert_eq!((img.width(), img.height()), (16, 15), "帧 {frame} 尺寸变了");
+            let mut solid: Vec<u32> = Vec::new();
+            let mut faded = 0usize;
+            for x in 0..16u32 {
+                let mut all_opaque = true;
+                let mut any_partial = false;
+                for y in 0..15u32 {
+                    let a = img.get_pixel(x, y).0[3];
+                    all_opaque &= a == 255;
+                    any_partial |= a > 0 && a < 255;
+                }
+                if all_opaque {
+                    solid.push(x);
+                }
+                if any_partial {
+                    faded += 1;
+                }
+            }
+            assert_eq!(
+                solid,
+                vec![7, 8],
+                "帧 {frame} 的不透明列变了，指针线宽跟着变"
+            );
+            assert_eq!(faded, 0, "帧 {frame} 有半透明列，指针会拖出一条浅色影");
+        }
+    }
 }

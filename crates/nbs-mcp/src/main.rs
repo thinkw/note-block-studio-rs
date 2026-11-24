@@ -40,14 +40,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// 常驻模式：交管道给 MCP 客户端，直到对方关掉 stdin。
+///
+/// 开局连不上**不再**直接把进程退掉：IDE 常常比编辑器先启动，旧做法那时候
+/// MCP 客户端只看见「服务起不来」，窗口后来开好了也没用，得重启 IDE。
+/// 现在照样把服务开起来，工具面全在，第一问再连（`Bridge` 每条连接只带一次，
+/// 断了会自己重连，见 nbs-mcp 的 `dispatch_link`）。
 fn serve(endpoint: Endpoint) -> Result<(), Box<dyn std::error::Error>> {
-    let client = connection(&endpoint);
-    eprintln!(
-        "nbs-mcp: 已连上 {}（{}），stdio 交给 MCP 客户端",
-        bridge_label(&client),
-        endpoint.config_dir.display()
-    );
-    let bridge = Bridge::new(client);
+    let bridge = match connect(&endpoint) {
+        Ok(client) => {
+            eprintln!(
+                "nbs-mcp: 已连上 {}（{}），stdio 交给 MCP 客户端",
+                bridge_label(&client),
+                endpoint.config_dir.display()
+            );
+            Bridge::new(endpoint, client)
+        }
+        Err(message) => {
+            eprintln!(
+                "nbs-mcp: 开局没连上编辑器，服务照起来，第一问再重连。\n{message}\n\
+                 （{}）",
+                endpoint.config_dir.display()
+            );
+            Bridge::detached(endpoint)
+        }
+    };
 
     runtime()?.block_on(async move {
         let service = bridge
@@ -91,7 +107,7 @@ fn run_call(endpoint: Endpoint, request: CallRequest) -> Result<(), Box<dyn std:
         }
     };
     let client = connection(&endpoint);
-    let bridge = Bridge::new(client);
+    let bridge = Bridge::new(endpoint, client);
     let reply = runtime()?.block_on(bridge.run(plan));
     // 结果打 stdout，成败用退出码说，脚本 `&&` / `||` 就能接。
     println!("{}", call::render(&request.tool, &reply, request.json));
@@ -100,9 +116,10 @@ fn run_call(endpoint: Endpoint, request: CallRequest) -> Result<(), Box<dyn std:
 
 /// 连不上就说话然后退出。退出码 2 和 `--call` 的「桥接没问到」同一个意思：
 /// 该动的是启动方式（编辑器没起 / 没开外部控制 / 目录不对），不是调用参数。
+/// 只有 `--call` 走这条路——它一次一问、每问新建一条连接，不值得为它保留常驻服务那种
+/// 「先起来，第一问再连」的耐心（见 [`serve`]）。
 fn connection(endpoint: &Endpoint) -> nbs_control::ControlClient {
     match connect(endpoint) {
-        // 先把连接建起来再交管道：带着一条坏连接去讲 MCP，客户端只会看见「工具全在，一调就错」。
         Ok(client) => client,
         Err(message) => {
             eprintln!("nbs-mcp: {message}");

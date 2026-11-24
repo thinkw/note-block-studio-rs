@@ -365,12 +365,35 @@ fn ruler_tick(vp: &Viewport, x: f32) -> f64 {
     vp.start_tick as f64 + (x - vp.origin.x) as f64 / vp.cell() as f64
 }
 
-/// 原版 `x1 + 2 + floor(marker_pos * 32 - starta * 32)`：播放头那条线所在的像素 x，
-/// 也是 `spr_marker` 传给 `draw_sprite` 的横坐标（贴图原点就在线上）。
+/// 播放头所在的原始横坐标（逻辑像素，可能带小数）：`starta + (marker_pos - starta) * 32`
+/// 那条式子的端口写法。命中判定（`handle_timeline_input`）要的是这个连续值，
+/// 画贴图不能用它 —— 见 [`marker_screen_x`]。
 fn marker_x(state: &EditorState) -> f32 {
     let vp = &state.viewport;
     let m = state.marker().max(0.0);
     vp.tick_x(m.floor() as i64) + (m.fract() as f32) * vp.cell()
+}
+
+/// 把逻辑坐标吸附到整物理像素，和 #114 网格竖线（`draw_grid` 里那条 `snap`）同一个口径。
+fn snap_px(v: f32, ppi: f32) -> f32 {
+    (v * ppi).round() / ppi
+}
+
+/// 传给 `draw_sprite` 的横坐标：吸附到整物理像素后的 [`marker_x`]。
+///
+/// 原版是 `floor(current_song.marker_pos * 32 - current_song.starta * 32)`
+/// （`control_draw.gml:1170`）—— 落到整数画布像素，上屏时才整体缩放，所以指针在任何
+/// 缩放档下都只有贴图那两根实列宽。端口按物理坐标直接画，且播放中 `marker` 是连续
+/// tick 数，落点带小数；`spr_marker` 的第 1 帧是 16×15、只有 x=7/x=8 两列不透明的位图
+/// （原点 x=8，正好骑在落点两侧各 1 像素），而这条带用的是 LINEAR 采样，于是那两根
+/// 实列会被摊成 3~4 列渐变（实测 f≈0.35 时三列 alpha 约 38/255/217）—— 用户看到的
+/// 「指针后面跟着一条浅蓝色的线」就是被摊开的那半。吸附后每帧最多跳 1 物理像素、
+/// 位置误差 ≤0.5 像素；原版是取整（截断），这里是四舍五入，方向一致、比它更准。
+///
+/// 时间轴带内和网格内两个绘制点必须调用同一个函数拿同一个值：箭头帽和竖线本来共用
+/// 一个 `mx`，一边吸一边不吸就会错开 1 像素。
+fn marker_screen_x(state: &EditorState, ppi: f32) -> f32 {
+    snap_px(marker_x(state), ppi)
 }
 
 /// 原版 `control_draw.gml:1122-1127`：区间两端每帧夹进 `[0, enda + totalcols]`，
@@ -515,9 +538,15 @@ fn handle_timeline_input(state: &mut EditorState, input: &InputSnapshot, rect: R
 /// `window = 0` 这道门：滚轮换音色/换键在 `control_draw.gml:227`、悬停音符改属性在
 /// :125 的总闸里、滚动条的滚轮和拖拽在 `draw_scrollbar.gml:22/51/161/188`、
 /// 标尺手柄在 `:132-151`；工具栏音色框展开也写成 `window = w_insbox`（:1975）。
-/// 端口把这几样拆成了三个字段，这里合成回同一个判断。
+/// 端口把这几样拆成了四个字段，这里合成回同一个判断。
+/// 第四条 `menubar_open` 是顶部菜单的下拉：原版走的是同一个 `window += w_menu`
+/// （show_menu_ext.gml:21），egui 的菜单不认画布这套裸输入，只能自己补上这道门
+/// （用户要求 #129）。
 fn canvas_blocked(state: &EditorState) -> bool {
-    state.window.is_some() || state.insbox_open || state.context_menu.is_some()
+    state.window.is_some()
+        || state.insbox_open
+        || state.context_menu.is_some()
+        || state.menubar_open
 }
 
 fn handle_grid_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect) {
@@ -1355,7 +1384,7 @@ fn draw_timeline(state: &EditorState, ui: &Ui, rect: Rect) {
 
     // 播放头：原版在时间轴顶端画 spr_marker 的箭头帧，细身帧一路拉满整个网格
     // （贴图原点在线上，见 `IconBank::marker`）。网格那半截见 draw_grid。
-    let mx = marker_x(state);
+    let mx = marker_screen_x(state, ui.ctx().pixels_per_point());
     if let Some(bank) = state.icons.bank() {
         if mx >= rect.min.x - 8.0 * u && mx <= rect.max.x + 8.0 * u {
             let tint = if th.kind == ThemeKind::Fluent {
@@ -1659,7 +1688,7 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
     // 播放头：原版 spr_marker 第 0 帧是箭头、第 1 帧是纵向拉满的细身（箭头画在时间轴那一格，
     // 见 draw_timeline），贴图原点在线上（`IconBank::marker`）。
     if let Some(bank) = state.icons.bank() {
-        let mx = marker_x(state);
+        let mx = marker_screen_x(state, ui.ctx().pixels_per_point());
         if mx >= rect.min.x && mx <= rect.max.x {
             let tint = if th.kind == ThemeKind::Fluent {
                 th.accent(3)
@@ -1670,8 +1699,9 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
                 &p,
                 pos2(mx, rect.min.y),
                 marker_frame(th, blackout) + 1,
-                // 竖线宽度恒定（#90）：这帧是 16px 宽的贴图，中线 1px，
-                // 按 `cell` 缩放时缩到 10% 就成了 0.1px，指针整个看不见。
+                // 竖线宽度恒定（#90）：这帧是 16px 宽的贴图，里面只有 x=7、x=8 两根
+                // 实列（原点 8，落点两侧各占 1 像素），按 `cell` 缩放时缩到 10% 就成了
+                // 0.2px，指针整个看不见。
                 Vec2::new(16.0 * RULER_SCALE, rect.height()),
                 tint,
             );
@@ -3166,7 +3196,7 @@ mod tests {
     }
 
     /// 偏离原版（用户要求）：滚动条不随窗口缩放，恒定为 BAR_SCALE（0.67）档尺寸。
-    /// 两种格距下 split() 分出的条带、h/v_geometry 的滑块几何必须一致，
+    /// 两种格距下 `split()` 分出的条带、`h/v_geometry()` 的滑块几何必须一致，
     /// 内边距钉在 `4 × BAR_SCALE`、最小滑块钉在 `24 × BAR_SCALE`。
     #[test]
     fn the_scrollbar_bands_do_not_scale_with_the_window() {
@@ -3201,7 +3231,7 @@ mod tests {
 
     /// 偏离原版（用户要求 #90）：时间轴带和播放指针都不随界面缩放。
     /// 带高恒为 `TIMELINE_HEIGHT`（100% 档），网格顶因此也不动；
-    /// 指针竖线的贴图宽度按 `RULER_SCALE` 展开，缩到 10% 仍然是整 1px，不会消失。
+    /// 指针竖线的贴图宽度按 `RULER_SCALE` 展开，缩到 10% 仍然是整 2px，不会消失。
     #[test]
     fn the_timeline_band_does_not_scale_with_the_window() {
         let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
@@ -3214,12 +3244,43 @@ mod tests {
         assert!((t1.height() - t2.height()).abs() < 0.01, "带高不随缩放");
         assert_eq!(g1.min.y, g2.min.y, "网格顶不随缩放");
 
-        // `IconBank::marker` 把 16px 宽的帧拉成 `size.x`，贴图里的中线是 1px，
-        // 所以屏幕上的线宽 = size.x ÷ 16。宽度钉死后线宽恒 1px。
-        let line_w = (16.0 * RULER_SCALE) / 16.0;
-        assert!((line_w - 1.0).abs() < 1e-6, "指针竖线恒 1px，实际 {line_w}");
+        // `IconBank::marker` 把 16px 宽的帧拉成 `size.x`；贴图里不透明的是 x=7、x=8
+        // 两根实列（钉在 `the_marker_body_is_exactly_two_solid_columns`），所以屏幕上的
+        // 线宽 = size.x ÷ 16 × 2。宽度钉死后恒 2px，不会随界面缩放变细。
+        let line_w = (16.0 * RULER_SCALE) / 16.0 * 2.0;
+        assert!((line_w - 2.0).abs() < 1e-6, "指针竖线恒 2px，实际 {line_w}");
         // 图层栏那边取的是同一个带高，两边算出的行数才对得上。
         assert!((timeline_band() - TIMELINE_HEIGHT).abs() < 0.01);
+    }
+
+    /// 用户实测「播放时指针后面跟着一条浅蓝色的线」的回归闸：贴图落点必须落在整物理
+    /// 像素上。带内用的是 LINEAR 采样，落点一带小数，`spr_marker` 那两根实列就会被摊成
+    /// 3~4 根渐变的半透明列（实测 f≈0.35 时三列 alpha ≈ 38/255/217），看着就像多出一条影。
+    /// 原版是 `floor` 到整数画布像素，这里是四舍五入到物理像素格，误差上限 0.5 物理像素。
+    #[test]
+    fn the_marker_blit_lands_on_a_whole_physical_pixel() {
+        let mut st = ruler_state();
+        for (marker, ppi) in [
+            (0.35, 1.0_f32),
+            (3.37, 1.5),
+            (3.5, 1.25),
+            (12.9, 2.0),
+            (7.0, 1.5),
+        ] {
+            st.set_marker(marker);
+            let got = marker_screen_x(&st, ppi);
+            assert!(
+                (got * ppi).fract().abs() < 1e-3,
+                "{marker} tick / ppi {ppi}：吸附后 {got}（×ppi = {}）不在物理像素格上",
+                got * ppi
+            );
+            let err = (got - marker_x(&st)).abs() * ppi;
+            assert!(err <= 0.5 + 1e-3, "{marker} tick：位置误差 {err} 物理像素");
+        }
+        // 反证：不吸附时播放中的落点确实是小数，正是被摊开的前提。
+        st.set_marker(0.35);
+        let raw = marker_x(&st);
+        assert!(raw.fract().abs() > 0.1, "落点本该是小数，实际 {raw}");
     }
 
     /// 偏离原版（用户要求 #90）：标尺标签尺寸钉死，格距变小时靠跳档避免数字叠在一起。

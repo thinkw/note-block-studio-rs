@@ -1085,6 +1085,17 @@ fn song_info(state: &mut EditorState, ui: &mut Ui, with_buttons: bool) {
         // 原版 :139 用的是全屏的左键判定，不要求指针落在卡片里。
         state.emit(Command::CloseWindow);
     }
+    // 偏离原版（用户要求 #130）：原版这一扇没有 ESC 路径——只读版认全屏左键（:139），
+    // 带按钮版认「确定」（:133/136）。两种变体是同一个脚本画的同一扇窗，只差底部有没有
+    // 按钮，所以 ESC 一并给。让位规则照原版 `draw_windows.gml:31-38`：同一次按键先收展开
+    // 的下拉，不收窗口。顶栏这一路要单独看 #129 的 `menubar_open`：egui 在 `menu.rs:366`
+    // 就把这次按下用掉了，画到本窗时 `any_popup_open` 已经是假。判定取按下不取抬起，和
+    // 原版 `draw_windows.gml:28` 的 `keyboard_check_pressed` 同口径：真实按键的按下/抬起常
+    // 分属两帧，认抬起会让收菜单那一刀的余波在下一帧把窗关掉。本扇自身没有下拉（只有一
+    // 段静态文字和两个按钮），所以不叠 `close_prefs_dropdowns`。
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) && !state.menubar_open {
+        state.emit(Command::CloseWindow);
+    }
 }
 
 fn properties(state: &mut EditorState, ui: &mut Ui) {
