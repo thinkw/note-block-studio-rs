@@ -13,13 +13,13 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use nbs_control::{Data, Op, Outcome, Playback};
+use nbs_control::{Data, Op, Outcome, Playback, TabRef};
 
 use crate::params::{
-    BatchFieldArgs, ClearSong, Export, GetNotes, ImportMidi, InspectMidi, JobId, LayerAdd,
-    LayerIndex, LayerMove, LayerUpdate, OpenPath, RemoveCells, RevOnly, RunAction, SavePath, Seek,
-    Select, SetLoop, SetMetaArgs, SetNotes, Steps, TranscribeAudio, TranscribePrepareEnv,
-    TranscribePrepareModel, Transpose,
+    BatchFieldArgs, ClearSong, CloseTab, Export, GetNotes, ImportMidi, InspectMidi, JobId,
+    LayerAdd, LayerIndex, LayerMove, LayerUpdate, OpenPath, RemoveCells, RevOnly, RunAction,
+    SavePath, Seek, Select, SetLoop, SetMetaArgs, SetNotes, Steps, SwitchTab, TabOnly,
+    TranscribeAudio, TranscribePrepareEnv, TranscribePrepareModel, Transpose,
 };
 use crate::Reply;
 
@@ -60,7 +60,7 @@ pub fn is_bridge_local(name: &str) -> bool {
 /// 一条 `--call` 要做的事。分两支是因为有一条压根不发往编辑器。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Plan {
-    Editor(Op),
+    Editor { op: Op, tab: Option<TabRef> },
     BridgeInfo,
 }
 
@@ -70,7 +70,15 @@ pub fn plan(name: &str, args: &Value) -> Result<Plan, DispatchError> {
     if is_bridge_local(name) {
         return Ok(Plan::BridgeInfo);
     }
-    Ok(Plan::Editor(op_for(name, args)?))
+    let op = op_for(name, args)?;
+    let tab = typed::<TabOnly>(name, args)?.tab;
+    if let Some(tab) = tab {
+        tab.validate().map_err(|message| DispatchError::BadArgs {
+            tool: name.to_string(),
+            message: message.to_string(),
+        })?;
+    }
+    Ok(Plan::Editor { op, tab })
 }
 
 /// `--call` 给的工具名 + 参数 → 一条 `Op`。
@@ -82,24 +90,50 @@ pub fn op_for(name: &str, args: &Value) -> Result<Op, DispatchError> {
         // 无参工具：参数给了也不认，免得把「拼错的名字」读成「省略」。
         "ping" => Ok(Op::Ping),
         "list_actions" => Ok(Op::ListActions),
-        "get_snapshot" => Ok(Op::GetSnapshot),
-        "get_layers" => Ok(Op::GetLayers),
-        "get_selection" => Ok(Op::GetSelection),
-        "get_instruments" => Ok(Op::GetInstruments),
+        "get_snapshot" => {
+            typed::<TabOnly>(name, args)?;
+            Ok(Op::GetSnapshot)
+        }
+        "get_layers" => {
+            typed::<TabOnly>(name, args)?;
+            Ok(Op::GetLayers)
+        }
+        "get_selection" => {
+            typed::<TabOnly>(name, args)?;
+            Ok(Op::GetSelection)
+        }
+        "get_instruments" => {
+            typed::<TabOnly>(name, args)?;
+            Ok(Op::GetInstruments)
+        }
         "get_diagnostics" => Ok(Op::GetDiagnostics),
-        "get_history" => Ok(Op::GetHistory),
+        "get_history" => {
+            typed::<TabOnly>(name, args)?;
+            Ok(Op::GetHistory)
+        }
+        "list_tabs" => Ok(Op::ListTabs),
+        "switch_tab" => Ok(typed::<SwitchTab>(name, args)?.into()),
+        "close_tab" => Ok(typed::<CloseTab>(name, args)?.into()),
         "job_list" => Ok(Op::JobList),
         "save" => Ok(Op::Save),
         "play" => Ok(Op::Playback(Playback::Play)),
         "pause" => Ok(Op::Playback(Playback::Pause)),
         "stop" => Ok(Op::Playback(Playback::Stop)),
         // 一个结构体对应两个动作的，方向在这张表里定（参数校验仍走同一个结构体）。
-        "undo" => Ok(Op::Undo {
-            steps: typed::<Steps>(name, args)?.steps,
-        }),
-        "redo" => Ok(Op::Redo {
-            steps: typed::<Steps>(name, args)?.steps,
-        }),
+        "undo" => {
+            let a = typed::<Steps>(name, args)?;
+            Ok(Op::Undo {
+                steps: a.steps,
+                expect_rev: a.expect_rev,
+            })
+        }
+        "redo" => {
+            let a = typed::<Steps>(name, args)?;
+            Ok(Op::Redo {
+                steps: a.steps,
+                expect_rev: a.expect_rev,
+            })
+        }
         "job_status" => Ok(Op::JobStatus {
             id: typed::<JobId>(name, args)?.id,
         }),
@@ -262,6 +296,9 @@ mod tests {
             "get_instruments",
             "get_diagnostics",
             "get_history",
+            "list_tabs",
+            "switch_tab",
+            "close_tab",
             "job_list",
             "save",
             "play",
@@ -307,7 +344,13 @@ mod tests {
     /// 你永远看不到真正的原因。
     #[test]
     fn plan_decides_before_any_socket_is_opened() {
-        assert_eq!(plan("ping", &payload()).unwrap(), Plan::Editor(Op::Ping));
+        assert_eq!(
+            plan("ping", &payload()).unwrap(),
+            Plan::Editor {
+                op: Op::Ping,
+                tab: None,
+            }
+        );
         assert_eq!(plan("server_info", &payload()).unwrap(), Plan::BridgeInfo);
         assert_eq!(
             plan("get_note", &payload()).unwrap_err(),
@@ -315,6 +358,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tab_locators_survive_planning_and_new_tab_tools_map_to_ops() {
+        let tab = TabRef {
+            id: Some(77),
+            index: None,
+        };
+        assert_eq!(
+            plan("get_notes", &json!({ "tab": { "id": 77 }, "tick_from": 2 })).unwrap(),
+            Plan::Editor {
+                op: Op::GetNotes {
+                    tick_from: Some(2),
+                    tick_to: None,
+                    layer_from: None,
+                    layer_to: None,
+                    ticks_per_bar: None,
+                    bars: None,
+                },
+                tab: Some(tab),
+            }
+        );
+        assert_eq!(
+            plan("switch_tab", &json!({ "tab": { "index": 1 } })).unwrap(),
+            Plan::Editor {
+                op: Op::SwitchTab {
+                    tab: TabRef {
+                        id: None,
+                        index: Some(1),
+                    },
+                },
+                tab: Some(TabRef {
+                    id: None,
+                    index: Some(1),
+                }),
+            }
+        );
+        assert_eq!(
+            plan(
+                "close_tab",
+                &json!({ "tab": { "id": 77 }, "discard": true })
+            )
+            .unwrap(),
+            Plan::Editor {
+                op: Op::CloseTab {
+                    tab,
+                    discard: Some(true),
+                },
+                tab: Some(tab),
+            }
+        );
+        for args in [
+            json!({ "tab": {} }),
+            json!({ "tab": { "id": 77, "index": 1 } }),
+        ] {
+            assert!(matches!(
+                plan("get_snapshot", &args),
+                Err(DispatchError::BadArgs { .. })
+            ));
+        }
+        assert!(matches!(
+            plan("switch_tab", &payload()),
+            Err(DispatchError::BadArgs { .. })
+        ));
+    }
     #[test]
     fn an_unknown_name_is_not_a_silent_empty_call() {
         let err = op_for("get_note", &payload()).unwrap_err();
@@ -387,7 +493,10 @@ mod tests {
         );
         assert_eq!(
             op_for("undo", &json!({"steps":3})).unwrap(),
-            Op::Undo { steps: Some(3) }
+            Op::Undo {
+                steps: Some(3),
+                expect_rev: None,
+            }
         );
         assert_eq!(
             op_for("layer_remove", &json!({"index":3})).unwrap(),

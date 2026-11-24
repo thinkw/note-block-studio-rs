@@ -388,6 +388,15 @@ impl SongStore {
         self.slots.get(id).map(|t| t.session)
     }
 
+    /// MCP 持有的稳定会话号 → 当前槽位；标签关闭后返回 None。
+    pub fn id_for_session(&self, session: u64) -> Option<SongId> {
+        self.order.iter().copied().find(|id| {
+            self.slots
+                .get(*id)
+                .is_some_and(|tab| tab.session == session)
+        })
+    }
+
     /// 台前的缓存身份，等价于原来的 `EditorState::song_session` 读值。
     /// 一个标签都没有时返回 0——发号从 1 开始，0 不会撞上任何真实身份。
     pub fn active_session(&self) -> u64 {

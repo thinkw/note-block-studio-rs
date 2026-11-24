@@ -95,13 +95,15 @@ impl Reply {
     }
 }
 
-/// 手里那条连接的可信状态。锁只护这两格，网络读全在锁外做。
+/// 手里那条连接的可信状态。锁只护这几格，网络读全在锁外做。
 #[derive(Default)]
 struct Link {
     /// `None` = 现在没有可信连接：还没连上，或者上一条刚刚在传输层失败。
     client: Option<ControlClient>,
     /// 最近一次握手时编辑器自报的应用名，给每条回执定范围。
     app: String,
+    /// 最近一次握手公布的标签能力；`server_info` 让外部调用方开局就能看到。
+    parked_write: Option<bool>,
 }
 
 /// 一条到编辑器的连接，外加「断了就重新连上」。一次只能问一句，所以用 `Mutex` 串行化；
@@ -159,6 +161,7 @@ fn dispatch_link(
     endpoint: &Endpoint,
     link: &Arc<Mutex<Link>>,
     op: Op,
+    tab: Option<nbs_control::TabRef>,
     resend: bool,
 ) -> Result<(Outcome, bool), String> {
     let read_only = op.is_read_only();
@@ -171,11 +174,12 @@ fn dispatch_link(
                 None => {
                     let fresh = connect(endpoint)?;
                     guard.app = fresh.server_app().to_string();
+                    guard.parked_write = Some(fresh.capabilities().parked_write);
                     fresh
                 }
             }
         };
-        match client.request(op.clone()) {
+        match client.request_tab(op.clone(), tab) {
             Ok(outcome) => {
                 link_guard(link).client = Some(client);
                 return Ok((outcome, resent));
@@ -192,11 +196,13 @@ impl Bridge {
     /// 已经连着一条时用这个；`endpoint` 留着给断了之后重连。
     pub fn new(endpoint: Endpoint, client: ControlClient) -> Self {
         let app = client.server_app().to_string();
+        let parked_write = client.capabilities().parked_write;
         Self {
             endpoint,
             link: Arc::new(Mutex::new(Link {
                 client: Some(client),
                 app,
+                parked_write: Some(parked_write),
             })),
         }
     }
@@ -255,7 +261,7 @@ pub enum ToolList {
 
 /// 把工具面打出来：给人核对「AI 会看到什么口径」，不需要编辑器在场，也不碰 stdio 协议。
 ///
-/// `only` 是给 `--dump-tools <工具>` 用的：全表 43 条、每条带一份 schema，
+/// `only` 是给 `--dump-tools <工具>` 用的：全表 46 条、每条带一份 schema，
 /// 只想看一条时那输出比正文长十倍。名字不在表里返回 `Ok(false)`，让调用方说清
 /// 「这条没有」而不是打一份空表装作成功。
 pub fn dump_tools(
@@ -317,17 +323,31 @@ impl Bridge {
     /// 发一条 `Op` 并等回执，然后按 [`to_result`] 的口径交给 MCP。
     /// 阻塞的网络读放在 `exec` 的 `spawn_blocking` 里，免得占住异步线程。
     async fn call(&self, op: Op) -> Result<Json<Reply>, CallToolResult> {
-        to_result(self.exec(op).await)
+        self.call_tab(op, None).await
+    }
+
+    async fn call_tab(
+        &self,
+        op: Op,
+        tab: Option<nbs_control::TabRef>,
+    ) -> Result<Json<Reply>, CallToolResult> {
+        to_result(self.exec_tab(op, tab).await)
     }
 
     /// [`call`](Self::call) 的无包装版本，给 `--call` 用。
     pub async fn exec(&self, op: Op) -> Reply {
+        self.exec_tab(op, None).await
+    }
+
+    pub async fn exec_tab(&self, op: Op, tab: Option<nbs_control::TabRef>) -> Reply {
         let endpoint = self.endpoint.clone();
         let link = Arc::clone(&self.link);
         let channel = self.channel();
         let resend = op.is_read_only();
-        let joined = tokio::task::spawn_blocking(move || dispatch_link(&endpoint, &link, op, resend))
-            .await;
+        let joined = tokio::task::spawn_blocking(move || {
+            dispatch_link(&endpoint, &link, op, tab, resend)
+        })
+        .await;
         match joined {
             // 重发之后拿到的那一答是新连接上现算的，`rev` 也是那时的，正文不用改；
             // 但「中间断过一次」这件事要能被人从日志里翻出来，走 stderr（stdout 是协议流）。
@@ -345,7 +365,7 @@ impl Bridge {
     pub async fn run(&self, plan: call::Plan) -> Reply {
         match plan {
             call::Plan::BridgeInfo => self.bridge_info().await,
-            call::Plan::Editor(op) => self.exec(op).await,
+            call::Plan::Editor { op, tab } => self.exec_tab(op, tab).await,
         }
     }
 
@@ -357,7 +377,7 @@ impl Bridge {
         let link = Arc::clone(&self.link);
         let channel = self.channel();
         match tokio::task::spawn_blocking(move || {
-            dispatch_link(&endpoint, &link, Op::Ping, true)
+            dispatch_link(&endpoint, &link, Op::Ping, None, true)
         })
         .await
         {
@@ -386,23 +406,26 @@ impl Bridge {
     /// 也该是 2（没连上）而不是 0（成功）。
     pub async fn bridge_info(&self) -> Reply {
         let channel = self.channel();
-        let face = |ok: bool, editor: &str| {
+        let face = |ok: bool, editor: &str, parked_write: Option<bool>| {
             serde_json::json!({
                 "ok": ok,
                 "channel": channel,
                 "bridge": env!("CARGO_PKG_VERSION"),
                 "protocol": nbs_control::PROTOCOL_VERSION,
+                "parked_write": parked_write,
                 "editor": editor,
             })
         };
-        match self.server_probe().await {
+        let probe = self.server_probe().await;
+        let parked_write = link_guard(&self.link).parked_write;
+        match probe {
             Ok(status) => Reply {
-                outcome: Some(face(true, &status)),
+                outcome: Some(face(true, &status, parked_write)),
                 transport: None,
                 channel: Some(channel.clone()),
             },
             Err(reason) => Reply {
-                outcome: Some(face(false, &reason)),
+                outcome: Some(face(false, &reason, parked_write)),
                 transport: Some(reason),
                 channel: Some(channel),
             },
@@ -431,7 +454,8 @@ impl Bridge {
     /// 回执里会带回动作自己的提示语和变更量。
     #[tool]
     async fn run_action(&self, Parameters(a): Parameters<RunAction>) -> Result<Json<Reply>, CallToolResult> {
-        self.call(a.into()).await
+        let tab = a.tab;
+        self.call_tab(a.into(), tab).await
     }
 
     // -------------------------------------------------------------- 读
@@ -439,8 +463,11 @@ impl Bridge {
     /// 工程概览：文件路径、脏标记、元数据、图层数、音符数、长度、播放头、
     /// `rev` / `song_session`，外加兼容性诊断。想先看清局面就调这个。
     #[tool]
-    async fn get_snapshot(&self) -> Result<Json<Reply>, CallToolResult> {
-        self.call(Op::GetSnapshot).await
+    async fn get_snapshot(
+        &self,
+        Parameters(a): Parameters<crate::params::TabOnly>,
+    ) -> Result<Json<Reply>, CallToolResult> {
+        self.call_tab(Op::GetSnapshot, a.tab).await
     }
 
     /// 读一段范围内的音符格子。返回上限由服务端定，`truncated=true` 说明只给了一部分，
@@ -450,27 +477,37 @@ impl Bridge {
     /// 只有耳朵能发现，所以这份文字视图由状态栏同一张表生成。
     #[tool]
     async fn get_notes(&self, Parameters(a): Parameters<GetNotes>) -> Result<Json<Reply>, CallToolResult> {
-        self.call(a.into()).await
+        let tab = a.tab;
+        self.call_tab(a.into(), tab).await
     }
 
     /// 图层清单：层号、名字、音量、左右声道、锁定 / solo 状态。
     #[tool]
-    async fn get_layers(&self) -> Result<Json<Reply>, CallToolResult> {
-        self.call(Op::GetLayers).await
+    async fn get_layers(
+        &self,
+        Parameters(a): Parameters<crate::params::TabOnly>,
+    ) -> Result<Json<Reply>, CallToolResult> {
+        self.call_tab(Op::GetLayers, a.tab).await
     }
 
     /// 当前选区：是否浮动选区、包围盒、音符数。写之前想知道「selection 是哪儿」就看它。
     #[tool]
-    async fn get_selection(&self) -> Result<Json<Reply>, CallToolResult> {
-        self.call(Op::GetSelection).await
+    async fn get_selection(
+        &self,
+        Parameters(a): Parameters<crate::params::TabOnly>,
+    ) -> Result<Json<Reply>, CallToolResult> {
+        self.call_tab(Op::GetSelection, a.tab).await
     }
 
     /// 音色表：内置 0..=19 加自定义槽位，含每个槽位当前挂的音色名，以及
     /// Minecraft 原生可播的键号闭区间 `mc_key_range`。
     /// 写音符前用它确认 `instrument` 号真的存在、音高落在能响的那两个八度里。
     #[tool]
-    async fn get_instruments(&self) -> Result<Json<Reply>, CallToolResult> {
-        self.call(Op::GetInstruments).await
+    async fn get_instruments(
+        &self,
+        Parameters(a): Parameters<crate::params::TabOnly>,
+    ) -> Result<Json<Reply>, CallToolResult> {
+        self.call_tab(Op::GetInstruments, a.tab).await
     }
 
     /// 兼容性诊断：超出 Minecraft 两个八度的音符、原版没有的音色、锁层引用等。
@@ -482,8 +519,35 @@ impl Bridge {
 
     /// 撤销栈：当前游标、长度，以及每一步的说明文字。
     #[tool]
-    async fn get_history(&self) -> Result<Json<Reply>, CallToolResult> {
-        self.call(Op::GetHistory).await
+    async fn get_history(
+        &self,
+        Parameters(a): Parameters<crate::params::TabOnly>,
+    ) -> Result<Json<Reply>, CallToolResult> {
+        self.call_tab(Op::GetHistory, a.tab).await
+    }
+
+    /// 标签清单：稳定 id、当前位置、标题、脏标记与内容版本；不切标签。
+    #[tool]
+    async fn list_tabs(&self) -> Result<Json<Reply>, CallToolResult> {
+        self.call(Op::ListTabs).await
+    }
+
+    /// 切到指定标签；稳定 id 推荐长期持有，index 会在重排后漂。
+    #[tool]
+    async fn switch_tab(
+        &self,
+        Parameters(a): Parameters<crate::params::SwitchTab>,
+    ) -> Result<Json<Reply>, CallToolResult> {
+        self.call(a.into()).await
+    }
+
+    /// 关闭指定标签；脏标签必须明确 discard=true，否则返回 needs_confirm。
+    #[tool]
+    async fn close_tab(
+        &self,
+        Parameters(a): Parameters<crate::params::CloseTab>,
+    ) -> Result<Json<Reply>, CallToolResult> {
+        self.call(a.into()).await
     }
 
     // -------------------------------------------------------------- 写
@@ -493,91 +557,117 @@ impl Bridge {
     /// 回执的 `report.rev` 请留给下一次写操作的 `expect_rev`。
     #[tool]
     async fn set_notes(&self, Parameters(a): Parameters<SetNotes>) -> Result<Json<Reply>, CallToolResult> {
-        self.call(a.into()).await
+        let tab = a.tab;
+        self.call_tab(a.into(), tab).await
     }
 
     /// 按坐标摘掉若干格子。空格子不算改动，所以 `cells_changed` 可能小于你给的条数。
     #[tool]
     async fn remove_cells(&self, Parameters(a): Parameters<RemoveCells>) -> Result<Json<Reply>, CallToolResult> {
-        self.call(a.into()).await
+        let tab = a.tab;
+        self.call_tab(a.into(), tab).await
     }
 
     /// 批量改某个字段（音色 / 音高 / 音量 / 声道 / 音分）。
     /// `mode="add"` 在现值上加，越界由服务端夹取并在回执里说明夹了多少，不会静默丢弃。
     #[tool]
     async fn batch_field(&self, Parameters(a): Parameters<BatchFieldArgs>) -> Result<Json<Reply>, CallToolResult> {
-        self.call(a.into()).await
+        let tab = a.tab;
+        self.call_tab(a.into(), tab).await
     }
 
     /// 整体或局部移调。`scope` 决定动谁：整首歌、当前浮动选区，还是给定矩形内已有音符的格子。
     /// 越界夹到 0..=87 并在回执里说明。
     #[tool]
     async fn transpose(&self, Parameters(a): Parameters<Transpose>) -> Result<Json<Reply>, CallToolResult> {
-        self.call(a.into()).await
+        let tab = a.tab;
+        self.call_tab(a.into(), tab).await
     }
 
     /// 选区：框选 / 全选 / 反选 / 按音色 / 超出 MC 音域 / 自定义音色。
     /// 摘出的浮动选区会挡住写操作，写完记得 `place_selection` 或用 `select` 取消。
     #[tool]
     async fn select(&self, Parameters(a): Parameters<Select>) -> Result<Json<Reply>, CallToolResult> {
-        self.call(a.into()).await
+        let tab = a.tab;
+        self.call_tab(a.into(), tab).await
     }
 
     /// 把浮动选区就地落回歌曲，等价于「取消选择但不丢改动」。
     /// 有浮动选区时 `set_notes` 这类写操作会被状态闸挡回来，所以这一步不能省。
     #[tool]
     async fn place_selection(&self, Parameters(a): Parameters<RevOnly>) -> Result<Json<Reply>, CallToolResult> {
-        self.call(a.into()).await
+        let tab = a.tab;
+        self.call_tab(a.into(), tab).await
     }
 
     /// 加图层：`at` 省略 = 追加到末尾。
     #[tool]
     async fn layer_add(&self, Parameters(a): Parameters<LayerAdd>) -> Result<Json<Reply>, CallToolResult> {
-        self.call(a.into()).await
+        let tab = a.tab;
+        self.call_tab(a.into(), tab).await
     }
 
     /// 删图层。锁定层的音符删之前先 `get_snapshot` 看一眼，回执会说明丢了几格。
     #[tool]
     async fn layer_remove(&self, Parameters(a): Parameters<LayerIndex>) -> Result<Json<Reply>, CallToolResult> {
-        self.call(a.into()).await
+        let tab = a.tab;
+        self.call_tab(a.into(), tab).await
     }
 
     /// 改图层属性：名字、音量、声道、锁定状态（normal / locked / solo）。省略的字段不动。
     #[tool]
     async fn layer_update(&self, Parameters(a): Parameters<LayerUpdate>) -> Result<Json<Reply>, CallToolResult> {
-        self.call(a.into()).await
+        let tab = a.tab;
+        self.call_tab(a.into(), tab).await
     }
 
     /// 移动图层顺序，音符跟着层一起走。
     #[tool]
     async fn layer_move(&self, Parameters(a): Parameters<LayerMove>) -> Result<Json<Reply>, CallToolResult> {
-        self.call(a.into()).await
+        let tab = a.tab;
+        self.call_tab(a.into(), tab).await
     }
 
     /// 改元数据：名字、作者、说明、速度、拍号、循环。省略的字段不动，
     /// 一个都没给会被拒（避免「空提交也报成功」的假象）。
     #[tool]
     async fn set_meta(&self, Parameters(a): Parameters<SetMetaArgs>) -> Result<Json<Reply>, CallToolResult> {
-        self.call(a.into()).await
+        let tab = a.tab;
+        self.call_tab(a.into(), tab).await
     }
 
     /// 撤销。`steps` 省略 = 1 步。回执的 `report` 会说清实际退了几步。
     #[tool]
     async fn undo(&self, Parameters(a): Parameters<Steps>) -> Result<Json<Reply>, CallToolResult> {
-        self.call(Op::Undo { steps: a.steps }).await
+        self.call_tab(
+            Op::Undo {
+                steps: a.steps,
+                expect_rev: a.expect_rev,
+            },
+            a.tab,
+        )
+        .await
     }
 
     /// 重做。`steps` 省略 = 1 步。
     #[tool]
     async fn redo(&self, Parameters(a): Parameters<Steps>) -> Result<Json<Reply>, CallToolResult> {
-        self.call(Op::Redo { steps: a.steps }).await
+        self.call_tab(
+            Op::Redo {
+                steps: a.steps,
+                expect_rev: a.expect_rev,
+            },
+            a.tab,
+        )
+        .await
     }
 
     /// 清空成一首空歌。工程有未保存改动时必须带 `discard_changes=true`：
     /// 这一步会连改动和全部撤销历史一起丢掉，不带就等于没认错。
     #[tool]
     async fn clear_song(&self, Parameters(a): Parameters<ClearSong>) -> Result<Json<Reply>, CallToolResult> {
-        self.call(a.into()).await
+        let tab = a.tab;
+        self.call_tab(a.into(), tab).await
     }
 
     // -------------------------------------------------------------- 播放
@@ -751,9 +841,12 @@ impl Bridge {
     name = "nbs-rs",
     instructions = "本服务驱动一个**正在运行的 nbs-rs（Note Block Studio 移植）编辑器窗口**，\
 所有改动都落在那台机器的这个 GUI 进程里，不是内存里的模拟工程。\n\
-开局先 get_snapshot 看清工程、rev 和脏标记；写操作带上一次回执里的 expect_rev，\
-冲突会报 rev_conflict 而不是覆盖别人的改动。\n\
-弹窗和浮动选区会挡写操作：get_snapshot 会说明谁在挡路，用 run_action 的 answer_modal / \
+开局先 list_tabs 看清标签，再用 get_snapshot 看清目标标签的 rev 和脏标记。\
+读工具和文档级写工具可用 tab={\"id\":...} 或 tab={\"index\":...} 寻址；省略 tab 保持旧行为=当前标签。\
+id 稳定，index 会随重排漂；关闭后的 id 返回 tab_gone。\n\
+写操作带上一次回执里的 expect_rev，冲突会报 rev_conflict。后台标签默认只读，\
+设置里开启后台写后还必须带 expect_rev；播放、文件、任务和交互动作只能打当前标签。\n\
+弹窗和浮动选区会挡写操作：get_snapshot 会说明谁在挡路，用 run_action 的 answer_modal（answer=yes/no/cancel）/ \
 close_window / place_selection 把路清开。\n\
 每个结论都要分清两层：transport = 桥接没送到，outcome.ok = 编辑器答了什么。\n\
 任何一层答「不」这条调用的 isError 都是 true；失败回执也带完整 JSON，读完 error.code 再决定下一步，\
@@ -770,11 +863,7 @@ mod tests {
     #[test]
     fn tool_names_are_unique_and_every_tool_says_something() {
         let tools = Bridge::tool_router().list_all();
-        assert!(
-            tools.len() >= 41,
-            "工具面塌了，只剩 {} 条：结构化 Op 有 41 条，一条都不能少",
-            tools.len()
-        );
+        assert_eq!(tools.len(), 46, "工具面新增三条标签工具后应恰好 46 条");
         let mut names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
         names.sort();
         let dupes: Vec<String> = names
@@ -783,7 +872,15 @@ mod tests {
             .map(|w| w[0].clone())
             .collect();
         assert!(dupes.is_empty(), "重名工具: {dupes:?}");
-        for name in ["get_snapshot", "set_notes", "run_action", "export"] {
+        for name in [
+            "get_snapshot",
+            "set_notes",
+            "run_action",
+            "export",
+            "list_tabs",
+            "switch_tab",
+            "close_tab",
+        ] {
             assert!(names.iter().any(|n| n == name), "少了 {name}");
         }
         for tool in &tools {
@@ -832,18 +929,21 @@ mod tests {
         assert!(export.contains("wav"), "格式枚举要说清取值");
         assert!(export.contains("overwrite"), "覆盖开关必须出现在 schema 里");
         // 无参工具：schema 是「空对象」而不是 null 或缺 type，客户端才敢发 `{}`。
-        let layers = serde_json::to_value(&find("get_layers").input_schema).unwrap();
-        assert_eq!(layers["type"], "object", "{layers}");
+        let diagnostics = serde_json::to_value(&find("get_diagnostics").input_schema).unwrap();
+        assert_eq!(diagnostics["type"], "object", "{diagnostics}");
         assert!(
-            layers["properties"]
+            diagnostics["properties"]
                 .as_object()
                 .is_some_and(|p| p.is_empty()),
-            "{layers}"
+            "{diagnostics}"
         );
+        // 读工具现在有可选 tab；id/index 二选一的形状必须出现在客户端 schema 里。
+        let layers = text("get_layers");
+        assert!(layers.contains("TabRef") && layers.contains("index"), "{layers}");
     }
 
     /// 报错文案里那句「形状看 `--dump-tools set_notes`」必须是真能跑的写法：
-    /// 全表 43 条带 schema，为了看一个参数读完整张表，等于没给答案。
+    /// 全表 46 条带 schema，为了看一个参数读完整张表，等于没给答案。
     #[test]
     fn tool_face_dumps_whole_or_one_by_one() {
         let mut all = Vec::new();
@@ -966,6 +1066,7 @@ mod tests {
     fn roundtrip(op: Op) -> String {
         let frame = serde_json::to_string(&nbs_control::bus::Request {
             id: 1,
+            tab: None,
             op: op.clone(),
         })
         .unwrap();
@@ -973,6 +1074,23 @@ mod tests {
             serde_json::from_str(&frame).unwrap_or_else(|e| panic!("{frame} 读不回来: {e}"));
         assert_eq!(back.op, op, "线上形状和发出去的不是同一条请求");
         frame
+    }
+
+    #[test]
+    fn request_tab_envelope_round_trips_without_changing_the_op() {
+        let tab = nbs_control::TabRef {
+            id: Some(88),
+            index: None,
+        };
+        let request = nbs_control::bus::Request {
+            id: 5,
+            tab: Some(tab),
+            op: Op::GetLayers,
+        };
+        let frame = serde_json::to_string(&request).unwrap();
+        assert!(frame.contains(r#""tab":{"id":88}"#), "{frame}");
+        let back: nbs_control::bus::Request = serde_json::from_str(&frame).unwrap();
+        assert_eq!(back, request);
     }
 
     #[test]
@@ -999,6 +1117,7 @@ mod tests {
         };
         check(
             Op::from(RunAction {
+                tab: None,
                 action: "redo".to_string(),
                 args: Some(serde_json::json!({"steps": 2})),
             }),
@@ -1006,6 +1125,7 @@ mod tests {
         );
         check(
             Op::from(Transpose {
+                tab: None,
                 scope: Scope::All,
                 semitones: -2,
                 expect_rev: Some(9),
@@ -1013,6 +1133,7 @@ mod tests {
             r#""scope":{"scope":"all"}"#,
         );
         let removed = roundtrip(Op::from(RemoveCells {
+            tab: None,
             cells: vec![CellRef { tick: 4, layer: 1 }],
             label: None,
             expect_rev: None,
@@ -1035,6 +1156,7 @@ mod tests {
         );
         check(
             Op::from(ClearSong {
+                tab: None,
                 expect_rev: None,
                 discard_changes: false,
             }),
@@ -1043,6 +1165,7 @@ mod tests {
         // 工具名和 `Op` 变体不同名时要格外盯住：save_as→SavePath、remove_layer→LayerRemove。
         check(
             Op::from(LayerIndex {
+                tab: None,
                 index: 2,
                 expect_rev: None,
             }),
@@ -1132,6 +1255,7 @@ mod tests {
                             hello: true,
                             protocol: nbs_control::PROTOCOL_VERSION,
                             app: "nbs-fake 0.0.0-test".to_string(),
+                            capabilities: Default::default(),
                             snapshot: None,
                         };
                         if nbs_control::write_json_line(&mut writer, &ack).is_err() {
@@ -1272,11 +1396,16 @@ mod tests {
             "编辑器在的时候该答成：{:?}",
             info.transport
         );
-        let editor = info.outcome.expect("有正文")["editor"]
+        let editor = info.outcome.as_ref().expect("有正文")["editor"]
             .as_str()
             .expect("editor 是字符串")
             .to_string();
         assert!(editor.contains("通"), "editor 那一格要说通：{editor}");
+        assert_eq!(
+            info.outcome.as_ref().expect("有正文")["parked_write"],
+            false,
+            "握手能力要暴露给 MCP 调用方"
+        );
 
         // 端口上没人 listening：连接被拒，得说清是「没连上」而不是「编辑器答不」。
         let dead_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();

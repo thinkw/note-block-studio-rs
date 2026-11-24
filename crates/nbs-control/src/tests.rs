@@ -112,6 +112,7 @@ fn nested_scope_and_target_tags() {
             copy: true,
             additive: false,
         },
+        expect_rev: None,
     };
     let value = serde_json::to_value(&sel).unwrap();
     assert_eq!(value["target"]["target"], json!("rect"));
@@ -320,7 +321,11 @@ fn read_only_ops_are_the_safe_subset() {
     // 这些会动歌、动磁盘或动播放，一律不算只读
     assert!(!Op::Save.is_read_only());
     assert!(!Op::Playback(Playback::Play).is_read_only());
-    assert!(!Op::Undo { steps: None }.is_read_only());
+    assert!(!Op::Undo {
+        steps: None,
+        expect_rev: None,
+    }
+    .is_read_only());
     assert!(!Op::RunAction {
         action: "anything".to_string(),
         args: None
@@ -373,11 +378,80 @@ fn the_bar_view_survives_the_wire() {
 // ---------------------------------------------------------------- 帧
 
 #[test]
+fn tab_ref_round_trips_and_requires_exactly_one_locator() {
+    let by_id = crate::bus::TabRef {
+        id: Some(42),
+        index: None,
+    };
+    let by_index = crate::bus::TabRef {
+        id: None,
+        index: Some(2),
+    };
+    assert_eq!(by_id.validate().unwrap(), by_id);
+    assert_eq!(by_index.validate().unwrap(), by_index);
+    assert!(crate::bus::TabRef {
+        id: None,
+        index: None
+    }
+    .validate()
+    .is_err());
+    assert!(crate::bus::TabRef {
+        id: Some(42),
+        index: Some(2),
+    }
+    .validate()
+    .is_err());
+
+    let request = Request {
+        id: 9,
+        tab: Some(by_id),
+        op: Op::GetSnapshot,
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["tab"]["id"], 42);
+    assert_eq!(serde_json::from_value::<Request>(value).unwrap(), request);
+    assert!(Op::ListTabs.is_read_only());
+    assert!(!Op::SwitchTab { tab: by_id }.is_read_only());
+    assert!(!Op::CloseTab {
+        tab: by_id,
+        discard: None,
+    }
+    .is_read_only());
+}
+
+#[test]
+fn inbox_preserves_the_optional_tab_envelope() {
+    let inbox = Inbox::idle();
+    let tab = crate::bus::TabRef {
+        id: Some(7),
+        index: None,
+    };
+    let rx = inbox.submit_tab(
+        1,
+        "test",
+        Op::GetNotes {
+            tick_from: None,
+            tick_to: None,
+            layer_from: None,
+            layer_to: None,
+            ticks_per_bar: None,
+            bars: None,
+        },
+        Some(tab),
+    );
+    let pending = inbox.drain();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].tab, Some(tab));
+    pending[0].reply(Outcome::done(ChangeReport::default()));
+    assert!(rx.recv().unwrap().ok);
+}
+#[test]
 fn frame_round_trip_adds_exactly_one_newline() {
     let mut buf = Vec::new();
     write_json_line(
         &mut buf,
         &Request {
+            tab: None,
             id: 7,
             op: Op::JobCancel { id: 3 },
         },
@@ -395,6 +469,7 @@ fn frame_round_trip_adds_exactly_one_newline() {
     assert_eq!(
         got.unwrap(),
         Request {
+            tab: None,
             id: 7,
             op: Op::JobCancel { id: 3 }
         }
@@ -408,6 +483,7 @@ fn frame_skips_blank_lines_and_reports_clean_eof() {
     assert_eq!(
         got.unwrap(),
         Request {
+            tab: None,
             id: 1,
             op: Op::Ping
         }
@@ -423,6 +499,7 @@ fn frame_tail_without_newline_still_parses() {
     assert_eq!(
         got.unwrap(),
         Request {
+            tab: None,
             id: 2,
             op: Op::JobList
         }
@@ -658,6 +735,31 @@ fn test_config(token: &str, inbox: Inbox) -> ServerConfig {
     cfg
 }
 
+#[test]
+fn hello_ack_reports_the_live_parked_write_capability() {
+    let inbox = Inbox::idle();
+    let mut cfg = test_config("tok", inbox);
+    cfg.parked_write = Arc::new(AtomicBool::new(true));
+    let server = ControlServer::start(0, cfg).unwrap();
+    let stream = TcpStream::connect(("127.0.0.1", server.port())).unwrap();
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut writer = stream;
+    write_json_line(
+        &mut writer,
+        &Hello {
+            token: "tok".into(),
+            protocol: crate::PROTOCOL_VERSION,
+            client: "test".into(),
+        },
+    )
+    .unwrap();
+    let ack: crate::bus::HelloAck = read_json_line(&mut reader).unwrap().unwrap();
+    assert!(ack.hello);
+    assert!(ack.capabilities.parked_write);
+    let client =
+        ControlClient::connect(server.port(), "tok", "test", Duration::from_secs(1)).unwrap();
+    assert!(client.capabilities().parked_write);
+}
 /// 冒充 UI 主线程：轮询收件箱，按 `Op` 回一份固定回执。
 fn fake_main_thread(inbox: Inbox, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || loop {
@@ -1038,6 +1140,7 @@ fn fake_server(
                 hello: true,
                 protocol: crate::PROTOCOL_VERSION,
                 app: "nbs-fake 0.0.0-test".to_string(),
+                capabilities: Default::default(),
                 snapshot: None,
             },
         )

@@ -2645,6 +2645,34 @@ fn external_control_window(state: &mut EditorState, ui: &mut Ui) {
     }
     ui.separator();
 
+    // 用户要求 #131：后台写是独立能力，默认关；播放/文件/任务仍只认当前标签。
+    let mut parked_write = state.prefs.control_allow_parked_write;
+    if ui
+        .checkbox(
+            &mut parked_write,
+            tr(
+                "Allow document edits in background tabs (expect_rev required)",
+                "允许修改后台标签（必须带 expect_rev）",
+            ),
+        )
+        .changed()
+    {
+        state.prefs.control_allow_parked_write = parked_write;
+        if listening {
+            state.control_change = Some(crate::control::ControlChange::Reapply);
+        }
+        state.save_prefs();
+    }
+    ui.label(
+        RichText::new(tr(
+            "Off by default. This never enables playback, file, or job operations on a background tab.",
+            "默认关闭。播放、文件和任务操作仍然只能在当前标签上执行。",
+        ))
+        .small()
+        .weak(),
+    );
+    ui.separator();
+
     // 危险动作单独一条，不跟「启用」联动：勾了启用绝不顺手把「替你退出程序」也打开。
     let mut danger = state.prefs.control_danger;
     if ui

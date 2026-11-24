@@ -243,6 +243,8 @@ pub enum Command {
     CancelModal,
     /// 原版 `close_song(sid)`：关掉一个歌曲标签（用户要求 #131）。
     CloseTab(crate::tabs::SongId),
+    /// MCP 明确丢弃未保存改动后关闭；仍走原版切回 previous → 删备份 → 关标签的顺序。
+    CloseTabDiscard(crate::tabs::SongId),
     /// 标签条单击：切到这一首。
     SwitchTab(crate::tabs::SongId),
     /// 标签拖拽松手：把 id 移到目标槽位，台前选中项按 id 保持。
@@ -1369,6 +1371,20 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 state.pending_close_set = Some(list);
             }
             dispatch(state, Command::CloseTab(next), ctx);
+        }
+        Command::CloseTabDiscard(id) => {
+            if !state.store.contains(id) || !state.modals.is_empty() {
+                return;
+            }
+            let previous = state.store.active();
+            if previous != Some(id) && !state.switch_tab(id) {
+                return;
+            }
+            if previous == Some(id) {
+                state.audio.stop();
+            }
+            state.pending_close = Some(crate::state::PendingClose { id, previous });
+            dispatch(state, Command::CloseTabFinish(id), ctx);
         }
         Command::CloseTab(id) => {
             // 原版 `close_song(sid)`。标签已经没了、或上一首的问句还没答完都不动 ——

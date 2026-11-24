@@ -28,7 +28,7 @@ use nbs_control::{
     ImportSubstitution, Inbox, InstrumentInfo, JobHandle, JobInfo, JobRegistry, JobStatus,
     LayerInfo, MidiChannelPlan, MidiDrumPlan, MidiEnhancedReport, MidiPartPlan, MidiPlan,
     MidiTrackInfo, NoteCell, Op, Outcome, Playback, Scope, SelectTarget, SelectionInfo,
-    ServerConfig, SetMeta, Snapshot, TranscribeOptions, PROTOCOL_VERSION,
+    ServerConfig, SetMeta, Snapshot, TabInfo, TabRef, TranscribeOptions, PROTOCOL_VERSION,
 };
 use nbs_core::model::{
     Note, Song, FIRST_CUSTOM_INDEX, KEY_MAX, MC_KEY_MAX, MC_KEY_MIN, PAN_MAX, PIT_MAX, VEL_MAX,
@@ -84,6 +84,7 @@ pub struct ControlChannel {
     pub inbox: Inbox,
     pub jobs: JobRegistry,
     pub policy: Arc<Mutex<Policy>>,
+    pub parked_write: Arc<std::sync::atomic::AtomicBool>,
     /// 谁连着：服务端往这里登记，面板按帧读。没起服务时它一直是空的。
     pub clients: ClientBoard,
     pub app_version: String,
@@ -128,6 +129,9 @@ pub fn attach<'a>(state: &'a mut EditorState, ctx: &Context) -> &'a ControlChann
             allow_any_path: false,
             allow_danger: false,
         })),
+        parked_write: Arc::new(std::sync::atomic::AtomicBool::new(
+            state.prefs.control_allow_parked_write,
+        )),
         clients: ClientBoard::default(),
         app_version: crate::VERSION.to_string(),
         protocol: PROTOCOL_VERSION,
@@ -144,6 +148,7 @@ pub fn start(
     discovery: bool,
     allow_danger: bool,
 ) -> Result<ControlStart, String> {
+    let parked_write = state.prefs.control_allow_parked_write;
     let channel = attach(state, ctx);
     if let Ok(mut policy) = channel.policy.lock() {
         policy.allow_danger = allow_danger;
@@ -158,6 +163,10 @@ pub fn start(
     let mut cfg = ServerConfig::new(token.clone(), inbox);
     cfg.app_version = crate::VERSION.to_string();
     cfg.discovery_dir = discovery_dir;
+    channel
+        .parked_write
+        .store(parked_write, std::sync::atomic::Ordering::Relaxed);
+    cfg.parked_write = channel.parked_write.clone();
     // 看板必须是链路上这一份：服务端往里记账，面板从 `state.control.clients` 读，
     // 新造一个的话面板永远是「没人连着」。
     cfg.clients = channel.clients.clone();
@@ -243,6 +252,10 @@ pub fn sync_policy(state: &EditorState, cli_dirs: &[PathBuf], danger: bool) {
         policy.allowed_dirs = out;
         policy.allow_danger = danger;
     }
+    channel.parked_write.store(
+        state.prefs.control_allow_parked_write,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 /// 白名单目录的种子：配置目录 + 当前工程目录 + 最近文件目录（最多 12 个）。
@@ -273,7 +286,7 @@ pub fn drain(state: &mut EditorState, ctx: &Context) -> usize {
     }
     let n = pending.len();
     for req in pending {
-        let outcome = execute(state, ctx, &channel, &req.op);
+        let outcome = execute(state, ctx, &channel, req.tab.as_ref(), &req.op);
         req.reply(outcome);
     }
     n
@@ -281,14 +294,263 @@ pub fn drain(state: &mut EditorState, ctx: &Context) -> usize {
 
 // ------------------------------------------------------------------ 分发
 
-fn execute(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op) -> Outcome {
+fn execute(
+    state: &mut EditorState,
+    ctx: &Context,
+    ch: &ControlChannel,
+    tab: Option<&TabRef>,
+    op: &Op,
+) -> Outcome {
+    let target = match tab {
+        Some(tab) => match resolve_tab(state, tab) {
+            Ok(id) => Some(id),
+            Err(error) => return fail(state, error),
+        },
+        None => state.store.active(),
+    };
+    if matches!(
+        op,
+        Op::ListTabs | Op::SwitchTab { .. } | Op::CloseTab { .. }
+    ) {
+        return execute_active(state, ctx, ch, op, true, state.store.active());
+    }
+    let Some(target) = target else {
+        return execute_active(state, ctx, ch, op, true, state.store.active());
+    };
+    if state.store.active() == Some(target) {
+        return execute_active(state, ctx, ch, op, true, state.store.active());
+    }
+    if is_tab_read(op) {
+        let previous = state.store.active();
+        return with_swapped_doc(state, target, |state| {
+            execute_active(state, ctx, ch, op, false, previous)
+        });
+    }
+    if op.is_document_write() {
+        if !state.prefs.control_allow_parked_write {
+            return refuse(
+                state,
+                ErrorCode::ParkedTabReadonly,
+                say(
+                    "后台标签默认只读；要在设置里开启后台写才能修改它",
+                    "Parked tabs are read-only by default; enable parked writes in settings first",
+                ),
+            );
+        }
+        if op.expect_rev().is_none() {
+            return refuse(
+                state,
+                ErrorCode::ExpectRequired,
+                say(
+                    "后台写必须带 expect_rev；先读该标签的 snapshot/notes 再重试",
+                    "Parked writes require expect_rev; read that tab before retrying",
+                ),
+            );
+        }
+        return with_swapped_doc(state, target, |state| {
+            mutate_inner(state, ctx, ch, op, false)
+        });
+    }
+    refuse(
+        state,
+        ErrorCode::RequiresActiveTab,
+        say(
+            "这个操作涉及播放、文件或全局交互，只能打在当前标签上",
+            "This operation touches playback, files, or global UI and requires the active tab",
+        ),
+    )
+}
+
+fn is_tab_read(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::GetSnapshot
+            | Op::GetNotes { .. }
+            | Op::GetLayers
+            | Op::GetSelection
+            | Op::GetInstruments
+            | Op::GetHistory
+    )
+}
+
+fn resolve_tab(state: &EditorState, tab: &TabRef) -> Result<crate::tabs::SongId, ErrorInfo> {
+    let tab = tab
+        .validate()
+        .map_err(|message| ErrorInfo::new(ErrorCode::BadArgument, say(message, message)))?;
+    let id = if let Some(session) = tab.id {
+        state.store.id_for_session(session).ok_or_else(|| {
+            ErrorInfo::new(
+                ErrorCode::TabGone,
+                say(
+                    format!("标签 {session} 已经关闭，引用失效"),
+                    format!("Tab {session} is gone"),
+                ),
+            )
+            .with_detail(json!({ "tab_id": session }))
+        })?
+    } else {
+        let index = tab.index.expect("validate 已保证 index 存在");
+        state
+            .store
+            .order()
+            .get(index as usize)
+            .copied()
+            .ok_or_else(|| {
+                ErrorInfo::new(
+                    ErrorCode::NotFound,
+                    say(
+                        format!("标签位置 {index} 不存在"),
+                        format!("Tab index {index} does not exist"),
+                    ),
+                )
+            })?
+    };
+    Ok(id)
+}
+
+fn with_swapped_doc(
+    state: &mut EditorState,
+    id: crate::tabs::SongId,
+    f: impl FnOnce(&mut EditorState) -> Outcome,
+) -> Outcome {
+    let previous = state.store.active().expect("有后台标签时台前一定存在");
+    let message = state.message.take();
+    if !state.store.swap_active(id, &mut state.doc) {
+        state.message = message;
+        return fail(
+            state,
+            ErrorInfo::new(
+                ErrorCode::TabGone,
+                say("目标标签已经关闭", "The target tab is gone"),
+            ),
+        );
+    }
+    let outcome = f(state);
+    let restored = state.store.swap_active(previous, &mut state.doc);
+    debug_assert!(restored, "后台操作后原标签一定还在");
+    state.message = message;
+    outcome
+}
+
+fn tab_infos(
+    state: &EditorState,
+    active_id: Option<crate::tabs::SongId>,
+    swapped: bool,
+) -> Vec<TabInfo> {
+    state
+        .store
+        .order()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, id)| {
+            let song = if swapped && active_id == Some(*id) {
+                &state.store.parked_doc(*id)?.song
+            } else if state.store.active() == Some(*id) {
+                &state.doc.song
+            } else {
+                &state.store.parked_doc(*id)?.song
+            };
+            let filename = song.filename.as_ref().map(|p| p.display().to_string());
+            let title = song
+                .filename
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|s| s.to_string_lossy().into_owned())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| say("新文件", "Unsaved song"));
+            Some(TabInfo {
+                id: state.store.session(*id)?,
+                index: index as u32,
+                title,
+                filename,
+                dirty: song.dirty,
+                rev: song.rev,
+                total_blocks: song.total_blocks,
+                song_length: song.song_length(),
+                layer_count: song.layers.len(),
+            })
+        })
+        .collect()
+}
+fn execute_active(
+    state: &mut EditorState,
+    ctx: &Context,
+    ch: &ControlChannel,
+    op: &Op,
+    active: bool,
+    original_active: Option<crate::tabs::SongId>,
+) -> Outcome {
     match op {
+        Op::ListTabs => ok_data(
+            state,
+            Data::Tabs {
+                tabs: tab_infos(state, state.store.active(), false),
+                active_tab: state.store.active_session().into(),
+            },
+            String::new(),
+        ),
+        Op::SwitchTab { tab } => {
+            let id = match resolve_tab(state, tab) {
+                Ok(id) => id,
+                Err(error) => return fail(state, error),
+            };
+            if state.store.active() != Some(id) {
+                run_command(state, ctx, Command::SwitchTab(id));
+            }
+            ok_data(
+                state,
+                Data::Tabs {
+                    tabs: tab_infos(state, state.store.active(), false),
+                    active_tab: state.store.active_session().into(),
+                },
+                String::new(),
+            )
+        }
+        Op::CloseTab { tab, discard } => {
+            let id = match resolve_tab(state, tab) {
+                Ok(id) => id,
+                Err(error) => return fail(state, error),
+            };
+            let dirty = if state.store.active() == Some(id) {
+                state.doc.song.dirty
+            } else {
+                state
+                    .store
+                    .parked_doc(id)
+                    .map(|doc| doc.song.dirty)
+                    .unwrap_or(false)
+            };
+            if dirty && !state.player && *discard != Some(true) {
+                return refuse(
+                    state,
+                    ErrorCode::NeedsConfirm,
+                    say(
+                        "这个标签有未保存改动；明确丢弃请带 discard=true",
+                        "This tab has unsaved changes; pass discard=true to discard them explicitly",
+                    ),
+                );
+            }
+            let command = if *discard == Some(true) {
+                Command::CloseTabDiscard(id)
+            } else {
+                Command::CloseTab(id)
+            };
+            run_command(state, ctx, command);
+            ok_data(
+                state,
+                Data::Tabs {
+                    tabs: tab_infos(state, state.store.active(), false),
+                    active_tab: state.store.active_session().into(),
+                },
+                String::new(),
+            )
+        }
         Op::Ping => Outcome::ok(
             Data::Pong {
                 app_version: ch.app_version.clone(),
                 protocol: ch.protocol,
                 rev: state.doc.song.rev,
-                song_session: state.song_session,
+                song_session: state.store.active_session(),
             },
             current_report(state, String::new()),
         ),
@@ -301,7 +563,7 @@ fn execute(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op)
         ),
         Op::GetSnapshot => ok_data(
             state,
-            Data::Snapshot(Box::new(snapshot(state, ch))),
+            Data::Snapshot(Box::new(snapshot(state, ch, active, original_active))),
             String::new(),
         ),
         Op::GetNotes {
@@ -338,7 +600,7 @@ fn execute(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op)
         Op::GetInstruments => ok_data(
             state,
             Data::Instruments {
-                instruments: instrument_infos(state),
+                instruments: instrument_infos(state, active),
                 mc_key_range: [MC_KEY_MIN, MC_KEY_MAX],
             },
             String::new(),
@@ -409,6 +671,16 @@ fn execute(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op)
 // ------------------------------------------------------------------ 写路径
 
 fn mutate(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op) -> Outcome {
+    mutate_inner(state, ctx, ch, op, true)
+}
+
+fn mutate_inner(
+    state: &mut EditorState,
+    ctx: &Context,
+    ch: &ControlChannel,
+    op: &Op,
+    active: bool,
+) -> Outcome {
     // 起后台任务的那几条只是拍快照再交给别的线程，不改状态，所以不受弹窗与窗口草稿闸约束。
     if !op.only_spawns_a_job() {
         if let Err(e) = gate(state, op) {
@@ -416,7 +688,7 @@ fn mutate(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op) 
         }
     }
     let stamp = Stamp::capture(state);
-    match write(state, ctx, ch, op) {
+    match write(state, ctx, ch, op, active) {
         Ok((data, message)) => {
             if !message.is_empty() {
                 state.set_message(message.clone());
@@ -511,7 +783,7 @@ impl Stamp {
         Self {
             history_len: state.doc.history.len(),
             cursor: state.doc.history.cursor(),
-            song_session: state.song_session,
+            song_session: state.store.active_session(),
         }
     }
 
@@ -526,7 +798,7 @@ impl Stamp {
         } else {
             (self.cursor, state.doc.history.cursor())
         };
-        let (cells, layers, meta) = if state.song_session != self.song_session {
+        let (cells, layers, meta) = if state.store.active_session() != self.song_session {
             (state.doc.song.total_blocks, state.doc.song.layers.len(), true)
         } else {
             edit_totals(state, from, to)
@@ -536,7 +808,7 @@ impl Stamp {
             layers_changed: layers,
             meta_changed: meta,
             rev: state.doc.song.rev,
-            song_session: state.song_session,
+            song_session: state.store.active_session(),
             dirty: state.doc.song.dirty,
             history_len: after,
             history_cursor: state.doc.history.cursor(),
@@ -588,7 +860,7 @@ fn current_report(state: &EditorState, message: String) -> ChangeReport {
         layers_changed: 0,
         meta_changed: false,
         rev: state.doc.song.rev,
-        song_session: state.song_session,
+        song_session: state.store.active_session(),
         dirty: state.doc.song.dirty,
         history_len: state.doc.history.len(),
         history_cursor: state.doc.history.cursor(),
@@ -636,6 +908,11 @@ fn run_command(state: &mut EditorState, ctx: &Context, cmd: Command) {
     state.flush(ctx);
 }
 
+/// 后台文档写不走 `flush`：否则帧末的音频事件表同步会把当前标签的缓存改成后台标签的 rev。
+fn run_document_command(state: &mut EditorState, ctx: &Context, cmd: Command) {
+    crate::commands::dispatch(state, cmd, ctx);
+}
+
 /// 界面状态栏那一行字。命令自己会写回执文字，外部调用直接借用，省得第二套说法。
 fn status_text(state: &EditorState) -> String {
     state
@@ -650,7 +927,13 @@ fn status_text(state: &EditorState) -> String {
 type Written = Result<(Option<Data>, String), ErrorInfo>;
 
 #[allow(clippy::too_many_arguments)]
-fn write(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op) -> Written {
+fn write(
+    state: &mut EditorState,
+    ctx: &Context,
+    ch: &ControlChannel,
+    op: &Op,
+    active: bool,
+) -> Written {
     match op {
         Op::SetNotes {
             cells,
@@ -859,7 +1142,8 @@ fn write(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op) -
             }
             Ok((None, message))
         }
-        Op::Select { target } => {
+        Op::Select { target, expect_rev } => {
+            rev_check(*expect_rev, state.doc.song.rev)?;
             let cmd = match target {
                 SelectTarget::Rect {
                     tick_from,
@@ -893,7 +1177,11 @@ fn write(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op) -
                 },
                 SelectTarget::Custom => Command::SelectCustom,
             };
-            run_command(state, ctx, cmd);
+            if active {
+                run_command(state, ctx, cmd);
+            } else {
+                run_document_command(state, ctx, cmd);
+            }
             let info = selection_info(&state.doc.selection);
             Ok((
                 Some(Data::Selection(Box::new(info.clone()))),
@@ -914,7 +1202,11 @@ fn write(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op) -
                     ),
                 ));
             }
-            run_command(state, ctx, Command::Deselect);
+            if active {
+                run_command(state, ctx, Command::Deselect);
+            } else {
+                run_document_command(state, ctx, Command::Deselect);
+            }
             Ok((
                 None,
                 say("选区已落回歌曲", "Selection placed back into the song"),
@@ -939,7 +1231,11 @@ fn write(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op) -
                 cmds.push(Command::RenameLayer(index, text.clone()));
             }
             for cmd in cmds {
-                run_command(state, ctx, cmd);
+                if active {
+                    run_command(state, ctx, cmd);
+                } else {
+                    run_document_command(state, ctx, cmd);
+                }
             }
             Ok((
                 Some(Data::Layers {
@@ -975,7 +1271,11 @@ fn write(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op) -
                     ),
                 ));
             }
-            run_command(state, ctx, Command::RemoveLayer(*index));
+            if active {
+                run_command(state, ctx, Command::RemoveLayer(*index));
+            } else {
+                run_document_command(state, ctx, Command::RemoveLayer(*index));
+            }
             Ok((
                 Some(Data::Layers {
                     layers: layer_infos(state),
@@ -1158,7 +1458,9 @@ fn write(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op) -
                 tx.commit();
             }
             // 改完元数据必须显式推一次时钟，否则循环与速度要等下一次起播才生效。
-            state.sync_loop_params();
+            if active {
+                state.sync_loop_params();
+            }
             // `changed` 记的是「调用方给了哪个字段」，同值也会记，所以标脏要另比一次。
             if state.doc.song.meta != meta_before {
                 state.doc.song.dirty = true;
@@ -1180,8 +1482,14 @@ fn write(state: &mut EditorState, ctx: &Context, ch: &ControlChannel, op: &Op) -
                 ),
             ))
         }
-        Op::Undo { steps } => roll(state, ctx, *steps, true),
-        Op::Redo { steps } => roll(state, ctx, *steps, false),
+        Op::Undo { steps, expect_rev } => {
+            rev_check(*expect_rev, state.doc.song.rev)?;
+            roll(state, ctx, *steps, true, active)
+        }
+        Op::Redo { steps, expect_rev } => {
+            rev_check(*expect_rev, state.doc.song.rev)?;
+            roll(state, ctx, *steps, false, active)
+        }
         Op::ClearSong {
             expect_rev,
             discard_changes,
@@ -2497,7 +2805,13 @@ fn path_in_allowed_dirs(state: &EditorState, policy: &Policy, path: &Path) -> bo
 
 // ------------------------------------------------------------------ 其余写操作
 
-fn roll(state: &mut EditorState, ctx: &Context, steps: Option<u32>, undo: bool) -> Written {
+fn roll(
+    state: &mut EditorState,
+    ctx: &Context,
+    steps: Option<u32>,
+    undo: bool,
+    active: bool,
+) -> Written {
     let want = steps.unwrap_or(1).clamp(1, MAX_HISTORY_STEPS) as usize;
     let mut done = 0usize;
     while done < want {
@@ -2509,7 +2823,12 @@ fn roll(state: &mut EditorState, ctx: &Context, steps: Option<u32>, undo: bool) 
         if !more {
             break;
         }
-        run_command(state, ctx, if undo { Command::Undo } else { Command::Redo });
+        let command = if undo { Command::Undo } else { Command::Redo };
+        if active {
+            run_command(state, ctx, command);
+        } else {
+            run_document_command(state, ctx, command);
+        }
         done += 1;
     }
     if done == 0 {
@@ -2888,7 +3207,7 @@ fn layer_infos(state: &EditorState) -> Vec<LayerInfo> {
         .collect()
 }
 
-fn instrument_infos(state: &EditorState) -> Vec<InstrumentInfo> {
+fn instrument_infos(state: &EditorState, active: bool) -> Vec<InstrumentInfo> {
     let song = &state.doc.song;
     let bank = state.audio.bank();
     let mut out = Vec::with_capacity(FIRST_CUSTOM_INDEX as usize + song.custom_instruments.len());
@@ -2908,7 +3227,7 @@ fn instrument_infos(state: &EditorState) -> Vec<InstrumentInfo> {
             name: custom.name.clone(),
             custom: true,
             filename: Some(custom.filename.clone()),
-            sample_ready: Some(sample_ready(&bank, index as usize)),
+            sample_ready: active.then(|| sample_ready(&bank, index as usize)),
         });
     }
     out
@@ -2985,7 +3304,12 @@ fn diagnostics(state: &EditorState) -> Diagnostics {
     }
 }
 
-fn snapshot(state: &EditorState, ch: &ControlChannel) -> Snapshot {
+fn snapshot(
+    state: &EditorState,
+    ch: &ControlChannel,
+    active: bool,
+    original_active: Option<crate::tabs::SongId>,
+) -> Snapshot {
     let song = &state.doc.song;
     Snapshot {
         app_version: ch.app_version.clone(),
@@ -2993,7 +3317,7 @@ fn snapshot(state: &EditorState, ch: &ControlChannel) -> Snapshot {
         path: song.filename.as_ref().map(|p| p.display().to_string()),
         dirty: song.dirty,
         rev: song.rev,
-        song_session: state.song_session,
+        song_session: state.store.active_session(),
         name: song.meta.name.clone(),
         author: song.meta.author.clone(),
         description: song.meta.description.clone(),
@@ -3008,11 +3332,13 @@ fn snapshot(state: &EditorState, ch: &ControlChannel) -> Snapshot {
         length_ticks: song.song_length(),
         save_version: song.meta.save_version,
         first_custom_index: FIRST_CUSTOM_INDEX,
-        playhead: state.audio.position_ticks(),
-        playing: state.audio.is_playing(),
+        active_tab: original_active.map(|id| state.store.session(id)).flatten(),
+        tabs: tab_infos(state, original_active, !active),
+        playhead: active.then(|| state.audio.position_ticks()),
+        playing: active.then(|| state.audio.is_playing()),
         selection: Box::new(selection_info(&state.doc.selection)),
         diagnostics: Box::new(diagnostics(state)),
-        modal_count: state.modals.items.len(),
+        modal_count: active.then(|| state.modals.items.len()),
         open_window: state.window.as_ref().map(|kind| format!("{kind:?}")),
     }
 }
@@ -3427,11 +3753,32 @@ const ACTIONS: &[(&str, ActionSpec)] = &[
     (
         "answer_modal",
         ActionSpec {
-            description: "回答界面当前那个确认框（yes=true）。等于替人按按钮，默认关掉",
-            args: Some(r#"{"yes":true}"#),
+            description: "回答界面当前那个确认框：answer=yes/no/cancel；兼容旧的 yes 布尔。等于替人按按钮，默认关掉",
+            args: Some(r#"{"answer":"yes"}"#),
             mutating: false,
             danger: true,
-            build: |_state, args| Ok(Some(Command::AnswerModal(arg_bool(args, "yes")?))),
+            build: |_state, args| {
+                if let Some(answer) = args.as_ref().and_then(|a| a.get("answer")) {
+                    return match answer.as_str() {
+                        Some("yes") => Ok(Some(Command::AnswerModal(true))),
+                        Some("no") => Ok(Some(Command::AnswerModal(false))),
+                        Some("cancel") => Ok(Some(Command::CancelModal)),
+                        _ => Err(bad(
+                            "answer 只认 yes / no / cancel",
+                            "answer must be yes, no, or cancel",
+                        )),
+                    };
+                }
+                if args
+                    .as_ref()
+                    .and_then(|a| a.get("cancel"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                {
+                    return Ok(Some(Command::CancelModal));
+                }
+                Ok(Some(Command::AnswerModal(arg_bool(args, "yes")?)))
+            },
         },
     ),
     (
@@ -4463,7 +4810,7 @@ fn notes_in_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{Modal, ModalButtons, WindowKind};
+    use crate::state::{Modal, ModalButtons, ModalQueue, WindowKind};
     use nbs_control::LayerSet;
 
     fn cell(tick: u32, layer: u32, instrument: u8, key: u8) -> CellNote {
@@ -4498,7 +4845,7 @@ mod tests {
         }
 
         fn run(&mut self, op: &Op) -> Outcome {
-            execute(&mut self.state, &self.ctx, &self.channel, op)
+            execute(&mut self.state, &self.ctx, &self.channel, None, op)
         }
 
         /// 演示曲换成空谱：断言只关心这次调用真正写进去的东西。
@@ -4527,6 +4874,308 @@ mod tests {
         }
     }
 
+    fn song_with_note(tick: u32, key: u8) -> Song {
+        let mut song = Song::new();
+        song.set(tick, 0, Note::new(0, key));
+        song.recalculate();
+        song.dirty = true;
+        song
+    }
+
+    #[test]
+    fn tab_reads_are_stable_across_reorder_and_snapshots_hide_interaction_state() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        h.state.doc.song.set(1, 0, Note::new(0, 45));
+        h.state.doc.song.recalculate();
+        let first = h.state.active_tab().unwrap();
+        let second = h.state.push_tab(song_with_note(5, 50));
+        let third = h.state.push_tab(song_with_note(9, 57));
+        let second_session = h.state.store.session(second).unwrap();
+        let third_session = h.state.store.session(third).unwrap();
+
+        let out = h.run(&Op::ListTabs);
+        assert!(out.ok, "{:?}", out.error);
+        let Data::Tabs { tabs, active_tab } = out.data.unwrap() else {
+            panic!("ListTabs 数据形状不对")
+        };
+        assert_eq!(tabs.len(), 3);
+        assert_eq!(active_tab, Some(h.state.store.session(first).unwrap()));
+
+        let by_id = TabRef {
+            id: Some(second_session),
+            index: None,
+        };
+        let out = execute(
+            &mut h.state,
+            &h.ctx,
+            &h.channel,
+            Some(&by_id),
+            &Op::GetNotes {
+                tick_from: None,
+                tick_to: None,
+                layer_from: None,
+                layer_to: None,
+                ticks_per_bar: None,
+                bars: None,
+            },
+        );
+        assert!(out.ok, "{:?}", out.error);
+        let Data::Notes { cells, .. } = out.data.unwrap() else {
+            panic!("GetNotes 数据形状不对")
+        };
+        assert_eq!(cells.len(), 1);
+        assert_eq!((cells[0].tick, cells[0].key), (5, 50));
+        assert_eq!(h.state.active_tab(), Some(first), "读后台标签不能切歌");
+
+        assert!(h.state.store.reorder(second, 0));
+        let out = execute(
+            &mut h.state,
+            &h.ctx,
+            &h.channel,
+            Some(&by_id),
+            &Op::GetSnapshot,
+        );
+        assert!(out.ok, "{:?}", out.error);
+        let Data::Snapshot(snapshot) = out.data.unwrap() else {
+            panic!("GetSnapshot 数据形状不对")
+        };
+        assert_eq!(snapshot.song_session, second_session);
+        assert_eq!(
+            snapshot.active_tab,
+            Some(h.state.store.session(first).unwrap())
+        );
+        assert_eq!(snapshot.tabs[0].id, second_session, "稳定 id 不随重排漂");
+        assert_eq!(snapshot.playhead, None);
+        assert_eq!(snapshot.playing, None);
+        assert_eq!(snapshot.modal_count, None);
+        assert_eq!(h.state.active_tab(), Some(first));
+
+        let by_index = TabRef {
+            id: None,
+            index: Some(2),
+        };
+        let out = execute(
+            &mut h.state,
+            &h.ctx,
+            &h.channel,
+            Some(&by_index),
+            &Op::GetNotes {
+                tick_from: None,
+                tick_to: None,
+                layer_from: None,
+                layer_to: None,
+                ticks_per_bar: None,
+                bars: None,
+            },
+        );
+        assert!(out.ok, "{:?}", out.error);
+        assert_eq!(
+            out.report.song_session, third_session,
+            "index=2 现在指向第三首"
+        );
+        let gone = TabRef {
+            id: Some(third_session + 1000),
+            index: None,
+        };
+        let out = execute(
+            &mut h.state,
+            &h.ctx,
+            &h.channel,
+            Some(&gone),
+            &Op::GetSnapshot,
+        );
+        assert_eq!(code(&out), ErrorCode::TabGone);
+
+        let out = h.run(&Op::SwitchTab {
+            tab: TabRef {
+                id: Some(third_session),
+                index: None,
+            },
+        });
+        assert!(out.ok, "{:?}", out.error);
+        assert_eq!(h.state.active_tab(), Some(third));
+    }
+
+    #[test]
+    fn parked_writes_need_the_switch_and_a_rev_without_touching_active_caches() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        let first = h.state.active_tab().unwrap();
+        let second = h.state.push_tab(song_with_note(5, 50));
+        let tab = TabRef {
+            id: Some(h.state.store.session(second).unwrap()),
+            index: None,
+        };
+        let rev = h.state.store.parked_doc(second).unwrap().song.rev;
+        let active_rev = h.state.doc.song.rev;
+        let audio_rev = h.state.audio_rev;
+        let active_tempo = h.state.audio.clock().tempo();
+        let write = Op::SetNotes {
+            cells: vec![cell(6, 0, 0, 55)],
+            label: None,
+            expect_rev: Some(rev),
+        };
+
+        let out = execute(&mut h.state, &h.ctx, &h.channel, Some(&tab), &write);
+        assert_eq!(code(&out), ErrorCode::ParkedTabReadonly);
+        assert!(h
+            .state
+            .store
+            .parked_doc(second)
+            .unwrap()
+            .song
+            .get(6, 0)
+            .is_none());
+
+        h.state.prefs.control_allow_parked_write = true;
+        let out = execute(
+            &mut h.state,
+            &h.ctx,
+            &h.channel,
+            Some(&tab),
+            &Op::SetNotes {
+                cells: vec![cell(6, 0, 0, 55)],
+                label: None,
+                expect_rev: None,
+            },
+        );
+        assert_eq!(code(&out), ErrorCode::ExpectRequired);
+
+        let out = execute(&mut h.state, &h.ctx, &h.channel, Some(&tab), &write);
+        assert!(out.ok, "{:?}", out.error);
+        assert_eq!(
+            out.report.song_session,
+            h.state.store.session(second).unwrap()
+        );
+        assert_eq!(
+            h.state.store.parked_doc(second).unwrap().song.get(6, 0),
+            Some(Note::new(0, 55))
+        );
+        assert_eq!(h.state.active_tab(), Some(first));
+        assert_eq!(h.state.doc.song.rev, active_rev);
+        assert_eq!(
+            h.state.audio_rev, audio_rev,
+            "后台写不能污染当前标签的事件表缓存"
+        );
+
+        let rev = out.report.rev;
+        let out = execute(
+            &mut h.state,
+            &h.ctx,
+            &h.channel,
+            Some(&tab),
+            &Op::Undo {
+                steps: Some(1),
+                expect_rev: Some(rev),
+            },
+        );
+        assert!(out.ok, "{:?}", out.error);
+        assert!(h
+            .state
+            .store
+            .parked_doc(second)
+            .unwrap()
+            .song
+            .get(6, 0)
+            .is_none());
+        let rev = out.report.rev;
+        let out = execute(
+            &mut h.state,
+            &h.ctx,
+            &h.channel,
+            Some(&tab),
+            &Op::Redo {
+                steps: Some(1),
+                expect_rev: Some(rev),
+            },
+        );
+        assert!(out.ok, "{:?}", out.error);
+        assert_eq!(
+            h.state.store.parked_doc(second).unwrap().song.get(6, 0),
+            Some(Note::new(0, 55))
+        );
+        assert_eq!(h.state.active_tab(), Some(first));
+        assert_eq!(h.state.audio_rev, audio_rev);
+
+        let rev = out.report.rev;
+        let out = execute(
+            &mut h.state,
+            &h.ctx,
+            &h.channel,
+            Some(&tab),
+            &Op::SetMeta {
+                meta: SetMeta {
+                    tempo: Some(12.0),
+                    ..SetMeta::default()
+                },
+                expect_rev: Some(rev),
+            },
+        );
+        assert!(out.ok, "{:?}", out.error);
+        assert_eq!(
+            h.state.store.parked_doc(second).unwrap().song.meta.tempo,
+            12.0
+        );
+        assert_eq!(
+            h.state.audio.clock().tempo(),
+            active_tempo,
+            "后台改速度不能改当前播放时钟"
+        );
+
+        let out = execute(
+            &mut h.state,
+            &h.ctx,
+            &h.channel,
+            Some(&tab),
+            &Op::Playback(Playback::Play),
+        );
+        assert_eq!(code(&out), ErrorCode::RequiresActiveTab);
+
+        let out = h.run(&Op::CloseTab { tab, discard: None });
+        assert_eq!(code(&out), ErrorCode::NeedsConfirm);
+        assert!(h.state.store.contains(second));
+        let out = h.run(&Op::CloseTab {
+            tab,
+            discard: Some(true),
+        });
+        assert!(out.ok, "{:?}", out.error);
+        assert!(!h.state.store.contains(second));
+        let out = execute(
+            &mut h.state,
+            &h.ctx,
+            &h.channel,
+            Some(&tab),
+            &Op::GetSnapshot,
+        );
+        assert_eq!(code(&out), ErrorCode::TabGone);
+    }
+
+    #[test]
+    fn answer_modal_accepts_no_and_cancel_without_running_the_yes_action() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.channel.policy.lock().unwrap().allow_danger = true;
+        h.state.prefs.master_volume = 0.75;
+        for (answer, expected) in [("no", 0.25), ("cancel", 0.75)] {
+            h.state.prefs.master_volume = 0.75;
+            h.state.modals = ModalQueue::yes_no_cancel(
+                "Confirm",
+                "test",
+                Command::SetMasterVolume(0.0),
+                Command::SetMasterVolume(0.25),
+            );
+            let out = h.run(&Op::RunAction {
+                action: "answer_modal".into(),
+                args: Some(json!({ "answer": answer })),
+            });
+            assert!(out.ok, "{:?}", out.error);
+            assert!(h.state.modals.is_empty());
+            assert_eq!(h.state.prefs.master_volume, expected, "{answer} 续作不正确");
+        }
+    }
     #[test]
     fn exit_action_keeps_the_explicit_discard_contract() {
         let _prefs = crate::isolate_prefs();
@@ -4599,7 +5248,10 @@ mod tests {
         assert_eq!(h.note(0, 0).map(|n| n.key), Some(36));
         assert_eq!(h.note(1, 0).map(|n| n.velocity), Some(VEL_MAX));
 
-        let out = h.run(&Op::Undo { steps: None });
+        let out = h.run(&Op::Undo {
+            steps: None,
+            expect_rev: None,
+        });
         assert!(out.ok, "{:?}", out.error);
         assert!(
             h.note(0, 0).is_none() && h.note(1, 0).is_none(),
@@ -5204,7 +5856,10 @@ mod tests {
         assert!(h.note(0, 0).is_none(), "音符跟着层走");
         assert_eq!(h.note(0, 2).map(|n| n.key), Some(36));
 
-        let out = h.run(&Op::Undo { steps: None });
+        let out = h.run(&Op::Undo {
+            steps: None,
+            expect_rev: None,
+        });
         assert!(out.ok, "{:?}", out.error);
         assert_eq!(h.state.doc.song.layers.len(), 3);
         assert_eq!(h.note(0, 0).map(|n| n.key), Some(36));
@@ -5447,7 +6102,7 @@ mod tests {
             panic!("Ping 应回 Pong");
         };
         assert_eq!(rev, h.state.doc.song.rev);
-        let snap = snapshot(&h.state, &h.channel);
+        let snap = snapshot(&h.state, &h.channel, true, h.state.store.active());
         assert_eq!(snap.rev, h.state.doc.song.rev);
         assert_eq!(snap.layers, h.state.doc.song.layers.len());
     }
