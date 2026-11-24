@@ -245,6 +245,10 @@ pub enum Command {
     CloseTab(crate::tabs::SongId),
     /// 标签条单击：切到这一首。
     SwitchTab(crate::tabs::SongId),
+    /// 标签拖拽松手：把 id 移到目标槽位，台前选中项按 id 保持。
+    ReorderTab(crate::tabs::SongId, usize),
+    /// 取消标签拖拽（Escape / 失焦 / 重排）。
+    CancelTabDrag,
     /// 标签条右键「新文件」：在指定标签后面插入并切过去。
     NewTabAfter(crate::tabs::SongId),
     /// 关闭除指定标签外的所有歌曲，逐首确认。
@@ -1291,6 +1295,13 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         Command::SwitchTab(id) => {
             state.tab_menu = None;
             state.switch_tab(id);
+        }
+        Command::ReorderTab(id, target) => {
+            state.store.reorder(id, target);
+            state.tab_drag = None;
+        }
+        Command::CancelTabDrag => {
+            state.tab_drag = None;
         }
         Command::CloseOtherTabs(anchor) => {
             let Some(_index) = state.store.index_of(anchor) else {

@@ -113,6 +113,7 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
     if count < 2 || state.fullscreen {
         state.store.reset_tab_layout();
         state.tab_menu = None;
+        state.tab_drag = None;
         return;
     }
     let Some(bank) = state.icons.bank() else {
@@ -122,13 +123,77 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
     let rw = ctx.screen_rect().width();
     let span = span(rw, count);
     let elapsed = ctx.input(|i| i.stable_dt).clamp(0.0, 0.05);
+    let mut finished_drag = false;
+    if let Some(mut drag) = state.tab_drag.take() {
+        let (pointer, down, released, escape, focused) = ctx.input(|i| {
+            (
+                i.pointer.latest_pos(),
+                i.pointer.primary_down(),
+                i.pointer.primary_released(),
+                i.key_pressed(egui::Key::Escape),
+                i.viewport().focused,
+            )
+        });
+        let canceled = !state.store.contains(drag.id)
+            || (drag.span - span).abs() > 0.01
+            || escape
+            || focused == Some(false)
+            || pointer.is_none()
+            || (!down && !released);
+        if canceled {
+            state.tab_drag = None;
+        } else {
+            let pointer_x = pointer.unwrap().x;
+            if drag.dragging {
+                drag.x = (pointer_x - drag.grab_offset).clamp(7.0, 7.0 + (count - 1) as f32 * span);
+                drag.target = ((drag.x - 7.0) / span)
+                    .round()
+                    .clamp(0.0, (count - 1) as f32) as usize;
+                if released {
+                    // 原版 draw_song_tabs.gml:109-120：松手才 array_delete/array_insert。
+                    state.emit(Command::ReorderTab(drag.id, drag.target));
+                    finished_drag = true;
+                } else {
+                    state.tab_drag = Some(drag);
+                }
+            } else if down && (pointer_x - drag.press_x).abs() >= 4.0 {
+                // 原版 :89-95：按住并横向越过 4px 才进入 w_dragtab。
+                drag.dragging = true;
+                drag.x = (pointer_x - drag.grab_offset).clamp(7.0, 7.0 + (count - 1) as f32 * span);
+                drag.target = ((drag.x - 7.0) / span)
+                    .round()
+                    .clamp(0.0, (count - 1) as f32) as usize;
+                state.tab_drag = Some(drag);
+            } else if released {
+                state.tab_drag = None;
+            } else {
+                state.tab_drag = Some(drag);
+            }
+        }
+    }
+    let drag = state.tab_drag;
     let active = state.active_tab();
     let ids = state.store.order().to_vec();
     let mut tabs = Vec::with_capacity(count);
     for (index, id) in ids.iter().copied().enumerate() {
-        let x = state
-            .store
-            .advance_tab_layout(id, 7.0 + index as f32 * span, elapsed, 0.18);
+        let slot = if let Some(d) = drag.filter(|d| d.dragging) {
+            let from = state.store.index_of(d.id).unwrap_or(index);
+            if index > from && index <= d.target {
+                index - 1
+            } else if index < from && index >= d.target {
+                index + 1
+            } else {
+                index
+            }
+        } else {
+            index
+        };
+        let target_x = 7.0 + slot as f32 * span;
+        let x = if drag.is_some_and(|d| d.dragging && d.id == id) {
+            drag.unwrap().x
+        } else {
+            state.store.advance_tab_layout(id, target_x, elapsed, 0.18)
+        };
         let title = tab_title(state, id);
         let dirty = if active == Some(id) {
             state.doc.song.dirty
@@ -147,6 +212,9 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
             selected: active == Some(id),
         });
     }
+    if let Some(d) = drag.filter(|d| d.dragging) {
+        tabs.sort_by_key(|tab| tab.id == d.id);
+    }
 
     let area = Rect::from_min_size(pos2(0.0, 24.0), Vec2::new(rw, 34.0));
     egui::Area::new(Id::new("nbs_song_tabs"))
@@ -158,7 +226,9 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
             let p = ui.painter().clone();
             let input_open = state.window.is_none()
                 && state.modals.is_empty()
-                && state.pending_close_set.is_none();
+                && state.pending_close_set.is_none()
+                && !drag.is_some_and(|d| d.dragging)
+                && !finished_drag;
             let held = ui.input(|i| i.pointer.any_down());
             let top = if th.kind == ThemeKind::Fluent {
                 24.0
@@ -233,6 +303,26 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                 };
                 draw_tab(&bank, &p, &th, tab, span, hover_state, close_state);
 
+                if input_open
+                    && state.tab_drag.is_none()
+                    && ui.input(|i| i.pointer.primary_pressed())
+                    && tab_resp.hovered()
+                    && !close_resp.hovered()
+                {
+                    if let Some(pointer) = ui.ctx().pointer_hover_pos() {
+                        // 原版按下就 set_song，之后拖拽只改顺序，不改变台前选中项。
+                        state.emit(Command::SwitchTab(tab.id));
+                        state.tab_drag = Some(crate::state::TabDrag {
+                            id: tab.id,
+                            press_x: pointer.x,
+                            grab_offset: pointer.x - tab.x,
+                            x: tab.x,
+                            target: state.store.index_of(tab.id).unwrap_or(0),
+                            dragging: false,
+                            span,
+                        });
+                    }
+                }
                 if input_open && close_resp.clicked() {
                     state.emit(Command::CloseTab(tab.id));
                 } else if input_open && tab_resp.clicked() {
@@ -484,6 +574,22 @@ fn draw_new(bank: &Bank, p: &egui::Painter, th: &Theme, x: f32, hover: bool) {
             },
         );
     }
+}
+
+/// 原版 `window = w_dragtab` 的全屏输入闸门。拖拽中只让标签条读裸指针，其它控件不接收点击。
+pub fn drag_shield(state: &EditorState, ctx: &egui::Context) {
+    if !state.tab_drag.is_some_and(|d| d.dragging) {
+        return;
+    }
+    let screen = ctx.screen_rect();
+    egui::Area::new(Id::new("nbs_songtab_drag_shield"))
+        .order(egui::Order::Middle)
+        .fixed_pos(screen.min)
+        .default_size(screen.size())
+        .sense(Sense::click())
+        .show(ctx, |ui| {
+            ui.allocate_rect(screen, Sense::CLICK);
+        });
 }
 
 fn show_menu(state: &mut EditorState, ctx: &egui::Context) {

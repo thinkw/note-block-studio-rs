@@ -2644,6 +2644,139 @@ mod gui_window_tests {
         assert!(!state.store.contains(first_id), "叉号关的是第一枚标签");
     }
 
+    /// 原版 4px 起拖阈值与松手重排：拖到哪一首，台前选中项仍按 id 保持。
+    #[test]
+    fn song_tab_drag_threshold_reorders_and_keeps_the_active_id() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        let mut first = nbs_core::model::Song::new();
+        first.filename = Some(PathBuf::from("drag-first.nbs"));
+        state.doc.replace_song(first);
+        let first_id = state.active_tab().unwrap();
+        let mut second = nbs_core::model::Song::new();
+        second.filename = Some(PathBuf::from("drag-second.nbs"));
+        let second_id = state.push_tab(second);
+        let mut third = nbs_core::model::Song::new();
+        third.filename = Some(PathBuf::from("drag-third.nbs"));
+        let third_id = state.push_tab(third);
+        frame_out(&mut state, &ctx, base_input());
+        frame_out(&mut state, &ctx, base_input());
+
+        let mut press = base_input();
+        press
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(50.0, 40.0)));
+        press.events.push(egui::Event::PointerButton {
+            pos: egui::pos2(50.0, 40.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Default::default(),
+        });
+        frame_out(&mut state, &ctx, press);
+        assert!(state.tab_drag.is_some());
+        assert!(!state.tab_drag.unwrap().dragging, "刚按下还没过 4px");
+        let mut slide = base_input();
+        slide
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(53.0, 40.0)));
+        frame_out(&mut state, &ctx, slide);
+        assert!(!state.tab_drag.unwrap().dragging, "3px 不算起拖");
+        let mut slide = base_input();
+        slide
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(70.0, 40.0)));
+        frame_out(&mut state, &ctx, slide);
+        assert!(state.tab_drag.unwrap().dragging, "超过 4px 才起拖");
+        let mut slide = base_input();
+        slide
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(400.0, 40.0)));
+        frame_out(&mut state, &ctx, slide);
+        assert_eq!(state.tab_drag.unwrap().target, 2);
+        let mut release = base_input();
+        release
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(400.0, 40.0)));
+        release.events.push(egui::Event::PointerButton {
+            pos: egui::pos2(400.0, 40.0),
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Default::default(),
+        });
+        frame_out(&mut state, &ctx, release);
+        assert_eq!(state.store.order(), &[second_id, third_id, first_id]);
+        assert_eq!(state.active_tab(), Some(first_id));
+        assert!(state.tab_drag.is_none());
+    }
+
+    /// 原版拖拽中按 Escape 或窗口失焦：取消重排，标签顺序与台前选中项都不动。
+    #[test]
+    fn song_tab_drag_escape_and_focus_loss_cancel() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        let mut first = nbs_core::model::Song::new();
+        first.filename = Some(PathBuf::from("cancel-first.nbs"));
+        state.doc.replace_song(first);
+        let first_id = state.active_tab().unwrap();
+        let mut second = nbs_core::model::Song::new();
+        second.filename = Some(PathBuf::from("cancel-second.nbs"));
+        let second_id = state.push_tab(second);
+        frame_out(&mut state, &ctx, base_input());
+        frame_out(&mut state, &ctx, base_input());
+        let start = |state: &mut EditorState, ctx: &egui::Context| {
+            let mut raw = base_input();
+            raw.events
+                .push(egui::Event::PointerMoved(egui::pos2(50.0, 40.0)));
+            raw.events.push(egui::Event::PointerButton {
+                pos: egui::pos2(50.0, 40.0),
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            });
+            frame_out(state, ctx, raw);
+            let mut raw = base_input();
+            raw.events
+                .push(egui::Event::PointerMoved(egui::pos2(80.0, 40.0)));
+            frame_out(state, ctx, raw);
+            assert!(state.tab_drag.unwrap().dragging);
+        };
+        start(&mut state, &ctx);
+        press_key(&mut state, &ctx, egui::Key::Escape);
+        assert!(state.tab_drag.is_none());
+        assert_eq!(state.store.order(), &[first_id, second_id]);
+
+        let mut release = base_input();
+        release
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(80.0, 40.0)));
+        release.events.push(egui::Event::PointerButton {
+            pos: egui::pos2(80.0, 40.0),
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Default::default(),
+        });
+        frame_out(&mut state, &ctx, release);
+        start(&mut state, &ctx);
+        let mut lost = base_input();
+        for viewport in lost.viewports.values_mut() {
+            viewport.focused = Some(false);
+        }
+        lost.events
+            .push(egui::Event::PointerMoved(egui::pos2(120.0, 40.0)));
+        frame_out(&mut state, &ctx, lost);
+        assert!(state.tab_drag.is_none());
+        assert_eq!(state.store.order(), &[first_id, second_id]);
+        assert_eq!(state.active_tab(), Some(first_id));
+    }
+
     /// 标签条右键菜单四条动作真实可点；这里验收「关闭右侧歌曲」。
     #[test]
     fn song_tab_context_menu_closes_the_right_side() {

@@ -245,6 +245,7 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
 
     show_windows(state, ctx);
     flush_all(state, ctx);
+    tabbar::drag_shield(state, ctx);
     // 原版 `window += w_menu`（show_menu_ext.gml:21）：下拉开着的时候，这一帧全屏的
     // 输入闸门都是抬着的（用户要求 #129：点菜单以外的地方只用来收菜单，
     // 不会顺手按到底下的按钮）。画布/琴键那几路读的是裸输入，各自有门

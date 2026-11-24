@@ -451,6 +451,18 @@ pub struct TabMenu {
     pub pos: Pos2,
 }
 
+/// 标签拖拽现场（原版 `tabdrag` / `draggingtab` / `tabdest`）。
+#[derive(Clone, Copy, Debug)]
+pub struct TabDrag {
+    pub id: crate::tabs::SongId,
+    pub press_x: f32,
+    pub grab_offset: f32,
+    pub x: f32,
+    pub target: usize,
+    pub dragging: bool,
+    pub span: f32,
+}
+
 /// 原版两条退出链：`request_quit()` 可取消；原生窗口关闭走 `control_end()`，不能取消。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QuitMode {
@@ -1260,6 +1272,8 @@ pub struct EditorState {
     pub pending_replace: Option<PendingReplace>,
     /// 标签条右键菜单；点外或选完一条即清。
     pub tab_menu: Option<TabMenu>,
+    /// 标签拖拽；起拖后屏蔽其它输入，松手才重排。
+    pub tab_drag: Option<TabDrag>,
     /// 「关闭其他/右侧歌曲」的逐首确认队列；取消则整组作废。
     pub pending_close_set: Option<Vec<crate::tabs::SongId>>,
     /// 原版 `quit_prompting` + 逐标签确认现场；`None` 表示当前没在退出确认。
@@ -1693,6 +1707,7 @@ impl EditorState {
             pending_close: None,
             pending_replace: None,
             tab_menu: None,
+            tab_drag: None,
             pending_close_set: None,
             quit: None,
             quit_confirmed: false,

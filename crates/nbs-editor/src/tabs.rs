@@ -320,6 +320,20 @@ impl SongStore {
         self.order.iter().position(|&x| x == id)
     }
 
+    /// 原版拖拽松手后的 `array_delete` + `array_insert`：只动顺序，不动 id、文档和台前选中项。
+    pub fn reorder(&mut self, id: SongId, target: usize) -> bool {
+        let Some(from) = self.index_of(id) else {
+            return false;
+        };
+        let target = target.min(self.order.len().saturating_sub(1));
+        if from == target {
+            return true;
+        }
+        let moved = self.order.remove(from);
+        self.order.insert(target, moved);
+        true
+    }
+
     pub fn contains(&self, id: SongId) -> bool {
         self.slots.contains_key(id)
     }
@@ -544,6 +558,26 @@ mod tests {
         let ghost = SongId::null();
         assert!(!store.set_ui(ghost, back.clone()));
         assert!(store.ui(ghost).is_none());
+    }
+
+    #[test]
+    fn reorder_moves_only_the_slot_and_keeps_the_active_id() {
+        let mut store = SongStore::new();
+        let a = store.insert(marked(1, 0));
+        let b = store.insert(marked(2, 0));
+        let c = store.insert(marked(3, 0));
+        let stage = store.lift(a).unwrap();
+        assert!(store.reorder(a, 2));
+        assert_eq!(store.order(), &[b, c, a]);
+        assert_eq!(store.active(), Some(a));
+        assert!(note_at(&stage, 1, 0));
+        assert!(note_at(store.parked_doc(b).unwrap(), 2, 0));
+        assert!(note_at(store.parked_doc(c).unwrap(), 3, 0));
+        assert!(store.reorder(c, 0));
+        assert_eq!(store.order(), &[c, b, a]);
+        assert!(store.reorder(a, 2), "拖回自己的位置也算成功");
+        assert_eq!(store.order(), &[c, b, a]);
+        assert!(!store.reorder(SongId::null(), 0));
     }
 
     #[test]
