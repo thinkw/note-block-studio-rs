@@ -2561,6 +2561,30 @@ mod gui_window_tests {
         assert_eq!(state.window, None, "创建歌曲应当关掉欢迎窗");
     }
 
+    /// 欢迎窗「打开歌曲」必须走 replace=1 的打开框；取消后欢迎窗收起但原标签不动。
+    #[test]
+    fn greeting_load_button_opens_the_replace_dialog() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = Some(WindowKind::Greeting);
+        let first = state.active_tab().unwrap();
+
+        click_text(&mut state, &ctx, "打开歌曲");
+        assert_eq!(state.window, Some(WindowKind::FileOpen));
+        assert_eq!(
+            state.pending_replace.as_ref().map(|p| p.target),
+            Some(first)
+        );
+        click_text(&mut state, &ctx, "取消");
+        assert_eq!(state.window, None);
+        assert!(state.pending_replace.is_none());
+        assert_eq!(state.active_tab(), Some(first));
+        assert_eq!(state.store.len(), 1);
+    }
+
     /// logo 是欢迎窗／关于窗里唯一一块 165×165 的贴图（`spr_logo` 半尺寸），帧号直接
     /// 写在网格 uv 的左边界上：3 帧横排 → 0 / ⅓ / ⅔。
     fn logo_u0(state: &mut EditorState, ctx: &egui::Context) -> f32 {

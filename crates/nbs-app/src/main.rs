@@ -95,23 +95,12 @@ impl NbsApp {
         if let Some(arg) = std::env::args().nth(1) {
             let path = PathBuf::from(arg);
             if path.extension().and_then(|s| s.to_str()) == Some("nbs") {
-                match nbs_core::nbs::load(&path) {
-                    Ok(song) => {
-                        state.doc.replace_song(song);
-                        state.song_backup_path = None;
-                        state.prepare_audio();
-                        state.add_recent(path);
-                        state.set_message(nbs_editor::tr(
-                            "Song loaded from command line",
-                            "已从命令行载入歌曲",
-                        ));
-                    }
-                    Err(e) => state.set_message(if nbs_core::lang() == 1 {
-                        format!("载入失败: {e}")
-                    } else {
-                        format!("Load failed: {e}")
-                    }),
-                }
+                // 原版启动文件走 load_song(fn, 0, 1)：替换第 1 个标签，取消则保留原曲。
+                nbs_editor::commands::dispatch(
+                    &mut state,
+                    Command::OpenReplacingFirst(Some(path)),
+                    &cc.egui_ctx,
+                );
             }
         }
         // 外部控制：命令行、环境变量、设置页三层都没点名就一行代码都不多跑

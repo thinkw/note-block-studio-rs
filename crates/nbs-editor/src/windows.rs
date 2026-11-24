@@ -797,7 +797,7 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
             false,
         );
         if resp.clicked() {
-            state.emit(Command::OpenDialog(DialogAction::OpenSong));
+            state.emit(Command::OpenReplacingFirst(None));
         }
     }
     // :204-249 最近歌曲。b 换到 x1+320，行高 16，表头只随第一行画一次。
@@ -856,7 +856,7 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
         );
         if resp.clicked() {
             if r.path.is_file() {
-                state.emit(Command::OpenPath(r.path.clone()));
+                state.emit(Command::OpenReplacingFirst(Some(r.path.clone())));
             } else {
                 state.modals = ModalQueue::message(
                     tr("Error", "错误"),

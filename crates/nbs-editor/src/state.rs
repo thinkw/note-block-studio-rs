@@ -435,6 +435,15 @@ pub struct PendingClose {
     pub previous: Option<crate::tabs::SongId>,
 }
 
+/// 欢迎窗 / 启动文件的 `load_song(..., replace = 1)`：先替换第 1 个标签，再载入新歌。
+#[derive(Clone, Debug)]
+pub struct PendingReplace {
+    pub target: crate::tabs::SongId,
+    pub previous: Option<crate::tabs::SongId>,
+    /// `None` = 还在等用户从打开框选文件。
+    pub path: Option<PathBuf>,
+}
+
 /// 原版两条退出链：`request_quit()` 可取消；原生窗口关闭走 `control_end()`，不能取消。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QuitMode {
@@ -1240,6 +1249,8 @@ pub struct EditorState {
     pub pending_dialog: Option<FileDialog>,
     /// 关标签走到「先保存」这一步时挂住的现场（用户要求 #131）。
     pub pending_close: Option<PendingClose>,
+    /// 欢迎窗 / 启动文件替换首标签的现场（用户要求 #131）。
+    pub pending_replace: Option<PendingReplace>,
     /// 原版 `quit_prompting` + 逐标签确认现场；`None` 表示当前没在退出确认。
     pub quit: Option<QuitState>,
     /// 原版 `quit_confirmed`：确认全部完成后，`control_end` 不再重复问。
@@ -1669,6 +1680,7 @@ impl EditorState {
             control_info: None,
             pending_dialog: None,
             pending_close: None,
+            pending_replace: None,
             quit: None,
             quit_confirmed: false,
             recent_files,
