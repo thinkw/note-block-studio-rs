@@ -62,6 +62,27 @@ pub struct TabUi {
     pub midi_file: String,
 }
 
+/// 原版 `obj_song` 上的参考音频配置；不写进 `.nbs`，只随本次会话的标签保留。
+#[derive(Clone, Debug)]
+pub struct ReferenceConfig {
+    pub path: Option<PathBuf>,
+    /// 0 静音 / 1 独奏 / 2 正常。
+    pub option: u8,
+    pub offset_ms: i64,
+    pub volume: u8,
+}
+
+impl Default for ReferenceConfig {
+    fn default() -> Self {
+        Self {
+            path: None,
+            option: 2,
+            offset_ms: 0,
+            volume: 100,
+        }
+    }
+}
+
 /// 一首歌在标签条上的一份记录。
 ///
 /// `doc` 是 `Option`：台前那份被 `EditorState.doc` 持有，对应槽位留 `None`。
@@ -75,6 +96,7 @@ pub struct SongTab {
     pub ui: TabUi,
     /// 原版 `song_backup_path`：只删这一首确实写过的恢复文件，不凭文件名认领别人的备份。
     pub backup_path: Option<PathBuf>,
+    pub reference: ReferenceConfig,
     /// 原版 `tab_draw_x` / `tab_target_x` / `tab_from_x` / `tab_progress`。
     pub tab_draw_x: f32,
     pub tab_target_x: f32,
@@ -138,6 +160,7 @@ impl SongStore {
             doc: Some(doc),
             ui: TabUi::default(),
             backup_path: None,
+            reference: ReferenceConfig::default(),
             tab_draw_x: -1.0,
             tab_target_x: -1.0,
             tab_from_x: -1.0,
@@ -177,6 +200,20 @@ impl SongStore {
     /// 读这一首拥有的备份路径；标签不存在或从未备份时返回 `None`。
     pub fn backup_path(&self, id: SongId) -> Option<&PathBuf> {
         self.slots.get(id).and_then(|t| t.backup_path.as_ref())
+    }
+
+    pub fn set_reference(&mut self, id: SongId, config: ReferenceConfig) -> bool {
+        match self.slots.get_mut(id) {
+            Some(tab) => {
+                tab.reference = config;
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn reference(&self, id: SongId) -> Option<&ReferenceConfig> {
+        self.slots.get(id).map(|tab| &tab.reference)
     }
 
     /// 原版标签条让位动画：目标槽位变化时重设起点，按三次缓出推进。

@@ -750,8 +750,10 @@ mod gui_window_tests {
             match shape {
                 egui::Shape::Vec(v) => v.iter().for_each(|s| mesh_bboxes(s, out)),
                 egui::Shape::Mesh(m) => {
-                    let (mut mn, mut mx) =
-                        (egui::pos2(f32::MAX, f32::MAX), egui::pos2(f32::MIN, f32::MIN));
+                    let (mut mn, mut mx) = (
+                        egui::pos2(f32::MAX, f32::MAX),
+                        egui::pos2(f32::MIN, f32::MIN),
+                    );
                     for v in &m.vertices {
                         mn.x = mn.x.min(v.pos.x);
                         mn.y = mn.y.min(v.pos.y);
@@ -1659,11 +1661,22 @@ mod gui_window_tests {
 
         let dir = scratch("maestro");
         let out = dir.join("sheet.schem");
-        dispatch(&mut state, commands::Command::DialogConfirm(out.clone()), &ctx);
+        dispatch(
+            &mut state,
+            commands::Command::DialogConfirm(out.clone()),
+            &ctx,
+        );
         let bytes = std::fs::read(&out).expect("节目单已落盘");
         assert_eq!(&bytes[..2], &[0x1f, 0x8b], "gzip 魔数");
-        assert!(state.export_status.is_some(), "窗口里要能看到这次改写了什么");
-        assert_eq!(state.window, Some(WindowKind::MaestroExport), "导出完窗口留着");
+        assert!(
+            state.export_status.is_some(),
+            "窗口里要能看到这次改写了什么"
+        );
+        assert_eq!(
+            state.window,
+            Some(WindowKind::MaestroExport),
+            "导出完窗口留着"
+        );
         assert!(
             state.maestro_report.as_ref().unwrap().streams > 0,
             "示例歌该有声音流"
@@ -1688,7 +1701,10 @@ mod gui_window_tests {
             &ctx,
         );
         let hinted = state.export_status.clone().unwrap_or_default();
-        assert!(hinted.contains("/schem list"), "中文名该在状态区提示改名：{hinted}");
+        assert!(
+            hinted.contains("/schem list"),
+            "中文名该在状态区提示改名：{hinted}"
+        );
         let _ = std::fs::remove_file(&cjk);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1800,11 +1816,22 @@ mod gui_window_tests {
 
         let dir = scratch("fractal");
         let out = dir.join("machine.litematic");
-        dispatch(&mut state, commands::Command::DialogConfirm(out.clone()), &ctx);
+        dispatch(
+            &mut state,
+            commands::Command::DialogConfirm(out.clone()),
+            &ctx,
+        );
         let bytes = std::fs::read(&out).expect("机体投影已落盘");
         assert_eq!(&bytes[..2], &[0x1f, 0x8b], "gzip 魔数");
-        assert!(state.export_status.is_some(), "窗口里要能看到这台机器的口径");
-        assert_eq!(state.window, Some(WindowKind::FractalExport), "导出完窗口留着");
+        assert!(
+            state.export_status.is_some(),
+            "窗口里要能看到这台机器的口径"
+        );
+        assert_eq!(
+            state.window,
+            Some(WindowKind::FractalExport),
+            "导出完窗口留着"
+        );
         let rep = state.fractal_report.clone().unwrap();
         assert!(rep.notes_kept > 0, "示例歌该有音符进机体");
         let status = state.export_status.clone().unwrap_or_default();
@@ -1845,7 +1872,12 @@ mod gui_window_tests {
         // 出厂档 = 上游 defaultConfig 的 20 音/秒：每件乐器偶/奇两条臂 ⇒ 20 轨 40 个子区域。
         let twenty = state.disc_chest_report.clone().unwrap();
         assert_eq!(
-            (twenty.machine(), twenty.lanes, twenty.regions, twenty.grid_rate),
+            (
+                twenty.machine(),
+                twenty.lanes,
+                twenty.regions,
+                twenty.grid_rate
+            ),
             (nbs_io::DiscChestMachine::TwentyHz, 2, 40, 20.0)
         );
 
@@ -1920,10 +1952,17 @@ mod gui_window_tests {
 
         let dir = scratch("disc_chest");
         let out = dir.join("disc-chests.litematic");
-        dispatch(&mut state, commands::Command::DialogConfirm(out.clone()), &ctx);
+        dispatch(
+            &mut state,
+            commands::Command::DialogConfirm(out.clone()),
+            &ctx,
+        );
         let bytes = std::fs::read(&out).expect("数据箱已落盘");
         assert_eq!(&bytes[..2], &[0x1f, 0x8b], "gzip 魔数");
-        assert!(state.export_status.is_some(), "窗口里要能看到这批箱子的口径");
+        assert!(
+            state.export_status.is_some(),
+            "窗口里要能看到这批箱子的口径"
+        );
         assert_eq!(
             state.window,
             Some(WindowKind::DiscChestExport),
@@ -2642,6 +2681,152 @@ mod gui_window_tests {
         click_point(&mut state, &ctx, egui::pos2(166.0, 40.0));
         assert_eq!(state.store.len(), 2);
         assert!(!state.store.contains(first_id), "叉号关的是第一枚标签");
+    }
+
+    /// 参考音频、画笔和乐器面板滚动位置都跟着标签走，关标签后落在下一首的那份上。
+    #[test]
+    fn reference_config_and_instrument_scroll_follow_their_tab() {
+        let _prefs = isolate_prefs();
+        let mut state = EditorState::for_test();
+        state.audio = Box::new(nbs_audio::SilentEngine::new());
+        let first = state.active_tab().unwrap();
+        let harp = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/Sounds/harp.ogg");
+        let bell = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/Sounds/bell.ogg");
+        state.reference.path = Some(harp.clone());
+        state.reference.option = 1;
+        state.reference.offset_ms = -125;
+        state.reference.volume = 40;
+        state.current = nbs_core::model::Note::new(7, 60);
+        state.insbox_start = 21;
+
+        let second = state.open_tab(nbs_core::Document::new());
+        assert_eq!(state.reference.path, None);
+        assert_eq!((state.reference.option, state.reference.volume), (2, 100));
+        assert_eq!(state.current, nbs_core::model::Note::default());
+        assert_eq!(state.insbox_start, 0);
+        state.reference.path = Some(bell.clone());
+        state.reference.option = 0;
+        state.reference.offset_ms = 250;
+        state.reference.volume = 70;
+
+        assert!(state.switch_tab(first));
+        assert_eq!(state.reference.path, Some(harp));
+        assert_eq!(state.reference.option, 1);
+        assert_eq!(state.reference.offset_ms, -125);
+        assert_eq!(state.reference.volume, 40);
+        assert_eq!(state.current, nbs_core::model::Note::new(7, 60));
+        assert_eq!(state.insbox_start, 21);
+
+        state.close_tab(first);
+        assert_eq!(state.active_tab(), Some(second));
+        assert_eq!(state.reference.path, Some(bell));
+        assert_eq!(state.reference.option, 0);
+        assert_eq!(state.reference.offset_ms, 250);
+        assert_eq!(state.reference.volume, 70);
+    }
+
+    #[test]
+    fn reference_row_loads_and_its_controls_change_the_real_track() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.audio = Box::new(nbs_audio::SilentEngine::new());
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+
+        click_text(&mut state, &ctx, "参考音频");
+        assert_eq!(
+            state.file_dialog.as_ref().map(|d| d.action),
+            Some(crate::state::DialogAction::LoadReference),
+            "名称格必须真的打开参考音频文件框"
+        );
+        state.file_dialog = None;
+        state.window = None;
+        let harp = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/Sounds/harp.ogg");
+        dispatch(
+            &mut state,
+            commands::Command::LoadReferenceAudio(harp),
+            &ctx,
+        );
+        state.reference.volume = 40;
+        state.reference.offset_ms = 100;
+        let out = frame_out(&mut state, &ctx, base_input());
+        let name = text_center_if(&out.shapes, |t| t == "参考音频");
+        let row_y = name.y + 2.0;
+
+        click_point(&mut state, &ctx, egui::pos2(138.0, row_y));
+        assert_eq!(state.reference.option, 0, "静音按钮要生效");
+        click_point(&mut state, &ctx, egui::pos2(156.0, row_y));
+        assert_eq!(state.reference.option, 1, "独奏按钮要生效");
+        drag_between(
+            &mut state,
+            &ctx,
+            egui::pos2(100.0, row_y),
+            egui::pos2(100.0, row_y - 15.0),
+        );
+        assert_eq!(state.reference.volume, 50, "向上拖 15 应量化到 50%");
+        drag_between(
+            &mut state,
+            &ctx,
+            egui::pos2(120.0, row_y),
+            egui::pos2(120.0, row_y + 12.0),
+        );
+        assert_eq!(state.reference.offset_ms, 88, "向下拖 12 应按原版减少 12ms");
+        click_point(&mut state, &ctx, egui::pos2(174.0, row_y));
+        assert_eq!(state.reference.path, None, "删除按钮要清掉当前标签的参考轨");
+        assert_eq!((state.reference.option, state.reference.volume), (2, 100));
+        assert_eq!(state.reference.offset_ms, 0);
+        state.fullscreen = true;
+        let out = frame_out(&mut state, &ctx, base_input());
+        assert!(!out.shapes.iter().any(|shape| matches!(
+            &shape.shape,
+            egui::Shape::Text(text) if text.galley.text() == "参考音频"
+        )));
+        state.fullscreen = false;
+        state.reference.path = Some(PathBuf::from("old.ogg"));
+        dispatch(
+            &mut state,
+            commands::Command::LoadReferenceAudio(PathBuf::from("bad.mp3")),
+            &ctx,
+        );
+        assert_eq!(state.reference.path, None, "加载失败不能假装旧文件仍在轨上");
+    }
+
+    #[test]
+    fn copy_and_cut_use_the_global_clipboard_across_tabs() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.audio = Box::new(nbs_audio::SilentEngine::new());
+        let mut song = nbs_core::model::Song::new();
+        song.set(3, 0, nbs_core::model::Note::new(0, 45));
+        song.recalculate();
+        state.doc.replace_song(song);
+        let first = state.active_tab().unwrap();
+        state.doc.select_all();
+        dispatch(&mut state, commands::Command::Copy, &ctx);
+        assert_eq!(state.clipboard.len(), 1);
+        let copied_text = state.clipboard_text.clone();
+
+        let second = state.open_tab(nbs_core::Document::new());
+        assert_eq!(state.clipboard_text, copied_text, "切标签不清全局剪贴板");
+        state.hover_cell = Some((20, 1));
+        dispatch(&mut state, commands::Command::Paste, &ctx);
+        assert_eq!(state.doc.selection.notes.len(), 1);
+        state.doc.place_selection();
+        assert!(has_note(&state, 20, 1));
+
+        assert!(state.switch_tab(first));
+        state.doc.select_all();
+        dispatch(&mut state, commands::Command::Cut, &ctx);
+        assert!(state.doc.song.get(3, 0).is_none(), "剪切要摘走源音符");
+        assert!(state.switch_tab(second));
+        state.hover_cell = Some((30, 2));
+        dispatch(&mut state, commands::Command::Paste, &ctx);
+        state.doc.place_selection();
+        assert!(has_note(&state, 30, 2), "另一首也能粘到剪切内容");
+        assert_eq!(state.clipboard.len(), 1);
     }
 
     /// 原版 4px 起拖阈值与松手重排：拖到哪一首，台前选中项仍按 id 保持。
@@ -5671,8 +5856,7 @@ mod gui_piano_tests {
         // 同一个 Context 复用：上一阶段指针停在 (30,800)（最左白键），warm 帧
         // 会接着左移一格，先把指针挪出琴键区再取基准值。
         let mut warm = input();
-        warm
-            .events
+        warm.events
             .push(egui::Event::PointerMoved(egui::pos2(640.0, 200.0)));
         run(&mut state, &ctx, warm);
         let start = state.piano_start;
@@ -5827,7 +6011,10 @@ mod fx_wiring_tests {
             state.interaction.visible_notes > 0,
             "一条特效都没开时网格照跑"
         );
-        assert!(state.piano_rect.is_some(), "show_piano 出厂为真，琴键面板要上报矩形");
+        assert!(
+            state.piano_rect.is_some(),
+            "show_piano 出厂为真，琴键面板要上报矩形"
+        );
 
         state.interaction.visible_notes = 0;
         state.fx.stack.set_active("synthesia", true);

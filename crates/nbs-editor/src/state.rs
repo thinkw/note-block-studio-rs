@@ -7,7 +7,7 @@ use std::time::Instant;
 use egui::{Context, Pos2};
 use nbs_audio::{AudioEngine, CpalEngine, SoundBank, DEFAULT_MAX_VOICES, EXTENDED_MAX_VOICES};
 use nbs_core::model::Note;
-use nbs_core::Document;
+use nbs_core::{Document, SelectionNote};
 use nbs_io::datapack::DatapackOptions;
 use nbs_io::image_export::ImageOptions;
 use nbs_io::midi::MidiImportOptions;
@@ -668,6 +668,7 @@ pub enum DialogAction {
     ImportSchematic,
     /// 原版「导入背景图片」：`menu_click.gml:57-58` / `:367-368`，选完直接 `wallpaper_init(temppath)`。
     ImportBackground,
+    LoadReference,
     /// 原版 `datapack_getextranotes()`：保存随程序那份「更多音符盒」资源包。
     SaveExtraNotes,
     /// 原版「修改」按钮：`get_save_filename_ext("", "选择歌曲文件夹", songfolder, "歌曲文件夹")`。
@@ -725,6 +726,7 @@ impl DialogAction {
             // 原版背景图对话框一次放行 png/jpg/jpeg（`menu_click.gml:57`）；
             // 这里的单扩展名只用于兜底列表和默认名，多个扩展名在 `accepts` 里放行。
             Self::ImportBackground => "png",
+            Self::LoadReference => "ogg",
             // 原版：get_save_filename_ext("Resource pack (*.zip)|*.zip", "更多音符盒", "", …)。
             Self::SaveExtraNotes => "zip",
             // 原版这两个对话框的过滤器是空字符串：不做过滤，选的是目录。
@@ -827,6 +829,7 @@ impl FileDialog {
         let ext = self.ext;
         let image_exts = matches!(self.action, DialogAction::ImportBackground);
         let audio_exts = matches!(self.action, DialogAction::TranscriptionAudio);
+        let reference_exts = matches!(self.action, DialogAction::LoadReference);
         let midi_exts = matches!(self.action, DialogAction::TranscriptionMidi);
         let transcription_file = matches!(self.action, DialogAction::TranscriptionModel | DialogAction::TranscriptionSoundFont);
         self.entries = std::fs::read_dir(&self.dir)
@@ -843,6 +846,7 @@ impl FileDialog {
                     || got == ext
                     || (image_exts && matches!(got, "png" | "jpg" | "jpeg"))
                     || (audio_exts && matches!(got.to_ascii_lowercase().as_str(), "wav" | "flac" | "mp3" | "ogg" | "m4a" | "aac" | "aif" | "aiff" | "opus" | "webm"))
+                    || (reference_exts && matches!(got.to_ascii_lowercase().as_str(), "ogg" | "wav"))
                     || (midi_exts && matches!(got.to_ascii_lowercase().as_str(), "mid" | "midi"))
                     || (transcription_file && got.eq_ignore_ascii_case(ext))
             })
@@ -1004,6 +1008,10 @@ impl FileDialog {
                     "*.png;*.jpg;*.jpeg",
                 )],
             ),
+            DialogAction::LoadReference => (
+                tr("Load reference audio", "打开参考音频"),
+                vec![filter("Ogg Vorbis / PCM WAV", "*.ogg;*.wav")],
+            ),
             // 原版 `datapack_getextranotes.gml:6`：过滤器名和标题都是照抄的这一句。
             DialogAction::SaveExtraNotes => (
                 tr("Save extra notes for data pack", "为数据包保存音符盒资源包"),
@@ -1096,6 +1104,13 @@ pub struct LayerDrag {
     pub raw: f32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct ReferenceDrag {
+    /// false = 音量，true = 偏移（毫秒）。
+    pub offset: bool,
+    pub raw: f32,
+}
+
 /// 原版 `tempo_changer_set_tempo` / `sound_stopper_set_start` / `sound_stopper_set_until`：
 /// 两个事件乐器编辑窗里 `draw_textarea` 的原始字符串（能整成 int64 才算合法）。
 /// 一次只开一个窗，三个草稿共用一个结构体。
@@ -1185,6 +1200,12 @@ pub struct EditorState {
     /// 台前标签的文档：真身住在 [`Self::store`] 的槽位里，这份是切标签时交换过来的
     /// （见 [`Self::switch_tab`]）。现有 658 处 `state.doc` 引用照旧直接用。
     pub doc: Document,
+    /// 原版全局 `selection_copied`：复制内容不属于某一首，切标签也保留。
+    pub clipboard: Vec<SelectionNote>,
+    pub clipboard_text: String,
+    /// 原版 `current_song.reference_*`：台前这一首的参考音频配置。
+    pub reference: crate::tabs::ReferenceConfig,
+    reference_sync_key: Option<(u64, Option<PathBuf>, u8, i64, bool)>,
     /// 原版 `global.songs[]` + `global.song` 的替身：歌曲标签槽位表。
     pub store: crate::tabs::SongStore,
     /// 原版台前 `song.song_backup_path`：切标签时与文档一起收装。
@@ -1312,6 +1333,7 @@ pub struct EditorState {
     pub event_edit: EventEditDraft,
     /// 图层音量/声像拖拽预览（松开时才提交一条历史，避免拖拽产生几百条）。
     pub layer_drag: Option<LayerDrag>,
+    pub reference_drag: Option<ReferenceDrag>,
     /// 原版 `obj_removeeff` 实例：删除音符时格子上的淡出边框。
     /// `rel` 是相对当前视口左上格的格坐标（原版存 `xx - starta`，不随滚动移动）。
     pub remove_effects: Vec<RemoveFx>,
@@ -1665,6 +1687,10 @@ impl EditorState {
 
         let mut state = Self {
             doc,
+            clipboard: Vec::new(),
+            clipboard_text: String::new(),
+            reference: crate::tabs::ReferenceConfig::default(),
+            reference_sync_key: None,
             store,
             song_backup_path: None,
             viewport,
@@ -1724,6 +1750,7 @@ impl EditorState {
             editing_layer_name: None,
             event_edit: EventEditDraft::default(),
             layer_drag: None,
+            reference_drag: None,
             remove_effects: Vec::new(),
             arpeggio_pattern: String::new(),
             stagger_pattern: String::new(),
@@ -1912,6 +1939,7 @@ impl EditorState {
         self.prefs.mono = false;
         self.interaction.mode = crate::interaction::DragMode::None; // timeline_pressa = -1
         self.layer_drag = None; // dragvolb = 0
+        self.reference_drag = None;
     }
 
     /// 切标签的完整动作：文档、缓存身份、界面状态、播放/交互归零、音色库重挂。
@@ -1939,18 +1967,72 @@ impl EditorState {
             self.store.set_ui(prev, ui_out);
             self.store
                 .set_backup_path(prev, self.song_backup_path.clone());
+            self.store.set_reference(prev, self.reference.clone());
         }
         self.song_backup_path = self.store.backup_path(id).cloned();
+        self.reference = self.store.reference(id).cloned().unwrap_or_default();
         self.song_session = self.store.active_session();
         self.clear_tab_transients();
         self.invalidate_derived_caches();
         let ui_in = self.store.ui(id).cloned().unwrap_or_default();
         self.apply_tab_ui(ui_in);
         self.prepare_audio();
+        self.activate_reference_audio();
         self.apply_audio_prefs();
         self.sync_loop_params();
         self.sync_section_stop();
         true
+    }
+
+    /// 原版 `set_song` 把 `current_song.reference_audio` 重挂到输出流。
+    pub fn activate_reference_audio(&mut self) {
+        self.reference_sync_key = None;
+        match self.reference.path.as_ref() {
+            Some(path) => {
+                if let Err(error) = self.audio.load_reference_audio(path) {
+                    self.reference.path = None;
+                    self.set_message(error);
+                }
+            }
+            None => self.audio.clear_reference_audio(),
+        }
+    }
+
+    pub fn sync_reference_audio(&mut self) {
+        if self.reference.path.is_none() {
+            self.reference_sync_key = None;
+            return;
+        }
+        let playing = self.audio.is_playing();
+        let force = self.reference_sync_key.as_ref().is_none_or(|prev| {
+            prev.0 != self.song_session
+                || prev.1.as_ref() != self.reference.path.as_ref()
+                || prev.2 != self.reference.option
+                || prev.3 != self.reference.offset_ms
+                || prev.4 != playing
+        });
+        if force {
+            self.reference_sync_key = Some((
+                self.song_session,
+                self.reference.path.clone(),
+                self.reference.option,
+                self.reference.offset_ms,
+                playing,
+            ));
+        }
+        if !playing && !force {
+            return;
+        }
+        let seconds = self.audio.position_seconds();
+        self.audio.sync_reference_audio(
+            playing,
+            seconds,
+            self.reference.offset_ms,
+            self.reference.volume,
+            self.prefs.master_volume as f32,
+            self.reference.option,
+            force,
+        );
     }
 
     /// 新建一个标签并切过去（原版 `new_song` / `open_song_nbs` / `open_midi` /
@@ -1998,17 +2080,20 @@ impl EditorState {
         match out.active {
             Some(next) => {
                 self.song_backup_path = self.store.backup_path(next).cloned();
+                self.reference = self.store.reference(next).cloned().unwrap_or_default();
                 let ui = self.store.ui(next).cloned().unwrap_or_default();
                 self.apply_tab_ui(ui);
             }
             // 表关空了：`store.close` 已经把台前换成一首空曲，界面状态跟着回出厂值。
             None => {
                 self.song_backup_path = None;
+                self.reference = crate::tabs::ReferenceConfig::default();
                 let ui = crate::tabs::TabUi::default();
                 self.apply_tab_ui(ui);
             }
         }
         self.prepare_audio();
+        self.activate_reference_audio();
         self.apply_audio_prefs();
         self.sync_loop_params();
         self.sync_section_stop();
@@ -2470,6 +2555,7 @@ impl EditorState {
         self.sync_section_stop();
         let _crossed = self.audio.clock_mut().update();
         let playing = self.audio.clock().is_playing();
+        self.sync_reference_audio();
         // 原版 `if (playing = 0) record = 0`：播放一停，录音自动退出。
         // 0.25（按下录音、等第一个键起播）不算「在播」，所以 armed 时不清。
         if playing {

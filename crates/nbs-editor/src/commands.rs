@@ -281,6 +281,9 @@ pub enum Command {
         place: bool,
     },
     SetMasterVolume(f32),
+    LoadReferenceAudio(PathBuf),
+    SetReferenceMode(u8),
+    RemoveReferenceAudio,
     /// 端口自加（用户要求 #94）：切换输出设备，`None` = 跟随系统默认。
     SetOutput(Option<String>),
     SetPlaySpeed(f32),
@@ -713,22 +716,34 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             }
         }
         Command::Copy => {
+            if state.doc.selection.is_empty() {
+                return;
+            }
             state.doc.copy_selection();
-            ctx.copy_text(state.doc.clipboard_text.clone());
+            state.clipboard = state.doc.clipboard.clone();
+            state.clipboard_text = state.doc.clipboard_text.clone();
+            ctx.copy_text(state.clipboard_text.clone());
             state.set_message(if crate::lang() == 1 {
-                format!("已复制 {} 个音符", state.doc.clipboard.len())
+                format!("已复制 {} 个音符", state.clipboard.len())
             } else {
-                format!("Copied {} notes", state.doc.clipboard.len())
+                format!("Copied {} notes", state.clipboard.len())
             });
         }
         Command::Cut => {
+            if state.doc.selection.is_empty() {
+                return;
+            }
             // 原版 `action_cut` 就是 `selection_delete(false)`，淡出边框同样要出。
             spawn_selection_effects(state);
             state.doc.cut_selection();
-            ctx.copy_text(state.doc.clipboard_text.clone());
+            state.clipboard = state.doc.clipboard.clone();
+            state.clipboard_text = state.doc.clipboard_text.clone();
+            ctx.copy_text(state.clipboard_text.clone());
             state.set_message(tr("Cut", "已剪切"));
         }
         Command::Paste => {
+            state.doc.clipboard = state.clipboard.clone();
+            state.doc.clipboard_text = state.clipboard_text.clone();
             let (x, y) = state
                 .hover_cell
                 .map(|(t, l)| (t as i64, l as i64))
@@ -752,6 +767,8 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 ));
             if text.contains('|') {
                 state.doc.paste_text(&text, x, y);
+                state.clipboard = state.doc.clipboard.clone();
+                state.clipboard_text = state.doc.clipboard_text.clone();
                 state.set_message(tr("Pasted from clipboard text", "已从剪贴板文本粘贴"));
             } else {
                 dispatch(state, Command::Paste, ctx);
@@ -2907,6 +2924,10 @@ machine that is already built; change the machine or its speed and these chests 
                     state.wallpaper = baked.ok();
                     state.window = None;
                 }
+                DialogAction::LoadReference => {
+                    state.window = None;
+                    dispatch(state, Command::LoadReferenceAudio(path), ctx);
+                }
                 DialogAction::SaveExtraNotes => {
                     // 原版 `datapack_getextranotes()`：复制完 `message("资源包保存成功！", "保存")`，
                     // 调用它的那个窗口原样留着（原生组件只是叠在上面）。走自绘兜底框时
@@ -2951,6 +2972,23 @@ machine that is already built; change the machine or its speed and these chests 
         Command::SetMasterVolume(v) => {
             state.prefs.master_volume = v.clamp(0.0, 2.0);
             state.apply_audio_prefs();
+        }
+        Command::LoadReferenceAudio(path) => {
+            if let Err(error) = state.audio.load_reference_audio(&path) {
+                state.reference.path = None;
+                state.set_message(error);
+            } else {
+                state.reference.path = Some(path);
+                state.set_message(tr("Reference audio loaded", "参考音频已加载"));
+            }
+        }
+        Command::SetReferenceMode(mode) => {
+            state.reference.option = mode.min(2);
+        }
+        Command::RemoveReferenceAudio => {
+            state.audio.stop();
+            state.audio.clear_reference_audio();
+            state.reference = crate::tabs::ReferenceConfig::default();
         }
         Command::SetOutput(wanted) => state.apply_output_choice(wanted),
         Command::SetPlaySpeed(v) => {

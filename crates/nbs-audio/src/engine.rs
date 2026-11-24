@@ -13,6 +13,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use nbs_core::model::{Note, Song, PAN_CENTER};
 
 use crate::mixer::Voice;
+use crate::reference::ReferenceTrack;
 use crate::samples::{SoundBank, BUILTIN_FILES, SAMPLE_RATE};
 use crate::scheduler::{
     build_event_table, make_shared, EventKind, NoteEvent, Shared, TransportClock, VisualEvent,
@@ -38,6 +39,10 @@ pub trait AudioEngine {
     fn stop(&mut self);
     fn is_playing(&self) -> bool;
     fn position_ticks(&self) -> f64;
+    /// 原版 `get_seconds_from_tick(marker_pos)`：参考音频按歌曲时间定位。
+    fn position_seconds(&self) -> f64 {
+        self.position_ticks() / self.clock().tempo().max(0.01) as f64
+    }
     fn advance(&mut self, dt: f64);
     fn active_voices(&self) -> usize;
     fn clock(&self) -> &TransportClock;
@@ -86,6 +91,27 @@ pub trait AudioEngine {
     }
     /// 重新扫描采样目录（首选项改路径后调用）。
     fn reload_bank(&mut self, _dir: Option<&Path>) {}
+    /// 原版 `load_reference_audio`：把当前标签的参考音频装进输出流。
+    fn load_reference_audio(&mut self, _path: &Path) -> Result<(), String> {
+        Err(nbs_core::tr(
+            "this audio engine cannot load reference audio",
+            "当前音频引擎不能载入参考音频",
+        )
+        .to_string())
+    }
+    fn clear_reference_audio(&mut self) {}
+    /// 原版 `reference_audio_sync`：按歌曲播放头、偏移和静音/独奏状态同步参考轨。
+    fn sync_reference_audio(
+        &mut self,
+        _song_playing: bool,
+        _position_seconds: f64,
+        _offset_ms: i64,
+        _volume: u8,
+        _master: f32,
+        _mode: u8,
+        _force: bool,
+    ) {
+    }
 }
 
 /// 输出设备快照。设备名是系统给的（Windows 会按系统语言给「耳机 (Realtek(R) Audio)」
@@ -472,6 +498,38 @@ impl CpalEngine {
         st.bank = self.bank.clone();
     }
 
+    pub fn load_reference_audio(&mut self, path: &Path) -> Result<(), String> {
+        self.shared.lock().reference.clear();
+        let decoded = ReferenceTrack::decode(path)?;
+        self.shared.lock().reference = decoded;
+        Ok(())
+    }
+
+    pub fn clear_reference_audio(&mut self) {
+        self.shared.lock().reference.clear();
+    }
+
+    pub fn sync_reference_audio(
+        &mut self,
+        song_playing: bool,
+        position_seconds: f64,
+        offset_ms: i64,
+        volume: u8,
+        master: f32,
+        mode: u8,
+        force: bool,
+    ) {
+        self.shared.lock().reference.sync(
+            song_playing,
+            position_seconds,
+            offset_ms,
+            volume,
+            master,
+            mode,
+            force,
+        );
+    }
+
     /// 换输出设备：`None` = 跟随系统默认。当场拆旧流、当场建新流，返回时结果已经落地
     /// （本机实测连拆带建约 0.1 秒，只在用户点那一下付）。
     pub fn set_output(&mut self, wanted: Option<String>) -> Result<(), String> {
@@ -657,12 +715,16 @@ impl AudioEngine for CpalEngine {
     }
     fn stop(&mut self) {
         self.clock.pause();
+        self.shared.lock().reference.stop();
     }
     fn is_playing(&self) -> bool {
         self.clock.is_playing()
     }
     fn position_ticks(&self) -> f64 {
         self.clock.position()
+    }
+    fn position_seconds(&self) -> f64 {
+        self.shared.lock().seconds_at(self.clock.position())
     }
     fn advance(&mut self, _dt: f64) {
         self.clock.update();
@@ -753,6 +815,33 @@ impl AudioEngine for CpalEngine {
     fn reload_bank(&mut self, dir: Option<&Path>) {
         CpalEngine::reload_bank(self, dir);
     }
+    fn load_reference_audio(&mut self, path: &Path) -> Result<(), String> {
+        CpalEngine::load_reference_audio(self, path)
+    }
+    fn clear_reference_audio(&mut self) {
+        CpalEngine::clear_reference_audio(self);
+    }
+    fn sync_reference_audio(
+        &mut self,
+        song_playing: bool,
+        position_seconds: f64,
+        offset_ms: i64,
+        volume: u8,
+        master: f32,
+        mode: u8,
+        force: bool,
+    ) {
+        CpalEngine::sync_reference_audio(
+            self,
+            song_playing,
+            position_seconds,
+            offset_ms,
+            volume,
+            master,
+            mode,
+            force,
+        );
+    }
 }
 
 /// 纯时钟实现（无共享状态、无音频设备），用于测试与显式静音。
@@ -763,6 +852,8 @@ pub struct SilentEngine {
     events: Vec<NoteEvent>,
     /// 无混音器也要发「改界面」的事件乐器副作用（原版 else-if 链与设备无关）。
     visual: Vec<VisualEvent>,
+    /// 参考轨仍真实解码，便于无设备环境验证加载/偏移/静音状态。
+    reference: ReferenceTrack,
 }
 
 impl SilentEngine {
@@ -845,12 +936,31 @@ impl AudioEngine for SilentEngine {
     }
     fn stop(&mut self) {
         self.clock.pause();
+        self.reference.stop();
     }
     fn is_playing(&self) -> bool {
         self.clock.is_playing()
     }
     fn position_ticks(&self) -> f64 {
         self.clock.position()
+    }
+    fn position_seconds(&self) -> f64 {
+        let mut segment_start = 0.0;
+        let mut tempo = self.clock().tempo().max(0.25) as f64;
+        let tick = self.clock.position().max(0.0);
+        let mut seconds = 0.0;
+        for event in &self.events {
+            let at = event.tick as f64;
+            if at > tick {
+                break;
+            }
+            if let EventKind::Tempo(pitch) = event.kind {
+                seconds += (at - segment_start) / tempo;
+                segment_start = at;
+                tempo = (pitch.unsigned_abs() as f64 / 15.0).max(0.25);
+            }
+        }
+        seconds + (tick - segment_start) / tempo
     }
     fn advance(&mut self, _dt: f64) {
         let prev = self.clock.position().floor() as i64;
@@ -880,6 +990,32 @@ impl AudioEngine for SilentEngine {
     }
     fn take_visual_events(&mut self) -> Vec<VisualEvent> {
         std::mem::take(&mut self.visual)
+    }
+    fn load_reference_audio(&mut self, path: &Path) -> Result<(), String> {
+        self.reference.load(path)
+    }
+    fn clear_reference_audio(&mut self) {
+        self.reference.clear();
+    }
+    fn sync_reference_audio(
+        &mut self,
+        song_playing: bool,
+        position_seconds: f64,
+        offset_ms: i64,
+        volume: u8,
+        master: f32,
+        mode: u8,
+        force: bool,
+    ) {
+        self.reference.sync(
+            song_playing,
+            position_seconds,
+            offset_ms,
+            volume,
+            master,
+            mode,
+            force,
+        );
     }
 }
 
