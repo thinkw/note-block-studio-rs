@@ -75,6 +75,11 @@ pub struct SongTab {
     pub ui: TabUi,
     /// 原版 `song_backup_path`：只删这一首确实写过的恢复文件，不凭文件名认领别人的备份。
     pub backup_path: Option<PathBuf>,
+    /// 原版 `tab_draw_x` / `tab_target_x` / `tab_from_x` / `tab_progress`。
+    pub tab_draw_x: f32,
+    pub tab_target_x: f32,
+    pub tab_from_x: f32,
+    pub tab_progress: f32,
 }
 
 /// [`SongStore::close`] 的结果。
@@ -122,14 +127,23 @@ impl SongStore {
     /// 界面状态取默认值：原版 `new_song()` / `open_song_nbs.gml` 建的都是
     /// 刚 `create(obj_song)` 出来的那份出厂值。
     pub fn insert(&mut self, doc: Document) -> SongId {
+        self.insert_at(self.order.len(), doc)
+    }
+
+    /// 在原版 `array_insert(songs, index, create(obj_song))` 的位置插入一个标签。
+    pub fn insert_at(&mut self, index: usize, doc: Document) -> SongId {
         let session = self.next_session();
         let id = self.slots.insert(SongTab {
             session,
             doc: Some(doc),
             ui: TabUi::default(),
             backup_path: None,
+            tab_draw_x: -1.0,
+            tab_target_x: -1.0,
+            tab_from_x: -1.0,
+            tab_progress: 1.0,
         });
-        self.order.push(id);
+        self.order.insert(index.min(self.order.len()), id);
         id
     }
 
@@ -163,6 +177,46 @@ impl SongStore {
     /// 读这一首拥有的备份路径；标签不存在或从未备份时返回 `None`。
     pub fn backup_path(&self, id: SongId) -> Option<&PathBuf> {
         self.slots.get(id).and_then(|t| t.backup_path.as_ref())
+    }
+
+    /// 原版标签条让位动画：目标槽位变化时重设起点，按三次缓出推进。
+    pub fn advance_tab_layout(
+        &mut self,
+        id: SongId,
+        target: f32,
+        elapsed: f32,
+        duration: f32,
+    ) -> f32 {
+        let Some(tab) = self.slots.get_mut(id) else {
+            return target;
+        };
+        if tab.tab_draw_x < 0.0 {
+            tab.tab_draw_x = target;
+            tab.tab_target_x = target;
+            tab.tab_from_x = target;
+            tab.tab_progress = 1.0;
+        }
+        if tab.tab_target_x != target {
+            tab.tab_from_x = tab.tab_draw_x;
+            tab.tab_target_x = target;
+            tab.tab_progress = 0.0;
+        }
+        if tab.tab_progress < 1.0 {
+            tab.tab_progress = (tab.tab_progress + elapsed / duration.max(0.001)).min(1.0);
+            let eased = 1.0 - (1.0 - tab.tab_progress).powi(3);
+            tab.tab_draw_x = tab.tab_from_x + (target - tab.tab_from_x) * eased;
+        }
+        tab.tab_draw_x
+    }
+
+    /// 标签条隐藏或重排前，把动画位置清回哨兵，下一次显示重新铺槽。
+    pub fn reset_tab_layout(&mut self) {
+        for tab in self.slots.values_mut() {
+            tab.tab_draw_x = -1.0;
+            tab.tab_target_x = -1.0;
+            tab.tab_from_x = -1.0;
+            tab.tab_progress = 1.0;
+        }
     }
 
     /// 把某个标签的文档取到台前（原版 `set_song` 的「装入」那一半）。
@@ -314,6 +368,21 @@ mod tests {
     use super::*;
     use nbs_core::model::Note;
     use slotmap::Key as _;
+
+    #[test]
+    fn tab_layout_animates_and_resets() {
+        let mut store = SongStore::new();
+        let a = store.insert(Document::new());
+        let b = store.insert(Document::new());
+        let _ = store.lift(a);
+        assert_eq!(store.advance_tab_layout(a, 7.0, 0.016, 0.18), 7.0);
+        assert_eq!(store.advance_tab_layout(b, 186.0, 0.016, 0.18), 186.0);
+        let moved = store.advance_tab_layout(a, 100.0, 0.09, 0.18);
+        assert!(moved > 7.0 && moved < 100.0, "让位动画应处于中间: {moved}");
+        assert_eq!(store.advance_tab_layout(a, 100.0, 0.09, 0.18), 100.0);
+        store.reset_tab_layout();
+        assert_eq!(store.advance_tab_layout(a, 7.0, 0.016, 0.18), 7.0);
+    }
 
     #[test]
     fn sessions_are_unique_and_never_reused() {

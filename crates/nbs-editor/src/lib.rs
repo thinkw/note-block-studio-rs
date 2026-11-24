@@ -33,6 +33,8 @@ pub mod shortcuts;
 pub mod sound_import;
 pub mod state;
 pub mod statusbar;
+/// 原版歌曲标签条（draw_song_tabs）。
+pub mod tabbar;
 /// 歌曲标签槽位表（原版 `global.songs[]`），见模块注释。
 pub mod tabs;
 pub mod theme;
@@ -1040,6 +1042,22 @@ mod gui_window_tests {
     /// egui 的 `clicked` 要按下与抬起落在同一个控件，抬指单独落下不算。
     fn click_point(state: &mut EditorState, ctx: &egui::Context, at: egui::Pos2) {
         drag_between(state, ctx, at, at);
+    }
+
+    fn secondary_click_point(state: &mut EditorState, ctx: &egui::Context, at: egui::Pos2) {
+        frame_out(state, ctx, base_input());
+        frame_out(state, ctx, base_input());
+        for pressed in [true, false] {
+            let mut raw = base_input();
+            raw.events.push(egui::Event::PointerMoved(at));
+            raw.events.push(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: Default::default(),
+            });
+            frame_out(state, ctx, raw);
+        }
     }
 
     fn has_note(state: &EditorState, tick: u32, layer: u32) -> bool {
@@ -2583,6 +2601,79 @@ mod gui_window_tests {
         assert!(state.pending_replace.is_none());
         assert_eq!(state.active_tab(), Some(first));
         assert_eq!(state.store.len(), 1);
+    }
+
+    /// 标签条真的画出来、点标题能切歌、点加号能新建、点关闭叉能关掉指定标签。
+    #[test]
+    fn song_tabs_render_switch_add_and_close() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        let mut first = nbs_core::model::Song::new();
+        first.filename = Some(PathBuf::from("first.nbs"));
+        state.doc.replace_song(first);
+        let first_id = state.active_tab().unwrap();
+        let mut second = nbs_core::model::Song::new();
+        second.filename = Some(PathBuf::from("second.nbs"));
+        let second_id = state.push_tab(second);
+
+        frame_out(&mut state, &ctx, base_input());
+        let out = frame_out(&mut state, &ctx, base_input());
+        let texts: Vec<String> = out
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t == "first.nbs"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "second.nbs"), "{texts:?}");
+        click_text(&mut state, &ctx, "second.nbs");
+        assert_eq!(state.active_tab(), Some(second_id));
+
+        // 1440 宽、2 标签时 span=179，加号命中中心 = 7 + 2*179 + 14。
+        click_point(&mut state, &ctx, egui::pos2(379.0, 40.0));
+        assert_eq!(state.store.len(), 3, "点加号要真的新建标签");
+        // Fluent 第一枚关闭叉：x=7+179-35，宽30；y=29，高22。
+        click_point(&mut state, &ctx, egui::pos2(166.0, 40.0));
+        assert_eq!(state.store.len(), 2);
+        assert!(!state.store.contains(first_id), "叉号关的是第一枚标签");
+    }
+
+    /// 标签条右键菜单四条动作真实可点；这里验收「关闭右侧歌曲」。
+    #[test]
+    fn song_tab_context_menu_closes_the_right_side() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        let mut first = nbs_core::model::Song::new();
+        first.filename = Some(PathBuf::from("menu-first.nbs"));
+        state.doc.replace_song(first);
+        let first_id = state.active_tab().unwrap();
+        let mut second = nbs_core::model::Song::new();
+        second.filename = Some(PathBuf::from("menu-second.nbs"));
+        let second_id = state.push_tab(second);
+        let mut third = nbs_core::model::Song::new();
+        third.filename = Some(PathBuf::from("menu-third.nbs"));
+        let third_id = state.push_tab(third);
+
+        frame_out(&mut state, &ctx, base_input());
+        let out = frame_out(&mut state, &ctx, base_input());
+        let at = text_center_if(&out.shapes, |t| t == "menu-second.nbs");
+        secondary_click_point(&mut state, &ctx, at);
+        frame(&mut state, &ctx);
+        click_text(&mut state, &ctx, "关闭右侧歌曲");
+        assert_eq!(state.store.order(), &[first_id, second_id]);
+        assert!(!state.store.contains(third_id));
+        assert_eq!(state.active_tab(), Some(second_id));
+        assert!(state.tab_menu.is_none());
     }
 
     /// logo 是欢迎窗／关于窗里唯一一块 165×165 的贴图（`spr_logo` 半尺寸），帧号直接

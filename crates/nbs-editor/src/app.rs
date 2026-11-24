@@ -10,6 +10,7 @@ use crate::piano::{paint_notechart, show_piano, ChartRequest, PANEL_HEIGHT};
 use crate::shortcuts::collect_shortcuts;
 use crate::state::EditorState;
 use crate::statusbar::show_status_bar;
+use crate::tabbar;
 use crate::toolbar::{show_menu_bar, show_toolbar};
 use crate::viewport::{MENU_HEIGHT, STATUS_HEIGHT, TOOLBAR_HEIGHT};
 use crate::windows::show_windows;
@@ -138,6 +139,18 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
         .frame(tight())
         .exact_height(TOOLBAR_HEIGHT)
         .show(ctx, |ui| show_toolbar(state, ui));
+
+    // 原版标签条与工具栏重叠绘制，但画布顶部要让出 get_tab_offset() 的高度。
+    let tab_offset = tabbar::height(state);
+    if tab_offset > 0.0 {
+        egui::TopBottomPanel::top("nbs_tabspace")
+            .frame(tight())
+            .exact_height(tab_offset)
+            .show(ctx, |ui| {
+                ui.allocate_rect(ui.max_rect(), Sense::hover());
+            });
+    }
+    tabbar::show(state, ctx);
 
     egui::TopBottomPanel::bottom("nbs_status")
         .frame(tight())

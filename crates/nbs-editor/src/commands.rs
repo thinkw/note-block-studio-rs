@@ -243,6 +243,16 @@ pub enum Command {
     CancelModal,
     /// 原版 `close_song(sid)`：关掉一个歌曲标签（用户要求 #131）。
     CloseTab(crate::tabs::SongId),
+    /// 标签条单击：切到这一首。
+    SwitchTab(crate::tabs::SongId),
+    /// 标签条右键「新文件」：在指定标签后面插入并切过去。
+    NewTabAfter(crate::tabs::SongId),
+    /// 关闭除指定标签外的所有歌曲，逐首确认。
+    CloseOtherTabs(crate::tabs::SongId),
+    /// 关闭指定标签右侧的所有歌曲，逐首确认。
+    CloseTabsRight(crate::tabs::SongId),
+    /// 批量关闭队列的下一首。
+    CloseTabSetNext,
     /// 关标签问句答「是」：先把这一首存下来，存成了才接着关。
     CloseTabSave(crate::tabs::SongId),
     /// 关标签的收尾：切回原来那一首，再从表里拿掉这一首（原版 `close_song` 后半段）。
@@ -639,6 +649,14 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             // （`WindowKind::ConfirmNew`），属自加行为，这次按原版改回新建标签，
             // 那扇窗随之删除（用户要求 #131）。
             state.open_tab(Document::with_song(Song::new()));
+            state.set_message(tr("New song created", "已新建歌曲"));
+        }
+        Command::NewTabAfter(id) => {
+            let Some(index) = state.store.index_of(id) else {
+                return;
+            };
+            state.open_tab_at(index + 1, Document::with_song(Song::new()));
+            state.tab_menu = None;
             state.set_message(tr("New song created", "已新建歌曲"));
         }
         Command::Open => {
@@ -1259,6 +1277,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         Command::CancelModal => {
             // 原版 `message_yesnocancel` 的取消键返回 -1：队列连同两条续作一起作废。
             state.modals = ModalQueue::default();
+            state.pending_close_set = None;
             if state.quit.is_some() {
                 dispatch(state, Command::QuitCancel, ctx);
             } else if state.pending_replace.is_some() {
@@ -1268,6 +1287,60 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
                 // 再因为 `decision < 0` 直接返回，这一首保持打开（用户要求 #131）。
                 restore_previous_tab(state);
             }
+        }
+        Command::SwitchTab(id) => {
+            state.tab_menu = None;
+            state.switch_tab(id);
+        }
+        Command::CloseOtherTabs(anchor) => {
+            let Some(_index) = state.store.index_of(anchor) else {
+                return;
+            };
+            let mut list = Vec::new();
+            for id in state.store.order().iter().rev() {
+                if *id != anchor {
+                    list.push(*id);
+                }
+            }
+            state.tab_menu = None;
+            if list.is_empty() {
+                return;
+            }
+            state.switch_tab(anchor);
+            state.pending_close_set = Some(list);
+            dispatch(state, Command::CloseTabSetNext, ctx);
+        }
+        Command::CloseTabsRight(anchor) => {
+            let Some(index) = state.store.index_of(anchor) else {
+                return;
+            };
+            let mut list = Vec::new();
+            for id in state.store.order()[index + 1..].iter().rev() {
+                list.push(*id);
+            }
+            state.tab_menu = None;
+            if list.is_empty() {
+                return;
+            }
+            state.switch_tab(anchor);
+            state.pending_close_set = Some(list);
+            dispatch(state, Command::CloseTabSetNext, ctx);
+        }
+        Command::CloseTabSetNext => {
+            let Some(mut list) = state.pending_close_set.take() else {
+                return;
+            };
+            while !list.is_empty() && !state.store.contains(list[0]) {
+                list.remove(0);
+            }
+            let Some(next) = list.first().copied() else {
+                return;
+            };
+            list.remove(0);
+            if !list.is_empty() {
+                state.pending_close_set = Some(list);
+            }
+            dispatch(state, Command::CloseTab(next), ctx);
         }
         Command::CloseTab(id) => {
             // 原版 `close_song(sid)`。标签已经没了、或上一首的问句还没答完都不动 ——
@@ -1338,6 +1411,9 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             if closed.active.is_none() {
                 state.refill_tab_after_last_close();
             }
+            if state.pending_close_set.is_some() {
+                dispatch(state, Command::CloseTabSetNext, ctx);
+            }
         }
         Command::OpenReplacingFirst(path) => {
             if state.pending_replace.is_some() || !state.modals.is_empty() {
@@ -1379,6 +1455,7 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
         }
         Command::ReplaceFirstFinish(id) => replace_finish(state, id),
         Command::DialogCancelled => {
+            state.pending_close_set = None;
             if state.pending_replace.is_some() {
                 replace_restore_previous(state);
                 return;
@@ -4400,6 +4477,81 @@ mod tests {
         assert_eq!(state.active_tab(), Some(second));
         assert_eq!(state.store.len(), 2);
         let _ = std::fs::remove_file(&new_path);
+    }
+
+    /// 标签条右键「新文件」：插到指定标签后面并切过去，不是追加到末尾。
+    #[test]
+    fn new_tab_after_inserts_and_selects_at_the_requested_slot() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        let first = state.active_tab().unwrap();
+        let second = state.push_tab(Song::new());
+        let third = state.push_tab(Song::new());
+
+        dispatch(&mut state, Command::NewTabAfter(second), &ctx);
+        let fresh = state.active_tab().unwrap();
+        assert_eq!(state.store.order(), &[first, second, fresh, third]);
+        assert_eq!(state.doc.song.total_blocks, 0);
+        assert!(state.tab_menu.is_none());
+    }
+
+    /// 「关闭其他歌曲」从后往前逐首问；取消整组作废，已关掉的不复活。
+    #[test]
+    fn close_other_tabs_confirms_in_reverse_and_cancel_stops_the_set() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        let anchor = state.active_tab().unwrap();
+        let second = state.push_tab(Song::new());
+        let mut third_song = Song::new();
+        third_song.dirty = true;
+        let third = state.push_tab(third_song);
+        let mut fourth_song = Song::new();
+        fourth_song.dirty = true;
+        let fourth = state.push_tab(fourth_song);
+
+        dispatch(&mut state, Command::CloseOtherTabs(anchor), &ctx);
+        assert_eq!(state.active_tab(), Some(fourth));
+        dispatch(&mut state, Command::CancelModal, &ctx);
+        assert_eq!(state.store.len(), 4);
+        assert_eq!(state.active_tab(), Some(anchor));
+        assert!(state.pending_close_set.is_none());
+
+        dispatch(&mut state, Command::CloseOtherTabs(anchor), &ctx);
+        dispatch(&mut state, Command::AnswerModal(false), &ctx);
+        assert!(!state.store.contains(fourth));
+        assert_eq!(state.active_tab(), Some(third));
+        dispatch(&mut state, Command::CancelModal, &ctx);
+        assert_eq!(state.store.len(), 3);
+        assert_eq!(state.active_tab(), Some(anchor));
+        assert!(state.store.contains(second));
+        assert!(state.store.contains(third));
+    }
+
+    /// 「关闭右侧歌曲」只碰锚点右边，顺序仍是从后往前。
+    #[test]
+    fn close_tabs_right_only_closes_the_suffix() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        let first = state.active_tab().unwrap();
+        let anchor = state.push_tab(Song::new());
+        let mut third_song = Song::new();
+        third_song.dirty = true;
+        let third = state.push_tab(third_song);
+        let mut fourth_song = Song::new();
+        fourth_song.dirty = true;
+        let fourth = state.push_tab(fourth_song);
+
+        dispatch(&mut state, Command::CloseTabsRight(anchor), &ctx);
+        assert_eq!(state.active_tab(), Some(fourth));
+        dispatch(&mut state, Command::AnswerModal(false), &ctx);
+        assert_eq!(state.active_tab(), Some(third));
+        dispatch(&mut state, Command::AnswerModal(false), &ctx);
+        assert_eq!(state.store.order(), &[first, anchor]);
+        assert_eq!(state.active_tab(), Some(anchor));
+        assert!(state.pending_close_set.is_none());
     }
 
     /// 原版 `close_song.gml:9-11`：没改过的标签不问，直接关；关完回到问之前那一首。

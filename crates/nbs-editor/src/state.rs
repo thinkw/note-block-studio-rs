@@ -444,6 +444,13 @@ pub struct PendingReplace {
     pub path: Option<PathBuf>,
 }
 
+/// 标签条右键菜单的现场（用户要求 #131）。
+#[derive(Clone, Copy, Debug)]
+pub struct TabMenu {
+    pub id: crate::tabs::SongId,
+    pub pos: Pos2,
+}
+
 /// 原版两条退出链：`request_quit()` 可取消；原生窗口关闭走 `control_end()`，不能取消。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QuitMode {
@@ -1251,6 +1258,10 @@ pub struct EditorState {
     pub pending_close: Option<PendingClose>,
     /// 欢迎窗 / 启动文件替换首标签的现场（用户要求 #131）。
     pub pending_replace: Option<PendingReplace>,
+    /// 标签条右键菜单；点外或选完一条即清。
+    pub tab_menu: Option<TabMenu>,
+    /// 「关闭其他/右侧歌曲」的逐首确认队列；取消则整组作废。
+    pub pending_close_set: Option<Vec<crate::tabs::SongId>>,
     /// 原版 `quit_prompting` + 逐标签确认现场；`None` 表示当前没在退出确认。
     pub quit: Option<QuitState>,
     /// 原版 `quit_confirmed`：确认全部完成后，`control_end` 不再重复问。
@@ -1681,6 +1692,8 @@ impl EditorState {
             pending_dialog: None,
             pending_close: None,
             pending_replace: None,
+            tab_menu: None,
+            pending_close_set: None,
             quit: None,
             quit_confirmed: false,
             recent_files,
@@ -1933,7 +1946,12 @@ impl EditorState {
     /// （`delay = 0`）、图层选中项（`sb_sel = 0`）。`text_exists` / `insselect` /
     /// `insedit` / `key_edit` / `editline` 端口没有对应字段（无歌词功能），不复刻。
     pub fn open_tab(&mut self, doc: Document) -> crate::tabs::SongId {
-        let id = self.store.insert(doc);
+        self.open_tab_at(self.store.len(), doc)
+    }
+
+    /// 在原版 `array_insert(songs, index, create(obj_song))` 的位置开标签并切过去。
+    pub fn open_tab_at(&mut self, index: usize, doc: Document) -> crate::tabs::SongId {
+        let id = self.store.insert_at(index, doc);
         let opened = self.enter_tab(id);
         debug_assert!(opened, "刚入槽的标签一定切得过去");
         self.window = None;
