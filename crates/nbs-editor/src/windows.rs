@@ -2546,15 +2546,28 @@ fn playback_effects_window(state: &mut EditorState, ui: &mut Ui) {
             window_changed = true;
         }
         state.prefs.fx_window_always_on_top = always_on_top;
+        let mut passthrough = state.prefs.fx_window_mouse_passthrough;
+        if ui
+            .checkbox(
+                &mut passthrough,
+                tr("Mouse click-through", "鼠标穿透（Click-through）"),
+            )
+            .changed()
+        {
+            window_changed = true;
+        }
+        state.prefs.fx_window_mouse_passthrough = passthrough;
         ui.label(
             RichText::new(tr(
                 "The floating window appears in the taskbar. Drag its title bar to move it, \
                  drag the border to resize, or close it to return effects to the main window. \
                  Transparent background affects only the empty client area; the title bar, \
-                 taskbar and window frame stay opaque.",
+                 taskbar and window frame stay opaque. Click-through passes mouse input to \
+                 the application below; turn it off here to drag or resize again.",
                 "浮窗会出现在 Windows 任务栏。拖标题栏移动、拖边框缩放；\
                  关闭浮窗后特效回主窗。透明背景只影响琴键和特效之外的客户区，\
-                 标题栏、任务栏和窗口边框保持不透明。",
+                 标题栏、任务栏和窗口边框保持不透明。鼠标穿透会把点击交给下方应用；\
+                 要重新拖动或缩放，请在这里取消穿透。",
             ))
             .small()
             .weak(),

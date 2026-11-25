@@ -209,6 +209,8 @@ pub struct Preferences {
     pub fx_window_transparent: bool,
     /// 浮窗是否始终压在其他窗口前面。默认关闭，避免遮挡视线。
     pub fx_window_always_on_top: bool,
+    /// 浮窗鼠标穿透：点击直接落到下方应用；默认关闭，保留正常窗口操作。
+    pub fx_window_mouse_passthrough: bool,
 }
 
 /// 最近歌曲一条：路径 + 上次打开的时间（unix 秒，原版 `date_current_datetime()`）。
@@ -385,6 +387,7 @@ impl Default for Preferences {
             fx_window: false,
             fx_window_transparent: false,
             fx_window_always_on_top: false,
+            fx_window_mouse_passthrough: false,
         }
     }
 }
@@ -708,6 +711,7 @@ mod tests {
         p.fx_window = true;
         p.fx_window_transparent = true;
         p.fx_window_always_on_top = true;
+        p.fx_window_mouse_passthrough = true;
         p.recent_files.push(crate::prefs::RecentFile {
             path: "C:/songs/demo.nbs".into(),
             time: 1760000001,
@@ -739,6 +743,7 @@ mod tests {
         assert!(back.fx_window, "分离浮窗开关要落盘");
         assert!(back.fx_window_transparent, "客户区背景透明开关要落盘");
         assert!(back.fx_window_always_on_top, "浮窗置顶开关要落盘");
+        assert!(back.fx_window_mouse_passthrough, "浮窗鼠标穿透开关要落盘");
         // 旧配置文件里没有这几项时必须退回默认值，不能整个文件读不出来。
         let old = r#"{"version":1,"theme":3}"#;
         let back: Preferences = serde_json::from_str(old).unwrap();
@@ -756,6 +761,7 @@ mod tests {
         assert!(!back.fx_window, "旧配置缺键时浮窗关闭");
         assert!(!back.fx_window_transparent, "旧配置缺键时浮窗不透明");
         assert!(!back.fx_window_always_on_top, "旧配置缺键时浮窗不置顶");
+        assert!(!back.fx_window_mouse_passthrough, "旧配置缺键时不穿透");
         assert_eq!(back.accent, [0, 120, 212], "强调色基色出厂 0,120,212");
         assert!(back.remove_effect, "旧配置缺键时退回出厂打开");
         assert_eq!(

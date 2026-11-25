@@ -63,6 +63,8 @@ struct NbsApp {
     fx_window_hwnd: Option<isize>,
     #[cfg(windows)]
     fx_window_style_applied: Option<bool>,
+    #[cfg(windows)]
+    fx_window_passthrough_applied: Option<bool>,
 }
 
 impl NbsApp {
@@ -160,6 +162,8 @@ impl NbsApp {
             fx_window_hwnd: None,
             #[cfg(windows)]
             fx_window_style_applied: None,
+            #[cfg(windows)]
+            fx_window_passthrough_applied: None,
         }
     }
 }
@@ -443,7 +447,6 @@ impl eframe::App for NbsApp {
             }
             if let Some(window) = &self.fx_window {
                 window.resume_state(&mut self.state);
-                window.sync_from_state(&self.state);
             }
         } else {
             self.fx_window = None;
@@ -488,6 +491,10 @@ impl eframe::App for NbsApp {
             self.last_title = title;
         }
         nbs_editor::show(ctx, &mut self.state);
+        if let Some(window) = &self.fx_window {
+            // 主窗这一帧先确保图标/字体/时间轴就绪，浮窗再拍视觉快照。
+            window.sync_from_state(&self.state);
+        }
         // 面板这一帧提的起停要求要画完之后再办：`control::start` 吃 `&mut EditorState`，
         // 而帧内它正被借去画界面；起 socket、写发现文件也不该发生在绘制路径里。
         if let Some(change) = self.state.control_change.take() {
@@ -559,6 +566,7 @@ impl NbsApp {
     fn reset_fx_window_style(&mut self) {
         self.fx_window_hwnd = None;
         self.fx_window_style_applied = None;
+        self.fx_window_passthrough_applied = None;
     }
 
     #[cfg(windows)]
@@ -578,6 +586,7 @@ impl NbsApp {
             };
             self.fx_window_hwnd = fx_window_style::find_by_title(title);
             self.fx_window_style_applied = None;
+            self.fx_window_passthrough_applied = None;
         }
         let Some(hwnd) = self.fx_window_hwnd else {
             // 原生窗口在帧末才创建；下一帧再取 HWND。
@@ -585,19 +594,27 @@ impl NbsApp {
             return;
         };
         if self.fx_window_focus_pending {
-            fx_window_style::bring_to_front_once(hwnd);
+            if !self.state.prefs.fx_window_always_on_top {
+                fx_window_style::bring_to_front_once(hwnd);
+            }
             self.fx_window_focus_pending = false;
         }
         let transparent = self.state.prefs.fx_window_transparent;
-        if self.fx_window_style_applied == Some(transparent) {
-            return;
+        if self.fx_window_style_applied != Some(transparent) {
+            let ok = fx_window_style::set_transparent(hwnd, transparent);
+            if !ok {
+                eprintln!("警告: 无法设置特效浮窗的 Windows DWM 透明合成");
+            }
+            // 失败也记下本次取值，避免每帧刷屏；用户再次切换时会重试。
+            self.fx_window_style_applied = Some(transparent);
         }
-        let ok = fx_window_style::set_transparent(hwnd, transparent);
-        if !ok {
-            eprintln!("警告: 无法设置特效浮窗的 Windows DWM 透明合成");
+        let passthrough = self.state.prefs.fx_window_mouse_passthrough;
+        if self.fx_window_passthrough_applied != Some(passthrough) {
+            if !fx_window_style::set_mouse_passthrough(hwnd, passthrough) {
+                eprintln!("警告: 无法设置特效浮窗的鼠标穿透");
+            }
+            self.fx_window_passthrough_applied = Some(passthrough);
         }
-        // 失败也记下本次取值，避免每帧刷屏；用户再次切换时会重试。
-        self.fx_window_style_applied = Some(transparent);
     }
 
     /// 设置页那三个动作的落点。编辑器只提要求，起停在这里做：服务端句柄归本进程管，

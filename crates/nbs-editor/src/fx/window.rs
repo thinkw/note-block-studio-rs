@@ -177,8 +177,8 @@ impl FxWindowShared {
                 WindowLevel::Normal
             })
             .with_mouse_passthrough(false)
-            // GL 配置在根窗口已带 alpha；子窗口先按普通窗口创建，透明时再由
-            // Windows 侧加 WS_EX_LAYERED，避免 winit 的 DWM 空区域把整个窗口吃掉。
+            // 子窗口保持普通装饰窗口；Windows 侧用 composition accent 给客户区
+            // 加透明 gradient，不改变标题栏、任务栏和边框。
             .with_transparent(false)
             .with_taskbar(true)
     }
