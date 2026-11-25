@@ -563,6 +563,12 @@ impl FxState {
         self.stack.surface_active(Surface::Overlay)
     }
 
+    /// 换歌曲标签时作废烘焙缓存（刀 0）：下一次 [`Self::refresh`] 按新曲子重烘。
+    /// 哨兵值与「一条特效都没开」那一帧打回去的相同，不会画半帧上一首的音符。
+    pub fn invalidate_bake(&mut self) {
+        self.baked_for = (u64::MAX, false);
+    }
+
     /// 每帧开头调一次：该重烘的烘掉，素材只认一次目录。
     ///
     /// 一条特效都没开时整段跳过 —— 那时画的是主界面网格，把整首曲子的事件展开、

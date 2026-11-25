@@ -304,7 +304,7 @@ fn main() {
     let en_ok = kept_english(zh_mode);
     // (标签, 窗口, 首选项页签)
     let mut units: Vec<(String, Option<WindowKind>, u8)> = vec![("主界面".into(), None, 0)];
-    let named: [(&str, WindowKind); 31] = [
+    let named: [(&str, WindowKind); 30] = [
         ("歌曲信息", WindowKind::SongInfo),
         ("歌曲信息（带按钮）", WindowKind::SongInfoEdit),
         ("歌曲属性", WindowKind::Properties),
@@ -322,7 +322,6 @@ fn main() {
         ("打开文件", WindowKind::FileOpen),
         ("保存文件", WindowKind::FileSave),
         ("层改名", WindowKind::LayerRename(0)),
-        ("确认新建", WindowKind::ConfirmNew),
         ("导出音频", WindowKind::AudioExport),
         ("音频设置", WindowKind::AudioSettings),
         ("导出结构", WindowKind::DatapackExport),

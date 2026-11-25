@@ -10,6 +10,7 @@ use crate::piano::{paint_notechart, show_piano, ChartRequest, PANEL_HEIGHT};
 use crate::shortcuts::collect_shortcuts;
 use crate::state::EditorState;
 use crate::statusbar::show_status_bar;
+use crate::tabbar;
 use crate::toolbar::{show_menu_bar, show_toolbar};
 use crate::tr;
 use crate::viewport::{MENU_HEIGHT, STATUS_HEIGHT, TOOLBAR_HEIGHT};
@@ -184,10 +185,26 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
         .exact_height(MENU_HEIGHT)
         .show(ctx, |ui| show_menu_bar(state, ui));
 
+    // v3.12 control_draw.gml:1895-1900：多标签时工具栏（spr_iconbar）画在
+    // `20 + song_tab_offset` —— 工具栏自己也要下移，标签条（y=24..58）落在
+    // 菜单栏与工具栏之间让出的空带里。这里插一块同高面板把工具栏和画布
+    // 一起推下去；单标签/全屏时 offset=0，面板不建。
+    let tab_offset = tabbar::height(state);
+    if tab_offset > 0.0 {
+        egui::TopBottomPanel::top("nbs_tabspace")
+            .frame(tight())
+            .exact_height(tab_offset)
+            .show(ctx, |ui| {
+                ui.allocate_rect(ui.max_rect(), Sense::hover());
+            });
+    }
+
     egui::TopBottomPanel::top("nbs_toolbar")
         .frame(tight())
         .exact_height(TOOLBAR_HEIGHT)
         .show(ctx, |ui| show_toolbar(state, ui));
+
+    tabbar::show(state, ctx);
 
     egui::TopBottomPanel::bottom("nbs_status")
         .frame(tight())
@@ -293,6 +310,7 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
 
     show_windows(state, ctx);
     flush_all(state, ctx);
+    tabbar::drag_shield(state, ctx);
     // 原版 `window += w_menu`（show_menu_ext.gml:21）：下拉开着的时候，这一帧全屏的
     // 输入闸门都是抬着的（用户要求 #129：点菜单以外的地方只用来收菜单，
     // 不会顺手按到底下的按钮）。画布/琴键那几路读的是裸输入，各自有门

@@ -13,6 +13,7 @@ use parking_lot::Mutex;
 use nbs_core::model::{Note, Song, FIRST_CUSTOM_INDEX};
 
 use crate::mixer::{Mixer, DEFAULT_MAX_VOICES};
+use crate::reference::ReferenceTrack;
 use crate::samples::{SampleSource, SoundBank};
 
 /// 播放到该列时要做的事。事件乐器不发声音——原版 control_step.gml:283-296
@@ -233,6 +234,8 @@ pub struct SharedState {
     pub position: f64,
     pub mixer: Mixer,
     pub bank: Arc<SoundBank>,
+    /// 当前标签的参考音频轨；切标签时由编辑器重挂（用户要求 #131）。
+    pub reference: ReferenceTrack,
     pub sample_rate: u32,
     /// 是否由真实音频回调推进（false 时 UI 侧内部时钟代理）。
     pub audio_active: bool,
@@ -260,6 +263,7 @@ impl SharedState {
             // 保持 nbswave 的精确时间轴。
             mixer: Mixer::new(sample_rate).with_tick_jitter(crate::mixer::REALTIME_TICK_JITTER_MS),
             bank,
+            reference: ReferenceTrack::default(),
             sample_rate,
             audio_active: false,
             stream_needs_rebuild: false,
@@ -314,6 +318,26 @@ impl SharedState {
             }
         }
         tempo
+    }
+
+    /// 原版 `get_seconds_from_tick`：逐段累加变速器之间的 tick 时长。
+    pub fn seconds_at(&self, tick: f64) -> f64 {
+        let tick = tick.max(0.0);
+        let mut segment_start = 0.0;
+        let mut tempo = self.params.tempo.max(0.25) as f64;
+        let mut seconds = 0.0;
+        for ev in &self.events {
+            let at = ev.tick as f64;
+            if at > tick {
+                break;
+            }
+            if let EventKind::Tempo(pitch) = ev.kind {
+                seconds += (at - segment_start) / tempo;
+                segment_start = at;
+                tempo = (pitch.unsigned_abs() as f64 / 15.0).max(0.25);
+            }
+        }
+        seconds + (tick - segment_start) / tempo
     }
 
     /// 原版 `toggle_playing` 的 PLAY COL：按播放键取落点列的速度，再把该列
@@ -514,9 +538,28 @@ impl SharedState {
     pub fn render_interleaved(&mut self, out: &mut [f32], channels: usize) {
         let frames = out.len() / channels.max(1);
         for f in 0..frames {
-            let (l, r) = self.render_frame();
+            let (mut l, mut r) = self.render_frame();
+            let reference = self.reference.render_sample();
+            if self.reference.is_solo() {
+                l = 0.0;
+                r = 0.0;
+            }
+            if !self.reference.is_muted() {
+                l += reference;
+                r += reference;
+            }
             let base = f * channels;
-            if channels == 1 {
+            if self.reference.is_loaded() {
+                if channels == 1 {
+                    out[base] = ((l + r) * 0.5).clamp(-1.0, 1.0);
+                } else {
+                    out[base] = l.clamp(-1.0, 1.0);
+                    out[base + 1] = r.clamp(-1.0, 1.0);
+                    for c in 2..channels {
+                        out[base + c] = ((l + r) * 0.5).clamp(-1.0, 1.0);
+                    }
+                }
+            } else if channels == 1 {
                 out[base] = (l + r) * 0.5;
             } else {
                 out[base] = l;
@@ -1218,6 +1261,8 @@ mod tests {
             "{}",
             st.tempo_at_tick(100)
         );
+        assert!((st.seconds_at(2.0) - 2.0 / 41.33).abs() < 1e-6);
+        assert!((st.seconds_at(5.5) - (2.0 / 41.33 + 3.0 / 40.0 + 0.5 / 20.0)).abs() < 1e-6);
     }
 
     /// 循环回绕后 control_step 的 diff<0 分支补播落点列：回绕列上的

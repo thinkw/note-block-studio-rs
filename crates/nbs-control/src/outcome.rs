@@ -18,6 +18,16 @@ pub enum ErrorCode {
     LockedLayer,
     /// `expect_rev` 与当前 `rev` 不符：有人在你的调用之间改了工程。
     RevConflict,
+    /// 客户端持有的标签会话号已经失效（标签被关闭）。
+    TabGone,
+    /// 后台标签默认只读；设置里开启后台写后才接受文档级操作。
+    ParkedTabReadonly,
+    /// 播放、文件、任务等全局交互只能打在当前标签上。
+    RequiresActiveTab,
+    /// 后台写必须带 expect_rev，禁止无锁覆盖。
+    ExpectRequired,
+    /// 关闭脏标签必须显式确认丢弃，MCP 没有默认应答方。
+    NeedsConfirm,
     /// 有模态框挂着，写操作被挡（只读操作不受影响）。
     ModalOpen,
     /// 有窗口开着且它握着这次操作的草稿态，外部提交会互相打架。
@@ -47,6 +57,11 @@ impl ErrorCode {
             Self::NotFound => "not_found",
             Self::LockedLayer => "locked_layer",
             Self::RevConflict => "rev_conflict",
+            Self::TabGone => "tab_gone",
+            Self::ParkedTabReadonly => "parked_tab_readonly",
+            Self::RequiresActiveTab => "requires_active_tab",
+            Self::ExpectRequired => "expect_required",
+            Self::NeedsConfirm => "needs_confirm",
             Self::ModalOpen => "modal_open",
             Self::WindowOpen => "window_open",
             Self::Busy => "busy",
@@ -229,6 +244,21 @@ pub struct Diagnostics {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TabInfo {
+    /// 稳定会话号；标签关闭后失效，不会因重排改变。
+    pub id: u64,
+    /// 当前标签条位置，从 0 起算。
+    pub index: u32,
+    pub title: String,
+    pub filename: Option<String>,
+    pub dirty: bool,
+    pub rev: u64,
+    pub total_blocks: usize,
+    pub song_length: u32,
+    pub layer_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub app_version: String,
     pub protocol: u32,
@@ -250,13 +280,17 @@ pub struct Snapshot {
     pub length_ticks: u32,
     pub save_version: u8,
     pub first_custom_index: u8,
-    /// 播放位置（tick，浮点）与是否在播。
-    pub playhead: f64,
-    pub playing: bool,
+    #[serde(default)]
+    pub active_tab: Option<u64>,
+    #[serde(default)]
+    pub tabs: Vec<TabInfo>,
+    /// 播放位置（tick，浮点）与是否在播；收起标签没有交互态，返回 null。
+    pub playhead: Option<f64>,
+    pub playing: Option<bool>,
     pub selection: Box<SelectionInfo>,
     pub diagnostics: Box<Diagnostics>,
-    /// 未答完的模态框数量；非 0 时写操作会被 `modal_open` 挡下。
-    pub modal_count: usize,
+    /// 未答完的模态框数量；收起标签返回 null。非 0 时写操作会被 `modal_open` 挡下。
+    pub modal_count: Option<usize>,
     /// 当前开着的窗口名（没有就 null）——它可能握着某次操作的草稿态。
     pub open_window: Option<String>,
 }
@@ -273,6 +307,10 @@ pub enum Data {
         song_session: u64,
     },
     Snapshot(Box<Snapshot>),
+    Tabs {
+        tabs: Vec<TabInfo>,
+        active_tab: Option<u64>,
+    },
     Notes {
         cells: Vec<NoteCell>,
         /// 因为超过上限而被截断时为 true，调用方得知道自己在看部分结果。

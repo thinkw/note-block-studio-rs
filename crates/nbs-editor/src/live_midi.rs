@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn press_records_block_while_playing_and_recording() {
         let (mut state, backend, _previews) = state_with_midi(1);
-        // for_test 自带演示曲，录音断言要空歌（原版 ConfirmNew 同款）。
+        // for_test 自带演示曲，录音断言要空歌（新建标签出来那一首同款）。
         state.doc.replace_song(nbs_core::model::Song::new());
         state.record = true;
         state.record_armed = false;

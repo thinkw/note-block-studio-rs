@@ -10,12 +10,53 @@ use serde::Deserialize;
 
 use nbs_control::{
     BatchField, CellNote, ExportFormat, ImportEnhancedOptions, ImportMidiOptions, LayerSet, Op,
-    Playback, Scope, SelectTarget, SetMeta, TranscribeOptions,
+    Playback, Scope, SelectTarget, SetMeta, TabRef, TranscribeOptions,
 };
+
+/// 只读工具的可选标签寻址；省略 = 当前标签。
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct TabOnly {
+    #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
+    #[serde(default)]
+    pub tab: Option<TabRef>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SwitchTab {
+    #[schemars(description = "稳定 id 或当前位置 index，二选一")]
+    pub tab: TabRef,
+}
+
+impl From<SwitchTab> for Op {
+    fn from(a: SwitchTab) -> Self {
+        Op::SwitchTab { tab: a.tab }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct CloseTab {
+    #[schemars(description = "稳定 id 或当前位置 index，二选一")]
+    pub tab: TabRef,
+    #[schemars(description = "true = 明确丢弃未保存改动并关闭；脏标签省略会返回 needs_confirm")]
+    #[serde(default)]
+    pub discard: Option<bool>,
+}
+
+impl From<CloseTab> for Op {
+    fn from(a: CloseTab) -> Self {
+        Op::CloseTab {
+            tab: a.tab,
+            discard: a.discard,
+        }
+    }
+}
 
 /// `run_action` 逃生舱的一条调用：动作名 + 它的参数原样。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct RunAction {
+    #[schemars(description = "稳定 id 或当前位置 index；交互动作只允许当前标签")]
+    #[serde(default)]
+    pub tab: Option<TabRef>,
     #[schemars(
         description = "动作名，必须是 list_actions 里出现过的一个；未知名字会被拒而不是被忽略"
     )]
@@ -155,6 +196,9 @@ impl From<CellInput> for CellNote {
 /// 只带 `expect_rev` 的写操作（把浮动选区落回歌曲）。
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct RevOnly {
+    #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
+    #[serde(default)]
+    pub tab: Option<TabRef>,
     #[schemars(
         description = "乐观并发令牌：填上一次回执里的 rev；省略 = 不校验，直接覆盖当前状态"
     )]
@@ -172,6 +216,9 @@ impl From<RevOnly> for Op {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct GetNotes {
+    #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
+    #[serde(default)]
+    pub tab: Option<TabRef>,
     #[schemars(description = "起始 tick，含；省略 = 0")]
     #[serde(default)]
     pub tick_from: Option<u32>,
@@ -211,6 +258,9 @@ impl From<GetNotes> for Op {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct SetNotes {
+    #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
+    #[serde(default)]
+    pub tab: Option<TabRef>,
     #[schemars(
         description = "要写的格子。一次调用 = 一次撤销；整批要么全收要么全拒（先校验后落笔）"
     )]
@@ -237,6 +287,9 @@ impl From<SetNotes> for Op {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct RemoveCells {
+    #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
+    #[serde(default)]
+    pub tab: Option<TabRef>,
     #[schemars(description = "要摘掉的格子坐标；空格子不算改动")]
     pub cells: Vec<CellRef>,
     #[schemars(description = "写进撤销历史的那句话，省略则用默认描述")]
@@ -261,6 +314,9 @@ impl From<RemoveCells> for Op {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct BatchFieldArgs {
+    #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
+    #[serde(default)]
+    pub tab: Option<TabRef>,
     #[schemars(description = "要批量改哪个字段")]
     pub field: BatchField,
     #[schemars(description = "\"set\" = 直接赋值；\"add\" = 在现值上加，越界由服务端夹取并回报")]
@@ -294,6 +350,9 @@ impl From<BatchFieldArgs> for Op {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct Transpose {
+    #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
+    #[serde(default)]
+    pub tab: Option<TabRef>,
     #[schemars(description = "作用范围：all / selection / rect。rect 只动范围内已有音符的格子")]
     pub scope: Scope,
     #[schemars(description = "半音数，可为负；越界夹到 0..=87 并在回执里说明")]
@@ -317,20 +376,32 @@ impl From<Transpose> for Op {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct Select {
+    #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
+    #[serde(default)]
+    pub tab: Option<TabRef>,
     #[schemars(
         description = "选什么。rect 里 copy=true 只复制不摘出（对应 Alt 框选），additive=true 并入现有选区（对应 Ctrl 加选）"
     )]
     pub target: SelectTarget,
+    #[schemars(description = "乐观并发令牌；后台写必填")]
+    #[serde(default)]
+    pub expect_rev: Option<u64>,
 }
 
 impl From<Select> for Op {
     fn from(a: Select) -> Self {
-        Op::Select { target: a.target }
+        Op::Select {
+            target: a.target,
+            expect_rev: a.expect_rev,
+        }
     }
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct LayerAdd {
+    #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
+    #[serde(default)]
+    pub tab: Option<TabRef>,
     #[schemars(description = "插入位置（0 起算）；省略 = 追加到末尾")]
     #[serde(default)]
     pub at: Option<u32>,
@@ -356,6 +427,9 @@ impl From<LayerAdd> for Op {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct LayerIndex {
+    #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
+    #[serde(default)]
+    pub tab: Option<TabRef>,
     #[schemars(description = "层号，0 起算")]
     pub index: u32,
     #[schemars(
@@ -376,6 +450,9 @@ impl From<LayerIndex> for Op {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct LayerUpdate {
+    #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
+    #[serde(default)]
+    pub tab: Option<TabRef>,
     #[schemars(description = "层号，0 起算")]
     pub index: u32,
     #[schemars(description = "要改的属性，省略的字段不动")]
@@ -399,6 +476,9 @@ impl From<LayerUpdate> for Op {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct LayerMove {
+    #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
+    #[serde(default)]
+    pub tab: Option<TabRef>,
     #[schemars(description = "源层号，0 起算")]
     pub from: u32,
     #[schemars(description = "目标层号，0 起算；音符跟着层一起走")]
@@ -422,6 +502,9 @@ impl From<LayerMove> for Op {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct SetMetaArgs {
+    #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
+    #[serde(default)]
+    pub tab: Option<TabRef>,
     #[schemars(description = "要改的元数据，省略的字段不动；一个都没给会被拒而不是空成功")]
     pub meta: SetMeta,
     #[schemars(
@@ -443,13 +526,22 @@ impl From<SetMetaArgs> for Op {
 /// `undo` / `redo` 共用：一个形状对应两个方向，所以转成哪个 `Op` 由调用处定。
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct Steps {
+    #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
+    #[serde(default)]
+    pub tab: Option<TabRef>,
     #[schemars(description = "步数；省略 = 1 步")]
     #[serde(default)]
     pub steps: Option<u32>,
+    #[schemars(description = "乐观并发令牌；后台写必填")]
+    #[serde(default)]
+    pub expect_rev: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct ClearSong {
+    #[schemars(description = "稳定 id 或当前位置 index；清空只允许当前标签")]
+    #[serde(default)]
+    pub tab: Option<TabRef>,
     #[schemars(
         description = "乐观并发令牌：填上一次回执里的 rev；省略 = 不校验，直接覆盖当前状态"
     )]
@@ -738,6 +830,7 @@ mod tests {
 
         // 折出来的键号和 `Op` 那侧一致，音名不会在搬运时掉回默认键。
         let Op::SetNotes { cells, .. } = Op::from(SetNotes {
+            tab: None,
             cells: vec![cell(json!("F#4")).unwrap()],
             label: None,
             expect_rev: None,

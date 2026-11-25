@@ -30,7 +30,7 @@ pub mod server;
 pub mod task;
 pub mod transcribe;
 
-pub use bus::{Inbox, PendingRequest};
+pub use bus::{Capabilities, Inbox, PendingRequest, TabRef};
 pub use client::{ClientError, ControlClient};
 pub use clients::{ClientBoard, ClientSession};
 pub use discovery::{Discovery, DISCOVERY_FILE};
@@ -45,14 +45,14 @@ pub use midi::{
 };
 pub use outcome::{
     ActionInfo, BarOverview, ChangeReport, Data, Diagnostics, ErrorCode, ErrorInfo, HistoryInfo,
-    InstrumentInfo, JobInfo, JobStatus, LayerInfo, NoteCell, Outcome, SelectionInfo, Snapshot,
+    InstrumentInfo, JobInfo, JobStatus, LayerInfo, NoteCell, Outcome, SelectionInfo, Snapshot, TabInfo,
 };
 pub use transcribe::TranscribeOptions;
 pub use server::{ControlServer, ServerConfig};
 pub use task::{JobHandle, JobKind, JobRegistry};
 
 /// 线协议版本：桥接进程与服务端不一致就直接拒绝，别拿半懂不懂的字段猜。
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[cfg(test)]
 mod tests;

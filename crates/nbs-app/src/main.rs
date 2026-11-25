@@ -23,7 +23,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use eframe::egui;
+use nbs_editor::commands::Command;
 use nbs_editor::fx::window::FxWindowShared;
+use nbs_editor::state::QuitMode;
 use nbs_editor::EditorState;
 
 #[cfg(windows)]
@@ -107,22 +109,12 @@ impl NbsApp {
         if let Some(arg) = std::env::args().nth(1) {
             let path = PathBuf::from(arg);
             if path.extension().and_then(|s| s.to_str()) == Some("nbs") {
-                match nbs_core::nbs::load(&path) {
-                    Ok(song) => {
-                        state.doc.replace_song(song);
-                        state.prepare_audio();
-                        state.add_recent(path);
-                        state.set_message(nbs_editor::tr(
-                            "Song loaded from command line",
-                            "已从命令行载入歌曲",
-                        ));
-                    }
-                    Err(e) => state.set_message(if nbs_core::lang() == 1 {
-                        format!("载入失败: {e}")
-                    } else {
-                        format!("Load failed: {e}")
-                    }),
-                }
+                // 原版启动文件走 load_song(fn, 0, 1)：替换第 1 个标签，取消则保留原曲。
+                nbs_editor::commands::dispatch(
+                    &mut state,
+                    Command::OpenReplacingFirst(Some(path)),
+                    &cc.egui_ctx,
+                );
             }
         }
         // 外部控制：命令行、环境变量、设置页三层都没点名就一行代码都不多跑
@@ -436,6 +428,12 @@ impl eframe::App for NbsApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 原生窗口关闭先拦住：原版 control_end 不可取消，但逐标签问完仍要保留失败恢复文件。
+        // eframe 允许用 CancelClose 把退出推迟到这些决定办完；已确认的退出不再拦。
+        if ctx.input(|i| i.viewport().close_requested()) && !self.state.quit_confirmed {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.state.emit(Command::BeginQuit(QuitMode::NativeClose));
+        }
         if self.state.prefs.fx_window {
             if self.fx_window.is_none() {
                 self.fx_window = Some(Arc::new(FxWindowShared::new(

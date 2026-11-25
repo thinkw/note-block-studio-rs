@@ -1,0 +1,744 @@
+//! 原版歌曲标签条（`draw_song_tabs.gml` / `draw_song_tab.gml`）。
+//!
+//! 标签条固定画在窗口 y=24..58；多标签且非全屏时布局在菜单栏与工具栏之间
+//! 让出 `get_tab_offset()` 的高度，工具栏随之下移（v3.12 control_draw.gml:1895
+//! 的 `20 + song_tab_offset`）。拖拽重排见刀 3，本文件含单击、关闭、加号、
+//! 右键菜单和 0.18 秒让位动画。
+
+use egui::{pos2, Align2, Color32, Id, Rect, Sense, Vec2};
+
+use crate::commands::Command;
+use crate::fonts::main_font;
+use crate::icons::Bank;
+use crate::state::EditorState;
+use crate::tabs::SongId;
+use crate::theme::{Theme, ThemeKind};
+use crate::tr;
+
+/// 原版 `get_tab_offset()`：只有多标签且非全屏才让位。
+pub fn height(state: &EditorState) -> f32 {
+    if state.store.len() > 1 && !state.fullscreen {
+        return match state.theme.kind {
+            ThemeKind::Aqua => 35.0,
+            ThemeKind::Retro | ThemeKind::Dark => 30.0,
+            ThemeKind::Fluent => 40.0,
+        };
+    }
+    0.0
+}
+
+fn span(window_width: f32, count: usize) -> f32 {
+    ((window_width - 44.0) / count as f32).clamp(1.0, 179.0)
+}
+
+fn theme_index(kind: ThemeKind) -> usize {
+    match kind {
+        ThemeKind::Aqua => 0,
+        ThemeKind::Retro => 1,
+        ThemeKind::Dark => 2,
+        ThemeKind::Fluent => 3,
+    }
+}
+
+fn gm(c: u32) -> Color32 {
+    Color32::from_rgb(
+        (c & 0xff) as u8,
+        ((c >> 8) & 0xff) as u8,
+        ((c >> 16) & 0xff) as u8,
+    )
+}
+
+fn alpha(c: Color32, a: u8) -> Color32 {
+    let (r, g, b, _) = c.to_tuple();
+    Color32::from_rgba_unmultiplied(r, g, b, a)
+}
+
+fn tab_title(state: &EditorState, id: SongId) -> String {
+    let song = if state.active_tab() == Some(id) {
+        &state.doc.song
+    } else {
+        &state.store.parked_doc(id).expect("标签存在").song
+    };
+    if let Some(path) = &song.filename {
+        return path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+    }
+    if state.player && !state.midi_file.is_empty() {
+        return state.midi_file.clone();
+    }
+    tr("Unsaved song", "新文件").to_string()
+}
+
+fn truncate_title(p: &egui::Painter, title: &str, suffix: &str, width: f32) -> String {
+    let font = main_font();
+    let full = format!("{title}{suffix}");
+    if p.layout_no_wrap(full, font.clone(), Color32::WHITE)
+        .size()
+        .x
+        <= width
+    {
+        return format!("{title}{suffix}");
+    }
+    let ellipsis = "...";
+    let reserved = p
+        .layout_no_wrap(ellipsis.to_string(), font.clone(), Color32::WHITE)
+        .size()
+        .x
+        + p.layout_no_wrap(suffix.to_string(), font.clone(), Color32::WHITE)
+            .size()
+            .x;
+    let mut out = title.to_string();
+    while !out.is_empty()
+        && p.layout_no_wrap(out.clone(), font.clone(), Color32::WHITE)
+            .size()
+            .x
+            > width - reserved
+    {
+        out.pop();
+    }
+    format!("{out}{ellipsis}{suffix}")
+}
+
+struct TabVisual {
+    id: SongId,
+    x: f32,
+    title: String,
+    dirty: bool,
+    selected: bool,
+}
+
+pub fn show(state: &mut EditorState, ctx: &egui::Context) {
+    let count = state.store.len();
+    if count < 2 || state.fullscreen {
+        state.store.reset_tab_layout();
+        state.tab_menu = None;
+        state.tab_drag = None;
+        return;
+    }
+    let Some(bank) = state.icons.bank() else {
+        return;
+    };
+    let th = state.theme.clone();
+    let rw = ctx.screen_rect().width();
+    let span = span(rw, count);
+    let elapsed = ctx.input(|i| i.stable_dt).clamp(0.0, 0.05);
+    let mut finished_drag = false;
+    if let Some(mut drag) = state.tab_drag.take() {
+        let (pointer, down, released, escape, focused) = ctx.input(|i| {
+            (
+                i.pointer.latest_pos(),
+                i.pointer.primary_down(),
+                i.pointer.primary_released(),
+                i.key_pressed(egui::Key::Escape),
+                i.viewport().focused,
+            )
+        });
+        let canceled = !state.store.contains(drag.id)
+            || (drag.span - span).abs() > 0.01
+            || escape
+            || focused == Some(false)
+            || pointer.is_none()
+            || (!down && !released);
+        if canceled {
+            state.tab_drag = None;
+        } else {
+            let pointer_x = pointer.unwrap().x;
+            if drag.dragging {
+                drag.x = (pointer_x - drag.grab_offset).clamp(7.0, 7.0 + (count - 1) as f32 * span);
+                drag.target = ((drag.x - 7.0) / span)
+                    .round()
+                    .clamp(0.0, (count - 1) as f32) as usize;
+                if released {
+                    // 原版 draw_song_tabs.gml:109-120：松手才 array_delete/array_insert。
+                    state.emit(Command::ReorderTab(drag.id, drag.target));
+                    finished_drag = true;
+                } else {
+                    state.tab_drag = Some(drag);
+                }
+            } else if down && (pointer_x - drag.press_x).abs() >= 4.0 {
+                // 原版 :89-95：按住并横向越过 4px 才进入 w_dragtab。
+                drag.dragging = true;
+                drag.x = (pointer_x - drag.grab_offset).clamp(7.0, 7.0 + (count - 1) as f32 * span);
+                drag.target = ((drag.x - 7.0) / span)
+                    .round()
+                    .clamp(0.0, (count - 1) as f32) as usize;
+                state.tab_drag = Some(drag);
+            } else if released {
+                state.tab_drag = None;
+            } else {
+                state.tab_drag = Some(drag);
+            }
+        }
+    }
+    let drag = state.tab_drag;
+    let active = state.active_tab();
+    let ids = state.store.order().to_vec();
+    let mut tabs = Vec::with_capacity(count);
+    for (index, id) in ids.iter().copied().enumerate() {
+        let slot = if let Some(d) = drag.filter(|d| d.dragging) {
+            let from = state.store.index_of(d.id).unwrap_or(index);
+            if index > from && index <= d.target {
+                index - 1
+            } else if index < from && index >= d.target {
+                index + 1
+            } else {
+                index
+            }
+        } else {
+            index
+        };
+        let target_x = 7.0 + slot as f32 * span;
+        let x = if drag.is_some_and(|d| d.dragging && d.id == id) {
+            drag.unwrap().x
+        } else {
+            state.store.advance_tab_layout(id, target_x, elapsed, 0.18)
+        };
+        let title = tab_title(state, id);
+        let dirty = if active == Some(id) {
+            state.doc.song.dirty
+        } else {
+            state
+                .store
+                .parked_doc(id)
+                .map(|d| d.song.dirty)
+                .unwrap_or(false)
+        };
+        tabs.push(TabVisual {
+            id,
+            x,
+            title,
+            dirty,
+            selected: active == Some(id),
+        });
+    }
+    if let Some(d) = drag.filter(|d| d.dragging) {
+        tabs.sort_by_key(|tab| tab.id == d.id);
+    }
+
+    let area = Rect::from_min_size(pos2(0.0, 24.0), Vec2::new(rw, 34.0));
+    egui::Area::new(Id::new("nbs_song_tabs"))
+        .order(egui::Order::Middle)
+        .fixed_pos(area.min)
+        .default_size(area.size())
+        .sense(Sense::hover())
+        .show(ctx, |ui| {
+            let p = ui.painter().clone();
+            let input_open = state.window.is_none()
+                && state.modals.is_empty()
+                && state.pending_close_set.is_none()
+                && !drag.is_some_and(|d| d.dragging)
+                && !finished_drag;
+            let held = ui.input(|i| i.pointer.any_down());
+            let top = if th.kind == ThemeKind::Fluent {
+                24.0
+            } else if matches!(th.kind, ThemeKind::Retro | ThemeKind::Dark) {
+                19.0
+            } else {
+                24.0
+            };
+            if th.kind != ThemeKind::Fluent {
+                bank.songtab(
+                    &p,
+                    pos2(0.0, top),
+                    9 + 10 * theme_index(th.kind),
+                    Vec2::new(rw, 31.0),
+                    Color32::WHITE,
+                );
+            }
+
+            for tab in &tabs {
+                let tab_rect = Rect::from_min_size(
+                    pos2(tab.x - 1.0, 26.0),
+                    Vec2::new(
+                        span - 1.0,
+                        24.0 + 5.0 * (th.kind == ThemeKind::Fluent) as i32 as f32,
+                    ),
+                );
+                let close_width = if th.kind == ThemeKind::Fluent {
+                    30.0
+                } else {
+                    16.0
+                };
+                let close_height = if th.kind == ThemeKind::Fluent {
+                    22.0
+                } else {
+                    15.0
+                };
+                let close_inset = if th.kind == ThemeKind::Fluent {
+                    35.0
+                } else {
+                    21.0
+                };
+                let close_y = match th.kind {
+                    ThemeKind::Fluent => 29.0,
+                    ThemeKind::Aqua => 31.0,
+                    ThemeKind::Retro | ThemeKind::Dark => 29.0,
+                };
+                let close_rect = Rect::from_min_size(
+                    pos2(tab.x + span - close_inset, close_y),
+                    Vec2::new(close_width, close_height),
+                );
+                let tab_resp = ui.interact(tab_rect, Id::new(("songtab", tab.id)), Sense::click());
+                let close_resp = ui.interact(
+                    close_rect,
+                    Id::new(("songtab-close", tab.id)),
+                    Sense::click(),
+                );
+                let hover = tab_resp.hovered() && input_open;
+                let close_hover = close_resp.hovered() && input_open;
+                let hover_state = if hover && held {
+                    2
+                } else if hover {
+                    1
+                } else {
+                    0
+                };
+                let close_state = if close_hover && held {
+                    2
+                } else if close_hover {
+                    1
+                } else {
+                    0
+                };
+                draw_tab(&bank, &p, &th, tab, span, hover_state, close_state);
+
+                if input_open
+                    && state.tab_drag.is_none()
+                    && ui.input(|i| i.pointer.primary_pressed())
+                    && tab_resp.hovered()
+                    && !close_resp.hovered()
+                {
+                    if let Some(pointer) = ui.ctx().pointer_hover_pos() {
+                        // 原版按下就 set_song，之后拖拽只改顺序，不改变台前选中项。
+                        state.emit(Command::SwitchTab(tab.id));
+                        state.tab_drag = Some(crate::state::TabDrag {
+                            id: tab.id,
+                            press_x: pointer.x,
+                            grab_offset: pointer.x - tab.x,
+                            x: tab.x,
+                            target: state.store.index_of(tab.id).unwrap_or(0),
+                            dragging: false,
+                            span,
+                        });
+                    }
+                }
+                if input_open && close_resp.clicked() {
+                    state.emit(Command::CloseTab(tab.id));
+                } else if input_open && tab_resp.clicked() {
+                    state.emit(Command::SwitchTab(tab.id));
+                }
+                if input_open && tab_resp.secondary_clicked() {
+                    state.tab_menu = Some(crate::state::TabMenu {
+                        id: tab.id,
+                        pos: ui.ctx().pointer_hover_pos().unwrap_or(tab_rect.min),
+                    });
+                }
+            }
+
+            let new_x = 7.0 + count as f32 * span;
+            let new_rect = Rect::from_min_size(
+                pos2(new_x - 1.0, 26.0),
+                Vec2::new(
+                    30.0,
+                    24.0 + 5.0 * (th.kind == ThemeKind::Fluent) as i32 as f32,
+                ),
+            );
+            let new_resp = ui.interact(new_rect, Id::new("songtab-new"), Sense::click());
+            let new_hover = new_resp.hovered() && input_open;
+            draw_new(&bank, &p, &th, new_x, new_hover);
+            if input_open && new_resp.clicked() {
+                state.emit(Command::New);
+            }
+
+            if th.kind == ThemeKind::Fluent {
+                for tab in &tabs {
+                    p.line(
+                        vec![
+                            pos2(tab.x + span + 1.0, 26.0),
+                            pos2(tab.x + span + 1.0, 57.0),
+                        ],
+                        egui::Stroke::new(1.0_f32, alpha(th.text_dim, 128)),
+                    );
+                }
+                p.line(
+                    vec![pos2(0.0, 58.0), pos2(rw, 58.0)],
+                    egui::Stroke::new(1.0_f32, alpha(th.text_dim, 204)),
+                );
+            }
+        });
+
+    show_menu(state, ctx);
+}
+
+fn draw_tab(
+    bank: &Bank,
+    p: &egui::Painter,
+    th: &Theme,
+    tab: &TabVisual,
+    span: f32,
+    hover: usize,
+    close_hover: usize,
+) {
+    let tabwidth = span + 1.0;
+    if th.kind != ThemeKind::Fluent {
+        let theme = theme_index(th.kind);
+        let top = if matches!(th.kind, ThemeKind::Retro | ThemeKind::Dark) {
+            19.0
+        } else {
+            24.0
+        };
+        let frame =
+            3 * (hover == 1 && !tab.selected) as usize + 6 * tab.selected as usize + 10 * theme;
+        bank.songtab(
+            p,
+            pos2(tab.x - 2.0, top),
+            frame,
+            Vec2::new(4.0, 31.0),
+            Color32::WHITE,
+        );
+        bank.songtab(
+            p,
+            pos2(tab.x + 2.0, top),
+            frame + 1,
+            Vec2::new(tabwidth - 5.0, 31.0),
+            Color32::WHITE,
+        );
+        bank.songtab(
+            p,
+            pos2(tab.x + span - 3.0, top),
+            frame + 2,
+            Vec2::new(4.0, 31.0),
+            Color32::WHITE,
+        );
+        let close_x = tab.x + span - 21.0;
+        let close_y = top + 7.0 + 3.0 * (th.kind != ThemeKind::Aqua) as i32 as f32;
+        bank.frame4_blit(
+            p,
+            pos2(close_x, close_y),
+            close_hover,
+            Vec2::new(17.0, 16.0),
+            th,
+            false,
+        );
+        let pressed = (close_hover == 2 && th.kind != ThemeKind::Aqua) as i32 as f32;
+        let frame = (close_hover > 0 && th.kind == ThemeKind::Aqua) as usize;
+        let tint = if th.kind == ThemeKind::Retro {
+            Color32::BLACK
+        } else {
+            Color32::WHITE
+        };
+        bank.closetab(
+            p,
+            pos2(close_x + 4.0 + pressed, close_y + 4.0 + pressed),
+            frame,
+            tint,
+        );
+    } else {
+        let dark_fill = th.fdark;
+        let hover_color = if dark_fill {
+            gm(0x002d2d2d)
+        } else {
+            gm(0x00e9e9e9)
+        };
+        let selected_color = if dark_fill {
+            gm(0x00282828)
+        } else {
+            gm(0x00f9f9f9)
+        };
+        if hover == 1 || tab.selected {
+            let y = if tab.selected { 24.0 } else { 26.0 };
+            p.rect_filled(
+                Rect::from_min_size(pos2(tab.x, y), Vec2::new(span, 57.0 - y)),
+                6.0,
+                if tab.selected {
+                    selected_color
+                } else {
+                    hover_color
+                },
+            );
+        }
+        if close_hover > 0 {
+            let color = if dark_fill {
+                if tab.selected {
+                    if close_hover == 2 {
+                        gm(3158064)
+                    } else {
+                        gm(3487029)
+                    }
+                } else if close_hover == 2 {
+                    gm(3487029)
+                } else {
+                    gm(3750201)
+                }
+            } else if tab.selected {
+                if close_hover == 2 {
+                    gm(15987699)
+                } else {
+                    gm(15790320)
+                }
+            } else if close_hover == 2 {
+                gm(15000804)
+            } else {
+                gm(14803425)
+            };
+            p.rect_filled(
+                Rect::from_min_size(pos2(tab.x + span - 35.0, 29.0), Vec2::new(31.0, 23.0)),
+                6.0,
+                color,
+            );
+        }
+        let tint = if th.fdark {
+            Color32::WHITE
+        } else {
+            Color32::BLACK
+        };
+        bank.closetab(
+            p,
+            pos2(tab.x + span - 22.0, 37.0),
+            2 + tab.dirty as usize,
+            tint,
+        );
+    }
+
+    let suffix = if th.kind != ThemeKind::Fluent && tab.dirty {
+        "*"
+    } else {
+        ""
+    };
+    let text_width = span - 40.0 - 15.0 * (th.kind == ThemeKind::Fluent) as i32 as f32;
+    let title = truncate_title(p, &tab.title, suffix, text_width.max(0.0));
+    let text_y = match th.kind {
+        ThemeKind::Aqua => 32.0,
+        ThemeKind::Retro | ThemeKind::Dark => 30.0,
+        ThemeKind::Fluent => 34.0,
+    };
+    p.text(
+        pos2(tab.x + 8.0, text_y),
+        Align2::LEFT_TOP,
+        title,
+        main_font(),
+        th.text,
+    );
+}
+
+fn draw_new(bank: &Bank, p: &egui::Painter, th: &Theme, x: f32, hover: bool) {
+    if th.kind != ThemeKind::Fluent {
+        let theme = theme_index(th.kind);
+        let top = if matches!(th.kind, ThemeKind::Retro | ThemeKind::Dark) {
+            19.0
+        } else {
+            24.0
+        };
+        let frame = 3 * hover as usize + 10 * theme;
+        bank.songtab(
+            p,
+            pos2(x - 2.0, top),
+            frame,
+            Vec2::new(4.0, 31.0),
+            Color32::WHITE,
+        );
+        bank.songtab(
+            p,
+            pos2(x + 2.0, top),
+            frame + 1,
+            Vec2::new(27.0, 31.0),
+            Color32::WHITE,
+        );
+        bank.songtab(
+            p,
+            pos2(x + 28.0, top),
+            frame + 2,
+            Vec2::new(4.0, 31.0),
+            Color32::WHITE,
+        );
+    } else {
+        if hover {
+            p.rect_filled(
+                Rect::from_min_size(pos2(x, 26.0), Vec2::new(31.0, 31.0)),
+                6.0,
+                if th.fdark {
+                    gm(0x002d2d2d)
+                } else {
+                    gm(0x00e9e9e9)
+                },
+            );
+        }
+        bank.newtab(
+            p,
+            pos2(x + 9.0, 34.0),
+            if th.fdark {
+                Color32::WHITE
+            } else {
+                Color32::BLACK
+            },
+        );
+    }
+}
+
+/// 原版 `window = w_dragtab` 的全屏输入闸门。拖拽中只让标签条读裸指针，其它控件不接收点击。
+pub fn drag_shield(state: &EditorState, ctx: &egui::Context) {
+    if !state.tab_drag.is_some_and(|d| d.dragging) {
+        return;
+    }
+    let screen = ctx.screen_rect();
+    egui::Area::new(Id::new("nbs_songtab_drag_shield"))
+        .order(egui::Order::Middle)
+        .fixed_pos(screen.min)
+        .default_size(screen.size())
+        .sense(Sense::click())
+        .show(ctx, |ui| {
+            ui.allocate_rect(screen, Sense::CLICK);
+        });
+}
+
+fn show_menu(state: &mut EditorState, ctx: &egui::Context) {
+    let Some(menu) = state.tab_menu else {
+        return;
+    };
+    if !state.store.contains(menu.id) || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        state.tab_menu = None;
+        return;
+    }
+    let count = state.store.len();
+    let index = state.store.index_of(menu.id).unwrap_or(0);
+    let mut chosen = None;
+    let response = egui::Window::new("Song tab")
+        .id(Id::new("nbs_songtab_menu"))
+        .title_bar(false)
+        .resizable(false)
+        .fixed_pos(menu.pos)
+        .show(ctx, |ui| {
+            if ui.button(tr("New song", "新文件")).clicked() {
+                chosen = Some(Command::NewTabAfter(menu.id));
+            }
+            ui.separator();
+            if ui
+                .button(tr("Close song  Ctrl+W", "关闭歌曲  Ctrl+W"))
+                .clicked()
+            {
+                chosen = Some(Command::CloseTab(menu.id));
+            }
+            ui.add_enabled(
+                count > 1,
+                egui::Button::new(tr("Close other songs", "关闭其他歌曲")),
+            )
+            .clicked()
+            .then(|| chosen = Some(Command::CloseOtherTabs(menu.id)));
+            ui.add_enabled(
+                index + 1 < count,
+                egui::Button::new(tr("Close songs to the right", "关闭右侧歌曲")),
+            )
+            .clicked()
+            .then(|| chosen = Some(Command::CloseTabsRight(menu.id)));
+        });
+    if let Some(cmd) = chosen {
+        state.tab_menu = None;
+        state.emit(cmd);
+        return;
+    }
+    let menu_rect = response.as_ref().map(|r| r.response.rect);
+    if ctx.input(|i| {
+        i.pointer.any_pressed()
+            && i.pointer
+                .latest_pos()
+                .is_some_and(|pos| menu_rect.is_some_and(|rect| !rect.contains(pos)))
+    }) {
+        state.tab_menu = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tab_sprites_are_available() {
+        let ctx = egui::Context::default();
+        let mut icons = crate::icons::Icons::default();
+        icons.ensure(&ctx);
+        assert!(icons.bank().is_some(), "标签条精灵必须能加载");
+    }
+
+    #[test]
+    fn offset_and_span_match_the_original() {
+        let mut state = EditorState::for_test();
+        state.store.reset_tab_layout();
+        assert_eq!(height(&state), 0.0);
+        state.push_tab(nbs_core::model::Song::new());
+        assert_eq!(height(&state), 40.0);
+        state.theme.kind = ThemeKind::Aqua;
+        assert_eq!(height(&state), 35.0);
+        state.theme.kind = ThemeKind::Retro;
+        assert_eq!(height(&state), 30.0);
+        state.fullscreen = true;
+        assert_eq!(height(&state), 0.0);
+        assert_eq!(span(1440.0, 2), 179.0);
+        assert_eq!(span(400.0, 4), 89.0);
+        assert_eq!(span(10.0, 4), 1.0);
+    }
+
+    fn ui_frame(state: &mut EditorState) -> egui::Context {
+        let ctx = egui::Context::default();
+        state.theme.apply(&ctx);
+        crate::fonts::warm_up(&ctx);
+        state.icons.ensure(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1440.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            let _lock = crate::frame_lock();
+            crate::show(ctx, state);
+        });
+        ctx
+    }
+
+    fn panel_rect(ctx: &egui::Context, id: &str) -> egui::Rect {
+        egui::containers::panel::PanelState::load(ctx, Id::new(id))
+            .unwrap_or_else(|| panic!("面板 {id} 这帧没画"))
+            .rect
+    }
+
+    /// 多标签时工具栏自己也要下移（v3.12 control_draw.gml:1895 `20 + song_tab_offset`），
+    /// 不能再压在工具栏上。
+    #[test]
+    fn toolbar_moves_below_the_tab_strip() {
+        let mut state = EditorState::for_test();
+
+        // 单标签：没有让位条，工具栏贴着菜单栏。
+        let ctx = ui_frame(&mut state);
+        assert!(
+            egui::containers::panel::PanelState::load(&ctx, Id::new("nbs_tabspace")).is_none(),
+            "单标签不该有让位面板"
+        );
+        assert_eq!(panel_rect(&ctx, "nbs_toolbar").min.y, 20.0);
+
+        // 两标签：菜单栏 0..20，让位条 20..60，工具栏 60..94；
+        // 标签条画在让位条上，下缘不碰工具栏。
+        state.push_tab(nbs_core::model::Song::new());
+        let offset = height(&state);
+        assert_eq!(offset, 40.0);
+        let ctx = ui_frame(&mut state);
+        let space = panel_rect(&ctx, "nbs_tabspace");
+        assert_eq!(space.min.y, 20.0);
+        assert!((space.height() - offset).abs() < 0.5);
+        let toolbar = panel_rect(&ctx, "nbs_toolbar");
+        assert_eq!(toolbar.min.y, 20.0 + offset);
+        assert_eq!(toolbar.height(), 34.0);
+        let tabs = ctx
+            .memory(|m| m.area_rect(Id::new("nbs_song_tabs")))
+            .expect("两标签时标签条 Area 必须存在");
+        assert_eq!(tabs.min.y, 24.0);
+        assert!(
+            tabs.max.y <= toolbar.min.y + 0.5,
+            "标签条下缘 {} 压进了工具栏 {}",
+            tabs.max.y,
+            toolbar.min.y
+        );
+    }
+}

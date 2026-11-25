@@ -35,3 +35,6 @@ logo/ = spr_logo，3 帧 330x330、原点 (28,32)：0 默认、1 旧图标（首
 donate/ = spr_donate，4 帧 150x120、原点 (0,0)：0/1 是右上角 16x16 的关闭叉（常/悬停），2/3 是横幅文案（英文/中文）。欢迎窗贴在窗口右缘 (x1+700, y1+110)，先画叉帧再叠文案帧；点叉提示后 donate_banner_time = 下个月的今天写回 [warnings]，点横幅其余部分打开捐赠页（draw_window_greeting.gml:10-36）。
 frame2/ = spr_frame2 的 Aqua 三帧（原帧号 0/1/2 = 按下态 + 3*0），frame2_retro/dark/fluent/fluent_d = 同一精灵按主题方言拆出的 3/6/9/12 帧组（fluent_d = 主题 3 且 fdark），各 224x32、原点 (0,0)；frame5/… = spr_frame5 同样拆五条，各 320x16，是欢迎窗动作按钮和最近歌曲行的底图（draw_window_greeting.gml）。整条 15 帧 224 一乘就超 egui 纹理边长 2048，所以按方言拆五条。
 bigicons/ = spr_bigicons，8 帧 32x32：0 创建歌曲、1 打开歌曲、2 从 MIDI 生成、6 浏览社区歌曲（draw_window_greeting.gml）；bigicons_f/ = spr_bigicons_f（Fluent 浅）、bigicons_d/ = spr_bigicons_d（Fluent 深），主题 3 时按 fdark 二选一，其余主题用 bigicons。
+songtab/ = spr_songtab，30 帧 4x31：每主题 10 帧，0/1/2 常态、3/4/5 未选中悬停、6/7/8 选中；9 是横向拉伸底图。draw_song_tab.gml 用左/中/右三帧拼标签，draw_song_tabs.gml 用 9+10*theme 铺底。
+closetab/ = spr_closetab，4 帧 9x9：0/1 经典主题常态/悬停，2/3 Fluent 未改/已改；Fluent 浅色用黑、深色用白。
+newtab/ = spr_newtab，1 帧 15x15：Fluent 标签条右侧加号；非 Fluent 的加号由 spr_songtab 的 0/1/2 三帧拼出。

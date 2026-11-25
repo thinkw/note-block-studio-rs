@@ -194,6 +194,10 @@ pub struct Preferences {
     /// 危险动作（退出程序、替你答确认框、打开外链）是否可调。
     /// **独立**开关：勾「启用外部控制」绝不会把这条一起打开，取消勾选也不会清掉它。
     pub control_danger: bool,
+    /// 用户要求 #131：允许外部控制不切标签就修改后台文档。默认关；
+    /// 播放、文件、任务等全局操作仍只允许当前标签。
+    #[serde(default)]
+    pub control_allow_parked_write: bool,
     /// 播放特效：每个特效一份参数，键 = 特效的稳定 id（不是显示名，改名不冲存档）。
     /// 老存档没这条 → 空表，各特效由自己参数结构上的 `#[serde(default)]` 补出厂值。
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
@@ -379,6 +383,7 @@ impl Default for Preferences {
             control_enabled: false,
             control_dirs: Vec::new(),
             control_danger: false,
+            control_allow_parked_write: false,
             // 播放特效出厂全关、参数用各特效自己的默认值（这里留空表，
             // 设置文件里也就不多写这两段）。
             fx: std::collections::HashMap::new(),
@@ -611,13 +616,8 @@ pub fn save_song_atomic(song: &Song, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// 自动保存一份备份（不改动当前文件名/脏标记）。
-pub fn autosave(song: &Song, prefs: &Preferences) -> Result<PathBuf, String> {
-    let dir = Preferences::backup_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| {
-        crate::tr(&format!("Failed to create backup directory: {e}"), &format!("创建备份目录失败: {e}"))
-            .to_string()
-    })?;
+/// 当前端口自动备份的固定路径（`{safe}.autosave.nbs`）。
+pub fn backup_path(song: &Song) -> PathBuf {
     let base = song
         .filename
         .as_ref()
@@ -626,11 +626,55 @@ pub fn autosave(song: &Song, prefs: &Preferences) -> Result<PathBuf, String> {
         .unwrap_or_else(|| "untitled".into());
     let safe: String = base
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    let path = dir.join(format!("{safe}.autosave.nbs"));
+    Preferences::backup_dir().join(format!("{safe}.autosave.nbs"))
+}
+
+/// 自动保存一份备份（不改动当前文件名/脏标记）。
+pub fn autosave(song: &Song, prefs: &Preferences) -> Result<PathBuf, String> {
+    let dir = Preferences::backup_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        crate::tr(&format!("Failed to create backup directory: {e}"), &format!("创建备份目录失败: {e}"))
+            .to_string()
+    })?;
+    let path = backup_path(song);
     save_song_atomic(song, &path)?;
     let _ = prefs;
+    Ok(path)
+}
+
+/// 原版 `save_unsaved()`：退出流程里另写一份恢复文件，不覆盖已有自动备份。
+pub fn save_shutdown_recovery(song: &Song) -> Result<PathBuf, String> {
+    let dir = Preferences::backup_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        crate::tr(
+            &format!("Failed to create backup directory: {e}"),
+            &format!("创建备份目录失败: {e}"),
+        )
+        .to_string()
+    })?;
+    let source = song
+        .filename
+        .as_ref()
+        .and_then(|p| p.file_stem())
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "untitled".into());
+    let stem: String = source.chars().take(48).collect();
+    let base = format!("{stem} (unsaved on exit)");
+    let mut path = dir.join(format!("{base}.nbs"));
+    let mut number = 2;
+    while path.exists() {
+        path = dir.join(format!("{base} {number}.nbs"));
+        number += 1;
+    }
+    save_song_atomic(song, &path)?;
     Ok(path)
 }
 
@@ -949,7 +993,7 @@ mod tests {
         assert!(!old.warning_disc_chest);
     }
 
-    /// 外部控制这三条是我们自己加的（原版没有对应物），所以对旧文件的口径是「全关」：
+    /// 外部控制这几条是我们自己加的（原版没有对应物），所以对旧文件的口径是「全关」：
     /// 装了老版本、prefs.json 里根本没这些键的用户，不该升级完就多出一个在听的端口。
     #[test]
     fn control_opt_in_defaults_to_off_in_old_files() {
@@ -957,16 +1001,21 @@ mod tests {
         assert!(!old.control_enabled, "旧配置缺键时外部控制退回关闭");
         assert!(old.control_dirs.is_empty(), "旧配置缺键时不放行任何额外目录");
         assert!(!old.control_danger, "旧配置缺键时危险动作退回关闭");
+        assert!(!old.control_allow_parked_write, "旧配置缺键时后台写退回关闭");
         assert_eq!(old.theme, 2, "已有的键照常读出来");
 
         let p = Preferences {
             control_enabled: true,
             control_dirs: vec!["D:\\乐谱".to_string(), "D:\\采样".to_string()],
             control_danger: true,
+            control_allow_parked_write: true,
             ..Default::default()
         };
         let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
-        assert!(back.control_enabled && back.control_danger, "两条勾选都要存下来");
+        assert!(
+            back.control_enabled && back.control_danger && back.control_allow_parked_write,
+            "三条勾选都要存下来"
+        );
         assert_eq!(back.control_dirs, p.control_dirs, "目录列表要按顺序存下来");
     }
 
@@ -999,6 +1048,15 @@ mod tests {
         assert_eq!(back.total_blocks, 1);
         assert!(!p.with_extension("nbs.tmp").exists());
         let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn backup_path_uses_the_same_safe_stem_as_autosave() {
+        let mut song = Song::new();
+        song.filename = Some(PathBuf::from("C:/songs/我的 曲子!.nbs"));
+        let path = backup_path(&song);
+        assert_eq!(path.file_name().and_then(|s| s.to_str()), Some("我的_曲子_.autosave.nbs"));
+        assert_eq!(path.parent(), Some(Preferences::backup_dir().as_path()));
     }
 
     #[test]

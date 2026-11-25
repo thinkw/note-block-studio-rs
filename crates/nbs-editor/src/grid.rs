@@ -68,17 +68,27 @@ const C_YELLOW: Color32 = Color32::from_rgb(255, 255, 0);
 /// 行区只取整行（原版 `totalrows = floor((rh - rhval) / 32)`），水平滚动条紧贴行区底
 /// （原版 `y1 + totalrows * 32 + 34`），而不是贴着窗口底边——这样图层栏的宏条
 /// （`y1 + 32`）和网格最后一行才会落在同一条线上。
-fn split(area: Rect, cell: f32) -> (Rect, Rect, Rect, Rect) {
+fn split(area: Rect, cell: f32, reference_row: bool) -> (Rect, Rect, Rect, Rect) {
     // 缩放只作用于格距；标尺带和滚动条各自钉死（见 `viewport::{BAR_SCALE, RULER_SCALE}`，
     // 偏离原版 #88 / #90：缩到 10% 时进度栏还是原来的高度、滚动条还抓得住）。
     let band = timeline_band();
     let bar = bar_thickness();
     let w = (area.width() - bar).max(64.0);
-    let h = (((area.height() - band - bar) / cell).floor().max(1.0)) * cell;
+    let extra = if reference_row { cell } else { 0.0 };
+    let h = (((area.height() - band - bar - extra) / cell)
+        .floor()
+        .max(1.0))
+        * cell;
     let timeline = Rect::from_min_size(area.min, Vec2::new(w, band));
     let grid = Rect::from_min_size(pos2(area.min.x, area.min.y + band), Vec2::new(w, h));
-    let hbar = Rect::from_min_size(pos2(area.min.x, area.min.y + band + h), Vec2::new(w, bar));
-    let vbar = Rect::from_min_size(pos2(area.min.x + w, area.min.y + band), Vec2::new(bar, h));
+    let hbar = Rect::from_min_size(
+        pos2(area.min.x, area.min.y + band + h + extra),
+        Vec2::new(w, bar),
+    );
+    let vbar = Rect::from_min_size(
+        pos2(area.min.x + w, area.min.y + band),
+        Vec2::new(bar, h + extra),
+    );
     (timeline, grid, hbar, vbar)
 }
 
@@ -90,7 +100,8 @@ pub fn show_grid(state: &mut EditorState, ui: &mut Ui, area: Rect) {
         return;
     }
     let cell = state.viewport.cell();
-    let (timeline_rect, grid_rect, hbar_rect, vbar_rect) = split(area, cell);
+    let (timeline_rect, grid_rect, hbar_rect, vbar_rect) =
+        split(area, cell, state.flags.show_layers && !state.fullscreen);
 
     state.viewport.origin = grid_rect.min;
     state.viewport.size = grid_rect.size();
@@ -117,6 +128,30 @@ pub fn show_grid(state: &mut EditorState, ui: &mut Ui, area: Rect) {
 
     draw_timeline(state, ui, timeline_rect);
     draw_grid(state, ui, grid_rect);
+    if state.flags.show_layers && !state.fullscreen {
+        let p = ui.painter();
+        p.hline(
+            grid_rect.x_range(),
+            grid_rect.max.y - 1.0,
+            egui::Stroke::new(1.0_f32, state.theme.grid_line),
+        );
+        let label = match state.reference.path.as_ref() {
+            Some(path) => format!("{} {}", tr("Loaded file: ", "已加载音频: "), path.display()),
+            None => tr("Click Reference to load audio", "点击「参考音频」打开文件").into(),
+        };
+        let font = crate::fonts::scaled(crate::fonts::main_font(), state.viewport.u());
+        let label = crate::layers_panel::clip_label(p, &label, &font, grid_rect.width() - 30.0);
+        p.text(
+            pos2(
+                grid_rect.min.x + 15.0,
+                grid_rect.max.y - cell + 10.0 * state.viewport.u(),
+            ),
+            Align2::LEFT_TOP,
+            label,
+            font,
+            state.theme.text,
+        );
+    }
     draw_scrollbars(state, ui, hbar_rect, vbar_rect);
     let idle = state.window.is_none() && state.context_menu.is_none();
     crate::layers_panel::macro_bar_over_grid(state, ui, area, idle);
@@ -574,8 +609,13 @@ fn handle_grid_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect)
         let delta = input.scroll.y + input.scroll.x;
         let d = if delta > 0.0 { 1 } else { -1 };
         // 原版条件 `exist && changepitch`：停在音符上且开了「滚轮改音符属性」才改那颗音。
+        // 播放中额外禁掉：原版 `:211` 的 `playing = 0` 总闸只冻住 sela/selb 的刷新，
+        // `:276` 的 `selbx = starta + sela` 却照用自动平移后的 starta，于是滚轮改的是
+        // 「鼠标上一次指过的那一列」而非指针底下那颗 —— 端口按指针算，改到的确实是
+        // 指针下那颗，但播放中滚轮本来就只该平移视口，碰音符是误伤。
         let note_cell = hover.filter(|(t, l)| {
             state.prefs.changepitch
+                && !state.is_playing()
                 && (state.doc.song.has(*t as u32, *l as u32)
                     || state.doc.selection.contains(*t, *l))
         });
@@ -942,10 +982,15 @@ fn h_geometry(state: &EditorState, rect: Rect) -> (f32, f32, Rect) {
 /// 方向与原版一致：滑块越往下 `startb` 越大，也就是层号往上走
 /// （`control_draw.gml:339` 的行号 `startb + b` 随屏幕 y 增大）。
 fn v_geometry(state: &EditorState, rect: Rect) -> (f32, f32, Rect) {
+    let reference_rows = if state.flags.show_layers && !state.fullscreen {
+        1.0
+    } else {
+        0.0
+    };
     let (ms, thumb_h, max_val) = bar_metrics(
         rect.height(),
         state.viewport.rows() as f32,
-        state.doc.song.endb as f32,
+        state.doc.song.endb as f32 + reference_rows,
     );
     let val = (state.viewport.start_layer as f32).clamp(0.0, max_val);
     (
@@ -2476,12 +2521,62 @@ mod tests {
         }
     }
 
+    /// 用户要求：播放中滚轮不许落到音符上。原版 `:211` 的 `playing = 0` 总闸只冻住
+    /// sela/selb，`:276` 的 `selbx = starta + sela` 又拿自动平移后的 starta 去加，
+    /// 所以原版改到的是「指针上次停过的那一列」；端口按实时光标算，改到的确实是
+    /// 眼前这颗，误伤更直接，这道门只能自己加。
+    #[test]
+    fn the_wheel_skips_notes_while_playing() {
+        let _prefs = crate::isolate_prefs();
+        let grid = Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 128.0));
+        // 指针停在 (3,2) 那颗音符上滚一格；返回「那颗音符现在长什么样」和视口位置。
+        let roll_on_note = |playing: bool| -> (nbs_core::model::Note, u32, usize) {
+            let mut st = scroll_state();
+            st.prefs.changepitch = true;
+            st.doc.song.set(3, 2, nbs_core::model::Note::new(0, 45));
+            if playing {
+                st.audio.clock_mut().play();
+            }
+            let mut input = wheel(0.0, -1.0);
+            input.pointer = Some(pos2(100.0, 64.0));
+            input.hover = Some(pos2(100.0, 64.0));
+            let before = st.pending.len();
+            handle_grid_input(&mut st, &input, grid);
+            let emitted = st.pending.len() - before;
+            st.flush(&egui::Context::default());
+            (
+                st.doc.song.get(3, 2).unwrap(),
+                st.viewport.start_layer,
+                emitted,
+            )
+        };
+
+        let untouched = roll_on_note(true);
+        assert_eq!(
+            untouched.0,
+            nbs_core::model::Note::new(0, 45),
+            "播放中那颗音符被改了"
+        );
+        assert_eq!(untouched.1, 1, "播放中滚轮要照常平移视口");
+        assert_eq!(untouched.2, 0, "播放中还在发改音符的命令");
+
+        // 停播时这一格必须照旧改得动，否则上面三条是空断言。
+        let changed = roll_on_note(false);
+        assert_ne!(
+            changed.0,
+            nbs_core::model::Note::new(0, 45),
+            "停播时滚轮改不动音符了"
+        );
+        assert_eq!(changed.1, 0, "改音符这一格不平移视口");
+    }
+
     /// #93.1 + #93.4：滑块按住哪儿就贴在哪儿（指针位移 = 滑块位移，一像素不差），
     /// 拖到尽头夹在 `enda`，此时滑块右边缘正好贴住滑轨末端。
     #[test]
     fn dragging_a_thumb_tracks_the_pointer_and_stops_at_the_song_end() {
         let _prefs = crate::isolate_prefs();
         let mut st = scroll_state();
+        st.flags.show_layers = false;
         let hbar = Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 16.0));
         let vbar = Rect::from_min_size(pos2(320.0, 0.0), Vec2::new(16.0, 128.0));
 
@@ -3201,8 +3296,8 @@ mod tests {
     #[test]
     fn the_scrollbar_bands_do_not_scale_with_the_window() {
         let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
-        let (_, _, h1, v1) = split(area, 32.0);
-        let (_, _, h2, v2) = split(area, 32.0 * 0.4);
+        let (_, _, h1, v1) = split(area, 32.0, false);
+        let (_, _, h2, v2) = split(area, 32.0 * 0.4, false);
         assert_eq!(h1.height(), h2.height(), "横条带高不随缩放");
         assert_eq!(v1.width(), v2.width(), "竖条带宽不随缩放");
         assert!((h1.height() - SCROLLBAR_SIZE * BAR_SCALE).abs() < 0.01);
@@ -3229,14 +3324,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reference_row_takes_one_layer_row_and_keeps_scrollbar_geometry() {
+        let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let (_, plain, h_plain, v_plain) = split(area, 32.0, false);
+        let (_, reference, h_reference, v_reference) = split(area, 32.0, true);
+        assert_eq!(plain.height() - reference.height(), 32.0);
+        assert_eq!(h_plain, h_reference, "横条仍贴窗口底部");
+        assert_eq!(v_plain, v_reference, "竖条尺寸不变，只多滚一格");
+        let mut state = ruler_state();
+        state.flags.show_layers = false;
+        state.viewport.size = plain.size();
+        let (_, max_plain, thumb_plain) = v_geometry(&state, v_plain);
+        state.flags.show_layers = true;
+        state.viewport.size = reference.size();
+        let (_, max_reference, thumb_reference) = v_geometry(&state, v_reference);
+        assert_eq!(max_reference, max_plain + 1.0);
+        assert!(thumb_reference.height() <= thumb_plain.height());
+    }
+
     /// 偏离原版（用户要求 #90）：时间轴带和播放指针都不随界面缩放。
     /// 带高恒为 `TIMELINE_HEIGHT`（100% 档），网格顶因此也不动；
     /// 指针竖线的贴图宽度按 `RULER_SCALE` 展开，缩到 10% 仍然是整 2px，不会消失。
     #[test]
     fn the_timeline_band_does_not_scale_with_the_window() {
         let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
-        let (t1, g1, _, _) = split(area, 32.0);
-        let (t2, g2, _, _) = split(area, 32.0 * 0.1);
+        let (t1, g1, _, _) = split(area, 32.0, false);
+        let (t2, g2, _, _) = split(area, 32.0 * 0.1, false);
         assert!(
             (t1.height() - TIMELINE_HEIGHT).abs() < 0.01,
             "标尺带恒为 100% 档"
