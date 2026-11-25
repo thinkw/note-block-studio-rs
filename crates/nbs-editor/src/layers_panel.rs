@@ -309,7 +309,7 @@ pub fn show_layers_panel(state: &mut EditorState, ui: &mut Ui) {
     // 网格那边用同一条公式（`grid.rs` 里的 `split`），两边画行数、宏条位置才对得上。
     // 行数只按本面板的区域算，不取 `viewport.rows()`：侧栏比网格先画，
     // 用视口那个值会慢一帧，第一帧少画几行、宏条也跟着错位。
-    let show_reference_row = !state.fullscreen;
+    let show_reference_row = state.shows_reference_row();
     let rows = (((area.height() - timeline_band() - bar_thickness()) / cell).floor() as u32)
         .saturating_sub(u32::from(show_reference_row))
         .max(1);
@@ -791,7 +791,10 @@ pub(crate) fn clip_label(
 }
 
 /// 原版 `control_draw.gml:1456-1566` 的参考音频行。
-/// 打包版把工具栏上的加载按钮注释掉了，所以名称格同时承担打开文件框的入口。
+/// 调用方已按 [`EditorState::shows_reference_row`] 保证「已加载参考音频」，所以行内
+/// 不再判一遍（原版整段都在 `reference_audio >= 0` 那个 `if` 里）。
+/// 名称格额外承担「打开/更换」的文件框入口：打包版把工具栏上那个加载按钮注释掉了
+/// （`control_draw.gml:2093-2109`），原版只剩 文件→导入→参考音频…… 一条路。
 fn reference_row(
     state: &mut EditorState,
     ui: &mut Ui,
@@ -804,7 +807,6 @@ fn reference_row(
     layout: &PanelLayout,
 ) {
     let config = state.reference.clone();
-    let loaded = config.path.is_some();
     let x1 = at.x + X1;
     let y1 = at.y;
     let gs = glyph_scale(cell);
@@ -917,7 +919,7 @@ fn reference_row(
                 );
             }
         }
-        if idle && loaded && resp.drag_started() {
+        if idle && resp.drag_started() {
             state.reference_drag = Some(ReferenceDrag { offset, raw: value });
         }
         if let Some(mut d) = state.reference_drag.filter(|d| d.offset == offset) {
@@ -954,7 +956,6 @@ fn reference_row(
     }
 
     if idle
-        && loaded
         && bank.layer_button(
             ui,
             pos2(bx(126.0), by),
@@ -974,7 +975,6 @@ fn reference_row(
         }));
     }
     if idle
-        && loaded
         && bank.layer_button(
             ui,
             pos2(bx(144.0), by),
@@ -994,7 +994,6 @@ fn reference_row(
         }));
     }
     if idle
-        && loaded
         && bank.layer_button(
             ui,
             pos2(bx(162.0), by),

@@ -21,6 +21,8 @@
 //! `NBS_UIPNG_PREFS_MENU=theme|rate|output` 把首选项页里的某个下拉摆成打开状态
 //! （前两个在「界面」页，`output` 在「播放」页）。
 //! `NBS_UIPNG_WALLPAPER=<图片路径>` 先导入这张背景图片再渲染（原版「导入背景图片」那条路）。
+//! `NBS_UIPNG_REFERENCE=<音频路径>` 先按 文件→导入→参考音频…… 那条路加载参考音频再渲染，
+//! 不设置就是空载状态（参考音频行只在加载之后才出现）。
 //! `NBS_UIPNG_ZOOM=<倍>` 设界面缩放档（走 prefs，下一帧换算成 viewport.scale）；
 //! `NBS_UIPNG_PANEL=<px>` 设图层栏宽度（#108：侧栏横轴不跟缩放，只能拖）；
 //! `NBS_UIPNG_SELECT=1` 把第一个音符摘进浮动选区（宏条只在有选区时出现）。
@@ -424,6 +426,16 @@ fn main() -> Result<(), String> {
     // （预缩放 → 降采样 → 虚化 → 上传贴图），用来看编辑区四周是否糊成渐变、暗化层盖了多少。
     if let Ok(path) = std::env::var("NBS_UIPNG_WALLPAPER") {
         state.wallpaper = Some(nbs_editor::background::bake(&ctx, Path::new(&path))?);
+    }
+    // `NBS_UIPNG_REFERENCE=<音频路径>`：走一遍和菜单 文件→导入→参考音频…… 完全相同的
+    // 加载命令。参考音频行只在加载成功之后才占一行，这条钩子用来截「空载 / 已加载」两张图。
+    if let Ok(path) = std::env::var("NBS_UIPNG_REFERENCE") {
+        nbs_editor::commands::dispatch(
+            &mut state,
+            nbs_editor::commands::Command::LoadReferenceAudio(PathBuf::from(path)),
+            &ctx,
+        );
+        println!("参考音频: {:?}", state.reference.path);
     }
 
     let mut texs: HashMap<TextureId, Tex> = HashMap::new();

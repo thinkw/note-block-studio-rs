@@ -2744,6 +2744,14 @@ impl EditorState {
         self.audio.clock().is_playing()
     }
 
+    /// 原版 `control_draw.gml:1456` 的 `current_song.reference_audio >= 0 && !fullscreen &&
+    /// show_layers`：参考音频行**只在已加载参考音频时**占一行，网格那边的分隔线、
+    /// 文件名与竖条多滚的一格都跟着这同一个判据（`:104` 的 `totalrows` 减同一项）。
+    /// `reference.path` 只在 `load_reference_audio` 成功后写入，等价于原版的句柄 `>= 0`。
+    pub fn shows_reference_row(&self) -> bool {
+        self.flags.show_layers && !self.fullscreen && self.reference.path.is_some()
+    }
+
     pub fn prepare_audio(&mut self) {
         self.audio.prepare(&self.doc.song);
         self.audio_rev = self.doc.song.rev;
