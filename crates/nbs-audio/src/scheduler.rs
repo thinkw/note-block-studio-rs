@@ -587,6 +587,20 @@ pub struct TransportClock {
     stop_at: f64,
 }
 
+/// 播放时钟的一份可跨线程快照。真实音频走 [`SharedState`] 的原子读取；
+/// 无设备时浮窗用这份快照继续推进，主窗恢复显示后再灌回 [`TransportClock`]。
+#[derive(Clone, Copy, Debug)]
+pub struct TransportSnapshot {
+    pub position: f64,
+    pub tempo: f32,
+    pub speed: f32,
+    pub playing: bool,
+    pub loop_enabled: bool,
+    pub loop_start: f64,
+    pub loop_end: f64,
+    pub stop_at: f64,
+}
+
 impl Default for TransportClock {
     fn default() -> Self {
         Self {
@@ -622,6 +636,44 @@ impl TransportClock {
     }
     pub fn tempo(&self) -> f32 {
         self.tempo
+    }
+
+    pub fn snapshot(&self) -> TransportSnapshot {
+        TransportSnapshot {
+            position: self.position,
+            tempo: self.tempo,
+            speed: self.speed,
+            playing: self.playing,
+            loop_enabled: self.loop_enabled,
+            loop_start: self.loop_start,
+            loop_end: self.loop_end,
+            stop_at: self.stop_at,
+        }
+    }
+
+    /// 把浮窗在后台推进出来的播放头接回主时钟。只在无音频共享状态时用；
+    /// 真实音频线程的位置不由 UI 覆盖。
+    pub fn restore(&mut self, snapshot: TransportSnapshot) {
+        self.position = snapshot.position.max(0.0);
+        self.tempo = snapshot.tempo.max(0.01);
+        self.speed = snapshot.speed.clamp(0.25, 4.0);
+        self.playing = snapshot.playing;
+        self.loop_enabled = snapshot.loop_enabled;
+        self.loop_start = snapshot.loop_start;
+        self.loop_end = snapshot.loop_end;
+        self.stop_at = snapshot.stop_at;
+        self.last = Instant::now();
+        if let Some(shared) = &self.shared {
+            let mut st = shared.lock();
+            st.position = self.position;
+            st.params.tempo = self.tempo;
+            st.params.speed = self.speed;
+            st.params.playing = self.playing;
+            st.params.loop_enabled = self.loop_enabled;
+            st.params.loop_start = self.loop_start;
+            st.params.loop_end = self.loop_end;
+            st.params.stop_at = self.stop_at;
+        }
     }
 
     pub fn set_tempo(&mut self, tempo: f32) {

@@ -21,10 +21,11 @@ pub mod stage;
 pub mod synthesia;
 pub mod tiles;
 pub mod timeline;
+pub mod window;
 
 use egui::{Color32, Context, Id, LayerId, Order, Painter, Rect, TextureHandle, Ui};
 use nbs_core::model::Song;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use keyboard::{KeyboardLayout, BLACK_LIFT};
 use stage::Frame;
@@ -72,6 +73,8 @@ pub struct FxInput {
     pub accent: Color32,
     /// 主界面编辑区那一块的底色（`theme.grid_bg`）：舞台特效想「和编辑区同色」就取这里。
     pub backdrop: Color32,
+    /// 分离浮窗的通用透明背景：舞台不铺整块底色，音符与琴键仍照常画。
+    pub transparent: bool,
     /// 这一帧可画的区域：舞台给中央面板那块，叠加给整个窗口内容区。
     pub area: Rect,
     pub keyboard: Option<KeyboardLayout>,
@@ -95,6 +98,8 @@ pub struct FxContext<'a> {
     pub accent: Color32,
     /// 主界面编辑区的底色（`FxInput::backdrop`），舞台底色跟着主题走时用。
     pub backdrop: Color32,
+    /// 浮窗通用透明背景；主窗路径恒为 false。
+    pub transparent: bool,
     /// 可画区域。舞台 = 中央面板那块；叠加 = 整个窗口。
     pub area: Rect,
     /// 底部钢琴栏的摆放。钢琴栏关掉时是 `None`，舞台特效自己 `KeyboardLayout::fit`。
@@ -110,7 +115,7 @@ pub struct FxContext<'a> {
 }
 
 /// 一个播放特效。实现者只产图元，不碰 `Painter`。
-pub trait PlaybackEffect {
+pub trait PlaybackEffect: Send + Sync {
     fn info(&self) -> EffectInfo;
 
     /// 产出这一帧的图元。`out` 已被底座清空并按 z 序排好前面的特效。
@@ -410,7 +415,9 @@ impl FxStack {
     /// 舞台表面：在中央面板那块区域里画，并先铺一层底色（舞台是独占的）。
     pub fn paint_stage(&mut self, cx: &FxContext, p: &Painter) {
         self.compose(cx, Surface::Stage);
-        p.rect_filled(cx.area, 0.0, STAGE_BACKDROP);
+        if !cx.transparent {
+            p.rect_filled(cx.area, 0.0, STAGE_BACKDROP);
+        }
         stage::paint(p, &self.frame, 1.0);
     }
 
@@ -504,6 +511,17 @@ pub struct FxState {
     pub palette: NotePalette,
     /// 素材目录只认一次：没扒素材时 `palette` 一直是空的，不然后每帧重扫一遍目录。
     palette_done: bool,
+}
+
+/// 主窗与分离浮窗共用的唯一一份特效状态。绘制窗口互斥，但设置、时间轴和粒子
+/// 都属于同一份对象；`Mutex` 同时满足 deferred viewport 回调的 `Send + Sync` 要求。
+#[derive(Clone, Default)]
+pub struct SharedFx(Arc<Mutex<FxState>>);
+
+impl SharedFx {
+    pub fn lock(&self) -> MutexGuard<'_, FxState> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 impl Default for FxState {
@@ -637,6 +655,7 @@ fn fx_context<'a>(
         scale: input.scale,
         accent: input.accent,
         backdrop: input.backdrop,
+        transparent: input.transparent,
         area: input.area,
         keyboard: input.keyboard,
         timeline,
@@ -691,6 +710,12 @@ mod tests {
             })
             .collect();
         stack
+    }
+
+    #[test]
+    fn shared_fx_is_send_and_sync_for_deferred_viewports() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<SharedFx>();
     }
 
     const OVERLAY: EffectInfo = EffectInfo {
@@ -781,6 +806,7 @@ mod tests {
             scale: 1.0,
             accent: Color32::LIGHT_GRAY,
             backdrop: STAGE_BACKDROP,
+            transparent: false,
             area: Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0)),
             keyboard: None,
             timeline: &timeline,
@@ -900,6 +926,7 @@ mod tests {
             scale: 1.25,
             accent: Color32::from_rgb(1, 2, 3),
             backdrop: STAGE_BACKDROP,
+            transparent: false,
             area: Rect::from_min_size(egui::pos2(4.0, 6.0), egui::vec2(640.0, 480.0)),
             keyboard: Some(layout),
         };
@@ -936,6 +963,7 @@ mod tests {
             scale: 1.0,
             accent: Color32::LIGHT_GRAY,
             backdrop: STAGE_BACKDROP,
+            transparent: false,
             area,
             keyboard: None,
         };

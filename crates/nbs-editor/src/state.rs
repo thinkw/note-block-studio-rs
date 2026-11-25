@@ -1535,7 +1535,8 @@ pub struct EditorState {
     pub wallpaper: Option<crate::background::Wallpaper>,
     /// 播放特效那一坨：烘出来的时间轴、乐器方块表、贴图、启用中的特效。
     /// 缓存键是 `song.rev`（和 [`Self::compat_rev`]、[`Self::audio_rev`] 同一套路）。
-    pub fx: crate::fx::FxState,
+    /// 主窗与分离浮窗共享同一份；两个窗口同一帧只允许一个绘制。
+    pub fx: crate::fx::SharedFx,
 }
 
 impl Default for EditorState {
@@ -1848,12 +1849,12 @@ impl EditorState {
             rainbow_hue: 0.0,
             background_accent: false,
             wallpaper: None,
-            fx: crate::fx::FxState::default(),
+            fx: crate::fx::SharedFx::default(),
         };
         // 特效：存档里留过痕迹（启用列表或参数快照）才把快照灌回各特效，
         // 出厂那两份空表不动，设置文件也就不多写这两段。
         if !state.prefs.fx_active.is_empty() || !state.prefs.fx.is_empty() {
-            state.fx.stack.sync_prefs(&mut state.prefs);
+            state.fx.lock().stack.sync_prefs(&mut state.prefs);
         }
         state.enter_startup();
         // 迁移那趟在设备表里认不出的老名字：在状态栏说一句，别让人以为还在自己
@@ -2151,7 +2152,7 @@ impl EditorState {
         // NAN 和任何数比都不相等，`refresh_compat` 的速度档同样落空。
         self.compat_tempo = f32::NAN;
         self.schematic_command_signature.clear();
-        self.fx.invalidate_bake();
+        self.fx.lock().invalidate_bake();
     }
 
     /// 原版 `control_create.gml` 结尾的开机流程：捐赠横幅按静音到期日重新亮出、
@@ -2981,8 +2982,11 @@ impl EditorState {
     /// 没有启用中的特效时这三条各是一次比较，不铺表。
     pub fn refresh_fx(&mut self) {
         let include_locked = self.prefs.include_locked_in_export;
-        self.fx
-            .refresh(&self.doc.song, include_locked, &self.schematic_options);
+        self.fx.lock().refresh(
+            &self.doc.song,
+            include_locked,
+            &self.schematic_options,
+        );
     }
 
     /// 把当前会话状态同步回偏好对象。
@@ -3038,7 +3042,7 @@ impl EditorState {
             })
             .collect();
         // 特效：只写不读。用 `sync_prefs` 会把调参面板刚滑出来的值覆盖回旧快照。
-        self.fx.stack.store(&mut self.prefs);
+        self.fx.lock().stack.store(&mut self.prefs);
     }
 
     pub fn save_prefs(&mut self) {
@@ -3340,26 +3344,27 @@ mod tests {
         st.sync_audio_events();
         // 关着特效时 refresh 一帧都不烘，这里要验的是「切标签后重烘」，先打开瀑布。
         st.fx
+            .lock()
             .stack
             .set_active(crate::fx::synthesia::Synthesia::ID, true);
         st.refresh_fx();
         assert_eq!(st.audio_rev, st.doc.song.rev);
         assert_eq!(st.compat_rev, st.doc.song.rev);
-        assert_eq!(st.fx.baked_for, (st.doc.song.rev, false));
-        assert_eq!(st.fx.timeline.note_count(), 1);
+        assert_eq!(st.fx.lock().baked_for, (st.doc.song.rev, false));
+        assert_eq!(st.fx.lock().timeline.note_count(), 1);
 
         assert!(st.switch_tab(other));
         // 三处缓存打回哨兵值，而不是「rev 相等就算命中」；音频事件表是当场
         // 重挂的（刀 1：原版 `set_song` 之后新那首要能立刻出声）。
         assert_eq!(st.compat_rev, u64::MAX);
-        assert_eq!(st.fx.baked_for, (u64::MAX, false));
+        assert_eq!(st.fx.lock().baked_for, (u64::MAX, false));
         assert!(st.schematic_command_signature.is_empty());
         assert_eq!(st.audio_rev, st.doc.song.rev, "切标签没重挂到新那首");
         // 重算拿到的是新那首的结论。
         assert_eq!(st.doc.song.iter_notes().count(), 2, "换过来的文档");
         st.refresh_fx();
         assert_eq!(
-            st.fx.timeline.note_count(),
+            st.fx.lock().timeline.note_count(),
             2,
             "切标签之后特效还在画上一首的音符"
         );

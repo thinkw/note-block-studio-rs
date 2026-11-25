@@ -403,6 +403,7 @@ mod tests {
                 scale: 1.0,
                 accent: Color32::from_rgb(80, 160, 255),
                 backdrop: crate::fx::STAGE_BACKDROP,
+                transparent: false,
                 area: Rect::from_min_size(Pos2::ZERO, Vec2::new(2200.0, 800.0)),
                 keyboard: self.layout,
                 timeline: &self.timeline,

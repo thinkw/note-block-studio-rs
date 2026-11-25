@@ -18,10 +18,9 @@
 
 use egui::{Color32, Context, TextureHandle, TextureOptions};
 use nbs_io::schematic::{namespaced_id, SchematicOptions};
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// 贴图目录名（相对可执行文件/仓库根），与 `tools/fetch_block_textures.py` 一致。
 pub const BLOCK_DIR: &str = "Blocks";
@@ -281,13 +280,13 @@ impl InstrumentBlocks {
 
 /// 已加载的贴图集合。贴图按名字惰性加载并缓存，`None` 表示「查过，没有」。
 ///
-/// 缓存用 `RefCell`：特效只从 [`super::FxContext`] 拿到 `&BlockTiles`，
-/// 拿不到可变的 `FxState`——不然贴图就得在每帧之前全量预加载一遍。
+/// 缓存用 `Mutex`：主窗与分离浮窗共享同一个 `FxState`，两边都可能按需加载贴图；
+/// `RefCell` 只够单线程借用，跨视口共享后会把缓存变成 `!Sync`。
 #[derive(Default)]
 pub struct BlockTiles {
     dir: Option<PathBuf>,
     files: HashMap<String, PathBuf>,
-    cache: RefCell<HashMap<String, Option<Arc<TextureHandle>>>>,
+    cache: Mutex<HashMap<String, Option<Arc<TextureHandle>>>>,
 }
 
 impl BlockTiles {
@@ -334,7 +333,7 @@ impl BlockTiles {
         let mut tiles = Self {
             dir,
             files: HashMap::new(),
-            cache: RefCell::new(HashMap::new()),
+            cache: Mutex::new(HashMap::new()),
         };
         if let Some(dir) = &tiles.dir {
             if let Ok(entries) = std::fs::read_dir(dir) {
@@ -367,7 +366,8 @@ impl BlockTiles {
 
     /// 方块名 → 贴图。查不到返回 `None`，调用方用 [`fallback_color`]。
     pub fn texture(&self, ctx: &Context, name: &str) -> Option<Arc<TextureHandle>> {
-        if let Some(hit) = self.cache.borrow().get(name) {
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(hit) = cache.get(name) {
             return hit.clone();
         }
         let found = self.dir.is_some().then(|| {
@@ -378,7 +378,7 @@ impl BlockTiles {
             Some(path) => load_png(ctx, &path).map(Arc::new),
             None => None,
         };
-        self.cache.borrow_mut().insert(name.to_owned(), loaded.clone());
+        cache.insert(name.to_owned(), loaded.clone());
         loaded
     }
 
@@ -394,7 +394,12 @@ impl BlockTiles {
 
     /// 已经缓存过贴图的名字（素材没扒时是 0，`note()` 据此决定要不要说明一句）。
     pub fn cached(&self) -> usize {
-        self.cache.borrow().values().filter(|t| t.is_some()).count()
+        self.cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter(|t| t.is_some())
+            .count()
     }
 }
 

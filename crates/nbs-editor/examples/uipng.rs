@@ -245,7 +245,7 @@ fn main() -> Result<(), String> {
             None => (spec.as_str(), 0.0),
         };
         for id in ids.split(',').filter(|s| !s.is_empty()) {
-            if let Some(msg) = state.fx.stack.set_active(id, true) {
+            if let Some(msg) = state.fx.lock().stack.set_active(id, true) {
                 println!("FX: {msg}");
             }
         }
