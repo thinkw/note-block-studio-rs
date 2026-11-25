@@ -1,0 +1,20 @@
+{
+  "purpose": "参考音频解码用例（crates/nbs-audio/src/reference.rs 的 every_advertised_extension_really_decodes）要真文件：mp3 和 flac 没法在测试里手搓，仓里没有别的同类素材。",
+  "source": "自己合成的 440 Hz 正弦，1 秒、单声道、22050 Hz、幅度 0.6——先写成 16-bit PCM WAV，再用 ffmpeg 转码。不含任何第三方录音或乐曲。",
+  "encoder": "D:/software/NBS/ffmpeg.exe 4.4.1（随 Note Block Studio 分发的那份，只当编码器用）",
+  "commands": [
+    "node -e '<合成 22050 Hz 单声道 16-bit sine=440 → reftone.wav>'",
+    "ffmpeg -i reftone.wav -ac 1 -c:a libmp3lame reftone.mp3",
+    "ffmpeg -i reftone.wav -ac 1 -c:a flac reftone.flac"
+  ],
+  "fetched_at": "2026-11-25T16:25:00",
+  "bytes": {
+    "reftone.mp3": 4511,
+    "reftone.flac": 17099
+  },
+  "sha1": {
+    "reftone.mp3": "ed8765f5645bdff0514404862b993aef0148cc83",
+    "reftone.flac": "af333fde7f9133451d470d5de733df829b961958"
+  },
+  "not_advertised": "ogg 用 assets/Sounds/harp.ogg；wav 和 aiff/aif 在测试里按字节现搓（位深、extensible、big-endian 都要覆盖，用现成文件反而测不全），所以这里不放。m4a/aac/opus 没引解码器，也不在清单里。"
+}
