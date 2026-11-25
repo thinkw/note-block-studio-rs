@@ -1,7 +1,7 @@
 //! 一帧的整体编排：输入 → 命令 → 状态 → 面板绘制 → 弹窗。
 //! 与 eframe 解耦，入口 crate 只负责创建窗口和调用 `show()`。
 
-use egui::{Context, Frame, Rect, Sense};
+use egui::{Align2, Context, Frame, Rect, Sense};
 
 use crate::fx::{self, FxInput};
 use crate::grid::show_grid;
@@ -11,6 +11,7 @@ use crate::shortcuts::collect_shortcuts;
 use crate::state::EditorState;
 use crate::statusbar::show_status_bar;
 use crate::toolbar::{show_menu_bar, show_toolbar};
+use crate::tr;
 use crate::viewport::{MENU_HEIGHT, STATUS_HEIGHT, TOOLBAR_HEIGHT};
 use crate::windows::show_windows;
 
@@ -55,6 +56,7 @@ fn fx_input(state: &EditorState, ctx: &Context, area: Rect) -> FxInput {
         scale,
         accent: state.theme.accent,
         backdrop: state.theme.grid_bg,
+        transparent: false,
         area,
         keyboard,
     }
@@ -64,13 +66,60 @@ fn fx_input(state: &EditorState, ctx: &Context, area: Rect) -> FxInput {
 /// 这时面板画不画由特效说了算，`flags.show_piano` 那个开关点不动任何东西，
 /// 所以状态栏右下角那条「琴键」按钮要跟着收起（用户要求：直到关闭特效为止）。
 pub(crate) fn piano_forced_by_fx(state: &EditorState) -> bool {
-    !state.player && (state.fx.stage_active() || state.fx.wants_piano())
+    !state.player
+        && (state.prefs.fx_window || {
+            let fx = state.fx.lock();
+            fx.stage_active() || fx.wants_piano()
+        })
 }
 
 /// 图层栏的可见性。播放器没有它（原版 `control_draw.gml:308` 那个巨门），
 /// 舞台特效开着时也没有：那一栏把编辑区往右推，瀑布的轨道就对不上下面的琴键。
 fn layers_panel_shown(state: &EditorState, stage: bool) -> bool {
     state.flags.show_layers && !state.player && !stage
+}
+
+/// 浮窗接管绘制时，主窗中央区不跑网格，只留一句说明和返回入口。两个原生窗口
+/// 仍同时存活；关闭分离后下一帧恢复编辑区。
+fn show_detached_notice(state: &mut EditorState, ui: &mut egui::Ui, area: Rect) {
+    state.interaction.visible_notes = 0;
+    state.hover_cell = None;
+    ui.allocate_rect(area, Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(area, 0.0, state.theme.grid_bg);
+    let card = Rect::from_center_size(area.center(), egui::vec2(460.0, 150.0));
+    p.rect_filled(card, 10.0, state.theme.panel);
+    p.text(
+        card.min + egui::vec2(20.0, 18.0),
+        Align2::LEFT_TOP,
+        tr("Effects are rendering in the floating window", "当前正在特效窗口渲染"),
+        crate::fonts::scaled(crate::fonts::main_font(), 1.35),
+        state.theme.text,
+    );
+    p.text(
+        card.min + egui::vec2(20.0, 50.0),
+        Align2::LEFT_TOP,
+        tr(
+            "The editor stays open, but the grid and piano are paused here.",
+            "主窗口仍保留，编辑网格和琴键已暂停；关闭浮窗或点击下方按钮即可恢复。",
+        ),
+        crate::fonts::small_font(),
+        state.theme.text_dim,
+    );
+    let button = Rect::from_center_size(
+        egui::pos2(card.center().x, card.max.y - 34.0),
+        egui::vec2(220.0, 32.0),
+    );
+    if ui
+        .put(
+            button,
+            egui::Button::new(tr("Return effects to main window", "返回主窗口渲染")),
+        )
+        .clicked()
+    {
+        state.prefs.fx_window = false;
+        state.emit(crate::commands::Command::SavePreferences);
+    }
 }
 
 pub fn show(ctx: &Context, state: &mut EditorState) {
@@ -120,9 +169,10 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
     // `song.rev` 这一帧不会再变。
     state.refresh_fx();
     // 播放器档位是原版那套只读界面，特效一律不上：那里的设置菜单没有
-    // 「播放特效…」，一旦接了舞台就没有关掉的入口。
-    let fx_on = !state.player;
-    let stage = fx_on && state.fx.stage_active();
+    // 「播放特效…」，一旦接了舞台就没有关掉的入口。分离浮窗开启时主窗也
+    // 不画特效和琴键，中央区改成提示；菜单、设置和播放控制仍留在主窗。
+    let fx_on = !state.player && !state.prefs.fx_window;
+    let stage = fx_on && state.fx.lock().stage_active();
 
     // 原版把壁纸画在 `draw_clear` 之后、所有面板之前（control_draw.gml:48-67），
     // 端口对应的位置是背景层最前面：菜单条 / 工具栏 / 状态栏 / 琴键 / 图层栏随后
@@ -149,7 +199,7 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
     // 原版 `control_draw.gml:2549`：钢琴调用条件是 `show_piano && !isplayer`。
     // 端口自加：特效的轨道都按这条琴键栏摆放（瀑布直接把胶囊落在真键面上，方块排压在
     // 键上方），所以用户关了面板，只要有任何特效要求就把它顶回来 —— 画面里始终只有一条键盘。
-    let piano = fx_on && (state.flags.show_piano || state.fx.wants_piano());
+    let piano = fx_on && (state.flags.show_piano || state.fx.lock().wants_piano());
     if piano {
         // 端口自加（用户要求）：琴键面板独立缩放，高度跟 `piano_scale`，
         // 不随 `window_scale`（与 #80「钢琴栏不随界面缩放」一致）。
@@ -158,7 +208,12 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
         // 舞台接管时面板底色跟舞台特效同源：面板比可见琴键高出一截，黑键之间
         // 那 7px 什么都不画，不填就露出窗口底色 —— 深色舞台下面横着一条白边。
         let panel_frame = if stage {
-            tight().fill(state.fx.stage_backdrop(state.theme.grid_bg))
+            tight().fill(
+                state
+                    .fx
+                    .lock()
+                    .stage_backdrop(state.theme.grid_bg),
+            )
         } else {
             tight()
         };
@@ -173,6 +228,10 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
         // 悬停路由用的矩形是每帧由面板写入的；面板关掉后必须清掉，
         // 否则悬停在原琴键位置时缩放键还会走琴键档。
         state.piano_rect = None;
+    }
+    if !state.player && state.prefs.fx_window {
+        // 浮窗接管绘制后主窗没有 `show_piano`，但电脑键盘/MIDI 的按下轮询不能停。
+        crate::piano::pump_piano_input(state, ctx);
     }
 
     // 原版图层行绘制在 `control_draw.gml:308` 巨门内，播放器不画；但播放器中央
@@ -206,7 +265,9 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
             };
             let p = egui::Painter::new(ctx.clone(), egui::LayerId::background(), clip);
             let input = fx_input(state, ctx, area);
-            state.fx.paint_stage(ctx, &input, &p);
+            state.fx.lock().paint_stage(ctx, &input, &p);
+        } else if state.prefs.fx_window {
+            show_detached_notice(state, ui, area);
         } else {
             show_grid(state, ui, area);
         }
@@ -222,9 +283,9 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
     // 排在五线谱那条之后）。这里按表面判断而不是按「有没有开特效」：开着瀑布时
     // 这条路径整段跳过，`fx_input` 那次读偏好、算琴键栏矩形也一并省掉 ——
     // 两条表面互斥，同一帧只有一边在算图元。
-    if fx_on && state.fx.overlay_active() {
+    if fx_on && state.fx.lock().overlay_active() {
         let overlay = fx_input(state, ctx, ctx.screen_rect());
-        state.fx.paint_overlay(ctx, &overlay);
+        state.fx.lock().paint_overlay(ctx, &overlay);
     }
 
     // 网格交互 / 面板按钮产生的命令在这里落地
@@ -357,17 +418,17 @@ mod tests {
         let mut state = EditorState::for_test();
         assert!(!piano_forced_by_fx(&state), "一条特效都没开时开关照旧");
 
-        state.fx.stack.set_active(fx::synthesia::Synthesia::ID, true);
+        state.fx.lock().stack.set_active(fx::synthesia::Synthesia::ID, true);
         assert!(piano_forced_by_fx(&state), "舞台瀑布要用琴键面板");
-        state.fx.stack.set_active(fx::synthesia::Synthesia::ID, false);
+        state.fx.lock().stack.set_active(fx::synthesia::Synthesia::ID, false);
 
-        state.fx.stack.set_active(fx::blockrow::BlockRow::ID, true);
+        state.fx.lock().stack.set_active(fx::blockrow::BlockRow::ID, true);
         assert!(piano_forced_by_fx(&state), "方块排按琴键面板对齐");
-        state.fx.stack.set_active(fx::blockrow::BlockRow::ID, false);
+        state.fx.lock().stack.set_active(fx::blockrow::BlockRow::ID, false);
         assert!(!piano_forced_by_fx(&state), "关掉特效按钮就回来");
 
         state.player = true;
-        state.fx.stack.set_active(fx::synthesia::Synthesia::ID, true);
+        state.fx.lock().stack.set_active(fx::synthesia::Synthesia::ID, true);
         assert!(!piano_forced_by_fx(&state), "播放器那一套界面不接特效");
     }
 

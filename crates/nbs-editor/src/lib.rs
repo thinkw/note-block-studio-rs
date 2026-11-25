@@ -5496,6 +5496,43 @@ mod fx_wiring_tests {
             .collect()
     }
 
+    /// 分离浮窗与主窗同时存活，但浮窗接管绘制时主窗中央区停画网格，只显示提示；
+    /// 关闭分离后舞台特效和琴键回主窗。
+    #[test]
+    fn detached_effects_pause_main_grid_and_show_notice() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.fx.lock().stack.set_active("synthesia", true);
+
+        frame(&mut state, &ctx);
+        assert_eq!(state.interaction.visible_notes, 0, "未分离时舞台接管网格");
+        assert!(state.piano_rect.is_some(), "未分离时琴键在主窗");
+
+        state.prefs.fx_window = true;
+        state.interaction.visible_notes = 23;
+        let texts = frame(&mut state, &ctx);
+        assert_eq!(state.interaction.visible_notes, 0, "分离后主窗不画编辑网格");
+        assert!(state.piano_rect.is_none(), "分离后主窗不画琴键");
+        assert!(
+            texts.iter().any(|s| s.contains("当前正在特效窗口渲染")),
+            "主窗中央区要显示浮窗渲染提示"
+        );
+
+        state.prefs.fx_window = false;
+        assert!(!state.prefs.fx_window);
+        assert!(state.fx.lock().stage_active(), "特效应仍启用");
+        state.interaction.visible_notes = 0;
+        frame(&mut state, &ctx);
+        assert!(!state.prefs.fx_window, "跑一帧后分离开关仍关闭");
+        assert!(!state.player, "测试状态不是播放器档");
+        assert!(state.fx.lock().stage_active(), "跑一帧后特效仍启用");
+        assert_eq!(state.interaction.visible_notes, 0, "关闭分离后舞台回主窗");
+        assert!(state.piano_rect.is_some(), "关闭分离后琴键回主窗");
+    }
+
     /// `visible_notes` 只有 `draw_grid` 会写，正好当「这一帧网格跑没跑」的探针。
     #[test]
     fn a_stage_effect_takes_the_center_panel_and_keeps_the_piano_panel() {
@@ -5512,7 +5549,7 @@ mod fx_wiring_tests {
         assert!(state.piano_rect.is_some(), "show_piano 出厂为真，琴键面板要上报矩形");
 
         state.interaction.visible_notes = 0;
-        state.fx.stack.set_active("synthesia", true);
+        state.fx.lock().stack.set_active("synthesia", true);
         frame(&mut state, &ctx);
         assert_eq!(
             state.interaction.visible_notes, 0,
@@ -5522,7 +5559,7 @@ mod fx_wiring_tests {
             .piano_rect
             .expect("瀑布的键盘就是底部那条面板，舞台期间它照样要画");
         assert!(
-            !state.fx.stack.frame().is_empty(),
+            !state.fx.lock().stack.frame().is_empty(),
             "舞台那一帧要真的排出图元"
         );
         // 「音符刚好落到琴键上」的口径：击中线压在面板上沿（黑键顶出来的那条剪影线），
@@ -5531,6 +5568,7 @@ mod fx_wiring_tests {
         assert!(
             state
                 .fx
+                .lock()
                 .stack
                 .frame()
                 .prims
@@ -5555,9 +5593,9 @@ mod fx_wiring_tests {
         assert!(state.piano_rect.is_none(), "琴键面板关掉后矩形要清空");
         assert!(state.interaction.visible_notes > 0, "网格照跑");
 
-        state.fx.stack.set_active("block_row", true);
+        state.fx.lock().stack.set_active("block_row", true);
         frame(&mut state, &ctx);
-        assert!(state.fx.wants_piano(), "乐器方块排要求底部有琴键");
+        assert!(state.fx.lock().wants_piano(), "乐器方块排要求底部有琴键");
         assert!(
             state.piano_rect.is_some(),
             "开着 wants_piano 的特效时琴键面板要被顶回来"
@@ -5572,8 +5610,8 @@ mod fx_wiring_tests {
     fn fx_prefs_survive_a_restart() {
         let _prefs = isolate_prefs();
         let mut state = EditorState::for_test();
-        state.fx.stack.set_active("synthesia", true);
-        state.fx.stack.set_opacity(0.4);
+        state.fx.lock().stack.set_active("synthesia", true);
+        state.fx.lock().stack.set_opacity(0.4);
         state.sync_prefs();
         assert_eq!(state.prefs.fx_active, vec!["synthesia".to_owned()]);
         assert!((state.prefs.fx_opacity - 0.4).abs() < 1e-6);
@@ -5584,9 +5622,9 @@ mod fx_wiring_tests {
         state.save_prefs();
 
         let back = EditorState::new();
-        assert!(back.fx.stack.is_active("synthesia"), "重启后勾选状态要回来");
+        assert!(back.fx.lock().stack.is_active("synthesia"), "重启后勾选状态要回来");
         assert!(
-            (back.fx.stack.opacity() - 0.4).abs() < 1e-3,
+            (back.fx.lock().stack.opacity() - 0.4).abs() < 1e-3,
             "透明度落在 prefs.fx_opacity 那一档"
         );
     }
@@ -5600,7 +5638,7 @@ mod fx_wiring_tests {
         let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.language = 1;
-        assert_eq!(state.fx.stack.ids().len(), 2, "内置两条特效");
+        assert_eq!(state.fx.lock().stack.ids().len(), 2, "内置两条特效");
 
         state.window = Some(WindowKind::PlaybackEffects);
         // 两帧：egui 的 Window 第一帧只定下尺寸，文字在第二帧的 shapes 里才捞得到。

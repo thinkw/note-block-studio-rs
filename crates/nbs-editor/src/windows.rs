@@ -2468,45 +2468,100 @@ fn playback_effects_window(state: &mut EditorState, ui: &mut Ui) {
         .weak(),
     );
     ui.separator();
-    let ids = state.fx.stack.ids();
+    let ids = state.fx.lock().stack.ids();
     for id in ids {
-        let Some(info) = state.fx.stack.info(id) else {
+        let Some(info) = state.fx.lock().stack.info(id) else {
             continue;
         };
         let kind = match info.surface {
             crate::fx::Surface::Stage => tr("stage", "舞台"),
             crate::fx::Surface::Overlay => tr("overlay", "叠加"),
         };
-        let mut on = state.fx.stack.is_active(id);
+        let mut on = state.fx.lock().stack.is_active(id);
         if ui
             .checkbox(&mut on, format!("{}（{kind}）", info.name))
             .changed()
         {
-            if let Some(msg) = state.fx.stack.set_active(id, on) {
+            let msg = state.fx.lock().stack.set_active(id, on);
+            if let Some(msg) = msg {
                 state.set_message(msg);
             }
         }
-        if state.fx.stack.is_active(id) {
+        if on {
             ui.indent(id, |ui| {
-                state.fx.stack.settings_ui(ui, id);
+                state.fx.lock().stack.settings_ui(ui, id);
             });
         }
     }
     ui.separator();
-    let mut opacity = state.fx.stack.opacity();
+    let mut opacity = state.fx.lock().stack.opacity();
     if ui
         .add(
             egui::Slider::new(&mut opacity, 0.05..=1.0).text(tr("Overlay opacity", "叠加透明度")),
         )
         .changed()
     {
-        state.fx.stack.set_opacity(opacity);
+        state.fx.lock().stack.set_opacity(opacity);
     }
     // 降级说明（方块贴图没扒到之类）：只在特效真开着时提。
-    let notes = state.fx.stack.notes();
+    let notes = state.fx.lock().stack.notes();
     for note in notes {
         let color = ui.visuals().warn_fg_color;
         ui.colored_label(color, note);
+    }
+
+    ui.separator();
+    let mut window_changed = false;
+    let mut detached = state.prefs.fx_window;
+    if ui
+        .checkbox(
+            &mut detached,
+            tr("Detach effects to a floating window", "分离到特效浮窗"),
+        )
+        .changed()
+    {
+        window_changed = true;
+    }
+    state.prefs.fx_window = detached;
+    if detached {
+        let mut transparent = state.prefs.fx_window_transparent;
+        if ui
+            .checkbox(
+                &mut transparent,
+                tr("Transparent client background", "客户区背景透明"),
+            )
+            .changed()
+        {
+            window_changed = true;
+        }
+        state.prefs.fx_window_transparent = transparent;
+        let mut always_on_top = state.prefs.fx_window_always_on_top;
+        if ui
+            .checkbox(
+                &mut always_on_top,
+                tr("Always keep floating window on top", "浮窗始终在前台"),
+            )
+            .changed()
+        {
+            window_changed = true;
+        }
+        state.prefs.fx_window_always_on_top = always_on_top;
+        ui.label(
+            RichText::new(tr(
+                "The floating window appears in the taskbar. Drag its title bar to move it, \
+                 drag the border to resize, or close it to return effects to the main window. \
+                 Transparent background affects only the empty client area; the title bar, \
+                 taskbar and window frame stay opaque.",
+                "浮窗会出现在 Windows 任务栏。拖标题栏移动、拖边框缩放；\
+                 关闭浮窗后特效回主窗。透明背景只影响琴键和特效之外的客户区，\
+                 标题栏、任务栏和窗口边框保持不透明。",
+            ))
+            .small()
+            .weak(),
+        );
+    }
+    if window_changed {
+        state.emit(Command::SavePreferences);
     }
 }
 

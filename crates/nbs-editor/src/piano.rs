@@ -180,14 +180,187 @@ pub struct ChartRequest {
     u: f32,
 }
 
-struct DrawOpts {
-    names: bool,
-    numbers: bool,
-    keyboard: bool,
-    out_of_range: bool,
-    current: u8,
-    playing: bool,
-    flats: bool,
+pub(crate) struct DrawOpts {
+    pub(crate) names: bool,
+    pub(crate) numbers: bool,
+    pub(crate) keyboard: bool,
+    pub(crate) out_of_range: bool,
+    pub(crate) current: u8,
+    pub(crate) playing: bool,
+    pub(crate) flats: bool,
+    pub(crate) show_chart: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct PianoPaint {
+    pub(crate) picked: Option<u8>,
+    pub(crate) chart: Option<ChartRequest>,
+    pub(crate) edge: i8,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct PianoDraw<'a> {
+    pub(crate) layout: KeyboardLayout,
+    pub(crate) width: f32,
+    pub(crate) opts: &'a DrawOpts,
+    pub(crate) keys_held: KeysHeld,
+    pub(crate) key_played: KeysPlayed,
+    pub(crate) now: f64,
+    pub(crate) pointer: Option<Pos2>,
+    pub(crate) holding: bool,
+    pub(crate) pressing: bool,
+}
+
+/// 主窗与分离浮窗共用的琴键落笔。浮窗只显示，所以 pointer/按按下传 None/false；
+/// 主窗仍从这里拿悬停、点击和边缘平移结果。
+pub(crate) fn paint_piano_keys(
+    p: &Painter,
+    th: &Theme,
+    bank: Option<&Bank>,
+    draw: &PianoDraw<'_>,
+) -> PianoPaint {
+    let PianoDraw {
+        layout,
+        width: rw,
+        opts,
+        keys_held,
+        key_played,
+        now,
+        pointer,
+        holding,
+        pressing,
+    } = *draw;
+    let keysshow = layout.slots;
+    let startkey = layout.first;
+    let u = layout.scale;
+    let y0 = layout.origin.y;
+    let inside = |r: Rect| pointer.is_some_and(|p| r.contains(p));
+    let held = |k: u8| keys_held.get(k as usize).copied().unwrap_or(false);
+    let glow = |k: u8| {
+        let at = key_played
+            .get(k as usize)
+            .copied()
+            .unwrap_or(f64::NEG_INFINITY);
+        played_key(now - at)
+    };
+    let frames = FrameMap::new(th);
+    let mut out = PianoPaint::default();
+
+    // 偏离原版（用户要求）：去掉 `draw_piano.gml:12/119-120` 的两侧渐隐
+    // （alpha 从 `3 - startkey` 起步、尾部递减），所有琴键恒全亮度——
+    // 原版播放器模式（isplayer）本来就不渐隐。
+    for a in 0..keysshow {
+        let x = layout.slot_x(a);
+        // 键号与矩形都由 `layout` 给出：黑键归属于它右侧那个白键的槽，
+        // 最左一根白键不画它左边的黑键（原版 `a > 0 && c != 2 && c != 5`）。
+        let Some(key) = layout.slot_white_key(a) else {
+            continue;
+        };
+        let black = layout.slot_black_key(a);
+        {
+            let white_hit = layout.white_hit(a);
+            // 原版：白键被左右黑键挡住的部分不算命中；最右一根、以及右边没有黑键的白键除外。
+            let left = layout.black_rect(a).is_some_and(inside);
+            let right = layout.black_rect(a + 1).is_some_and(inside);
+            let hovering = !left && !right && inside(white_hit);
+            // 原版 `draw_piano.gml:66-67`：先看 key_played 的 300ms 窗口（染黄 + 弹下），
+            // 再被实时按下覆盖 —— 鼠标按住白键（key_click）或键盘绑定按住（key_press）
+            // 把下沉倍率改成 0.75，但覆盖只动 down，染黄留着。像素数 = `floor(7 * down)`。
+            let (tint, mut drop) = glow(key).unwrap_or((0.0, 0.0));
+            if (hovering && holding) || held(key) {
+                drop = PRESS_RATIO;
+            }
+            let down = (PRESS_PX * drop).floor() * u;
+            // 原版在画这根键之前先画五线谱：门是 `c2 > 6 && c2 < 69 && playing = 0`
+            // （C/F 分支用 c1，值相同），键号参数是列号 `startkey + a`。没有播放器模式，
+            // `!isplayer` 恒真，C/F 分支少的一个门可以合并。
+            if hovering && opts.show_chart && !opts.playing && key > 6 && key < 69 {
+                out.chart = Some(ChartRequest {
+                    rw,
+                    x1: x + 18.0 * u,
+                    y0,
+                    key: (startkey + a) as i32,
+                    accidental: false,
+                    flats: opts.flats,
+                    u,
+                });
+            }
+            if let Some(bank) = bank {
+                draw_white_key(
+                    bank,
+                    p,
+                    th,
+                    &frames,
+                    pos2(x, y0 + down),
+                    key,
+                    tint,
+                    opts,
+                    u,
+                );
+            }
+            if hovering {
+                if a == 0 {
+                    out.edge = -1;
+                }
+                if a == keysshow - 1 {
+                    out.edge = 1;
+                }
+                if pressing {
+                    out.picked = Some(key);
+                }
+            }
+        }
+
+        // 黑键骑在本槽左缘上：`black` 与 `black_rect(a)` 由同一个判定给出
+        // （`layout` 只在「左边确有黑键」时返回它们）。
+        if let (Some(key), Some(black_hit)) = (black, layout.black_rect(a)) {
+            let (tint, mut drop) = glow(key).unwrap_or((0.0, 0.0));
+            if (inside(black_hit) && holding) || held(key) {
+                drop = PRESS_RATIO;
+            }
+            // 原版黑键：背面sprite 固定在 `yy - 7`，正面sprite 随 `floor(7 * down)` 下沉。
+            let down = (PRESS_PX * drop).floor() * u;
+            // 原版黑键五线谱：升号门 `c1 > 6 && c1 < 70`、降号门 `c1 > 5 && c1 < 69`，
+            // 键号参数升号写 `startkey + a - 1`、降号写 `startkey + a`（同为列号空间）。
+            if inside(black_hit) && opts.show_chart && !opts.playing {
+                let (ok, chart_key) = if opts.flats {
+                    (key > 5 && key < 69, (startkey + a) as i32)
+                } else {
+                    (key > 6 && key < 70, (startkey + a) as i32 - 1)
+                };
+                if ok {
+                    out.chart = Some(ChartRequest {
+                        rw,
+                        x1: x,
+                        y0,
+                        key: chart_key,
+                        accidental: true,
+                        flats: opts.flats,
+                        u,
+                    });
+                }
+            }
+            // 原版白键先画，黑键压在它上面。
+            if let Some(bank) = bank {
+                draw_black_key(
+                    bank,
+                    p,
+                    th,
+                    &frames,
+                    pos2(x + BLACK_DRAW_X * u, y0 - BLACK_LIFT * u),
+                    key,
+                    down,
+                    tint,
+                    opts,
+                    u,
+                );
+            }
+            if inside(black_hit) && pressing {
+                out.picked = Some(key);
+            }
+        }
+    }
+    out
 }
 
 pub fn show_piano(state: &mut EditorState, ui: &mut Ui) -> Option<ChartRequest> {
@@ -249,143 +422,33 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) -> Option<ChartRequest> 
         current: state.current.key,
         playing: state.audio.is_playing(),
         flats: state.flags.flats,
+        show_chart: state.flags.show_notechart,
     };
-    let inside = |r: Rect| pointer.map_or(false, |p| r.contains(p));
-    let show_chart = state.flags.show_notechart;
     // 键盘绑定当前按住的键（`collect_keybind_presses` 每帧刷新）。
     let keys_held = state.keys_held;
-    let held = |k: u8| keys_held.get(k as usize).copied().unwrap_or(false);
     // 原版 `key_played[]` + 300ms 窗口：这一帧该键还在「刚被演奏」的窗口里就返回
     // (染黄比例, 下沉倍率)。时间戳由音频派发回传、UI 排空时盖章（见 state.rs）。
     let key_played = state.key_played;
     let now = ui.input(|i| i.time);
-    let glow = |k: u8| {
-        let at = key_played
-            .get(k as usize)
-            .copied()
-            .unwrap_or(f64::NEG_INFINITY);
-        played_key(now - at)
-    };
-    let p = ui.painter();
-    let frames = FrameMap::new(&th);
-    let mut picked: Option<u8> = None;
-    let mut chart: Option<ChartRequest> = None;
-    let mut edge = 0i8;
-
-    // 偏离原版（用户要求）：去掉 `draw_piano.gml:12/119-120` 的两侧渐隐
-    // （alpha 从 `3 - startkey` 起步、尾部递减），所有琴键恒全亮度——
-    // 原版播放器模式（isplayer）本来就不渐隐。
-    for a in 0..keysshow {
-        let x = layout.slot_x(a);
-        // 键号与矩形都由 `layout` 给出：黑键归属于它右侧那个白键的槽，
-        // 最左一根白键不画它左边的黑键（原版 `a > 0 && c != 2 && c != 5`）。
-        let Some(key) = layout.slot_white_key(a) else {
-            continue;
-        };
-        let black = layout.slot_black_key(a);
-        {
-            let white_hit = layout.white_hit(a);
-            // 原版：白键被左右黑键挡住的部分不算命中；最右一根、以及右边没有黑键的白键除外。
-            let left = layout.black_rect(a).is_some_and(|r| inside(r));
-            let right = layout.black_rect(a + 1).is_some_and(|r| inside(r));
-            let hovering = !left && !right && inside(white_hit);
-            // 原版 `draw_piano.gml:66-67`：先看 key_played 的 300ms 窗口（染黄 + 弹下），
-            // 再被实时按下覆盖 —— 鼠标按住白键（key_click）或键盘绑定按住（key_press）
-            // 把下沉倍率改成 0.75，但覆盖只动 down，染黄留着。像素数 = `floor(7 * down)`。
-            let (tint, mut drop) = glow(key).unwrap_or((0.0, 0.0));
-            if (hovering && holding) || held(key) {
-                drop = PRESS_RATIO;
-            }
-            let down = (PRESS_PX * drop).floor() * u;
-            // 原版在画这根键之前先画五线谱：门是 `c2 > 6 && c2 < 69 && playing = 0`
-            // （C/F 分支用 c1，值相同），键号参数是列号 `startkey + a`。没有播放器模式，
-            // `!isplayer` 恒真，C/F 分支少的那一个门可以合并。
-            if hovering && show_chart && !opts.playing && key > 6 && key < 69 {
-                chart = Some(ChartRequest {
-                    rw,
-                    x1: x + 18.0 * u,
-                    y0,
-                    key: (startkey + a) as i32,
-                    accidental: false,
-                    flats: opts.flats,
-                    u,
-                });
-            }
-            if let Some(bank) = bank.as_deref() {
-                draw_white_key(
-                    bank,
-                    p,
-                    &th,
-                    &frames,
-                    pos2(x, y0 + down),
-                    key,
-                    tint,
-                    &opts,
-                    u,
-                );
-            }
-            if hovering {
-                if a == 0 {
-                    edge = -1;
-                }
-                if a == keysshow - 1 {
-                    edge = 1;
-                }
-                if pressing {
-                    picked = Some(key);
-                }
-            }
-        }
-
-        // 黑键骑在本槽左缘上：`black` 与 `black_rect(a)` 由同一个判定给出
-        // （`layout` 只在「左边确有黑键」时返回它们）。
-        if let (Some(key), Some(black_hit)) = (black, layout.black_rect(a)) {
-            let (tint, mut drop) = glow(key).unwrap_or((0.0, 0.0));
-            if (inside(black_hit) && holding) || held(key) {
-                drop = PRESS_RATIO;
-            }
-            // 原版黑键：背面sprite 固定在 `yy - 7`，正面sprite 随 `floor(7 * down)` 下沉。
-            let down = (PRESS_PX * drop).floor() * u;
-            // 原版黑键五线谱：升号门 `c1 > 6 && c1 < 70`、降号门 `c1 > 5 && c1 < 69`，
-            // 键号参数升号写 `startkey + a - 1`、降号写 `startkey + a`（同为列号空间）。
-            if inside(black_hit) && show_chart && !opts.playing {
-                let (ok, chart_key) = if opts.flats {
-                    (key > 5 && key < 69, (startkey + a) as i32)
-                } else {
-                    (key > 6 && key < 70, (startkey + a) as i32 - 1)
-                };
-                if ok {
-                    chart = Some(ChartRequest {
-                        rw,
-                        x1: x,
-                        y0,
-                        key: chart_key,
-                        accidental: true,
-                        flats: opts.flats,
-                        u,
-                    });
-                }
-            }
-            // 原版：白键先画，黑键压在它上面。
-            if let Some(bank) = bank.as_deref() {
-                draw_black_key(
-                    bank,
-                    p,
-                    &th,
-                    &frames,
-                    pos2(x + BLACK_DRAW_X * u, y0 - BLACK_LIFT * u),
-                    key,
-                    down,
-                    tint,
-                    &opts,
-                    u,
-                );
-            }
-            if inside(black_hit) && pressing {
-                picked = Some(key);
-            }
-        }
-    }
+    let paint = paint_piano_keys(
+        ui.painter(),
+        &th,
+        bank.as_deref(),
+        &PianoDraw {
+            layout,
+            width: rw,
+            opts: &opts,
+            keys_held,
+            key_played,
+            now,
+            pointer,
+            holding,
+            pressing,
+        },
+    );
+    let picked = paint.picked;
+    let chart = paint.chart;
+    let edge = paint.edge;
 
     if let Some(key) = picked {
         state.emit(Command::SelectKey(key));
@@ -393,7 +456,7 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) -> Option<ChartRequest> 
 
     // 原版 `draw_piano` 末尾的按键轮询：没有输入框焦点、没按 Ctrl 时，
     // 按下 `init_keys` 表里的键就发一次音（`play_sound(instrument, a, 100, 100, 0)`）。
-    collect_keybind_presses(state, ui);
+    collect_keybind_presses(state, ui.ctx());
 
     // 原版 `d` + `delay`：停在边缘白键上（没按住鼠标时）每 0.1 秒平移一个音。
     state.piano_scroll_delay = (state.piano_scroll_delay - dt).max(0.0);
@@ -423,16 +486,16 @@ pub fn show_piano(state: &mut EditorState, ui: &mut Ui) -> Option<ChartRequest> 
 /// `key_press[a] = keyboard_check(piano_key[a])` 既用来触发（按下沿）也用来把琴键画成按下态。
 /// 实时 MIDI 在同一道闸门里逐键过 `midi_input_set_key`（draw_piano.gml:152），
 /// 帧尾清空按下/松开队列。
-fn collect_keybind_presses(state: &mut EditorState, ui: &mut Ui) {
+fn collect_keybind_presses(state: &mut EditorState, ctx: &Context) {
     // 原版 `window = 0 && text_focus = -1 && key_edit = -1 && !check_ctrl()`：
     // 窗口开着 / 输入框有焦点 / 按 Ctrl 时整段轮询跳过，按住态保持原样。
-    let blocked = state.window.is_some() || ui.ctx().memory(|m| m.focused().is_some());
+    let blocked = state.window.is_some() || ctx.memory(|m| m.focused().is_some());
     // 没被键盘覆盖的键保留现值：MIDI 按住的键也在 keys_held 里（原版只对
     // `piano_key[a] > 0` 的键重写 `key_press[a]`）。
     let mut held = state.keys_held;
     let mut pressed: KeysHeld = NO_KEYS;
     if !blocked {
-        ui.input(|i| {
+        ctx.input(|i| {
             if !crate::shortcuts::ctrl_chord(i) {
                 for (idx, c) in KEYBINDS.iter().enumerate() {
                     if let Some(k) = keybind_key(*c) {
@@ -461,6 +524,12 @@ fn collect_keybind_presses(state: &mut EditorState, ui: &mut Ui) {
     }
     state.live_midi.presses.clear();
     state.live_midi.releases.clear();
+}
+
+/// 琴键面板被浮窗接管时，主窗仍要泵电脑键盘与实时 MIDI；只显示的主窗没有
+/// `show_piano` 可挂这条轮询，所以单独暴露一个帧首入口。
+pub fn pump_piano_input(state: &mut EditorState, ctx: &Context) {
+    collect_keybind_presses(state, ctx);
 }
 
 /// 原版白键：整帧（含文字）一起按 `floor(7 * down)` 下沉，所以 `at` 已带位移。

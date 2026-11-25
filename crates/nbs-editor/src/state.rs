@@ -1378,7 +1378,8 @@ pub struct EditorState {
     pub wallpaper: Option<crate::background::Wallpaper>,
     /// 播放特效那一坨：烘出来的时间轴、乐器方块表、贴图、启用中的特效。
     /// 缓存键是 `song.rev`（和 [`Self::compat_rev`]、[`Self::audio_rev`] 同一套路）。
-    pub fx: crate::fx::FxState,
+    /// 主窗与分离浮窗共享同一份；两个窗口同一帧只允许一个绘制。
+    pub fx: crate::fx::SharedFx,
 }
 
 impl Default for EditorState {
@@ -1670,12 +1671,12 @@ impl EditorState {
             rainbow_hue: 0.0,
             background_accent: false,
             wallpaper: None,
-            fx: crate::fx::FxState::default(),
+            fx: crate::fx::SharedFx::default(),
         };
         // 特效：存档里留过痕迹（启用列表或参数快照）才把快照灌回各特效，
         // 出厂那两份空表不动，设置文件也就不多写这两段。
         if !state.prefs.fx_active.is_empty() || !state.prefs.fx.is_empty() {
-            state.fx.stack.sync_prefs(&mut state.prefs);
+            state.fx.lock().stack.sync_prefs(&mut state.prefs);
         }
         state.enter_startup();
         // 迁移那趟在设备表里认不出的老名字：在状态栏说一句，别让人以为还在自己
@@ -2509,8 +2510,11 @@ impl EditorState {
     /// 没有启用中的特效时这三条各是一次比较，不铺表。
     pub fn refresh_fx(&mut self) {
         let include_locked = self.prefs.include_locked_in_export;
-        self.fx
-            .refresh(&self.doc.song, include_locked, &self.schematic_options);
+        self.fx.lock().refresh(
+            &self.doc.song,
+            include_locked,
+            &self.schematic_options,
+        );
     }
 
     /// 把当前会话状态同步回偏好对象。
@@ -2566,7 +2570,7 @@ impl EditorState {
             })
             .collect();
         // 特效：只写不读。用 `sync_prefs` 会把调参面板刚滑出来的值覆盖回旧快照。
-        self.fx.stack.store(&mut self.prefs);
+        self.fx.lock().stack.store(&mut self.prefs);
     }
 
     pub fn save_prefs(&mut self) {

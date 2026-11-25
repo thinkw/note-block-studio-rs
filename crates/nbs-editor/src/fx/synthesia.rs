@@ -258,7 +258,9 @@ impl PlaybackEffect for Synthesia {
             cx.backdrop
         };
         let light = is_light(back);
-        out.rect(cx.area, back, 0.0);
+        if !cx.transparent {
+            out.rect(cx.area, back, 0.0);
+        }
 
         if self.params.lanes {
             // 轨道线从键盘上缘拉到屏幕顶，间距就是白键宽；下端同样停在键盘剪影
@@ -477,6 +479,7 @@ mod tests {
                 scale: 1.0,
                 accent: Color32::from_rgb(80, 160, 255),
                 backdrop: Color32::WHITE,
+                transparent: false,
                 area: stage(),
                 keyboard: None,
                 timeline: &self.timeline,
@@ -940,6 +943,24 @@ mod tests {
             top,
             "测试摆放里白键顶和黑键顶必须是两个高度"
         );
+    }
+
+    /// 浮窗通用透明背景：瀑布不再铺整块舞台底色，轨道、击中线与琴键仍可画。
+    #[test]
+    fn transparent_stage_does_not_fill_its_backdrop() {
+        let rig = Rig::new(&[]);
+        let mut cx = rig.cx(0.0, 0.0, false);
+        cx.transparent = true;
+        let mut fx = Synthesia::default();
+        let mut frame = Frame::default();
+        fx.draw(&cx, &mut frame);
+        assert!(
+            !frame.prims.iter().any(|prim| matches!(prim,
+                Primitive::Rect { rect, rounding, fill, .. }
+                    if *rect == stage() && *rounding == 0.0 && fill.a() > 0)),
+            "透明模式不能留下整块不透明底色"
+        );
+        assert!(!frame.is_empty(), "参考线和击中线照常画");
     }
 
     /// 琴键面板的底色口径跟着「黑色背景」走：勾了就一起黑，没勾就跟编辑区同色。

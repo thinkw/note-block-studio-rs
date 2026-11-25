@@ -42,6 +42,10 @@ pub trait AudioEngine {
     fn active_voices(&self) -> usize;
     fn clock(&self) -> &TransportClock;
     fn clock_mut(&mut self) -> &mut TransportClock;
+    /// 音频线程真正推进的那份共享状态。浮窗绕过 UI 帧读它；无设备实现返回 None。
+    fn shared_state(&self) -> Option<Shared> {
+        None
+    }
     fn device_info(&self) -> String;
     /// 系统里可选的输出设备。原版把声音整个交给 GameMaker，只会走系统默认设备，
     /// 没有选择项；这一组方法是端口自加（用户要求 #94）。没有可枚举后端的实现返回空表。
@@ -675,6 +679,9 @@ impl AudioEngine for CpalEngine {
     }
     fn clock_mut(&mut self) -> &mut TransportClock {
         &mut self.clock
+    }
+    fn shared_state(&self) -> Option<Shared> {
+        Some(self.shared.clone())
     }
     fn device_info(&self) -> String {
         match &self.device {
