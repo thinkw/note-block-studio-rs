@@ -127,7 +127,11 @@ impl ReferenceTrack {
         self.playing = true;
     }
 
-    pub fn render_sample(&mut self) -> f32 {
+    /// 每渲染一帧取一个参考采样。缓冲固定是 [`SAMPLE_RATE`]，但步进必须按**输出设备**的
+    /// 采样率算：设备 48 kHz 时按 44.1k 步进等于把音频提速 8.8 %（音调变高），而且
+    /// `position` 会跑在播放头前面，被 [`Self::sync`] 的 100 ms 闸门每隔约 1 秒拽回去一次，
+    /// 听感就是一卡一卡。乐器侧靠 `Mixer::playback_ratio` 归一，这里同理。
+    pub fn render_sample(&mut self, output_rate: u32) -> f32 {
         if !self.playing || self.is_muted() {
             return 0.0;
         }
@@ -136,7 +140,7 @@ impl ReferenceTrack {
         let frac = (at - index as f64) as f32;
         let a = self.samples.get(index).copied().unwrap_or(0.0);
         let b = self.samples.get(index + 1).copied().unwrap_or(0.0);
-        self.position += 1.0 / SAMPLE_RATE as f64;
+        self.position += 1.0 / f64::from(output_rate.max(1));
         if self.position >= self.duration() {
             self.playing = false;
         }
@@ -498,11 +502,37 @@ mod tests {
         assert!(!track.is_playing(), "越过尾端停止");
         track.sync(true, 0.5, 0, 50, 2.0, 2, false);
         assert!(track.is_playing());
-        assert_eq!(track.render_sample(), 0.25);
+        assert_eq!(track.render_sample(SAMPLE_RATE), 0.25);
         track.sync(true, 0.1, 0, 50, 2.0, 2, false);
         assert!((track.position - 0.1).abs() < 1e-9, "回退要重定位");
         track.sync(true, 0.1, 0, 100, 1.0, 0, false);
         assert!(!track.is_playing());
         assert!(track.is_muted());
+    }
+
+    /// 乐器靠 `Mixer::playback_ratio` 归一到设备采样率，参考轨以前写死 44.1k：48 kHz 输出
+    /// 上整首提速 8.8 %（音调变高），`position` 还会跑在播放头前面，被 `sync` 的 100 ms
+    /// 闸门每隔约 1 秒拽回去一次（一卡一卡）。步进必须按设备率走。
+    #[test]
+    fn render_steps_in_device_seconds() {
+        let mut track = ReferenceTrack {
+            samples: (0..2 * SAMPLE_RATE).map(|i| i as f32).collect(),
+            ..Default::default()
+        };
+        track.sync(true, 0.0, 0, 100, 1.0, 2, true);
+        for _ in 1..48_000 {
+            track.render_sample(48_000);
+        }
+        let at = track.render_sample(48_000);
+        let expected = f64::from(SAMPLE_RATE) * (47_999.0 / 48_000.0);
+        assert!(
+            (f64::from(at) - expected).abs() < 1.0,
+            "48 kHz 上渲染满 48000 帧应正好读到 1 秒处（下标 ~{expected:.0}），实际 {at}"
+        );
+        assert!(
+            (track.position - 1.0).abs() < 1e-9,
+            "position 记的是秒，48000 帧 = 1 秒，实际 {}",
+            track.position
+        );
     }
 }
