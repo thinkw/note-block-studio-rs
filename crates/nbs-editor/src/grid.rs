@@ -92,6 +92,13 @@ fn split(area: Rect, cell: f32, reference_row: bool) -> (Rect, Rect, Rect, Rect)
     (timeline, grid, hbar, vbar)
 }
 
+/// 「已加载音频: …」的落点。原版 `control_draw.gml:1566` 写的是 `x1 + 275, y1 + 10`，
+/// 而那个 `y1` 正是同一块里分隔线的 y（`:1461`）—— 文字在 `split()` 让出来的参考行带内，
+/// 不是最后一层音符行里。
+fn reference_label_pos(grid: Rect, u: f32) -> Pos2 {
+    pos2(grid.min.x + 15.0, grid.max.y - 1.0 + 10.0 * u)
+}
+
 pub fn show_grid(state: &mut EditorState, ui: &mut Ui, area: Rect) {
     // 原版 `control_draw.gml:308` 的巨型门：播放器（非下落模式）整块网格绘制与输入
     // 都不跑，画布只剩中央歌曲信息区（:2338-2420）。
@@ -147,10 +154,7 @@ pub fn show_grid(state: &mut EditorState, ui: &mut Ui, area: Rect) {
         let font = crate::fonts::scaled(crate::fonts::main_font(), state.viewport.u());
         let label = crate::layers_panel::clip_label(p, &label, &font, grid_rect.width() - 30.0);
         p.text(
-            pos2(
-                grid_rect.min.x + 15.0,
-                grid_rect.max.y - cell + 10.0 * state.viewport.u(),
-            ),
+            reference_label_pos(grid_rect, state.viewport.u()),
             Align2::LEFT_TOP,
             label,
             font,
@@ -3347,6 +3351,24 @@ mod tests {
         state.reference.path = None;
         let (_, max_unloaded, _) = v_geometry(&state, v_plain);
         assert_eq!(max_unloaded, max_plain, "空载时竖条不该按参考行多滚一格");
+    }
+
+    /// 这行字掉进最后一层音符行里过（用户截图）：锚点必须是分隔线下方那条参考行带，
+    /// 而且换缩放档也不能跳出去。
+    #[test]
+    fn the_loaded_file_label_sits_in_the_reference_row_band() {
+        let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let (_, grid, hbar, _) = split(area, 32.0, true);
+        for u in [1.0, 0.4, 0.1] {
+            let pos = reference_label_pos(grid, u);
+            assert!(
+                pos.y >= grid.max.y - 1.0 && pos.y < hbar.min.y,
+                "{u} 档的文字应落在分隔线下方那条带里（{}..{}），实际 {}",
+                grid.max.y,
+                hbar.min.y,
+                pos.y
+            );
+        }
     }
 
     /// 偏离原版（用户要求 #90）：时间轴带和播放指针都不随界面缩放。
