@@ -1,8 +1,9 @@
 //! 原版歌曲标签条（`draw_song_tabs.gml` / `draw_song_tab.gml`）。
 //!
-//! 标签条和工具栏在 y=24..58 重叠：布局上另留 `get_tab_offset()` 的高度把画布往下推，
-//! 绘制区则固定在窗口 y=24，保持原版像素。拖拽重排留到刀 3，本文件先实现单击、
-//! 关闭、加号、右键菜单和 0.18 秒让位动画。
+//! 标签条固定画在窗口 y=24..58；多标签且非全屏时布局在菜单栏与工具栏之间
+//! 让出 `get_tab_offset()` 的高度，工具栏随之下移（v3.12 control_draw.gml:1895
+//! 的 `20 + song_tab_offset`）。拖拽重排见刀 3，本文件含单击、关闭、加号、
+//! 右键菜单和 0.18 秒让位动画。
 
 use egui::{pos2, Align2, Color32, Id, Rect, Sense, Vec2};
 
@@ -676,5 +677,68 @@ mod tests {
         assert_eq!(span(1440.0, 2), 179.0);
         assert_eq!(span(400.0, 4), 89.0);
         assert_eq!(span(10.0, 4), 1.0);
+    }
+
+    fn ui_frame(state: &mut EditorState) -> egui::Context {
+        let ctx = egui::Context::default();
+        state.theme.apply(&ctx);
+        crate::fonts::warm_up(&ctx);
+        state.icons.ensure(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1440.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            let _lock = crate::frame_lock();
+            crate::show(ctx, state);
+        });
+        ctx
+    }
+
+    fn panel_rect(ctx: &egui::Context, id: &str) -> egui::Rect {
+        egui::containers::panel::PanelState::load(ctx, Id::new(id))
+            .unwrap_or_else(|| panic!("面板 {id} 这帧没画"))
+            .rect
+    }
+
+    /// 多标签时工具栏自己也要下移（v3.12 control_draw.gml:1895 `20 + song_tab_offset`），
+    /// 不能再压在工具栏上。
+    #[test]
+    fn toolbar_moves_below_the_tab_strip() {
+        let mut state = EditorState::for_test();
+
+        // 单标签：没有让位条，工具栏贴着菜单栏。
+        let ctx = ui_frame(&mut state);
+        assert!(
+            egui::containers::panel::PanelState::load(&ctx, Id::new("nbs_tabspace")).is_none(),
+            "单标签不该有让位面板"
+        );
+        assert_eq!(panel_rect(&ctx, "nbs_toolbar").min.y, 20.0);
+
+        // 两标签：菜单栏 0..20，让位条 20..60，工具栏 60..94；
+        // 标签条画在让位条上，下缘不碰工具栏。
+        state.push_tab(nbs_core::model::Song::new());
+        let offset = height(&state);
+        assert_eq!(offset, 40.0);
+        let ctx = ui_frame(&mut state);
+        let space = panel_rect(&ctx, "nbs_tabspace");
+        assert_eq!(space.min.y, 20.0);
+        assert!((space.height() - offset).abs() < 0.5);
+        let toolbar = panel_rect(&ctx, "nbs_toolbar");
+        assert_eq!(toolbar.min.y, 20.0 + offset);
+        assert_eq!(toolbar.height(), 34.0);
+        let tabs = ctx
+            .memory(|m| m.area_rect(Id::new("nbs_song_tabs")))
+            .expect("两标签时标签条 Area 必须存在");
+        assert_eq!(tabs.min.y, 24.0);
+        assert!(
+            tabs.max.y <= toolbar.min.y + 0.5,
+            "标签条下缘 {} 压进了工具栏 {}",
+            tabs.max.y,
+            toolbar.min.y
+        );
     }
 }

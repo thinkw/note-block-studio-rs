@@ -185,12 +185,10 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
         .exact_height(MENU_HEIGHT)
         .show(ctx, |ui| show_menu_bar(state, ui));
 
-    egui::TopBottomPanel::top("nbs_toolbar")
-        .frame(tight())
-        .exact_height(TOOLBAR_HEIGHT)
-        .show(ctx, |ui| show_toolbar(state, ui));
-
-    // 原版标签条与工具栏重叠绘制，但画布顶部要让出 get_tab_offset() 的高度。
+    // v3.12 control_draw.gml:1895-1900：多标签时工具栏（spr_iconbar）画在
+    // `20 + song_tab_offset` —— 工具栏自己也要下移，标签条（y=24..58）落在
+    // 菜单栏与工具栏之间让出的空带里。这里插一块同高面板把工具栏和画布
+    // 一起推下去；单标签/全屏时 offset=0，面板不建。
     let tab_offset = tabbar::height(state);
     if tab_offset > 0.0 {
         egui::TopBottomPanel::top("nbs_tabspace")
@@ -200,6 +198,12 @@ pub fn show(ctx: &Context, state: &mut EditorState) {
                 ui.allocate_rect(ui.max_rect(), Sense::hover());
             });
     }
+
+    egui::TopBottomPanel::top("nbs_toolbar")
+        .frame(tight())
+        .exact_height(TOOLBAR_HEIGHT)
+        .show(ctx, |ui| show_toolbar(state, ui));
+
     tabbar::show(state, ctx);
 
     egui::TopBottomPanel::bottom("nbs_status")
