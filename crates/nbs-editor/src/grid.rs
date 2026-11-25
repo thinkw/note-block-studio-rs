@@ -574,8 +574,13 @@ fn handle_grid_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect)
         let delta = input.scroll.y + input.scroll.x;
         let d = if delta > 0.0 { 1 } else { -1 };
         // 原版条件 `exist && changepitch`：停在音符上且开了「滚轮改音符属性」才改那颗音。
+        // 播放中额外禁掉：原版 `:211` 的 `playing = 0` 总闸只冻住 sela/selb 的刷新，
+        // `:276` 的 `selbx = starta + sela` 却照用自动平移后的 starta，于是滚轮改的是
+        // 「鼠标上一次指过的那一列」而非指针底下那颗 —— 端口按指针算，改到的确实是
+        // 指针下那颗，但播放中滚轮本来就只该平移视口，碰音符是误伤。
         let note_cell = hover.filter(|(t, l)| {
             state.prefs.changepitch
+                && !state.is_playing()
                 && (state.doc.song.has(*t as u32, *l as u32)
                     || state.doc.selection.contains(*t, *l))
         });
@@ -2474,6 +2479,55 @@ mod tests {
                 "第 {which} 种遮挡下，点背后的滚动条仍然生效"
             );
         }
+    }
+
+    /// 用户要求：播放中滚轮不许落到音符上。原版 `:211` 的 `playing = 0` 总闸只冻住
+    /// sela/selb，`:276` 的 `selbx = starta + sela` 又拿自动平移后的 starta 去加，
+    /// 所以原版改到的是「指针上次停过的那一列」；端口按实时光标算，改到的确实是
+    /// 眼前这颗，误伤更直接，这道门只能自己加。
+    #[test]
+    fn the_wheel_skips_notes_while_playing() {
+        let _prefs = crate::isolate_prefs();
+        let grid = Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 128.0));
+        // 指针停在 (3,2) 那颗音符上滚一格；返回「那颗音符现在长什么样」和视口位置。
+        let roll_on_note = |playing: bool| -> (nbs_core::model::Note, u32, usize) {
+            let mut st = scroll_state();
+            st.prefs.changepitch = true;
+            st.doc.song.set(3, 2, nbs_core::model::Note::new(0, 45));
+            if playing {
+                st.audio.clock_mut().play();
+            }
+            let mut input = wheel(0.0, -1.0);
+            input.pointer = Some(pos2(100.0, 64.0));
+            input.hover = Some(pos2(100.0, 64.0));
+            let before = st.pending.len();
+            handle_grid_input(&mut st, &input, grid);
+            let emitted = st.pending.len() - before;
+            st.flush(&egui::Context::default());
+            (
+                st.doc.song.get(3, 2).unwrap(),
+                st.viewport.start_layer,
+                emitted,
+            )
+        };
+
+        let untouched = roll_on_note(true);
+        assert_eq!(
+            untouched.0,
+            nbs_core::model::Note::new(0, 45),
+            "播放中那颗音符被改了"
+        );
+        assert_eq!(untouched.1, 1, "播放中滚轮要照常平移视口");
+        assert_eq!(untouched.2, 0, "播放中还在发改音符的命令");
+
+        // 停播时这一格必须照旧改得动，否则上面三条是空断言。
+        let changed = roll_on_note(false);
+        assert_ne!(
+            changed.0,
+            nbs_core::model::Note::new(0, 45),
+            "停播时滚轮改不动音符了"
+        );
+        assert_eq!(changed.1, 0, "改音符这一格不平移视口");
     }
 
     /// #93.1 + #93.4：滑块按住哪儿就贴在哪儿（指针位移 = 滑块位移，一像素不差），
