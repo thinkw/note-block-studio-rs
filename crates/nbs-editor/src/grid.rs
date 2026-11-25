@@ -101,7 +101,7 @@ pub fn show_grid(state: &mut EditorState, ui: &mut Ui, area: Rect) {
     }
     let cell = state.viewport.cell();
     let (timeline_rect, grid_rect, hbar_rect, vbar_rect) =
-        split(area, cell, state.flags.show_layers && !state.fullscreen);
+        split(area, cell, state.shows_reference_row());
 
     state.viewport.origin = grid_rect.min;
     state.viewport.size = grid_rect.size();
@@ -128,17 +128,22 @@ pub fn show_grid(state: &mut EditorState, ui: &mut Ui, area: Rect) {
 
     draw_timeline(state, ui, timeline_rect);
     draw_grid(state, ui, grid_rect);
-    if state.flags.show_layers && !state.fullscreen {
+    if let Some(path) = state
+        .reference
+        .path
+        .as_ref()
+        .filter(|_| state.shows_reference_row())
+    {
+        // 原版这条分隔线和文件名都写在参考音频行那个 `if` 里（`control_draw.gml:1461` 的
+        // `draw_line` 与 `:1566` 的 `draw_text_dynamic`）：没加载参考音频时网格底部既没有
+        // 这条线，也没有「已加载音频: …」。
         let p = ui.painter();
         p.hline(
             grid_rect.x_range(),
             grid_rect.max.y - 1.0,
             egui::Stroke::new(1.0_f32, state.theme.grid_line),
         );
-        let label = match state.reference.path.as_ref() {
-            Some(path) => format!("{} {}", tr("Loaded file: ", "已加载音频: "), path.display()),
-            None => tr("Click Reference to load audio", "点击「参考音频」打开文件").into(),
-        };
+        let label = format!("{} {}", tr("Loaded file: ", "已加载音频: "), path.display());
         let font = crate::fonts::scaled(crate::fonts::main_font(), state.viewport.u());
         let label = crate::layers_panel::clip_label(p, &label, &font, grid_rect.width() - 30.0);
         p.text(
@@ -982,11 +987,7 @@ fn h_geometry(state: &EditorState, rect: Rect) -> (f32, f32, Rect) {
 /// 方向与原版一致：滑块越往下 `startb` 越大，也就是层号往上走
 /// （`control_draw.gml:339` 的行号 `startb + b` 随屏幕 y 增大）。
 fn v_geometry(state: &EditorState, rect: Rect) -> (f32, f32, Rect) {
-    let reference_rows = if state.flags.show_layers && !state.fullscreen {
-        1.0
-    } else {
-        0.0
-    };
+    let reference_rows = f32::from(state.shows_reference_row());
     let (ms, thumb_h, max_val) = bar_metrics(
         rect.height(),
         state.viewport.rows() as f32,
@@ -3334,6 +3335,7 @@ mod tests {
         assert_eq!(v_plain, v_reference, "竖条尺寸不变，只多滚一格");
         let mut state = ruler_state();
         state.flags.show_layers = false;
+        state.reference.path = Some(std::path::PathBuf::from("ref.ogg"));
         state.viewport.size = plain.size();
         let (_, max_plain, thumb_plain) = v_geometry(&state, v_plain);
         state.flags.show_layers = true;
@@ -3341,6 +3343,10 @@ mod tests {
         let (_, max_reference, thumb_reference) = v_geometry(&state, v_reference);
         assert_eq!(max_reference, max_plain + 1.0);
         assert!(thumb_reference.height() <= thumb_plain.height());
+        state.viewport.size = plain.size();
+        state.reference.path = None;
+        let (_, max_unloaded, _) = v_geometry(&state, v_plain);
+        assert_eq!(max_unloaded, max_plain, "空载时竖条不该按参考行多滚一格");
     }
 
     /// 偏离原版（用户要求 #90）：时间轴带和播放指针都不随界面缩放。

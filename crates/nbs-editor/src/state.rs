@@ -846,7 +846,10 @@ impl FileDialog {
                     || got == ext
                     || (image_exts && matches!(got, "png" | "jpg" | "jpeg"))
                     || (audio_exts && matches!(got.to_ascii_lowercase().as_str(), "wav" | "flac" | "mp3" | "ogg" | "m4a" | "aac" | "aif" | "aiff" | "opus" | "webm"))
-                    || (reference_exts && matches!(got.to_ascii_lowercase().as_str(), "ogg" | "wav"))
+                    || (reference_exts
+                        && nbs_audio::reference::REFERENCE_EXTENSIONS
+                            .iter()
+                            .any(|want| got.eq_ignore_ascii_case(want)))
                     || (midi_exts && matches!(got.to_ascii_lowercase().as_str(), "mid" | "midi"))
                     || (transcription_file && got.eq_ignore_ascii_case(ext))
             })
@@ -1010,7 +1013,7 @@ impl FileDialog {
             ),
             DialogAction::LoadReference => (
                 tr("Load reference audio", "打开参考音频"),
-                vec![filter("Ogg Vorbis / PCM WAV", "*.ogg;*.wav")],
+                vec![filter("Audio files", &reference_globs().join(";"))],
             ),
             // 原版 `datapack_getextranotes.gml:6`：过滤器名和标题都是照抄的这一句。
             DialogAction::SaveExtraNotes => (
@@ -1090,6 +1093,15 @@ fn filter(name: &str, patterns: &str) -> FilterSpec {
         name: name.to_string(),
         patterns: patterns.to_string(),
     }
+}
+
+/// 参考音频认哪些后缀只有一处定义（`nbs_audio::reference::REFERENCE_EXTENSIONS`）：
+/// 对话框过滤器、内置浏览器的放行表和 `decode` 的分派表都读它，多列一个就是让人选完报错。
+fn reference_globs() -> Vec<String> {
+    nbs_audio::reference::REFERENCE_EXTENSIONS
+        .iter()
+        .map(|ext| format!("*.{ext}"))
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2744,6 +2756,14 @@ impl EditorState {
         self.audio.clock().is_playing()
     }
 
+    /// 原版 `control_draw.gml:1456` 的 `current_song.reference_audio >= 0 && !fullscreen &&
+    /// show_layers`：参考音频行**只在已加载参考音频时**占一行，网格那边的分隔线、
+    /// 文件名与竖条多滚的一格都跟着这同一个判据（`:104` 的 `totalrows` 减同一项）。
+    /// `reference.path` 只在 `load_reference_audio` 成功后写入，等价于原版的句柄 `>= 0`。
+    pub fn shows_reference_row(&self) -> bool {
+        self.flags.show_layers && !self.fullscreen && self.reference.path.is_some()
+    }
+
     pub fn prepare_audio(&mut self) {
         self.audio.prepare(&self.doc.song);
         self.audio_rev = self.doc.song.rev;
@@ -3856,6 +3876,41 @@ mod tests {
         assert_eq!(spec.filters[0].patterns, "*.zip");
         assert!(pack.save, "原版是 get_save_filename_ext");
         assert!(!pack.start_dir, "原版第 3 个参数是空串，起始目录交给系统记");
+    }
+
+    /// 参考音频认哪些后缀只有一处定义：原生过滤器的通配符和内置浏览器的放行表都从
+    /// `nbs_audio::reference::REFERENCE_EXTENSIONS` 生成，解码侧的用例
+    /// （nbs-audio 的 `every_advertised_extension_really_decodes`）保证列出来的真解得开。
+    #[test]
+    fn reference_dialog_offers_every_supported_extension() {
+        let _cn = crate::LangGuard::set(1);
+        let dir = std::env::temp_dir().join(format!("nbs_ref_dir_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut expected = Vec::new();
+        for ext in nbs_audio::reference::REFERENCE_EXTENSIONS {
+            let path = dir.join(format!("take.{ext}"));
+            std::fs::write(&path, b"x").unwrap();
+            expected.push(path);
+        }
+        std::fs::write(dir.join("take.txt"), b"x").unwrap();
+        expected.sort();
+
+        let dialog = FileDialog::for_action(
+            DialogAction::LoadReference,
+            Some(&dir.join("take.mp3")),
+            None,
+        );
+        let spec = dialog.picker_spec();
+        assert_eq!(spec.title, "打开参考音频");
+        for ext in nbs_audio::reference::REFERENCE_EXTENSIONS {
+            assert!(
+                spec.filters[0].patterns.contains(&format!("*.{ext}")),
+                "原生过滤器漏了 {ext}：{}",
+                spec.filters[0].patterns
+            );
+        }
+        assert_eq!(dialog.entries, expected, "浏览器放行表要跟着清单走");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// 兼容性窗口那两行的判据：档位表必须和原版一模一样，
