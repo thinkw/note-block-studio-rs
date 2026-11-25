@@ -190,6 +190,10 @@ fn decode_symphonia(path: &Path) -> Result<Vec<f32>, String> {
         let packet = match format.next_packet() {
             Ok(Some(packet)) => packet,
             Ok(None) => break,
+            // symphonia 的 FLAC 解析器收尾时会拿 STREAMINFO 声明的总帧数和实际读到的比，
+            // 声明值偏大（剪辑过的曲子常见）就抛 UnexpectedEof 而不是正常结束。此时音频几乎
+            // 全在手，判成整轨打不开等于把能用的东西扔掉，所以有样本就收尾、颗粒无收才算失败。
+            Err(_) if !mono.is_empty() => break,
             Err(e) => return Err(format!("解码中断: {e}")),
         };
         if packet.track_id != track_id {
@@ -406,6 +410,28 @@ mod tests {
         for (_, path) in generated {
             let _ = std::fs::remove_file(path);
         }
+    }
+
+    /// 剪辑过的 FLAC 常见 STREAMINFO 谎报总帧数，symphonia 会在读完的那一刻判成硬错误，
+    /// 整轨作废。把用例的声明值抬高复现，验证已解出来的样本能留下。
+    #[test]
+    fn flac_with_a_lying_frame_count_keeps_the_audio() {
+        let mut liar = std::fs::read(fixture("flac")).unwrap();
+        // STREAMINFO 紧跟 fLaC + 4 字节块头，这 8 字节的低 36 位是总帧数。
+        let mut field = u64::from_be_bytes(liar[18..26].try_into().unwrap());
+        field = (field & !((1u64 << 36) - 1)) | (1u64 << 32);
+        liar[18..26].copy_from_slice(&field.to_be_bytes());
+        let honest = decode_symphonia(&fixture("flac")).unwrap();
+        let path = write_temp("liar", "flac", &liar);
+        let fixed = decode_symphonia(&path);
+        let _ = std::fs::remove_file(path);
+        let fixed = fixed.expect("STREAMINFO 谎报总长不能判成整轨解不开");
+        assert!(!honest.is_empty(), "用例本身得先有声音");
+        assert_eq!(
+            fixed.len(),
+            honest.len(),
+            "谎报总长的代价只能是报错那一段，已解出来的样本不许丢"
+        );
     }
 
     #[test]
