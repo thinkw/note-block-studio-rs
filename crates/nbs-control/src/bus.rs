@@ -13,10 +13,32 @@ use serde::{Deserialize, Serialize};
 use crate::op::Op;
 use crate::outcome::{Data, Outcome, Snapshot};
 
+/// 标签寻址。`id` 是稳定会话号；`index` 是标签条当前位置，重排后会漂。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TabRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<u32>,
+}
+
+impl TabRef {
+    pub fn validate(self) -> Result<Self, &'static str> {
+        match (self.id, self.index) {
+            (Some(_), None) | (None, Some(_)) => Ok(self),
+            (Some(_), Some(_)) => Err("tab.id and tab.index are mutually exclusive"),
+            (None, None) => Err("tab requires exactly one of id or index"),
+        }
+    }
+}
+
 /// 一条待执行的请求。`id` 由客户端自己编号，服务端原样回填，方便断线重排时对账。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     pub id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab: Option<TabRef>,
     pub op: Op,
 }
 
@@ -35,12 +57,20 @@ pub struct Hello {
     pub client: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct Capabilities {
+    pub parked_write: bool,
+}
+
 /// 握手指回应答。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HelloAck {
     pub hello: bool,
     pub protocol: u32,
     pub app: String,
+    #[serde(default)]
+    pub capabilities: Capabilities,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<Box<Snapshot>>,
 }
@@ -49,6 +79,7 @@ pub struct HelloAck {
 pub struct PendingRequest {
     pub id: u64,
     pub client: String,
+    pub tab: Option<TabRef>,
     pub op: Op,
     reply: Mutex<Option<Sender<Outcome>>>,
 }
@@ -110,10 +141,21 @@ impl Inbox {
     /// 投递一条请求，拿到等回执的 `Receiver`。投完立刻催一次重绘，
     /// 否则窗口静止时 egui 不出新帧，请求会一直躺在队列里。
     pub fn submit(&self, id: u64, client: impl Into<String>, op: Op) -> Receiver<Outcome> {
+        self.submit_tab(id, client, op, None)
+    }
+
+    pub fn submit_tab(
+        &self,
+        id: u64,
+        client: impl Into<String>,
+        op: Op,
+        tab: Option<TabRef>,
+    ) -> Receiver<Outcome> {
         let (tx, rx) = mpsc::channel();
         let req = PendingRequest {
             id,
             client: client.into(),
+            tab,
             op,
             reply: Mutex::new(Some(tx)),
         };

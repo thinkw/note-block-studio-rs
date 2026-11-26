@@ -23,7 +23,10 @@ use nbs_core::model::{Layer, LockMode, PAN_CENTER};
 use crate::commands::Command;
 use crate::fonts::{info_med_bold_font, main_font, small_font};
 use crate::icons::{layer as layer_icon, macro_icon, Bank};
-use crate::state::{ContextKind, ContextMenu, EditorState, LayerDrag, WindowKind};
+use crate::state::{
+    ContextKind, ContextMenu, DialogAction, EditorState, FileDialog, LayerDrag, ReferenceDrag,
+    WindowKind,
+};
 use crate::theme::{Theme, ThemeKind};
 use crate::tr;
 use crate::viewport::{bar_thickness, timeline_band, RULER_SCALE};
@@ -306,7 +309,10 @@ pub fn show_layers_panel(state: &mut EditorState, ui: &mut Ui) {
     // 网格那边用同一条公式（`grid.rs` 里的 `split`），两边画行数、宏条位置才对得上。
     // 行数只按本面板的区域算，不取 `viewport.rows()`：侧栏比网格先画，
     // 用视口那个值会慢一帧，第一帧少画几行、宏条也跟着错位。
-    let rows = (((area.height() - timeline_band() - bar_thickness()) / cell).floor() as u32).max(1);
+    let show_reference_row = state.shows_reference_row();
+    let rows = (((area.height() - timeline_band() - bar_thickness()) / cell).floor() as u32)
+        .saturating_sub(u32::from(show_reference_row))
+        .max(1);
     let layers = state.doc.song.layers.clone();
     let idle = state.window.is_none() && state.context_menu.is_none();
     let shift = ui.input(|i| i.modifiers.shift);
@@ -338,8 +344,23 @@ pub fn show_layers_panel(state: &mut EditorState, ui: &mut Ui) {
         );
     }
 
-    // 宏条贴在整行区底（原版 `y1 + 32`，y1 是最后一行行顶）。
-    let bar_top = rows_start.y + rows as f32 * cell - ROW_LIFT * u;
+    if show_reference_row {
+        reference_row(
+            state,
+            ui,
+            &bank,
+            &th,
+            pos2(start.x, rows_start.y + rows as f32 * cell - ROW_LIFT * u),
+            cell,
+            u,
+            idle,
+            &layout,
+        );
+    }
+
+    // 宏条贴在参考行下面（原版 `y1 + 32`，y1 是最后一行行顶）。
+    let bar_top =
+        rows_start.y + (rows + u32::from(show_reference_row)) as f32 * cell - ROW_LIFT * u;
     macro_bar(
         state,
         ui,
@@ -738,7 +759,12 @@ fn commit_tempo_input(state: &mut EditorState, text: &str, mult: f32) {
 /// 原版图层名是常驻 `draw_text_edit` / `draw_textarea`（内容宽 72）：超框的字符断行
 /// 到下一行，而框高只够一行，视觉上就是「只显示放得下的前缀」。非编辑态直接画文本
 /// 没有框会溢出压到音量/声像图标，这里按同样的可视宽度截断。
-fn clip_label(p: &egui::Painter, label: &str, font: &egui::FontId, max_w: f32) -> String {
+pub(crate) fn clip_label(
+    p: &egui::Painter,
+    label: &str,
+    font: &egui::FontId,
+    max_w: f32,
+) -> String {
     if p.layout_no_wrap(label.to_owned(), font.clone(), Color32::WHITE)
         .size()
         .x
@@ -762,6 +788,226 @@ fn clip_label(p: &egui::Painter, label: &str, font: &egui::FontId, max_w: f32) -
         }
     }
     chars[..lo].iter().collect()
+}
+
+/// 原版 `control_draw.gml:1456-1566` 的参考音频行。
+/// 调用方已按 [`EditorState::shows_reference_row`] 保证「已加载参考音频」，所以行内
+/// 不再判一遍（原版整段都在 `reference_audio >= 0` 那个 `if` 里）。
+/// 名称格额外承担「打开/更换」的文件框入口：打包版把工具栏上那个加载按钮注释掉了
+/// （`control_draw.gml:2093-2109`），原版只剩 文件→导入→参考音频…… 一条路。
+fn reference_row(
+    state: &mut EditorState,
+    ui: &mut Ui,
+    bank: &Bank,
+    th: &Theme,
+    at: Pos2,
+    cell: f32,
+    u: f32,
+    idle: bool,
+    layout: &PanelLayout,
+) {
+    let config = state.reference.clone();
+    let x1 = at.x + X1;
+    let y1 = at.y;
+    let gs = glyph_scale(cell);
+    bank.layer_row(
+        ui.painter(),
+        pos2(x1, y1),
+        layout.strip_w(),
+        layout.name_box_right() - X1,
+        cell + 2.0 * u,
+        th,
+    );
+    let font = crate::fonts::scaled(
+        if th.kind == ThemeKind::Fluent {
+            main_font()
+        } else {
+            small_font()
+        },
+        u,
+    );
+    let name_rect = Rect::from_min_size(
+        pos2(x1 + 10.0, y1 + 10.0 * u),
+        vec2(
+            (at.x + layout.name_box_right() - x1 - 10.0).max(0.0),
+            13.0 * u,
+        ),
+    );
+    let name = ui.interact(name_rect, Id::new("reference_name"), Sense::click());
+    let h = ui
+        .painter()
+        .layout_no_wrap("Reference".to_owned(), font.clone(), Color32::WHITE)
+        .size()
+        .y;
+    if let Some(dy) = text_y(cell, u, 10.0, h) {
+        ui.painter().text(
+            pos2(x1 + 11.0, y1 + dy),
+            Align2::LEFT_TOP,
+            tr("Reference", "参考音频"),
+            font,
+            th.text,
+        );
+    }
+    if idle && name.clicked() {
+        let dialog =
+            FileDialog::for_action(DialogAction::LoadReference, config.path.as_ref(), None);
+        state.request_file_dialog(dialog);
+    }
+    name.on_hover_text(tr("Load or replace reference audio", "打开或更换参考音频"));
+
+    let bx = |base: f32| at.x + layout.buttons_x() + (base - 126.0);
+    let by = y1 + (cell - BTN_SIZE * gs) * 0.5;
+    let drag = state.reference_drag;
+    for (offset, x, current) in [
+        (false, layout.vol_x(), config.volume as f32),
+        (true, layout.pan_x(), config.offset_ms as f32),
+    ] {
+        if (offset && !layout.pan) || (!offset && !layout.volume) {
+            continue;
+        }
+        let hit = Rect::from_min_size(
+            pos2(at.x + x, y1 + 5.0 * u),
+            vec2(GLYPH_HIT_W, GLYPH_HIT_H * u),
+        );
+        let resp = ui.interact(hit, Id::new(("reference_drag", offset)), Sense::drag());
+        let active = resp.hovered() || resp.dragged();
+        let value = drag
+            .filter(|d| d.offset == offset)
+            .map(|d| d.raw)
+            .unwrap_or(current);
+        let gy = y1 + (cell - GLYPH_H * gs) * 0.5;
+        if offset {
+            bank.stereo_glyph(
+                ui.painter(),
+                pos2(at.x + x + 3.0 + GLYPH_W * (1.0 - gs) * 0.5, gy),
+                PAN_CENTER,
+                active,
+                th,
+                gs,
+                state.canvas_hires,
+            );
+        } else {
+            bank.volume_glyph(
+                ui.painter(),
+                pos2(at.x + x + 3.0 + GLYPH_W * (1.0 - gs) * 0.5, gy),
+                value.clamp(0.0, 100.0) as u8,
+                active,
+                th,
+                gs,
+                state.canvas_hires,
+            );
+        }
+        if active {
+            let text = if offset {
+                format!("{} ms", value.round() as i64)
+            } else {
+                format!("{}%", value.floor() as u8)
+            };
+            let small = crate::fonts::scaled(small_font(), u);
+            let h = ui
+                .painter()
+                .layout_no_wrap(text.clone(), small.clone(), Color32::WHITE)
+                .size()
+                .y;
+            if let Some(dy) = text_y(cell, u, 18.0, h) {
+                ui.painter().text(
+                    pos2(at.x + x + 10.0, y1 + dy),
+                    Align2::CENTER_TOP,
+                    text,
+                    small,
+                    th.text,
+                );
+            }
+        }
+        if idle && resp.drag_started() {
+            state.reference_drag = Some(ReferenceDrag { offset, raw: value });
+        }
+        if let Some(mut d) = state.reference_drag.filter(|d| d.offset == offset) {
+            if resp.dragged() && !resp.drag_started() {
+                d.raw -= resp.drag_delta().y / u;
+                if d.offset {
+                    state.reference.offset_ms = d.raw.round() as i64;
+                } else {
+                    d.raw = d.raw.clamp(0.0, 100.0);
+                    state.reference.volume = if ui.input(|i| i.modifiers.shift) {
+                        d.raw.round() as u8
+                    } else {
+                        (d.raw / 10.0).floor() as u8 * 10
+                    };
+                }
+                state.reference_drag = Some(d);
+            }
+            if resp.drag_stopped() {
+                state.reference_drag = None;
+            }
+        }
+        resp.clone().on_hover_cursor(CursorIcon::ResizeNorth);
+        if offset {
+            resp.on_hover_text(tr(
+                "Reference offset (click and drag to change)",
+                "参考音频偏移（拖拽来修改）",
+            ));
+        } else {
+            resp.on_hover_text(tr(
+                "Reference volume (click and drag to change)",
+                "参考音频音量（拖拽来修改）",
+            ));
+        }
+    }
+
+    if idle
+        && bank.layer_button(
+            ui,
+            pos2(bx(126.0), by),
+            layer_icon::LOCK,
+            u32::MAX,
+            tr("Mute reference audio", "静音参考音频"),
+            config.option == 0,
+            th,
+            gs,
+            state.canvas_hires,
+        )
+    {
+        state.emit(Command::SetReferenceMode(if config.option == 0 {
+            2
+        } else {
+            0
+        }));
+    }
+    if idle
+        && bank.layer_button(
+            ui,
+            pos2(bx(144.0), by),
+            layer_icon::SOLO,
+            u32::MAX,
+            tr("Solo reference audio", "独奏参考音频"),
+            config.option == 1,
+            th,
+            gs,
+            state.canvas_hires,
+        )
+    {
+        state.emit(Command::SetReferenceMode(if config.option == 1 {
+            2
+        } else {
+            1
+        }));
+    }
+    if idle
+        && bank.layer_button(
+            ui,
+            pos2(bx(162.0), by),
+            layer_icon::REMOVE,
+            u32::MAX,
+            tr("Remove reference audio", "删除参考音频"),
+            false,
+            th,
+            gs,
+            state.canvas_hires,
+        )
+    {
+        state.emit(Command::RemoveReferenceAudio);
+    }
 }
 
 /// 一行图层。`at` 是原版行底左上角（已含 `ROW_LIFT`）。
@@ -1575,6 +1821,55 @@ fn show_layers_text(state: &mut EditorState, ui: &mut Ui) {
             }
             if !mono {
                 text_drag_value(state, ui, idx, true, layer.stereo, 200);
+            }
+        });
+    }
+    if !state.fullscreen {
+        ui.horizontal(|ui| {
+            if ui.button(tr("Reference", "参考音频")).clicked() {
+                let dialog = FileDialog::for_action(
+                    DialogAction::LoadReference,
+                    state.reference.path.as_ref(),
+                    None,
+                );
+                state.request_file_dialog(dialog);
+            }
+            if let Some(path) = &state.reference.path {
+                ui.label(path.display().to_string());
+                let mut volume = state.reference.volume as u8;
+                if ui
+                    .add(egui::DragValue::new(&mut volume).range(0..=100))
+                    .changed()
+                {
+                    state.reference.volume = volume;
+                }
+                let mut offset = state.reference.offset_ms;
+                if ui.add(egui::DragValue::new(&mut offset)).changed() {
+                    state.reference.offset_ms = offset;
+                }
+                if ui
+                    .selectable_label(state.reference.option == 0, tr("Mute", "静音"))
+                    .clicked()
+                {
+                    state.emit(Command::SetReferenceMode(if state.reference.option == 0 {
+                        2
+                    } else {
+                        0
+                    }));
+                }
+                if ui
+                    .selectable_label(state.reference.option == 1, tr("Solo", "独奏"))
+                    .clicked()
+                {
+                    state.emit(Command::SetReferenceMode(if state.reference.option == 1 {
+                        2
+                    } else {
+                        1
+                    }));
+                }
+                if ui.button(tr("Remove", "删除")).clicked() {
+                    state.emit(Command::RemoveReferenceAudio);
+                }
             }
         });
     }

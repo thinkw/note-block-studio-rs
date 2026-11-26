@@ -11,7 +11,7 @@ use nbs_core::{Macro, TremoloFade};
 
 use crate::commands::Command;
 use crate::state::{
-    AccentPick, DialogAction, EditorState, Flag, ModalQueue, PrefsFolder, WindowKind,
+    AccentPick, DialogAction, EditorState, Flag, ModalButtons, ModalQueue, PrefsFolder, WindowKind,
 };
 use crate::theme::{Theme, ThemeKind};
 use crate::tr;
@@ -160,7 +160,6 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::FileOpen => file_dialog(state, ui, false),
             WindowKind::FileSave => file_dialog(state, ui, true),
             WindowKind::LayerRename(layer) => layer_rename(state, ui, *layer),
-            WindowKind::ConfirmNew => confirm_new(state, ui),
             WindowKind::AudioExport => audio_export_window(state, ui),
             WindowKind::AudioSettings => audio_settings_window(state, ui),
             WindowKind::MidiImport => midi_import_window(state, ui),
@@ -197,13 +196,15 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
     }
 }
 
-/// 原版的 `message()` / `question()`：一次一个，答完才轮到下一个，
-/// 中途答「否」丢掉整个队列。窗口右上角的叉等价于「确定」/「否」。
+/// 原版的 `message()` / `question()` / `message_yesnocancel()`：一次一个，答完才轮到
+/// 下一个。普通问答答「否」丢掉整个队列；三键问句的「否 / 取消」由两条续作区分。
+/// 窗口右上角的叉等价于「确定」/「否」/「取消」。
 fn show_modal(state: &mut EditorState, ctx: &Context) {
     let Some(modal) = state.modals.items.front().cloned() else {
         return;
     };
     let mut answer = None;
+    let mut cancel = false;
     let mut open = true;
     egui::Window::new(modal.title)
         .id(egui::Id::new("nbs_modal"))
@@ -220,24 +221,50 @@ fn show_modal(state: &mut EditorState, ctx: &Context) {
             let row_h = ui.spacing().interact_size.y;
             ui.allocate_ui(egui::vec2(ui.available_width(), row_h), |ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if modal.yes_no {
-                        if ui.button(tr("No", "否")).clicked() {
-                            answer = Some(false);
+                    // 从右往左摆，落到屏幕上就是原版 MessageBox 的「是 / 否 / 取消」。
+                    match modal.buttons {
+                        ModalButtons::Ok => {
+                            if ui.button(tr("OK", "确定")).clicked() {
+                                answer = Some(true);
+                            }
                         }
-                        if ui.button(tr("Yes", "是")).clicked() {
-                            answer = Some(true);
+                        ModalButtons::YesNo => {
+                            if ui.button(tr("No", "否")).clicked() {
+                                answer = Some(false);
+                            }
+                            if ui.button(tr("Yes", "是")).clicked() {
+                                answer = Some(true);
+                            }
                         }
-                    } else if ui.button(tr("OK", "确定")).clicked() {
-                        answer = Some(true);
+                        ModalButtons::YesNoCancel => {
+                            if ui.button(tr("Cancel", "取消")).clicked() {
+                                cancel = true;
+                            }
+                            if ui.button(tr("No", "否")).clicked() {
+                                answer = Some(false);
+                            }
+                            if ui.button(tr("Yes", "是")).clicked() {
+                                answer = Some(true);
+                            }
+                        }
                     }
                 });
             });
         });
-    if answer.is_none() && !open {
-        // 点右上角的叉：确认框算「确定」，提问框算「否」。
-        answer = Some(!modal.yes_no);
+    if answer.is_none() && !cancel && !open {
+        // 点右上角的叉：确认框算「确定」，提问框算「否」，三键框算「取消」。
+        // 叉是系统标题栏画的，反编译 `libdlgmod` 看不到它的返回值，这里取的是
+        // Windows 上「Esc = 取消」这条惯例（取证与依据见
+        // `.work/songtabs-20261123/gml/message_yesnocancel_返回值.md`，用户要求 #131）。
+        if modal.buttons == ModalButtons::YesNoCancel {
+            cancel = true;
+        } else {
+            answer = Some(modal.buttons == ModalButtons::Ok);
+        }
     }
-    if let Some(yes) = answer {
+    if cancel {
+        state.emit(Command::CancelModal);
+    } else if let Some(yes) = answer {
         state.emit(Command::AnswerModal(yes));
     }
 }
@@ -770,7 +797,7 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
             false,
         );
         if resp.clicked() {
-            state.emit(Command::OpenDialog(DialogAction::OpenSong));
+            state.emit(Command::OpenReplacingFirst(None));
         }
     }
     // :204-249 最近歌曲。b 换到 x1+320，行高 16，表头只随第一行画一次。
@@ -829,7 +856,7 @@ fn greeting(state: &mut EditorState, ui: &mut Ui) {
         );
         if resp.clicked() {
             if r.path.is_file() {
-                state.emit(Command::OpenPath(r.path.clone()));
+                state.emit(Command::OpenReplacingFirst(Some(r.path.clone())));
             } else {
                 state.modals = ModalQueue::message(
                     tr("Error", "错误"),
@@ -2468,45 +2495,113 @@ fn playback_effects_window(state: &mut EditorState, ui: &mut Ui) {
         .weak(),
     );
     ui.separator();
-    let ids = state.fx.stack.ids();
+    let ids = state.fx.lock().stack.ids();
     for id in ids {
-        let Some(info) = state.fx.stack.info(id) else {
+        let Some(info) = state.fx.lock().stack.info(id) else {
             continue;
         };
         let kind = match info.surface {
             crate::fx::Surface::Stage => tr("stage", "舞台"),
             crate::fx::Surface::Overlay => tr("overlay", "叠加"),
         };
-        let mut on = state.fx.stack.is_active(id);
+        let mut on = state.fx.lock().stack.is_active(id);
         if ui
             .checkbox(&mut on, format!("{}（{kind}）", info.name))
             .changed()
         {
-            if let Some(msg) = state.fx.stack.set_active(id, on) {
+            let msg = state.fx.lock().stack.set_active(id, on);
+            if let Some(msg) = msg {
                 state.set_message(msg);
             }
         }
-        if state.fx.stack.is_active(id) {
+        if on {
             ui.indent(id, |ui| {
-                state.fx.stack.settings_ui(ui, id);
+                state.fx.lock().stack.settings_ui(ui, id);
             });
         }
     }
     ui.separator();
-    let mut opacity = state.fx.stack.opacity();
+    let mut opacity = state.fx.lock().stack.opacity();
     if ui
         .add(
             egui::Slider::new(&mut opacity, 0.05..=1.0).text(tr("Overlay opacity", "叠加透明度")),
         )
         .changed()
     {
-        state.fx.stack.set_opacity(opacity);
+        state.fx.lock().stack.set_opacity(opacity);
     }
     // 降级说明（方块贴图没扒到之类）：只在特效真开着时提。
-    let notes = state.fx.stack.notes();
+    let notes = state.fx.lock().stack.notes();
     for note in notes {
         let color = ui.visuals().warn_fg_color;
         ui.colored_label(color, note);
+    }
+
+    ui.separator();
+    let mut window_changed = false;
+    let mut detached = state.prefs.fx_window;
+    if ui
+        .checkbox(
+            &mut detached,
+            tr("Detach effects to a floating window", "分离到特效浮窗"),
+        )
+        .changed()
+    {
+        window_changed = true;
+    }
+    state.prefs.fx_window = detached;
+    if detached {
+        let mut transparent = state.prefs.fx_window_transparent;
+        if ui
+            .checkbox(
+                &mut transparent,
+                tr("Transparent client background", "客户区背景透明"),
+            )
+            .changed()
+        {
+            window_changed = true;
+        }
+        state.prefs.fx_window_transparent = transparent;
+        let mut always_on_top = state.prefs.fx_window_always_on_top;
+        if ui
+            .checkbox(
+                &mut always_on_top,
+                tr("Always keep floating window on top", "浮窗始终在前台"),
+            )
+            .changed()
+        {
+            window_changed = true;
+        }
+        state.prefs.fx_window_always_on_top = always_on_top;
+        let mut passthrough = state.prefs.fx_window_mouse_passthrough;
+        if ui
+            .checkbox(
+                &mut passthrough,
+                tr("Mouse click-through", "鼠标穿透（Click-through）"),
+            )
+            .changed()
+        {
+            window_changed = true;
+        }
+        state.prefs.fx_window_mouse_passthrough = passthrough;
+        ui.label(
+            RichText::new(tr(
+                "The floating window appears in the taskbar. Drag its title bar to move it, \
+                 drag the border to resize, or close it to return effects to the main window. \
+                 Transparent background affects only the empty client area; the title bar, \
+                 taskbar and window frame stay opaque. Click-through passes mouse input to \
+                 the application below; turn it off here to drag or resize again.",
+                "浮窗会出现在 Windows 任务栏。拖标题栏移动、拖边框缩放；\
+                 关闭浮窗后特效回主窗。透明背景只影响琴键和特效之外的客户区，\
+                 标题栏、任务栏和窗口边框保持不透明。鼠标穿透会把点击交给下方应用；\
+                 要重新拖动或缩放，请在这里取消穿透。",
+            ))
+            .small()
+            .weak(),
+        );
+    }
+    if window_changed {
+        state.emit(Command::SavePreferences);
     }
 }
 
@@ -2616,6 +2711,34 @@ fn external_control_window(state: &mut EditorState, ui: &mut Ui) {
             ),
         );
     }
+    ui.separator();
+
+    // 用户要求 #131：后台写是独立能力，默认关；播放/文件/任务仍只认当前标签。
+    let mut parked_write = state.prefs.control_allow_parked_write;
+    if ui
+        .checkbox(
+            &mut parked_write,
+            tr(
+                "Allow document edits in background tabs (expect_rev required)",
+                "允许修改后台标签（必须带 expect_rev）",
+            ),
+        )
+        .changed()
+    {
+        state.prefs.control_allow_parked_write = parked_write;
+        if listening {
+            state.control_change = Some(crate::control::ControlChange::Reapply);
+        }
+        state.save_prefs();
+    }
+    ui.label(
+        RichText::new(tr(
+            "Off by default. This never enables playback, file, or job operations on a background tab.",
+            "默认关闭。播放、文件和任务操作仍然只能在当前标签上执行。",
+        ))
+        .small()
+        .weak(),
+    );
     ui.separator();
 
     // 危险动作单独一条，不跟「启用」联动：勾了启用绝不顺手把「替你退出程序」也打开。
@@ -5432,21 +5555,6 @@ fn event_stopper_window(state: &mut EditorState, ui: &mut Ui, tick: u32, layer: 
         state.emit(c);
         state.emit(Command::CloseWindow);
     }
-}
-
-fn confirm_new(state: &mut EditorState, ui: &mut Ui) {
-    ui.label(tr(
-        "The current song has unsaved changes. Create a new song anyway?",
-        "当前歌曲有未保存的修改，确定新建？",
-    ));
-    ui.horizontal(|ui| {
-        if ui.button(tr("OK", "确定")).clicked() {
-            state.emit(Command::ConfirmNew);
-        }
-        if ui.button(tr("Cancel", "取消")).clicked() {
-            state.emit(Command::CloseWindow);
-        }
-    });
 }
 
 /// 原版 `draw_window_about.gml`：580×410。左半是 logo + 「Note Block Studio」+ 版本

@@ -7,7 +7,7 @@ use std::time::Instant;
 use egui::{Context, Pos2};
 use nbs_audio::{AudioEngine, CpalEngine, SoundBank, DEFAULT_MAX_VOICES, EXTENDED_MAX_VOICES};
 use nbs_core::model::Note;
-use nbs_core::Document;
+use nbs_core::{Document, SelectionNote};
 use nbs_io::datapack::DatapackOptions;
 use nbs_io::image_export::ImageOptions;
 use nbs_io::midi::MidiImportOptions;
@@ -212,7 +212,6 @@ pub enum WindowKind {
     FileOpen,
     FileSave,
     LayerRename(u32),
-    ConfirmNew,
     AudioExport,
     AudioSettings,
     DatapackExport,
@@ -304,7 +303,6 @@ impl WindowKind {
             Self::FileOpen => tr("Open Song", "打开歌曲"),
             Self::FileSave => tr("Save Song", "保存歌曲"),
             Self::LayerRename(_) => tr("Rename layer", "重命名图层"),
-            Self::ConfirmNew => tr("New song", "新建歌曲"),
             Self::AudioExport => tr("Audio Export", "音频导出"),
             Self::AudioSettings => tr("Audio Settings", "音频设置"),
             // 原版 `draw_window_datapack_export.gml:13`：CN "导出数据包"。
@@ -392,13 +390,25 @@ pub enum MidiMenu {
     PercPitch(usize),
 }
 
-/// 原版的 `message()` / `question()` 模态框。`yes_no` 对应 `question()`，
-/// 答「否」会丢掉整个待弹队列（即 `calculate_size()` 返回 0，不打开导出窗口）。
+/// 原版三种弹窗的按钮组：`message()` 只有确定、`question()` 是/否、
+/// `message_yesnocancel()` 是/否/取消。第三键的返回值是从出货二进制里反汇编
+/// 确认的（是 = 1 / 否 = 0 / 取消 = -1，见
+/// `.work/songtabs-20261123/gml/message_yesnocancel_返回值.md`），所以「取消」
+/// 和「保存失败」在原版里是同一个值，都表示这条路作废。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModalButtons {
+    Ok,
+    YesNo,
+    YesNoCancel,
+}
+
+/// 原版的 `message()` / `question()` / `message_yesnocancel()` 模态框。
+/// `YesNo` 答「否」会丢掉整个待弹队列（即 `calculate_size()` 返回 0，不打开导出窗口）。
 #[derive(Clone, Debug)]
 pub struct Modal {
     pub title: &'static str,
     pub text: String,
-    pub yes_no: bool,
+    pub buttons: ModalButtons,
 }
 
 /// 一组待弹的模态框，队列走完后执行 `then`。
@@ -406,6 +416,75 @@ pub struct Modal {
 pub struct ModalQueue {
     pub items: std::collections::VecDeque<Modal>,
     pub then: Option<Command>,
+    /// 只有带「否」按钮的问句用得上：答「否」也要继续走，但走的是另一条路。
+    /// 原版 `close_song` 里「否」= 不保存、照关（`confirm` 返回 0，不 < 0），
+    /// 和答「是」的「先保存再关」不是一件事，所以得分开挂（用户要求 #131）。
+    pub then_no: Option<Command>,
+}
+
+/// 关标签进行中的挂起状态（用户要求 #131）。
+///
+/// 原版 `close_song(sid)` 从头到尾是阻塞的：先把要关的那首摆上台，问完再切回
+/// 原来那首，最后才真正销毁。端口里「先保存」这一步可能弹原生文件选择框，
+/// 一帧完不了，所以得把「正在关哪首 / 关完切回哪首」记下来，等对话框回来接着走。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingClose {
+    /// 正在关闭的那首。
+    pub id: crate::tabs::SongId,
+    /// 问之前站在台前的那一首（原版 `previous_song`）：问完先切回它，再销毁。
+    /// 要关的就是它时两者相同，切回去是空操作。
+    pub previous: Option<crate::tabs::SongId>,
+}
+
+/// 欢迎窗 / 启动文件的 `load_song(..., replace = 1)`：先替换第 1 个标签，再载入新歌。
+#[derive(Clone, Debug)]
+pub struct PendingReplace {
+    pub target: crate::tabs::SongId,
+    pub previous: Option<crate::tabs::SongId>,
+    /// `None` = 还在等用户从打开框选文件。
+    pub path: Option<PathBuf>,
+}
+
+/// 标签条右键菜单的现场（用户要求 #131）。
+#[derive(Clone, Copy, Debug)]
+pub struct TabMenu {
+    pub id: crate::tabs::SongId,
+    pub pos: Pos2,
+}
+
+/// 标签拖拽现场（原版 `tabdrag` / `draggingtab` / `tabdest`）。
+#[derive(Clone, Copy, Debug)]
+pub struct TabDrag {
+    pub id: crate::tabs::SongId,
+    pub press_x: f32,
+    pub grab_offset: f32,
+    pub x: f32,
+    pub target: usize,
+    pub dragging: bool,
+    pub span: f32,
+}
+
+/// 原版两条退出链：`request_quit()` 可取消；原生窗口关闭走 `control_end()`，不能取消。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuitMode {
+    Request,
+    NativeClose,
+}
+
+/// 逐标签退出流程的现场（用户要求 #131）。
+#[derive(Clone, Debug)]
+pub struct QuitState {
+    pub mode: QuitMode,
+    /// 原版从 `array_length(songs) - 1` 往下问，快照保证中途换标签也不丢顺序。
+    pub tabs: Vec<crate::tabs::SongId>,
+    pub next: usize,
+    pub previous: Option<crate::tabs::SongId>,
+    /// 原版 `clear_backups`：只要有一首需要恢复，就保留所有标签的已有备份。
+    pub clear_backups: bool,
+    /// 开始退出前按每首当时的文件名记下备份路径；另存为改文件名后仍要删原备份。
+    pub backup_paths: Vec<PathBuf>,
+    /// 无文件名或重试另存为时，文件框还没回来。
+    pub awaiting_save: Option<crate::tabs::SongId>,
 }
 
 /// 最近歌曲一条（原版 `recent_song[a]` + `recent_song_time[a]`）。
@@ -438,11 +517,45 @@ impl ModalQueue {
             items: [Modal {
                 title,
                 text: text.into(),
-                yes_no: true,
+                buttons: ModalButtons::YesNo,
             }]
             .into_iter()
             .collect(),
             then: Some(then),
+            then_no: None,
+        }
+    }
+
+    /// 两键问句，但「否」也要继续走另一条路（原生关闭时「不保存」仍会退出）。
+    pub fn yes_no(title: &'static str, text: &str, then: Command, then_no: Command) -> Self {
+        Self {
+            items: [Modal {
+                title,
+                text: text.into(),
+                buttons: ModalButtons::YesNo,
+            }]
+            .into_iter()
+            .collect(),
+            then: Some(then),
+            then_no: Some(then_no),
+        }
+    }
+
+    /// 单个原版 `message_yesnocancel(正文, 标题)`：三键问句。
+    /// 「是」走 `then`、「否」走 `then_no`（不保存也要办完的那条路）、
+    /// 「取消」两条都不走 —— 原版的 `close_song` 只在 `decision < 0` 时中止，
+    /// 而取消键返回的就是 -1。
+    pub fn yes_no_cancel(title: &'static str, text: &str, then: Command, then_no: Command) -> Self {
+        Self {
+            items: [Modal {
+                title,
+                text: text.into(),
+                buttons: ModalButtons::YesNoCancel,
+            }]
+            .into_iter()
+            .collect(),
+            then: Some(then),
+            then_no: Some(then_no),
         }
     }
 
@@ -452,11 +565,12 @@ impl ModalQueue {
             items: [Modal {
                 title,
                 text: text.into(),
-                yes_no: false,
+                buttons: ModalButtons::Ok,
             }]
             .into_iter()
             .collect(),
             then: None,
+            then_no: None,
         }
     }
 }
@@ -555,6 +669,7 @@ pub enum DialogAction {
     ImportSchematic,
     /// 原版「导入背景图片」：`menu_click.gml:57-58` / `:367-368`，选完直接 `wallpaper_init(temppath)`。
     ImportBackground,
+    LoadReference,
     /// 原版 `datapack_getextranotes()`：保存随程序那份「更多音符盒」资源包。
     SaveExtraNotes,
     /// 原版「修改」按钮：`get_save_filename_ext("", "选择歌曲文件夹", songfolder, "歌曲文件夹")`。
@@ -612,6 +727,7 @@ impl DialogAction {
             // 原版背景图对话框一次放行 png/jpg/jpeg（`menu_click.gml:57`）；
             // 这里的单扩展名只用于兜底列表和默认名，多个扩展名在 `accepts` 里放行。
             Self::ImportBackground => "png",
+            Self::LoadReference => "ogg",
             // 原版：get_save_filename_ext("Resource pack (*.zip)|*.zip", "更多音符盒", "", …)。
             Self::SaveExtraNotes => "zip",
             // 原版这两个对话框的过滤器是空字符串：不做过滤，选的是目录。
@@ -714,6 +830,7 @@ impl FileDialog {
         let ext = self.ext;
         let image_exts = matches!(self.action, DialogAction::ImportBackground);
         let audio_exts = matches!(self.action, DialogAction::TranscriptionAudio);
+        let reference_exts = matches!(self.action, DialogAction::LoadReference);
         let midi_exts = matches!(self.action, DialogAction::TranscriptionMidi);
         let transcription_file = matches!(self.action, DialogAction::TranscriptionModel | DialogAction::TranscriptionSoundFont);
         self.entries = std::fs::read_dir(&self.dir)
@@ -730,6 +847,10 @@ impl FileDialog {
                     || got == ext
                     || (image_exts && matches!(got, "png" | "jpg" | "jpeg"))
                     || (audio_exts && matches!(got.to_ascii_lowercase().as_str(), "wav" | "flac" | "mp3" | "ogg" | "m4a" | "aac" | "aif" | "aiff" | "opus" | "webm"))
+                    || (reference_exts
+                        && nbs_audio::reference::REFERENCE_EXTENSIONS
+                            .iter()
+                            .any(|want| got.eq_ignore_ascii_case(want)))
                     || (midi_exts && matches!(got.to_ascii_lowercase().as_str(), "mid" | "midi"))
                     || (transcription_file && got.eq_ignore_ascii_case(ext))
             })
@@ -891,6 +1012,10 @@ impl FileDialog {
                     "*.png;*.jpg;*.jpeg",
                 )],
             ),
+            DialogAction::LoadReference => (
+                tr("Load reference audio", "打开参考音频"),
+                vec![filter("Audio files", &reference_globs().join(";"))],
+            ),
             // 原版 `datapack_getextranotes.gml:6`：过滤器名和标题都是照抄的这一句。
             DialogAction::SaveExtraNotes => (
                 tr("Save extra notes for data pack", "为数据包保存音符盒资源包"),
@@ -971,6 +1096,15 @@ fn filter(name: &str, patterns: &str) -> FilterSpec {
     }
 }
 
+/// 参考音频认哪些后缀只有一处定义（`nbs_audio::reference::REFERENCE_EXTENSIONS`）：
+/// 对话框过滤器、内置浏览器的放行表和 `decode` 的分派表都读它，多列一个就是让人选完报错。
+fn reference_globs() -> Vec<String> {
+    nbs_audio::reference::REFERENCE_EXTENSIONS
+        .iter()
+        .map(|ext| format!("*.{ext}"))
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct LayerDrag {
     pub index: u32,
@@ -980,6 +1114,13 @@ pub struct LayerDrag {
     pub value: u8,
     /// 未量化的累加值，对应原版 `dragvol` / `dragstereo`：
     /// 慢慢拖也能越过 10 的台阶，量化只影响落到模型上的那一份。
+    pub raw: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ReferenceDrag {
+    /// false = 音量，true = 偏移（毫秒）。
+    pub offset: bool,
     pub raw: f32,
 }
 
@@ -1069,7 +1210,19 @@ pub fn tap_clock_ms() -> i64 {
 }
 
 pub struct EditorState {
+    /// 台前标签的文档：真身住在 [`Self::store`] 的槽位里，这份是切标签时交换过来的
+    /// （见 [`Self::switch_tab`]）。现有 658 处 `state.doc` 引用照旧直接用。
     pub doc: Document,
+    /// 原版全局 `selection_copied`：复制内容不属于某一首，切标签也保留。
+    pub clipboard: Vec<SelectionNote>,
+    pub clipboard_text: String,
+    /// 原版 `current_song.reference_*`：台前这一首的参考音频配置。
+    pub reference: crate::tabs::ReferenceConfig,
+    reference_sync_key: Option<(u64, Option<PathBuf>, u8, i64, bool)>,
+    /// 原版 `global.songs[]` + `global.song` 的替身：歌曲标签槽位表。
+    pub store: crate::tabs::SongStore,
+    /// 原版台前 `song.song_backup_path`：切标签时与文档一起收装。
+    pub song_backup_path: Option<PathBuf>,
     pub viewport: Viewport,
     /// 原版 `hires`（`control_create.gml:110`：`window_scale > 1.25`，绝对倍率含
     /// DPI）：Fluent 主题的画布精灵换 4 倍源图。每帧随 `apply_ui_scale` 更新。
@@ -1147,6 +1300,20 @@ pub struct EditorState {
     /// 等着被原生选择器处理的请求。在帧外（`raw_input_hook`）取走，避免在 egui 帧内
     /// 起一个会泵消息的模态框。
     pub pending_dialog: Option<FileDialog>,
+    /// 关标签走到「先保存」这一步时挂住的现场（用户要求 #131）。
+    pub pending_close: Option<PendingClose>,
+    /// 欢迎窗 / 启动文件替换首标签的现场（用户要求 #131）。
+    pub pending_replace: Option<PendingReplace>,
+    /// 标签条右键菜单；点外或选完一条即清。
+    pub tab_menu: Option<TabMenu>,
+    /// 标签拖拽；起拖后屏蔽其它输入，松手才重排。
+    pub tab_drag: Option<TabDrag>,
+    /// 「关闭其他/右侧歌曲」的逐首确认队列；取消则整组作废。
+    pub pending_close_set: Option<Vec<crate::tabs::SongId>>,
+    /// 原版 `quit_prompting` + 逐标签确认现场；`None` 表示当前没在退出确认。
+    pub quit: Option<QuitState>,
+    /// 原版 `quit_confirmed`：确认全部完成后，`control_end` 不再重复问。
+    pub quit_confirmed: bool,
     /// 原版 `recent_song[0..10]`（路径 + 打开时间）。
     pub recent_files: Vec<RecentPath>,
     /// 开机更新检查的共享结果。没开「检查更新」时状态一直是 0（原版 `update_http = -1`）。
@@ -1179,6 +1346,7 @@ pub struct EditorState {
     pub event_edit: EventEditDraft,
     /// 图层音量/声像拖拽预览（松开时才提交一条历史，避免拖拽产生几百条）。
     pub layer_drag: Option<LayerDrag>,
+    pub reference_drag: Option<ReferenceDrag>,
     /// 原版 `obj_removeeff` 实例：删除音符时格子上的淡出边框。
     /// `rel` 是相对当前视口左上格的格坐标（原版存 `xx - starta`，不随滚动移动）。
     pub remove_effects: Vec<RemoveFx>,
@@ -1267,8 +1435,9 @@ pub struct EditorState {
     pub schematic_command_plan: Option<nbs_io::mc_export::Plan>,
     /// 原版 `sch_command_signature`：方案缓存签名，歌/选项任一变化即失效。
     pub schematic_command_signature: String,
-    /// 原版 `string(o.songs[o.song])` 的替代：开档 / 新建才变化的会话号，
-    /// 内容编辑不变（与原版实例 id 语义一致）。
+    /// 原版 `string(o.songs[o.song])` 的替代：台前标签的缓存身份，号由
+    /// [`crate::tabs::SongStore`] 发，开档 / 新建 / 整首替换才变，内容编辑不变
+    /// （与原版实例 id 语义一致）。
     pub song_session: u64,
     /// 原版 `obj_controller.log_strs`：导出报告等日志行（暂不落盘文件）。
     pub log_strs: Vec<String>,
@@ -1379,7 +1548,8 @@ pub struct EditorState {
     pub wallpaper: Option<crate::background::Wallpaper>,
     /// 播放特效那一坨：烘出来的时间轴、乐器方块表、贴图、启用中的特效。
     /// 缓存键是 `song.rev`（和 [`Self::compat_rev`]、[`Self::audio_rev`] 同一套路）。
-    pub fx: crate::fx::FxState,
+    /// 主窗与分离浮窗共享同一份；两个窗口同一帧只允许一个绘制。
+    pub fx: crate::fx::SharedFx,
 }
 
 impl Default for EditorState {
@@ -1522,8 +1692,21 @@ impl EditorState {
             .map(nbs_io::MidiGmTable::from_persist)
             .unwrap_or_default();
 
+        // 刀 0：文档住进标签槽位表，台前再取一份出来。`state.doc` 于是是「台前镜像」，
+        // 缓存身份 `song_session` 由槽位表发号（原版每首曲子是一个独立 obj_song 实例）。
+        let mut store = crate::tabs::SongStore::new();
+        let first_tab = store.insert(Document::with_song(song));
+        let doc = store.lift(first_tab).expect("刚入槽的标签一定取得到文档");
+        let song_session = store.active_session();
+
         let mut state = Self {
-            doc: Document::with_song(song),
+            doc,
+            clipboard: Vec::new(),
+            clipboard_text: String::new(),
+            reference: crate::tabs::ReferenceConfig::default(),
+            reference_sync_key: None,
+            store,
+            song_backup_path: None,
             viewport,
             canvas_hires: false,
             hide_note_text: false,
@@ -1561,6 +1744,13 @@ impl EditorState {
             control_change: None,
             control_info: None,
             pending_dialog: None,
+            pending_close: None,
+            pending_replace: None,
+            tab_menu: None,
+            tab_drag: None,
+            pending_close_set: None,
+            quit: None,
+            quit_confirmed: false,
             recent_files,
             update_check: std::sync::Arc::new(std::sync::Mutex::new(UpdateCheck::default())),
             update_question: false,
@@ -1574,6 +1764,7 @@ impl EditorState {
             editing_layer_name: None,
             event_edit: EventEditDraft::default(),
             layer_drag: None,
+            reference_drag: None,
             remove_effects: Vec::new(),
             arpeggio_pattern: String::new(),
             stagger_pattern: String::new(),
@@ -1616,7 +1807,7 @@ impl EditorState {
             disc_chest_error: None,
             schematic_command_plan: None,
             schematic_command_signature: String::new(),
-            song_session: 1,
+            song_session,
             log_strs: Vec::new(),
             schematic_stats: nbs_io::schematic::SchematicStats::default(),
             schematic_tab: 0,
@@ -1671,12 +1862,12 @@ impl EditorState {
             rainbow_hue: 0.0,
             background_accent: false,
             wallpaper: None,
-            fx: crate::fx::FxState::default(),
+            fx: crate::fx::SharedFx::default(),
         };
         // 特效：存档里留过痕迹（启用列表或参数快照）才把快照灌回各特效，
         // 出厂那两份空表不动，设置文件也就不多写这两段。
         if !state.prefs.fx_active.is_empty() || !state.prefs.fx.is_empty() {
-            state.fx.stack.sync_prefs(&mut state.prefs);
+            state.fx.lock().stack.sync_prefs(&mut state.prefs);
         }
         state.enter_startup();
         // 迁移那趟在设备表里认不出的老名字：在状态栏说一句，别让人以为还在自己
@@ -1693,6 +1884,288 @@ impl EditorState {
             ));
         }
         state
+    }
+
+    /// 切到某个歌曲标签（原版 `set_song.gml`）：台前这份的界面状态收回自己槽位，
+    /// 目标标签的那份装上台，播放与交互层按原版归零，音色库重挂。
+    /// 标签不存在、或它本来就在台前时返回 false，且什么都不动。
+    pub fn switch_tab(&mut self, id: crate::tabs::SongId) -> bool {
+        self.enter_tab(id)
+    }
+
+    /// 装/收 [`crate::tabs::TabUi`]：台前这一份界面状态 ↔ 标签槽里那一份。
+    ///
+    /// 两端都写成解构赋值，以后往 [`crate::tabs::TabUi`] 加字段会同时在这两个
+    /// 函数编译不过，防止只收不装（用户要求 #131）。
+    fn grab_tab_ui(&self) -> crate::tabs::TabUi {
+        crate::tabs::TabUi {
+            brush: self.current,
+            scroll_tick: self.viewport.start_tick,
+            scroll_layer: self.viewport.start_layer,
+            playhead: self.audio.clock().position(),
+            section_exists: self.section_exists,
+            section_start: self.section_start,
+            section_end: self.section_end,
+            insbox_start: self.insbox_start,
+            midi_file: self.midi_file.clone(),
+        }
+    }
+
+    fn apply_tab_ui(&mut self, ui: crate::tabs::TabUi) {
+        let crate::tabs::TabUi {
+            brush,
+            scroll_tick,
+            scroll_layer,
+            playhead,
+            section_exists,
+            section_start,
+            section_end,
+            insbox_start,
+            midi_file,
+        } = ui;
+        self.current = brush;
+        self.viewport.start_tick = scroll_tick;
+        self.viewport.start_layer = scroll_layer;
+        // 原版 `marker_pos` 是每首一份的播放头。走 set_marker 而不是直接写，
+        // 顺带把 `metronome_played = -1` 一起复位（set_song.gml:8）。
+        self.set_marker(playhead);
+        self.section_exists = section_exists;
+        self.section_start = section_start;
+        self.section_end = section_end;
+        self.insbox_start = insbox_start;
+        self.midi_file = midi_file;
+    }
+
+    /// 原版 `set_song.gml:6-19` 落在播放器/交互层的那几行。
+    ///
+    /// `playing = 0` 用 [`crate::audio::AudioEngine::stop`]（它就是 `clock.pause()`，
+    /// 保留播放头，位置由 [`EditorState::apply_tab_ui`] 另行装回）。
+    /// `fade` / `metronome` / `realstereo` 在原版是全局量、每次切标签都归零：
+    /// 端口对应 `flags.fade`、`prefs.metronome`、`prefs.mono`，照原样清掉。
+    /// 这三个开关落盘的是各自的 `use_fading` / `use_stereo`（`load_settings.gml:45/69`），
+    /// 本次归零不会改掉下次开机的默认值；节拍器原版根本不持久化。
+    fn clear_tab_transients(&mut self) {
+        self.audio.stop();
+        self.tempo_drag = None; // tempodrag = 10（出厂值 = 没在拖）
+        self.tempo_input = None;
+        self.flags.fade = false;
+        self.prefs.metronome = false;
+        self.prefs.mono = false;
+        self.interaction.mode = crate::interaction::DragMode::None; // timeline_pressa = -1
+        self.layer_drag = None; // dragvolb = 0
+        self.reference_drag = None;
+    }
+
+    /// 切标签的完整动作：文档、缓存身份、界面状态、播放/交互归零、音色库重挂。
+    /// 台前已经站着它时返回 false；台上空着（启动、刚关空）走 `lift` 那条。
+    fn enter_tab(&mut self, id: crate::tabs::SongId) -> bool {
+        if self.store.active() == Some(id) {
+            return false;
+        }
+        let outgoing = self.store.active();
+        let ui_out = self.grab_tab_ui();
+        let moved = match outgoing {
+            Some(_) => self.store.swap_active(id, &mut self.doc),
+            None => match self.store.lift(id) {
+                Some(doc) => {
+                    self.doc = doc;
+                    true
+                }
+                None => false,
+            },
+        };
+        if !moved {
+            return false;
+        }
+        if let Some(prev) = outgoing {
+            self.store.set_ui(prev, ui_out);
+            self.store
+                .set_backup_path(prev, self.song_backup_path.clone());
+            self.store.set_reference(prev, self.reference.clone());
+        }
+        self.song_backup_path = self.store.backup_path(id).cloned();
+        self.reference = self.store.reference(id).cloned().unwrap_or_default();
+        self.song_session = self.store.active_session();
+        self.clear_tab_transients();
+        self.invalidate_derived_caches();
+        let ui_in = self.store.ui(id).cloned().unwrap_or_default();
+        self.apply_tab_ui(ui_in);
+        self.prepare_audio();
+        self.activate_reference_audio();
+        self.apply_audio_prefs();
+        self.sync_loop_params();
+        self.sync_section_stop();
+        true
+    }
+
+    /// 原版 `set_song` 把 `current_song.reference_audio` 重挂到输出流。
+    pub fn activate_reference_audio(&mut self) {
+        self.reference_sync_key = None;
+        match self.reference.path.as_ref() {
+            Some(path) => {
+                if let Err(error) = self.audio.load_reference_audio(path) {
+                    self.reference.path = None;
+                    self.set_message(error);
+                }
+            }
+            None => self.audio.clear_reference_audio(),
+        }
+    }
+
+    pub fn sync_reference_audio(&mut self) {
+        if self.reference.path.is_none() {
+            self.reference_sync_key = None;
+            return;
+        }
+        let playing = self.audio.is_playing();
+        let force = self.reference_sync_key.as_ref().is_none_or(|prev| {
+            prev.0 != self.song_session
+                || prev.1.as_ref() != self.reference.path.as_ref()
+                || prev.2 != self.reference.option
+                || prev.3 != self.reference.offset_ms
+                || prev.4 != playing
+        });
+        if force {
+            self.reference_sync_key = Some((
+                self.song_session,
+                self.reference.path.clone(),
+                self.reference.option,
+                self.reference.offset_ms,
+                playing,
+            ));
+        }
+        if !playing && !force {
+            return;
+        }
+        let seconds = self.audio.position_seconds();
+        self.audio.sync_reference_audio(
+            playing,
+            seconds,
+            self.reference.offset_ms,
+            self.reference.volume,
+            self.prefs.master_volume as f32,
+            self.reference.option,
+            force,
+        );
+    }
+
+    /// 新建一个标签并切过去（原版 `new_song` / `open_song_nbs` / `open_midi` /
+    /// `open_schematic` 四条入口都是「建实例压进 `songs[]` + `reset_add` + `set_song」）。
+    ///
+    /// `reset_add.gml:24-33` 里端口有对应物的那几条一并做掉：关前台窗
+    /// （`window = 0`）、收右键菜单（`global.popup = 0`）、钢琴滚动节流
+    /// （`delay = 0`）、图层选中项（`sb_sel = 0`）。`text_exists` / `insselect` /
+    /// `insedit` / `key_edit` / `editline` 端口没有对应字段（无歌词功能），不复刻。
+    pub fn open_tab(&mut self, doc: Document) -> crate::tabs::SongId {
+        self.open_tab_at(self.store.len(), doc)
+    }
+
+    /// 在原版 `array_insert(songs, index, create(obj_song))` 的位置开标签并切过去。
+    pub fn open_tab_at(&mut self, index: usize, doc: Document) -> crate::tabs::SongId {
+        let id = self.store.insert_at(index, doc);
+        let opened = self.enter_tab(id);
+        debug_assert!(opened, "刚入槽的标签一定切得过去");
+        self.window = None;
+        self.window_prev = None;
+        self.context_menu = None;
+        self.piano_scroll_delay = 0.0;
+        self.sb_sel = 0;
+        id
+    }
+
+    /// 关掉一个标签：状态搬移（原版 `close_song.gml` 的后半段）。
+    ///
+    /// 保存确认、备份文件删除都不在这里——那是调用方（`Command::CloseTab`
+    /// 与退出流程）的事，对应原版 `close_song` 前半段的 `confirm` 和
+    /// `backup_delete_own_tab`。原版关任何一首都要经过两次 `set_song`
+    /// （`close_song.gml:15/27`），所以**关后台标签同样停播**、清 fade/metronome/mono；
+    /// 台前的文档和它的界面状态则一格不动。
+    /// 标签不存在时返回 `was_active: false` 且不动任何状态。
+    pub fn close_tab(&mut self, id: crate::tabs::SongId) -> crate::tabs::Closed {
+        let out = self.store.close(id, &mut self.doc);
+        if !out.was_active {
+            self.clear_tab_transients();
+            self.apply_audio_prefs();
+            return out;
+        }
+        self.song_session = self.store.active_session();
+        self.clear_tab_transients();
+        self.invalidate_derived_caches();
+        match out.active {
+            Some(next) => {
+                self.song_backup_path = self.store.backup_path(next).cloned();
+                self.reference = self.store.reference(next).cloned().unwrap_or_default();
+                let ui = self.store.ui(next).cloned().unwrap_or_default();
+                self.apply_tab_ui(ui);
+            }
+            // 表关空了：`store.close` 已经把台前换成一首空曲，界面状态跟着回出厂值。
+            None => {
+                self.song_backup_path = None;
+                self.reference = crate::tabs::ReferenceConfig::default();
+                let ui = crate::tabs::TabUi::default();
+                self.apply_tab_ui(ui);
+            }
+        }
+        self.prepare_audio();
+        self.activate_reference_audio();
+        self.apply_audio_prefs();
+        self.sync_loop_params();
+        self.sync_section_stop();
+        out
+    }
+
+    /// 最后一个标签关掉后补一首空曲（原版 `close_song.gml:27-29`：表空了就
+    /// `new_song()`）。闸门是 `!nonew || noconfirm`：Ctrl+W / 菜单关标签（`close_song(sid)`）
+    /// 和退出流程（`close_song(i, 1, 1)`）都成立，只有欢迎窗和启动文件那条
+    /// 「替换第 1 个标签」的路（`close_song(0, 1)`）不补——那条路紧接着就载入新歌。
+    /// [`crate::tabs::SongStore::close`] 已经换上一首空曲在台前（不在表里，
+    /// `active_tab()` 是 `None`），这里把它搬进槽位表、台上再放一首。
+    pub fn refill_tab_after_last_close(&mut self) -> Option<crate::tabs::SongId> {
+        if !self.store.is_empty() {
+            return self.store.active();
+        }
+        let blank = std::mem::replace(&mut self.doc, Document::new());
+        Some(self.open_tab(blank))
+    }
+
+    /// 新开一个标签，放在标签条末尾、**不在台前**（原版 `open_song_nbs.gml:50-53`
+    /// 就是建实例压进 `songs[]`，切过去是另一步 `set_song`）。
+    pub fn push_tab(&mut self, song: nbs_core::model::Song) -> crate::tabs::SongId {
+        self.store.insert(Document::with_song(song))
+    }
+
+    /// 台前标签（原版 `global.song`）。
+    pub fn active_tab(&self) -> Option<crate::tabs::SongId> {
+        self.store.active()
+    }
+
+    /// 读后台标签的文档（刀 5 的 MCP 跨标签读走这里）；台前那份就是 `self.doc`。
+    pub fn parked_doc(&self, id: crate::tabs::SongId) -> Option<&Document> {
+        self.store.parked_doc(id)
+    }
+
+    /// 台前这一首被整份换掉了（新建 / 载入 / 导入）：换一个新的缓存身份。
+    /// 替掉原来散在五处的 `state.song_session += 1`。
+    pub fn reissue_session(&mut self) {
+        if let Some(session) = self.store.reissue_session() {
+            self.song_session = session;
+        }
+    }
+
+    /// 作废所有按 `doc.song.rev` 缓存的派生态，下一次比较必然落空重算。
+    ///
+    /// 缓存不随标签走是实测定的：整表重算兼容性只要 0.71 ms（10 万音符），而事件表
+    /// 和特效烘焙本来就是「下次播放才建」——切标签即停播，常驻只会把内存乘以标签数
+    /// （特效时间轴 + 事件表实测 4.0 + 1.5 MiB/首）。理由与代价见
+    /// `.work/songtabs-20261123/正式方案.md` 3.2 / 3.4（用户要求 #131）。
+    fn invalidate_derived_caches(&mut self) {
+        // u64::MAX 撞不上：`rev` 只会从当前值往上加，加不到 2^64。
+        self.audio_rev = u64::MAX;
+        self.compat_rev = u64::MAX;
+        // NAN 和任何数比都不相等，`refresh_compat` 的速度档同样落空。
+        self.compat_tempo = f32::NAN;
+        self.schematic_command_signature.clear();
+        self.fx.lock().invalidate_bake();
     }
 
     /// 原版 `control_create.gml` 结尾的开机流程：捐赠横幅按静音到期日重新亮出、
@@ -1809,6 +2282,10 @@ impl EditorState {
             }
             PickResult::Cancelled => {
                 self.file_dialog = None;
+                // 关标签正等在这个框上时，取消 = 原版 `save_song` 返回 0 = `confirm`
+                // 返回 -1：这一首不关，切回原来那首（用户要求 #131）。
+                // 只有 `Command::CloseTab` 会置挂起记录，别的请求取消时这条是空操作。
+                self.emit(Command::DialogCancelled);
             }
             PickResult::Unavailable => {
                 // 自绘兜底框会把原窗口顶掉，记住顶掉的是哪个，选完放回去。
@@ -1858,8 +2335,14 @@ impl EditorState {
         let cmds = std::mem::take(&mut self.pending);
         for cmd in cmds {
             // 原版 `message()` / `question()` 会冻结整个游戏循环：模态队列没答完之前，
-            // 背景界面产生的命令一律丢弃，只接受「回答当前模态框」这一条。
-            if !self.modals.is_empty() && !matches!(cmd, crate::commands::Command::AnswerModal(_)) {
+            // 背景界面产生的命令一律丢弃，只接受回答当前模态框（是 / 否 / 取消）。
+            if !self.modals.is_empty()
+                && !matches!(
+                    cmd,
+                    crate::commands::Command::AnswerModal(_)
+                        | crate::commands::Command::CancelModal
+                )
+            {
                 continue;
             }
             crate::commands::dispatch(self, cmd, ctx);
@@ -2086,6 +2569,7 @@ impl EditorState {
         self.sync_section_stop();
         let _crossed = self.audio.clock_mut().update();
         let playing = self.audio.clock().is_playing();
+        self.sync_reference_audio();
         // 原版 `if (playing = 0) record = 0`：播放一停，录音自动退出。
         // 0.25（按下录音、等第一个键起播）不算「在播」，所以 armed 时不清。
         if playing {
@@ -2161,6 +2645,7 @@ impl EditorState {
         {
             self.last_autosave = Instant::now();
             if let Ok(p) = nbs_io::prefs::autosave(&self.doc.song, &self.prefs) {
+                self.song_backup_path = Some(p.clone());
                 let name = p
                     .file_name()
                     .unwrap_or_default()
@@ -2270,6 +2755,14 @@ impl EditorState {
 
     pub fn is_playing(&self) -> bool {
         self.audio.clock().is_playing()
+    }
+
+    /// 原版 `control_draw.gml:1456` 的 `current_song.reference_audio >= 0 && !fullscreen &&
+    /// show_layers`：参考音频行**只在已加载参考音频时**占一行，网格那边的分隔线、
+    /// 文件名与竖条多滚的一格都跟着这同一个判据（`:104` 的 `totalrows` 减同一项）。
+    /// `reference.path` 只在 `load_reference_audio` 成功后写入，等价于原版的句柄 `>= 0`。
+    pub fn shows_reference_row(&self) -> bool {
+        self.flags.show_layers && !self.fullscreen && self.reference.path.is_some()
     }
 
     pub fn prepare_audio(&mut self) {
@@ -2510,8 +3003,11 @@ impl EditorState {
     /// 没有启用中的特效时这三条各是一次比较，不铺表。
     pub fn refresh_fx(&mut self) {
         let include_locked = self.prefs.include_locked_in_export;
-        self.fx
-            .refresh(&self.doc.song, include_locked, &self.schematic_options);
+        self.fx.lock().refresh(
+            &self.doc.song,
+            include_locked,
+            &self.schematic_options,
+        );
     }
 
     /// 把当前会话状态同步回偏好对象。
@@ -2567,7 +3063,7 @@ impl EditorState {
             })
             .collect();
         // 特效：只写不读。用 `sync_prefs` 会把调参面板刚滑出来的值覆盖回旧快照。
-        self.fx.stack.store(&mut self.prefs);
+        self.fx.lock().stack.store(&mut self.prefs);
     }
 
     pub fn save_prefs(&mut self) {
@@ -2800,6 +3296,341 @@ fn apply_audio_prefs(audio: &mut dyn AudioEngine, p: &Preferences) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 刀 0 不变量（用户要求 #131）：切走再切回，台前那份文档整份还原——内容、
+    /// `rev`、撤销历史、脏标记、缓存身份都跟着自己的标签走，不串到隔壁那一首。
+    #[test]
+    fn switch_tab_roundtrips_the_whole_document() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = EditorState::for_test();
+        let home = st.active_tab().expect("启动就有台前标签");
+        let home_session = st.song_session;
+        st.doc.place_note(7, 0, Note::new(0, 45));
+        st.doc.song.dirty = true;
+        let home_rev = st.doc.song.rev;
+        let home_history = st.doc.history.len();
+
+        let other = st.push_tab(nbs_core::model::Song::new());
+        let other_rev = st.parked_doc(other).expect("后台标签读得到文档").song.rev;
+        assert_ne!(other, home);
+        assert_ne!(st.store.session(other), Some(home_session));
+
+        assert!(st.switch_tab(other));
+        assert_eq!(st.song_session, st.store.session(other).unwrap());
+        assert_eq!(st.doc.song.rev, other_rev);
+        assert_eq!(st.doc.history.len(), 0);
+        assert!(!st.doc.song.dirty);
+        assert!(st.doc.song.get(7, 0).is_none());
+        // 台前这一首的槽位是空的（文档在台前），槽里只剩后台那一首。
+        assert!(st.parked_doc(other).is_none());
+
+        assert!(st.switch_tab(home));
+        assert_eq!(st.song_session, home_session);
+        assert_eq!(st.doc.song.rev, home_rev);
+        assert_eq!(st.doc.history.len(), home_history);
+        assert!(st.doc.song.dirty);
+        assert_eq!(st.doc.song.get(7, 0), Some(Note::new(0, 45)));
+        assert!(st.parked_doc(home).is_none());
+        assert!(st.parked_doc(other).unwrap().song.get(7, 0).is_none());
+        // 同一首歌切回来不重演一遍：标签条顺序不变、身份不变。
+        assert_eq!(st.store.order(), &[home, other]);
+        // 台前那一首再切一次是被拒绝的（原版 `set_song` 对同一首直接返回）。
+        assert!(!st.switch_tab(home));
+        assert_eq!(st.doc.song.rev, home_rev);
+    }
+
+    /// 刀 0 不变量：两首曲子算出**同一个 `rev`** 时也不许复用上一首的派生态。
+    /// 只拿 `rev` 当键的下游有四处（右上角徽标、音频事件表、特效烘焙、声源分配方案），
+    /// 串台就是 #116 那个徽标滞后的多标签版本。
+    #[test]
+    fn switch_invalidates_caches_even_when_revs_collide() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = EditorState::for_test();
+        // 台前换成一首音域内的曲子（MC 键域 33..=57）。
+        let mut ok_song = nbs_core::model::Song::new();
+        ok_song.set(2, 0, Note::new(0, 50));
+        ok_song.recalculate();
+        st.doc.replace_song(ok_song);
+        // 后台压一首越界的，且让它和台前撞在同一个 rev 上。
+        let mut bad_song = nbs_core::model::Song::new();
+        bad_song.set(2, 0, Note::new(0, 60));
+        bad_song.set(3, 0, Note::new(0, 61));
+        bad_song.recalculate();
+        let mut bad_doc = Document::new();
+        bad_doc.replace_song(bad_song);
+        assert_eq!(bad_doc.song.rev, st.doc.song.rev);
+        let other = st.store.insert(bad_doc);
+
+        let ok_compat = st.compatibility();
+        st.sync_audio_events();
+        // 关着特效时 refresh 一帧都不烘，这里要验的是「切标签后重烘」，先打开瀑布。
+        st.fx
+            .lock()
+            .stack
+            .set_active(crate::fx::synthesia::Synthesia::ID, true);
+        st.refresh_fx();
+        assert_eq!(st.audio_rev, st.doc.song.rev);
+        assert_eq!(st.compat_rev, st.doc.song.rev);
+        assert_eq!(st.fx.lock().baked_for, (st.doc.song.rev, false));
+        assert_eq!(st.fx.lock().timeline.note_count(), 1);
+
+        assert!(st.switch_tab(other));
+        // 三处缓存打回哨兵值，而不是「rev 相等就算命中」；音频事件表是当场
+        // 重挂的（刀 1：原版 `set_song` 之后新那首要能立刻出声）。
+        assert_eq!(st.compat_rev, u64::MAX);
+        assert_eq!(st.fx.lock().baked_for, (u64::MAX, false));
+        assert!(st.schematic_command_signature.is_empty());
+        assert_eq!(st.audio_rev, st.doc.song.rev, "切标签没重挂到新那首");
+        // 重算拿到的是新那首的结论。
+        assert_eq!(st.doc.song.iter_notes().count(), 2, "换过来的文档");
+        st.refresh_fx();
+        assert_eq!(
+            st.fx.lock().timeline.note_count(),
+            2,
+            "切标签之后特效还在画上一首的音符"
+        );
+        assert_ne!(st.compatibility(), ok_compat, "徽标沿用了上一首的判定");
+        assert_eq!(st.compat, 0);
+    }
+
+    /// 刀 1（用户要求 #131）：每首曲子那份界面状态跟着自己的标签走。
+    /// 画笔、滚动位置、区间、乐器面板滚动、MIDI 文件名、播放头——切走要收回槽里，
+    /// 切回要一格不差装回来；中间那一首拿到的是出厂值，不是上一首的。
+    #[test]
+    fn switch_tab_roundtrips_the_per_tab_ui_state() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = EditorState::for_test();
+        let home = st.active_tab().unwrap();
+        st.current = Note::new(7, 60);
+        st.viewport.start_tick = 40;
+        st.viewport.start_layer = 3;
+        st.section_exists = true;
+        st.section_start = 4;
+        st.section_end = 9;
+        st.insbox_start = 21;
+        st.midi_file = "demo.mid".into();
+        st.set_marker(12.5);
+
+        let other = st.push_tab(nbs_core::model::Song::new());
+        assert!(st.switch_tab(other));
+        // 台上换成出厂值（原版新歌曲就是刚 create 出来的 obj_song）。
+        assert_eq!(st.current, Note::default());
+        assert_eq!((st.viewport.start_tick, st.viewport.start_layer), (0, 0));
+        assert!(!st.section_exists);
+        assert_eq!((st.section_start, st.section_end), (0, 0));
+        assert_eq!(st.insbox_start, 0);
+        assert!(st.midi_file.is_empty());
+        assert_eq!(st.audio.clock().position(), 0.0);
+        // home 那一份是收进它自己的槽位，不是塞给刚上台那一首。
+        let parked = st.store.ui(home).unwrap().clone();
+        assert_eq!(parked.brush, Note::new(7, 60));
+        assert_eq!(parked.scroll_tick, 40);
+        assert_eq!(parked.midi_file, "demo.mid");
+        assert_eq!(st.store.ui(other).unwrap().playhead, 0.0);
+
+        assert!(st.switch_tab(home));
+        assert_eq!(st.current, Note::new(7, 60));
+        assert_eq!((st.viewport.start_tick, st.viewport.start_layer), (40, 3));
+        assert_eq!(
+            (st.section_exists, st.section_start, st.section_end),
+            (true, 4, 9)
+        );
+        assert_eq!(st.insbox_start, 21);
+        assert_eq!(st.midi_file, "demo.mid");
+        assert_eq!(st.audio.clock().position(), 12.5);
+    }
+
+    /// 刀 1：切标签 = 原版 `set_song.gml:6-19`。播放停、播放头保留，
+    /// 速度拖拽 / 淡出 / 节拍器 / 单声道 / 标尺按住 / 层音量拖拽全部归零，
+    /// 音色库换成新那首的（用 `clock().tempo()` 观察，prepare 会跟着 song 重设）。
+    #[test]
+    fn switch_tab_stops_playback_and_rehooks_audio() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = EditorState::for_test();
+        let home = st.active_tab().unwrap();
+        st.doc.song.meta.tempo = 1.0;
+        // 摆个靠后的音，歌曲长度盖过下面的播放头，免得起播时先被弹回 0 列。
+        st.doc.place_note(30, 0, Note::new(0, 45));
+        st.flags.fade = true;
+        st.prefs.metronome = true;
+        st.prefs.mono = true;
+        st.tempo_drag = Some(2.0);
+        st.tempo_input = Some("2".into());
+        st.interaction.mode = crate::interaction::DragMode::PressTimeline { pressa: 3 };
+        st.layer_drag = Some(LayerDrag {
+            index: 0,
+            stereo: false,
+            value: 100,
+            raw: 100.0,
+        });
+        let other = {
+            let mut s = nbs_core::model::Song::new();
+            s.meta.tempo = 2.5;
+            s.set(1, 0, Note::new(0, 45));
+            s.recalculate();
+            st.push_tab(s)
+        };
+        let home_pos = 5.0;
+        st.set_marker(home_pos);
+        st.begin_playback();
+        assert!(st.is_playing());
+
+        assert!(st.switch_tab(other));
+        assert!(!st.is_playing(), "原版切标签必停播");
+        assert_eq!(st.audio.clock().tempo(), 2.5, "音色库还挂在上一首");
+        assert_eq!(st.audio.clock().position(), 0.0, "另一首的播放头是自己的");
+        assert!(!st.flags.fade);
+        assert!(!st.prefs.metronome);
+        assert!(!st.prefs.mono);
+        assert_eq!(st.tempo_drag, None);
+        assert_eq!(st.tempo_input, None);
+        assert!(matches!(
+            st.interaction.mode,
+            crate::interaction::DragMode::None
+        ));
+        assert!(st.layer_drag.is_none());
+
+        // 切回上一首：停播不变（原版如此），但播放头回到离开时那一格。
+        assert!(st.switch_tab(home));
+        assert!(!st.is_playing());
+        assert_eq!(st.audio.clock().position(), home_pos);
+        assert_eq!(st.audio.clock().tempo(), 1.0);
+    }
+
+    /// 刀 1：关后台标签——台前那一份文档和它的界面状态一格不动，
+    /// 但原版经过两次 `set_song`，所以播放照旧停、fade/节拍器/单声道照旧清。
+    #[test]
+    fn closing_a_background_tab_stops_playback_but_keeps_the_stage() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = EditorState::for_test();
+        let home = st.active_tab().unwrap();
+        st.doc.place_note(4, 0, Note::new(0, 45));
+        st.current = Note::new(9, 50);
+        st.viewport.start_tick = 12;
+        st.midi_file = "keep.mid".into();
+        let back = st.push_tab(nbs_core::model::Song::new());
+        st.flags.fade = true;
+        st.prefs.metronome = true;
+        st.begin_playback();
+
+        let out = st.close_tab(back);
+        assert_eq!(
+            out,
+            crate::tabs::Closed {
+                active: Some(home),
+                was_active: false
+            }
+        );
+        assert_eq!(st.active_tab(), Some(home));
+        assert_eq!(st.doc.song.get(4, 0), Some(Note::new(0, 45)));
+        assert_eq!(st.current, Note::new(9, 50));
+        assert_eq!(st.viewport.start_tick, 12);
+        assert_eq!(st.midi_file, "keep.mid");
+        assert_eq!(st.song_session, st.store.session(home).unwrap());
+        assert!(!st.is_playing());
+        assert!(!st.flags.fade);
+        assert!(!st.prefs.metronome);
+        // 关掉的号再也读不出来，标签条顺序里也没有了。
+        assert!(st.parked_doc(back).is_none());
+        assert_eq!(st.store.order(), &[home]);
+    }
+
+    /// 刀 1：关台前标签落在原版那条下标规则选出的邻居身上，装的是邻居那份界面
+    /// 状态；关到最后一首时台前换成一首空曲、界面回出厂值（补不补标签由调用方定）。
+    #[test]
+    fn closing_the_active_tab_restores_the_neighbour() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = EditorState::for_test();
+        let a = st.active_tab().unwrap();
+        // 台前是开机那首演示曲，给它一枚好认的标记，下面用它认「台上摆的是哪一首」。
+        st.doc.place_note(40, 7, Note::new(0, 45));
+        st.current = Note::new(1, 40);
+        let b = {
+            let mut s = nbs_core::model::Song::new();
+            s.set(41, 7, Note::new(0, 45));
+            s.recalculate();
+            st.push_tab(s)
+        };
+        assert!(st.switch_tab(b));
+        st.current = Note::new(2, 50);
+        st.viewport.start_tick = 7;
+
+        let out = st.close_tab(b);
+        assert_eq!(
+            out,
+            crate::tabs::Closed {
+                active: Some(a),
+                was_active: true
+            }
+        );
+        assert_eq!(st.active_tab(), Some(a));
+        assert_eq!(st.song_session, st.store.session(a).unwrap());
+        assert_eq!(st.current, Note::new(1, 40), "装回来的是邻居那份画笔");
+        assert_eq!(st.viewport.start_tick, 0);
+        assert_eq!(st.doc.song.get(40, 7), Some(Note::new(0, 45)));
+        assert_eq!(st.doc.song.get(41, 7), None, "被关那首的文档该整份消失");
+        assert_eq!(st.audio_rev, st.doc.song.rev);
+        assert!(!st.is_playing());
+
+        // 关到没有标签：台前是一首空曲，标签条空、身份归零。
+        let out = st.close_tab(a);
+        assert_eq!(
+            out,
+            crate::tabs::Closed {
+                active: None,
+                was_active: true
+            }
+        );
+        assert!(st.store.is_empty());
+        assert_eq!(st.active_tab(), None);
+        assert_eq!(st.song_session, 0);
+        assert_eq!(st.doc.song.total_blocks, 0);
+        assert_eq!(st.current, Note::default());
+        // 关一个不存在的号不动任何状态。
+        let out = st.close_tab(b);
+        assert_eq!(
+            out,
+            crate::tabs::Closed {
+                active: None,
+                was_active: false
+            }
+        );
+    }
+
+    /// 刀 1：`open_tab` = 原版四条入口共用的「建实例 + `reset_add` + `set_song`」。
+    /// 新标签上台、进标签条末尾，前台窗和右键菜单被 `reset_add` 关掉。
+    #[test]
+    fn open_tab_stages_the_new_song_and_clears_transient_ui() {
+        let _prefs = crate::isolate_prefs();
+        let mut st = EditorState::for_test();
+        let home = st.active_tab().unwrap();
+        st.window = Some(WindowKind::Properties);
+        st.window_prev = Some(WindowKind::Properties);
+        st.sb_sel = 3;
+        st.piano_scroll_delay = 0.5;
+        st.viewport.start_tick = 12;
+        let home_session = st.song_session;
+        let mut song = nbs_core::model::Song::new();
+        song.set(6, 0, Note::new(0, 45));
+        song.recalculate();
+        let opened = st.open_tab(Document::with_song(song));
+
+        assert_eq!(st.active_tab(), Some(opened));
+        assert_eq!(st.store.order(), &[home, opened]);
+        assert_eq!(st.song_session, st.store.session(opened).unwrap());
+        assert_ne!(st.song_session, home_session, "新标签要和上一首分清身份");
+        assert_eq!(st.doc.song.get(6, 0), Some(Note::new(0, 45)));
+        assert_eq!(st.audio_rev, st.doc.song.rev);
+        assert_eq!(st.window, None);
+        assert_eq!(st.window_prev, None);
+        assert!(st.context_menu.is_none());
+        assert_eq!(st.piano_scroll_delay, 0.0);
+        assert_eq!(st.sb_sel, 0);
+        // 上一首的界面状态留在自己槽里，没有跟着上新台。
+        assert_eq!(st.store.ui(home).unwrap().scroll_tick, 12);
+        assert_eq!(st.viewport.start_tick, 0);
+        assert_eq!(st.current, Note::default());
+    }
 
     /// 原版 `update_window_caption.gml`：播放器标题 = 歌名 + " - Player Mode"，
     /// 无歌名退回文件名主干。
@@ -3046,6 +3877,41 @@ mod tests {
         assert_eq!(spec.filters[0].patterns, "*.zip");
         assert!(pack.save, "原版是 get_save_filename_ext");
         assert!(!pack.start_dir, "原版第 3 个参数是空串，起始目录交给系统记");
+    }
+
+    /// 参考音频认哪些后缀只有一处定义：原生过滤器的通配符和内置浏览器的放行表都从
+    /// `nbs_audio::reference::REFERENCE_EXTENSIONS` 生成，解码侧的用例
+    /// （nbs-audio 的 `every_advertised_extension_really_decodes`）保证列出来的真解得开。
+    #[test]
+    fn reference_dialog_offers_every_supported_extension() {
+        let _cn = crate::LangGuard::set(1);
+        let dir = std::env::temp_dir().join(format!("nbs_ref_dir_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut expected = Vec::new();
+        for ext in nbs_audio::reference::REFERENCE_EXTENSIONS {
+            let path = dir.join(format!("take.{ext}"));
+            std::fs::write(&path, b"x").unwrap();
+            expected.push(path);
+        }
+        std::fs::write(dir.join("take.txt"), b"x").unwrap();
+        expected.sort();
+
+        let dialog = FileDialog::for_action(
+            DialogAction::LoadReference,
+            Some(&dir.join("take.mp3")),
+            None,
+        );
+        let spec = dialog.picker_spec();
+        assert_eq!(spec.title, "打开参考音频");
+        for ext in nbs_audio::reference::REFERENCE_EXTENSIONS {
+            assert!(
+                spec.filters[0].patterns.contains(&format!("*.{ext}")),
+                "原生过滤器漏了 {ext}：{}",
+                spec.filters[0].patterns
+            );
+        }
+        assert_eq!(dialog.entries, expected, "浏览器放行表要跟着清单走");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// 兼容性窗口那两行的判据：档位表必须和原版一模一样，

@@ -17,19 +17,23 @@
 
 pub mod blockrow;
 pub mod keyboard;
+pub mod panstack;
 pub mod stage;
 pub mod synthesia;
 pub mod tiles;
 pub mod timeline;
+pub mod window;
 
 use egui::{Color32, Context, Id, LayerId, Order, Painter, Rect, TextureHandle, Ui};
 use nbs_core::model::Song;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use keyboard::{KeyboardLayout, BLACK_LIFT};
 use stage::Frame;
 use timeline::FxTimeline;
-use tiles::{fallback_color, instrument_color, BlockTiles, InstrumentBlocks, NotePalette};
+use tiles::{
+    fallback_color, instrument_color, BlockTiles, InstrumentBlocks, NotePalette, TileLook,
+};
 
 /// 特效画在哪一层。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +76,8 @@ pub struct FxInput {
     pub accent: Color32,
     /// 主界面编辑区那一块的底色（`theme.grid_bg`）：舞台特效想「和编辑区同色」就取这里。
     pub backdrop: Color32,
+    /// 分离浮窗的通用透明背景：舞台不铺整块底色，音符与琴键仍照常画。
+    pub transparent: bool,
     /// 这一帧可画的区域：舞台给中央面板那块，叠加给整个窗口内容区。
     pub area: Rect,
     pub keyboard: Option<KeyboardLayout>,
@@ -95,6 +101,8 @@ pub struct FxContext<'a> {
     pub accent: Color32,
     /// 主界面编辑区的底色（`FxInput::backdrop`），舞台底色跟着主题走时用。
     pub backdrop: Color32,
+    /// 浮窗通用透明背景；主窗路径恒为 false。
+    pub transparent: bool,
     /// 可画区域。舞台 = 中央面板那块；叠加 = 整个窗口。
     pub area: Rect,
     /// 底部钢琴栏的摆放。钢琴栏关掉时是 `None`，舞台特效自己 `KeyboardLayout::fit`。
@@ -110,7 +118,7 @@ pub struct FxContext<'a> {
 }
 
 /// 一个播放特效。实现者只产图元，不碰 `Painter`。
-pub trait PlaybackEffect {
+pub trait PlaybackEffect: Send + Sync {
     fn info(&self) -> EffectInfo;
 
     /// 产出这一帧的图元。`out` 已被底座清空并按 z 序排好前面的特效。
@@ -166,6 +174,7 @@ impl FxStack {
         let effects: Vec<Box<dyn PlaybackEffect>> = vec![
             Box::<synthesia::Synthesia>::default(),
             Box::<blockrow::BlockRow>::default(),
+            Box::<panstack::PanStack>::default(),
         ];
         Self {
             effects,
@@ -381,6 +390,19 @@ impl FxStack {
         }
     }
 
+    /// 按 id 把一份参数快照灌进某个特效，和调参面板滑出来走的是同一条 `set_params`。
+    /// 界面不调这个（面板自己可变借特效），它是给探针脚本用的：观感要对不同参数截图，
+    /// 手点太慢。id 认不出来返回 false，特效字段不动。
+    pub fn set_params(&mut self, id: &str, value: &serde_json::Value) -> bool {
+        match self.effects.iter_mut().find(|e| e.info().id == id) {
+            Some(effect) => {
+                effect.set_params(value);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// 各特效的降级说明（素材缺失之类）。
     pub fn notes(&self) -> Vec<String> {
         self.effects
@@ -410,7 +432,9 @@ impl FxStack {
     /// 舞台表面：在中央面板那块区域里画，并先铺一层底色（舞台是独占的）。
     pub fn paint_stage(&mut self, cx: &FxContext, p: &Painter) {
         self.compose(cx, Surface::Stage);
-        p.rect_filled(cx.area, 0.0, STAGE_BACKDROP);
+        if !cx.transparent {
+            p.rect_filled(cx.area, 0.0, STAGE_BACKDROP);
+        }
         stage::paint(p, &self.frame, 1.0);
     }
 
@@ -465,12 +489,14 @@ pub struct NoteBlock {
     pub unconfigured: bool,
 }
 
-/// 按导出方块表 + 贴图目录查一枚音符的方块长相。`use_tiles` 关掉时只给色。
-pub fn note_block(cx: &FxContext, instrument: u8, use_tiles: bool) -> NoteBlock {
+/// 按导出方块表 + 贴图目录查一枚音符的方块长相。`use_tiles` 关掉时只给色，
+/// `look` 决定先查方块面还是等距图（见 [`tiles::TileLook`]）：方块排/瀑布要方块面，
+/// 声道方块的摞塔要等距图。配色那条不受 `look` 影响，同一件乐器在任何特效里同色。
+pub fn note_block(cx: &FxContext, instrument: u8, use_tiles: bool, look: TileLook) -> NoteBlock {
     let has_block = cx.blocks.has_block(instrument);
     let texture = if use_tiles && has_block {
         cx.tiles
-            .and_then(|tiles| tiles.texture_for(cx.tex, cx.blocks, instrument))
+            .and_then(|tiles| tiles.texture_for(cx.tex, cx.blocks, instrument, look))
     } else {
         None
     };
@@ -504,6 +530,17 @@ pub struct FxState {
     pub palette: NotePalette,
     /// 素材目录只认一次：没扒素材时 `palette` 一直是空的，不然后每帧重扫一遍目录。
     palette_done: bool,
+}
+
+/// 主窗与分离浮窗共用的唯一一份特效状态。绘制窗口互斥，但设置、时间轴和粒子
+/// 都属于同一份对象；`Mutex` 同时满足 deferred viewport 回调的 `Send + Sync` 要求。
+#[derive(Clone, Default)]
+pub struct SharedFx(Arc<Mutex<FxState>>);
+
+impl SharedFx {
+    pub fn lock(&self) -> MutexGuard<'_, FxState> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 impl Default for FxState {
@@ -543,6 +580,12 @@ impl FxState {
     /// （凑一份要读时钟、算键盘摆放，一条都没开时不该花钱）。
     pub fn overlay_active(&self) -> bool {
         self.stack.surface_active(Surface::Overlay)
+    }
+
+    /// 换歌曲标签时作废烘焙缓存（刀 0）：下一次 [`Self::refresh`] 按新曲子重烘。
+    /// 哨兵值与「一条特效都没开」那一帧打回去的相同，不会画半帧上一首的音符。
+    pub fn invalidate_bake(&mut self) {
+        self.baked_for = (u64::MAX, false);
     }
 
     /// 每帧开头调一次：该重烘的烘掉，素材只认一次目录。
@@ -631,6 +674,7 @@ fn fx_context<'a>(
         scale: input.scale,
         accent: input.accent,
         backdrop: input.backdrop,
+        transparent: input.transparent,
         area: input.area,
         keyboard: input.keyboard,
         timeline,
@@ -687,6 +731,12 @@ mod tests {
         stack
     }
 
+    #[test]
+    fn shared_fx_is_send_and_sync_for_deferred_viewports() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<SharedFx>();
+    }
+
     const OVERLAY: EffectInfo = EffectInfo {
         id: "overlay_a",
         name: "叠加A",
@@ -722,6 +772,7 @@ mod tests {
         let ids = stack.ids();
         assert!(ids.contains(&"synthesia"), "{ids:?}");
         assert!(ids.contains(&"block_row"), "{ids:?}");
+        assert!(ids.contains(&"pan_slots"), "{ids:?}");
         // 出厂默认都不开：用户没要特效时，播放路径不该多出任何绘制。
         assert!(stack.active().is_empty());
         assert_eq!(stack.stage_id(), None);
@@ -775,6 +826,7 @@ mod tests {
             scale: 1.0,
             accent: Color32::LIGHT_GRAY,
             backdrop: STAGE_BACKDROP,
+            transparent: false,
             area: Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0)),
             keyboard: None,
             timeline: &timeline,
@@ -870,6 +922,24 @@ mod tests {
         assert_eq!(prefs.fx_opacity, 0.4);
     }
 
+    /// 探针那条路：按 id 灌参数。认不出的 id 什么都不能改，被点名的那个才动。
+    #[test]
+    fn set_params_targets_one_effect_by_id() {
+        let mut stack = FxStack::new();
+        let other = stack.effects[1].params();
+        assert!(
+            !stack.set_params("nope", &serde_json::json!({ "fall_seconds": 9.0 })),
+            "不存在的 id 不许返回 true"
+        );
+        assert!(stack.set_params("synthesia", &serde_json::json!({ "fall_seconds": 3.5 })));
+        assert_eq!(
+            stack.effects[0].params()["fall_seconds"].as_f64(),
+            Some(3.5),
+            "点名的那个得吃到新值"
+        );
+        assert_eq!(stack.effects[1].params(), other, "只该动被点名的那一个");
+    }
+
     /// 接线用的接缝：`FxInput` 里那几个数得原样进 [`FxContext`]，底座只补自己的三份数据。
     #[test]
     fn fx_input_becomes_the_effect_context() {
@@ -894,6 +964,7 @@ mod tests {
             scale: 1.25,
             accent: Color32::from_rgb(1, 2, 3),
             backdrop: STAGE_BACKDROP,
+            transparent: false,
             area: Rect::from_min_size(egui::pos2(4.0, 6.0), egui::vec2(640.0, 480.0)),
             keyboard: Some(layout),
         };
@@ -930,6 +1001,7 @@ mod tests {
             scale: 1.0,
             accent: Color32::LIGHT_GRAY,
             backdrop: STAGE_BACKDROP,
+            transparent: false,
             area,
             keyboard: None,
         };
@@ -1006,5 +1078,19 @@ mod tests {
         assert_eq!(fx.timeline.note_count(), 3, "打开特效的那一次就要补烘上");
         assert!(fx.stage_active(), "瀑布占舞台");
         assert!(!fx.overlay_active(), "瀑布不占叠加表面");
+    }
+
+    /// 贴图口径分给三条特效：方块排和瀑布的「乐器方块」用 16×16 的方块面（用户看过 Wiki
+    /// 等距图就否：「方块排不要用 wiki 上下载的方块」），等距立方体只留给声道方块的摞塔。
+    /// 钉的是各条 `draw()` 真传给 [`note_block`] 的那两个常数，不是注释。
+    #[test]
+    fn the_flat_faces_are_for_the_row_and_the_cube_only_for_the_tower() {
+        assert_eq!(blockrow::BlockRow::TILE_LOOK, TileLook::Face);
+        assert_eq!(
+            synthesia::Synthesia::TILE_LOOK,
+            blockrow::BlockRow::TILE_LOOK,
+            "瀑布的「乐器方块」就是把方块排搬过去，两边必须同一种图"
+        );
+        assert_eq!(panstack::PanStack::TILE_LOOK, TileLook::Iso);
     }
 }

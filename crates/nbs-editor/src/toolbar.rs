@@ -228,8 +228,16 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                         ));
                         ui.close_menu();
                     }
-                    // 原版「导入」子菜单的最后一项，排在还没移植的「参考音频……」之后
-                    // （control_draw.gml:1705/1801）。
+                    // 原版 v3.12 的「导入」子菜单顺序：片段 / MIDI 文件 / 参考音频 / 背景图片
+                    // （`control_draw.gml:1706` 与中文版 `:1801`）。参考音频行只在加载之后才
+                    // 出现，这条是唯一的加载入口。
+                    if ui.button(tr("Reference audio...", "参考音频……")).clicked() {
+                        state.emit(Command::OpenDialog(
+                            crate::state::DialogAction::LoadReference,
+                        ));
+                        ui.close_menu();
+                    }
+                    // 原版「导入」子菜单的最后一项（control_draw.gml:1705/1801）。
                     if ui.button(tr("Background image...", "背景图片……")).clicked() {
                         state.emit(Command::OpenDialog(
                             crate::state::DialogAction::ImportBackground,

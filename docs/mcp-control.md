@@ -95,7 +95,7 @@ set_notes ok rev=6 cells_changed=1 layers_changed=0 meta_changed=false dirty=tru
 核对「AI 会看到什么口径」不需要编辑器在场：
 
 ```bash
-nbs-mcp --names                        # 43 条工具名
+nbs-mcp --names                        # 46 条工具名
 nbs-mcp --dump-tools set_notes         # 只看一条：说明 + 入参 schema
 nbs-mcp --dump-tools set_notes --json  # 同一条的机器可读版
 ```
@@ -108,7 +108,7 @@ MCP 那一侧的 `isError`：**两层里任何一层答「不」，`isError` 都
 失败时也把整份回执原样放进 `structuredContent`，所以读完 `error.code` 再决定下一步，别接着往下写。
 
 `error.code` 是对外契约，字符串不会随便换：
-`bad_argument` / `not_found` / `locked_layer` / `rev_conflict` / `modal_open` / `window_open` / `busy` / `unsupported` / `not_allowed` / `io` / `out_of_range` / `timeout` / `closed` / `internal`。
+`bad_argument` / `not_found` / `locked_layer` / `rev_conflict` / `tab_gone` / `parked_tab_readonly` / `requires_active_tab` / `expect_required` / `needs_confirm` / `modal_open` / `window_open` / `busy` / `unsupported` / `not_allowed` / `io` / `out_of_range` / `timeout` / `closed` / `internal`。
 
 每条写操作的回执都带 `report`：`rev`、`cells_changed`、`layers_changed`、`meta_changed`、`dirty`、`history_len`。
 `cells_changed` 可能小于你给的条数——写下去和原来一样的格子不算改动。
@@ -120,9 +120,20 @@ MCP 那一侧的 `isError`：**两层里任何一层答「不」，`isError` 都
 
 - `overwrite`（`save_as` / `export`）：目标是别人的文件时必须为 true；
 - `discard_changes`（`clear_song` / `open_file` / `import_midi` / `exit`）：有未保存改动时必须为 true，这些动作连撤销历史一起丢；
-- `expect_rev`（所有写操作）：填上一次回执里的 `rev`，对不上就 `rev_conflict` 而不是覆盖掉别人刚改的。省略 = 不校验，直接覆盖当前状态；
+- `expect_rev`（写操作）：填上一次回执里的 `rev`，对不上就 `rev_conflict` 而不是覆盖掉别人刚改的。当前标签省略 = 不校验；后台标签写必填，缺了回 `expect_required`；
 - 读写目录：路径必须落在编辑器放行的目录里（设置页那栏 + `--control-dir`）；
 - 有模态框挂着时写操作回 `modal_open`（只读操作不受影响）。
+
+### 标签寻址（协议 v2）
+
+- 请求信封新增可选 `tab`。`{"id":稳定会话号}` 或 `{"index":标签条位置}` 二选一；两个都给或都不给回 `bad_argument`。省略 `tab` 的旧调用仍打当前标签。
+- `id` 只在标签关闭时失效，重排不影响；`index` 从 0 起算，重排后会指向别的标签。长期持有引用用 `id`，关闭后的引用回 `tab_gone`，不要当 `rev_conflict` 重试。
+- `list_tabs` 返回每首的 `id/index/title/filename/dirty/rev/total_blocks/song_length/layer_count` 与 `active_tab`；`switch_tab` 切标签并停播；`close_tab` 关闭指定标签。
+- `get_snapshot/get_notes/get_layers/get_selection/get_history/get_instruments` 接受 `tab`。读后台标签不切歌、不重算音频或特效；后台快照的 `playhead/playing/modal_count` 为 `null`，`active_tab` 与 `tabs` 仍描述真实标签条。
+- 后台**文档级写默认关闭**。设置页「允许修改后台标签」开启后，`set_notes/remove_cells/batch_field/transpose/select/place_selection/layer_*/set_meta/undo/redo` 可带 `tab + expect_rev` 执行；历史与撤销仍走各标签自己的 `Document`，不动当前标签的音频/特效缓存。
+- 播放、seek、文件、导入导出、任务和 `run_action` 等全局/交互操作打后台标签回 `requires_active_tab`，任何档位都不放开。
+- `close_tab` 遇到脏标签且没带 `discard:true` 时回 `needs_confirm`，不会挂一个无人回答的弹窗；明确丢弃才关闭。
+- `run_action("answer_modal", {"answer":"yes"|"no"|"cancel"})` 支持三态；旧的 `{"yes":true/false}` 仍兼容。它仍受危险动作开关约束。
 
 ## 8. 写音符的口径
 
@@ -245,16 +256,16 @@ nbs-mcp --call import_midi '{"path":"D:/out/take.mid","discard_changes":true}'
    留着它，下一问先读到的是上一问那张过期回执（旧 `rev`、旧计数），看着像答对了其实答的是过去的事；
    更坏的一版是那一答压根没来，于是每问都慢到等满 45s。
 2. 下一问从新握手开始重连。
-3. **只有只读工具会自动重发一次**。只读 = `Op::is_read_only()` 那 12 条，对应工具名：
+3. **只有只读工具会自动重发一次**。只读 = `Op::is_read_only()` 那 13 条，对应工具名：
    `ping`、`list_actions`、`get_snapshot`、`get_notes`、`get_layers`、`get_selection`、
-   `get_instruments`、`get_diagnostics`、`get_history`、`job_status`、`job_list`、`inspect_midi`。
+   `get_instruments`、`get_diagnostics`、`get_history`、`list_tabs`、`job_status`、`job_list`、`inspect_midi`。
    重发之后拿到的是新连接上现算的答案，`rev` 也是那时的；桥接会往 stderr 写一行「断过一次」，日志里翻得到。
 4. **写操作绝不自动重发**：请求可能已经落进主线程的收件箱了，重发一遍就是改两回。
    这种失败回的是 `transport`，文案会点名「没有替你重发」，并让你先用 `get_snapshot` 对一眼 `rev` 和变更量再决定要不要重放。
    连接照样重建好了，下一问站在新的那条上。
 
 `server_info` 现在当场敲一次 `ping` 再答，分两格：`bridge` 那格是桥接自己（不用编辑器在场也答得出），
-`editor` 那格是问出来的「现在接不接得住」。接不住时整条走 `transport`，所以 MCP 侧 `isError=true`、
+`editor` 那格是问出来的「现在接不接得住」，`parked_write` 是最近一次握手公布的标签能力。接不住时整条走 `transport`，所以 MCP 侧 `isError=true`、
 `--call server_info` 的退出码是 **2**（没连上）而不是 0——「面板 ready」不等于「编辑器接得住」。
 
 另外：IDE 比编辑器先启动也不会把服务顶死了。旧做法开局连不上就 `exit(2)`，客户端只看见「MCP 服务起不来」，

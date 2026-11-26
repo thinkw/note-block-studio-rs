@@ -19,6 +19,20 @@ pub struct FxNote {
     pub key: u8,
     pub instrument: u8,
     pub velocity: u8,
+    /// 音符自己的声像 0..=200（100 = 中）。
+    pub panning: u8,
+    /// 所在轨的声道 0..=200。它和 `panning` 一起才决定听到哪只耳朵，见 [`Self::audible_pan`]。
+    pub layer_stereo: u8,
+}
+
+impl FxNote {
+    /// 真正听到的声像 0..=200，直接取音频侧那条公式（轨声道非正中时把音符 pan 往中
+    /// 间拉一半），所以按它摆位置的画面和耳朵对得上。
+    ///
+    /// 不能图省事用裸 `panning`：轨声道拨到一边时，音符的 pan 会被半路吃掉。
+    pub fn audible_pan(&self) -> u8 {
+        nbs_audio::mixer::Voice::effective_pan(self.panning, self.layer_stereo)
+    }
 }
 
 /// 每列起点的时刻（秒，相对播放头 0）。
@@ -30,12 +44,20 @@ pub struct FxTimeline {
     /// 特效要靠它区分「这是哪件乐器」：方块表没配的自定义乐器在表里全是同一块石头，
     /// 只有名字能把它们分开。
     instruments: Vec<String>,
+    /// 音符表 + 秒表的内容指纹（烘的时候顺手算的）。特效想「对全曲做一次统计、结果缓存起来」
+    /// 需要一个能认「曲子还是不是那一首、速度还是不是那个速度」的凭据，见 [`Self::signature`]。
+    signature: u64,
 }
 
 impl Default for FxTimeline {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// FNV-1a 的一步。指纹只当「重算触发器」用，不当校验和：同一份输入两次算出同一个数就够。
+fn mix(signature: &mut u64, field: u64) {
+    *signature = (*signature ^ field).wrapping_mul(0x100_0000_01b3);
 }
 
 impl FxTimeline {
@@ -45,6 +67,7 @@ impl FxTimeline {
             cum: vec![0.0, 1.0],
             ticks_per_bar: 16,
             instruments: Vec::new(),
+            signature: 0,
         }
     }
 
@@ -77,6 +100,8 @@ impl FxTimeline {
                     key: ev.note.key,
                     instrument: ev.note.instrument,
                     velocity: ev.note.velocity,
+                    panning: ev.note.panning,
+                    layer_stereo: ev.layer_stereo,
                 }),
                 _ => {}
             }
@@ -95,6 +120,27 @@ impl FxTimeline {
             cum.push(t);
         }
         notes.sort_by_key(|n| (n.tick, n.layer));
+        // 内容指纹：见 [`Self::signature`]。喂进去的都是「声道方块那套全曲统计」看得见
+        // 的东西 —— 时刻和轨决定窗口滑到哪，乐器号决定合并成几格，两个声像决定落哪一槽，
+        // 出厂 tempo 和变速点决定「隔多久算断一段」（两张表都按秒判，不看列数）。
+        let mut signature = 0xcbf2_9ce4_8422_2325u64;
+        for note in &notes {
+            for field in [
+                note.tick,
+                note.layer,
+                u32::from(note.instrument),
+                u32::from(note.panning),
+                u32::from(note.layer_stereo),
+            ] {
+                mix(&mut signature, u64::from(field));
+            }
+        }
+        mix(&mut signature, notes.len() as u64);
+        mix(&mut signature, u64::from(f32::to_bits(song.meta.tempo)));
+        for (tick, tempo) in &changers {
+            mix(&mut signature, u64::from(*tick));
+            mix(&mut signature, u64::from(f32::to_bits(*tempo)));
+        }
         // 乐器名表：内置那 20 个 + 这首曲子挂的自定义乐器。越界的号后面查不到，特效按空名处理。
         let instruments = (0..(FIRST_CUSTOM_INDEX as usize + song.custom_instruments.len()))
             .map(|i| song.instrument_name(i as u8).to_string())
@@ -103,8 +149,20 @@ impl FxTimeline {
             notes,
             cum,
             ticks_per_bar,
+            signature,
             instruments,
         }
+    }
+
+    /// 整份音符表 + 秒表的指纹（FNV-1a：喂时刻/轨/乐器号/两个声像，再喂出厂 tempo 和每个变速点）。
+    ///
+    /// 键号、力度、乐器名都不进哈希：改这些不会挪动「哪一槽有几件乐器」的统计结果，
+    /// 也没改「多少列算一段」，没必要让特效那边的缓存作废。tempo 和变速点**要**进：
+    /// 声道方块那两张表（峰值、段起点）都按秒断，光折音符的话改完速度指纹不变，
+    /// 缓存会一直沿用旧速度算出来的段。**同一首曲子两次烘出来必须得同一个数**，
+    /// 所以这条只当「重算一次」的触发器，不当校验和用。
+    pub fn signature(&self) -> u64 {
+        self.signature
     }
 
     /// 音符总数，也用来判断「烘出来的表是不是空的」。
@@ -267,6 +325,57 @@ mod tests {
         assert!((tl.seconds_at(1.5) - 0.5).abs() < 1e-4);
         assert_eq!(tl.seconds_at(0.0), 0.0);
         assert_eq!(tl.note_count(), 40);
+    }
+
+    /// 指纹只认「全曲统计看得见的」字段：动声像/乐器要重算，只动音高不该。
+    #[test]
+    fn the_signature_tracks_what_the_layout_counts() {
+        let base = FxTimeline::bake(&song(), false).signature();
+        assert_eq!(FxTimeline::bake(&song(), false).signature(), base);
+
+        let mut retuned = song();
+        for t in 0..40u32 {
+            retuned.set(t, 0, note(0, 60, 0));
+        }
+        retuned.recalculate();
+        assert_eq!(
+            FxTimeline::bake(&retuned, false).signature(),
+            base,
+            "只改音高：声道方块统计不出差别，不该重扫一遍全曲"
+        );
+
+        let mut panned = song();
+        let mut swapped = song();
+        for t in 0..40u32 {
+            let mut n = note(0, 39, 0);
+            n.panning = 150;
+            panned.set(t, 0, n);
+            swapped.set(t, 0, note(1, 39, 0));
+        }
+        panned.recalculate();
+        swapped.recalculate();
+        assert_ne!(FxTimeline::bake(&panned, false).signature(), base);
+        assert_ne!(FxTimeline::bake(&swapped, false).signature(), base);
+
+        // 秒表也进指纹：声道方块那两张表都按**秒**断段/开窗，改速度不改音符。
+        let mut faster = song();
+        faster.meta.tempo = 6.0;
+        assert_ne!(
+            FxTimeline::bake(&faster, false).signature(),
+            base,
+            "改出厂 tempo 会挪动「隔多久算一段」，不该沿用旧速度烘出来的段起点表"
+        );
+
+        // 变速点自己不进音符表（`tempo_changer_applies_from_its_own_column_on` 数过 40 枚），
+        // 所以这一条只可能由秒表那几笔哈希区分开。
+        let mut shifted = song();
+        changer(&mut shifted, 20, 1, 30); // 30/15 = 2 t/s
+        assert_eq!(FxTimeline::bake(&shifted, false).note_count(), 40);
+        assert_ne!(
+            FxTimeline::bake(&shifted, false).signature(),
+            base,
+            "加一个变速点同理"
+        );
     }
 
     #[test]
@@ -470,6 +579,29 @@ mod tests {
         let tl = FxTimeline::bake(&s, false);
         assert_eq!(tl.ticks_per_bar(), 12);
         assert_eq!(tl.tick_of_bar(2), 24);
+    }
+
+    /// 声像要一起烘进来：声道方块按「听到哪只耳朵」摆位置，裸的 `note.panning` 会摆错。
+    #[test]
+    fn pan_survives_the_bake() {
+        let mut s = Song::new();
+        s.meta.tempo = 3.0;
+        // `Song::new()` 自带一条轨，声道改在它身上（再 push 就成第二条了）。
+        s.layers[0].stereo = 60;
+        let mut n = note(0, 45, 0);
+        n.panning = 140;
+        s.set(3, 0, n);
+        s.recalculate();
+        let tl = FxTimeline::bake(&s, false);
+        let baked = &tl.notes()[0];
+        assert_eq!(baked.panning, 140);
+        assert_eq!(baked.layer_stereo, 60);
+        // 轨不在正中 ⇒ 往中间拉一半：(60 + 140) / 2 = 100。
+        assert_eq!(baked.audible_pan(), 100);
+        // 轨在正中 ⇒ 原样。
+        let mut flat = s.clone();
+        flat.layers[0].stereo = 100;
+        assert_eq!(FxTimeline::bake(&flat, false).notes()[0].audible_pan(), 140);
     }
 
     #[test]

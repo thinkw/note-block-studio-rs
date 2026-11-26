@@ -272,6 +272,18 @@ pub enum Op {
     GetInstruments,
     GetDiagnostics,
     GetHistory,
+    /// 标签清单；读取不切标签。
+    ListTabs,
+    /// 切到指定标签，播放与交互按原版 set_song 归零。
+    SwitchTab {
+        tab: crate::bus::TabRef,
+    },
+    /// 关闭指定标签；脏标签必须显式 discard=true。
+    CloseTab {
+        tab: crate::bus::TabRef,
+        #[serde(default)]
+        discard: Option<bool>,
+    },
 
     // -------------------------------------------------------------- 写
     /// 批量写格子：**一次调用 = 一次撤销**。整批要么全收要么全拒（先校验后落笔）。
@@ -309,6 +321,8 @@ pub enum Op {
     },
     Select {
         target: SelectTarget,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect_rev: Option<u64>,
     },
     /// 把浮动选区落回歌曲（人用鼠标拖放，这里就是「就地落下」）。
     PlaceSelection {
@@ -349,10 +363,14 @@ pub enum Op {
     Undo {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         steps: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect_rev: Option<u64>,
     },
     Redo {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         steps: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect_rev: Option<u64>,
     },
     ClearSong {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -487,11 +505,51 @@ impl Op {
                 | Op::GetInstruments
                 | Op::GetDiagnostics
                 | Op::GetHistory
+                | Op::ListTabs
                 | Op::JobStatus { .. }
                 | Op::JobList
                 // 读文件、算导入，但既不改工程也不落盘，所以弹窗挡在中间时照样该回答。
                 | Op::InspectMidi { .. }
         )
+    }
+
+    /// 可在后台标签上执行的文档级操作；历史与撤销仍走 Document 自己的事务。
+    pub fn is_document_write(&self) -> bool {
+        matches!(
+            self,
+            Op::SetNotes { .. }
+                | Op::RemoveCells { .. }
+                | Op::BatchField { .. }
+                | Op::Transpose { .. }
+                | Op::Select { .. }
+                | Op::PlaceSelection { .. }
+                | Op::LayerAdd { .. }
+                | Op::LayerRemove { .. }
+                | Op::LayerUpdate { .. }
+                | Op::LayerMove { .. }
+                | Op::SetMeta { .. }
+                | Op::Undo { .. }
+                | Op::Redo { .. }
+        )
+    }
+
+    pub fn expect_rev(&self) -> Option<u64> {
+        match self {
+            Op::SetNotes { expect_rev, .. }
+            | Op::RemoveCells { expect_rev, .. }
+            | Op::BatchField { expect_rev, .. }
+            | Op::Transpose { expect_rev, .. }
+            | Op::Select { expect_rev, .. }
+            | Op::PlaceSelection { expect_rev, .. }
+            | Op::LayerAdd { expect_rev, .. }
+            | Op::LayerRemove { expect_rev, .. }
+            | Op::LayerUpdate { expect_rev, .. }
+            | Op::LayerMove { expect_rev, .. }
+            | Op::SetMeta { expect_rev, .. }
+            | Op::Undo { expect_rev, .. }
+            | Op::Redo { expect_rev, .. } => *expect_rev,
+            _ => None,
+        }
     }
 
     /// 只是「起一个后台任务」的操作：不改工程、不动撤销历史，所以弹窗挡在中间时

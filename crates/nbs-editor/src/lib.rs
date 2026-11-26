@@ -33,6 +33,10 @@ pub mod shortcuts;
 pub mod sound_import;
 pub mod state;
 pub mod statusbar;
+/// 原版歌曲标签条（draw_song_tabs）。
+pub mod tabbar;
+/// 歌曲标签槽位表（原版 `global.songs[]`），见模块注释。
+pub mod tabs;
 pub mod theme;
 pub mod toolbar;
 pub mod transcription;
@@ -746,8 +750,10 @@ mod gui_window_tests {
             match shape {
                 egui::Shape::Vec(v) => v.iter().for_each(|s| mesh_bboxes(s, out)),
                 egui::Shape::Mesh(m) => {
-                    let (mut mn, mut mx) =
-                        (egui::pos2(f32::MAX, f32::MAX), egui::pos2(f32::MIN, f32::MIN));
+                    let (mut mn, mut mx) = (
+                        egui::pos2(f32::MAX, f32::MAX),
+                        egui::pos2(f32::MIN, f32::MIN),
+                    );
                     for v in &m.vertices {
                         mn.x = mn.x.min(v.pos.x);
                         mn.y = mn.y.min(v.pos.y);
@@ -1038,6 +1044,22 @@ mod gui_window_tests {
     /// egui 的 `clicked` 要按下与抬起落在同一个控件，抬指单独落下不算。
     fn click_point(state: &mut EditorState, ctx: &egui::Context, at: egui::Pos2) {
         drag_between(state, ctx, at, at);
+    }
+
+    fn secondary_click_point(state: &mut EditorState, ctx: &egui::Context, at: egui::Pos2) {
+        frame_out(state, ctx, base_input());
+        frame_out(state, ctx, base_input());
+        for pressed in [true, false] {
+            let mut raw = base_input();
+            raw.events.push(egui::Event::PointerMoved(at));
+            raw.events.push(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: Default::default(),
+            });
+            frame_out(state, ctx, raw);
+        }
     }
 
     fn has_note(state: &EditorState, tick: u32, layer: u32) -> bool {
@@ -1639,11 +1661,22 @@ mod gui_window_tests {
 
         let dir = scratch("maestro");
         let out = dir.join("sheet.schem");
-        dispatch(&mut state, commands::Command::DialogConfirm(out.clone()), &ctx);
+        dispatch(
+            &mut state,
+            commands::Command::DialogConfirm(out.clone()),
+            &ctx,
+        );
         let bytes = std::fs::read(&out).expect("节目单已落盘");
         assert_eq!(&bytes[..2], &[0x1f, 0x8b], "gzip 魔数");
-        assert!(state.export_status.is_some(), "窗口里要能看到这次改写了什么");
-        assert_eq!(state.window, Some(WindowKind::MaestroExport), "导出完窗口留着");
+        assert!(
+            state.export_status.is_some(),
+            "窗口里要能看到这次改写了什么"
+        );
+        assert_eq!(
+            state.window,
+            Some(WindowKind::MaestroExport),
+            "导出完窗口留着"
+        );
         assert!(
             state.maestro_report.as_ref().unwrap().streams > 0,
             "示例歌该有声音流"
@@ -1668,7 +1701,10 @@ mod gui_window_tests {
             &ctx,
         );
         let hinted = state.export_status.clone().unwrap_or_default();
-        assert!(hinted.contains("/schem list"), "中文名该在状态区提示改名：{hinted}");
+        assert!(
+            hinted.contains("/schem list"),
+            "中文名该在状态区提示改名：{hinted}"
+        );
         let _ = std::fs::remove_file(&cjk);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1790,11 +1826,22 @@ mod gui_window_tests {
 
         let dir = scratch("fractal");
         let out = dir.join("machine.litematic");
-        dispatch(&mut state, commands::Command::DialogConfirm(out.clone()), &ctx);
+        dispatch(
+            &mut state,
+            commands::Command::DialogConfirm(out.clone()),
+            &ctx,
+        );
         let bytes = std::fs::read(&out).expect("机体投影已落盘");
         assert_eq!(&bytes[..2], &[0x1f, 0x8b], "gzip 魔数");
-        assert!(state.export_status.is_some(), "窗口里要能看到这台机器的口径");
-        assert_eq!(state.window, Some(WindowKind::FractalExport), "导出完窗口留着");
+        assert!(
+            state.export_status.is_some(),
+            "窗口里要能看到这台机器的口径"
+        );
+        assert_eq!(
+            state.window,
+            Some(WindowKind::FractalExport),
+            "导出完窗口留着"
+        );
         let rep = state.fractal_report.clone().unwrap();
         assert!(rep.notes_kept > 0, "示例歌该有音符进机体");
         let status = state.export_status.clone().unwrap_or_default();
@@ -1835,7 +1882,12 @@ mod gui_window_tests {
         // 出厂档 = 上游 defaultConfig 的 20 音/秒：每件乐器偶/奇两条臂 ⇒ 20 轨 40 个子区域。
         let twenty = state.disc_chest_report.clone().unwrap();
         assert_eq!(
-            (twenty.machine(), twenty.lanes, twenty.regions, twenty.grid_rate),
+            (
+                twenty.machine(),
+                twenty.lanes,
+                twenty.regions,
+                twenty.grid_rate
+            ),
             (nbs_io::DiscChestMachine::TwentyHz, 2, 40, 20.0)
         );
 
@@ -1910,10 +1962,17 @@ mod gui_window_tests {
 
         let dir = scratch("disc_chest");
         let out = dir.join("disc-chests.litematic");
-        dispatch(&mut state, commands::Command::DialogConfirm(out.clone()), &ctx);
+        dispatch(
+            &mut state,
+            commands::Command::DialogConfirm(out.clone()),
+            &ctx,
+        );
         let bytes = std::fs::read(&out).expect("数据箱已落盘");
         assert_eq!(&bytes[..2], &[0x1f, 0x8b], "gzip 魔数");
-        assert!(state.export_status.is_some(), "窗口里要能看到这批箱子的口径");
+        assert!(
+            state.export_status.is_some(),
+            "窗口里要能看到这批箱子的口径"
+        );
         assert_eq!(
             state.window,
             Some(WindowKind::DiscChestExport),
@@ -2068,9 +2127,76 @@ mod gui_window_tests {
             let Some(front) = state.modals.items.front().cloned() else {
                 return;
             };
-            click_text(state, ctx, if front.yes_no { "是" } else { "确定" });
+            click_text(
+                state,
+                ctx,
+                match front.buttons {
+                    state::ModalButtons::Ok => "确定",
+                    state::ModalButtons::YesNo | state::ModalButtons::YesNoCancel => "是",
+                },
+            );
         }
         panic!("模态框一直没答完，流程可能卡住了");
+    }
+
+    /// 三键确认框必须真的画出「是 / 否 / 取消」；点取消后这一首还在，并回到原来那首。
+    #[test]
+    fn close_tab_cancel_button_is_drawn_and_works() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        let home = state.active_tab().expect("开机至少有一首");
+        let mut other = nbs_core::model::Song::new();
+        other.filename = Some(PathBuf::from("gui-close.nbs"));
+        other.set(4, 0, nbs_core::model::Note::new(0, 48));
+        other.recalculate();
+        let second = state.push_tab(other);
+
+        dispatch(&mut state, commands::Command::CloseTab(second), &ctx);
+        assert_eq!(state.modals.items.len(), 1, "脏标签应先弹确认");
+        assert_eq!(state.pending_close.map(|p| p.id), Some(second));
+        frame_out(&mut state, &ctx, base_input());
+        let out = frame_out(&mut state, &ctx, base_input());
+        assert_eq!(state.modals.items.len(), 1, "模态框画完也应还在");
+        let x = |label: &str| text_center_if(&out.shapes, |t| t == label).x;
+        assert!(x("是") < x("否"), "按钮顺序应是 是 / 否 / 取消");
+        assert!(x("否") < x("取消"), "取消键必须真的画在第三位");
+
+        click_text(&mut state, &ctx, "取消");
+        assert!(state.modals.is_empty());
+        assert_eq!(state.store.len(), 2, "取消不能把标签关掉");
+        assert_eq!(state.active_tab(), Some(home));
+        assert!(state.pending_close.is_none());
+        assert!(state.parked_doc(second).unwrap().song.dirty);
+    }
+
+    /// 退出确认也必须走真实命令闸门：点第三键后回到原标签，窗口保持打开。
+    #[test]
+    fn quit_cancel_button_is_drawn_and_keeps_the_editor_open() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        let home = state.active_tab().expect("开机至少有一首");
+        let mut other = nbs_core::model::Song::new();
+        other.filename = Some(PathBuf::from("quit-gui.nbs"));
+        other.set(4, 0, nbs_core::model::Note::new(0, 48));
+        other.recalculate();
+        state.push_tab(other);
+
+        dispatch(&mut state, commands::Command::Exit, &ctx);
+        frame(&mut state, &ctx);
+        click_text(&mut state, &ctx, "取消");
+        assert!(state.modals.is_empty());
+        assert!(state.quit.is_none());
+        assert!(!state.quit_confirmed);
+        assert_eq!(state.store.len(), 2);
+        assert_eq!(state.active_tab(), Some(home));
     }
 
     /// 真点鼠标走完原版 Schematic 导出流程：菜单 → `calculate_size()` 的提问 →
@@ -2124,7 +2250,7 @@ mod gui_window_tests {
         // 「使用默认值」先问「你确定吗？」，答否保持原样。
         click_text(&mut state, &ctx, "使用默认值");
         assert_eq!(state.modals.items.len(), 1, "原版这里先弹确认");
-        assert!(state.modals.items[0].yes_no);
+        assert_eq!(state.modals.items[0].buttons, state::ModalButtons::YesNo);
         click_text(&mut state, &ctx, "否");
         assert_eq!(state.schematic_options.layout, 0, "答否不该还原");
 
@@ -2278,7 +2404,8 @@ mod gui_window_tests {
         assert_eq!(s2.modals.items.len(), 1, "失败要弹模态，不只是状态栏一行字");
         assert_eq!(s2.modals.items[0].title, "Error");
         assert_eq!(
-            s2.modals.items[0].yes_no, false,
+            s2.modals.items[0].buttons,
+            state::ModalButtons::Ok,
             "原版这里是 message()，只有确定键"
         );
         assert!(
@@ -2499,6 +2626,409 @@ mod gui_window_tests {
         // 真点「创建歌曲」→ 关窗（原版 windowclose=1）。
         click_text(&mut state, &ctx, "创建歌曲");
         assert_eq!(state.window, None, "创建歌曲应当关掉欢迎窗");
+    }
+
+    /// 欢迎窗「打开歌曲」必须走 replace=1 的打开框；取消后欢迎窗收起但原标签不动。
+    #[test]
+    fn greeting_load_button_opens_the_replace_dialog() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = Some(WindowKind::Greeting);
+        let first = state.active_tab().unwrap();
+
+        click_text(&mut state, &ctx, "打开歌曲");
+        assert_eq!(state.window, Some(WindowKind::FileOpen));
+        assert_eq!(
+            state.pending_replace.as_ref().map(|p| p.target),
+            Some(first)
+        );
+        click_text(&mut state, &ctx, "取消");
+        assert_eq!(state.window, None);
+        assert!(state.pending_replace.is_none());
+        assert_eq!(state.active_tab(), Some(first));
+        assert_eq!(state.store.len(), 1);
+    }
+
+    /// 标签条真的画出来、点标题能切歌、点加号能新建、点关闭叉能关掉指定标签。
+    #[test]
+    fn song_tabs_render_switch_add_and_close() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        let mut first = nbs_core::model::Song::new();
+        first.filename = Some(PathBuf::from("first.nbs"));
+        state.doc.replace_song(first);
+        let first_id = state.active_tab().unwrap();
+        let mut second = nbs_core::model::Song::new();
+        second.filename = Some(PathBuf::from("second.nbs"));
+        let second_id = state.push_tab(second);
+
+        frame_out(&mut state, &ctx, base_input());
+        let out = frame_out(&mut state, &ctx, base_input());
+        let texts: Vec<String> = out
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t == "first.nbs"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "second.nbs"), "{texts:?}");
+        click_text(&mut state, &ctx, "second.nbs");
+        assert_eq!(state.active_tab(), Some(second_id));
+
+        // 1440 宽、2 标签时 span=179，加号命中中心 = 7 + 2*179 + 14。
+        click_point(&mut state, &ctx, egui::pos2(379.0, 40.0));
+        assert_eq!(state.store.len(), 3, "点加号要真的新建标签");
+        // Fluent 第一枚关闭叉：x=7+179-35，宽30；y=29，高22。
+        click_point(&mut state, &ctx, egui::pos2(166.0, 40.0));
+        assert_eq!(state.store.len(), 2);
+        assert!(!state.store.contains(first_id), "叉号关的是第一枚标签");
+    }
+
+    /// 参考音频、画笔和乐器面板滚动位置都跟着标签走，关标签后落在下一首的那份上。
+    #[test]
+    fn reference_config_and_instrument_scroll_follow_their_tab() {
+        let _prefs = isolate_prefs();
+        let mut state = EditorState::for_test();
+        state.audio = Box::new(nbs_audio::SilentEngine::new());
+        let first = state.active_tab().unwrap();
+        let harp = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/Sounds/harp.ogg");
+        let bell = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/Sounds/bell.ogg");
+        state.reference.path = Some(harp.clone());
+        state.reference.option = 1;
+        state.reference.offset_ms = -125;
+        state.reference.volume = 40;
+        state.current = nbs_core::model::Note::new(7, 60);
+        state.insbox_start = 21;
+
+        let second = state.open_tab(nbs_core::Document::new());
+        assert_eq!(state.reference.path, None);
+        assert_eq!((state.reference.option, state.reference.volume), (2, 100));
+        assert_eq!(state.current, nbs_core::model::Note::default());
+        assert_eq!(state.insbox_start, 0);
+        state.reference.path = Some(bell.clone());
+        state.reference.option = 0;
+        state.reference.offset_ms = 250;
+        state.reference.volume = 70;
+
+        assert!(state.switch_tab(first));
+        assert_eq!(state.reference.path, Some(harp));
+        assert_eq!(state.reference.option, 1);
+        assert_eq!(state.reference.offset_ms, -125);
+        assert_eq!(state.reference.volume, 40);
+        assert_eq!(state.current, nbs_core::model::Note::new(7, 60));
+        assert_eq!(state.insbox_start, 21);
+
+        state.close_tab(first);
+        assert_eq!(state.active_tab(), Some(second));
+        assert_eq!(state.reference.path, Some(bell));
+        assert_eq!(state.reference.option, 0);
+        assert_eq!(state.reference.offset_ms, 250);
+        assert_eq!(state.reference.volume, 70);
+    }
+
+    /// 参考音频行只在**已加载**之后才占一行（原版 `control_draw.gml:1456` 的
+    /// `reference_audio >= 0` 门），删掉之后整行一并消失；加载入口是
+    /// 文件→导入→参考音频……（`:1706/1801`），行内名称格只做「更换」。
+    #[test]
+    fn reference_row_loads_and_its_controls_change_the_real_track() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.audio = Box::new(nbs_audio::SilentEngine::new());
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+
+        let has_row = |out: &egui::FullOutput| {
+            out.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text)
+                    if text.galley.text() == "参考音频")
+            })
+        };
+        frame_out(&mut state, &ctx, base_input());
+        let out = frame_out(&mut state, &ctx, base_input());
+        assert!(!has_row(&out), "没加载参考音频时不该画出参考行");
+
+        dispatch(
+            &mut state,
+            commands::Command::OpenDialog(crate::state::DialogAction::LoadReference),
+            &ctx,
+        );
+        assert_eq!(
+            state.file_dialog.as_ref().map(|d| d.action),
+            Some(crate::state::DialogAction::LoadReference),
+            "文件→导入→参考音频…… 必须打开参考音频文件框"
+        );
+        state.file_dialog = None;
+        state.window = None;
+        let harp = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/Sounds/harp.ogg");
+        dispatch(
+            &mut state,
+            commands::Command::LoadReferenceAudio(harp),
+            &ctx,
+        );
+        state.reference.volume = 40;
+        state.reference.offset_ms = 100;
+        let out = frame_out(&mut state, &ctx, base_input());
+        assert!(has_row(&out), "加载后参考行必须出现");
+        let name = text_center_if(&out.shapes, |t| t == "参考音频");
+        let row_y = name.y + 2.0;
+
+        click_point(&mut state, &ctx, name);
+        assert_eq!(
+            state.file_dialog.as_ref().map(|d| d.action),
+            Some(crate::state::DialogAction::LoadReference),
+            "名称格必须真的打开参考音频文件框"
+        );
+        state.file_dialog = None;
+        state.window = None;
+
+        click_point(&mut state, &ctx, egui::pos2(138.0, row_y));
+        assert_eq!(state.reference.option, 0, "静音按钮要生效");
+        click_point(&mut state, &ctx, egui::pos2(156.0, row_y));
+        assert_eq!(state.reference.option, 1, "独奏按钮要生效");
+        drag_between(
+            &mut state,
+            &ctx,
+            egui::pos2(100.0, row_y),
+            egui::pos2(100.0, row_y - 15.0),
+        );
+        assert_eq!(state.reference.volume, 50, "向上拖 15 应量化到 50%");
+        drag_between(
+            &mut state,
+            &ctx,
+            egui::pos2(120.0, row_y),
+            egui::pos2(120.0, row_y + 12.0),
+        );
+        assert_eq!(state.reference.offset_ms, 88, "向下拖 12 应按原版减少 12ms");
+        click_point(&mut state, &ctx, egui::pos2(174.0, row_y));
+        assert_eq!(state.reference.path, None, "删除按钮要清掉当前标签的参考轨");
+        assert_eq!((state.reference.option, state.reference.volume), (2, 100));
+        assert_eq!(state.reference.offset_ms, 0);
+        let out = frame_out(&mut state, &ctx, base_input());
+        assert!(!has_row(&out), "删除后参考行要一并消失");
+        state.reference.path = Some(PathBuf::from("ref.ogg"));
+        state.fullscreen = true;
+        let out = frame_out(&mut state, &ctx, base_input());
+        assert!(!has_row(&out), "全屏时不画参考行");
+        state.fullscreen = false;
+        state.reference.path = Some(PathBuf::from("old.ogg"));
+        dispatch(
+            &mut state,
+            commands::Command::LoadReferenceAudio(PathBuf::from("bad.mp3")),
+            &ctx,
+        );
+        assert_eq!(state.reference.path, None, "加载失败不能假装旧文件仍在轨上");
+    }
+
+    #[test]
+    fn copy_and_cut_use_the_global_clipboard_across_tabs() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.audio = Box::new(nbs_audio::SilentEngine::new());
+        let mut song = nbs_core::model::Song::new();
+        song.set(3, 0, nbs_core::model::Note::new(0, 45));
+        song.recalculate();
+        state.doc.replace_song(song);
+        let first = state.active_tab().unwrap();
+        state.doc.select_all();
+        dispatch(&mut state, commands::Command::Copy, &ctx);
+        assert_eq!(state.clipboard.len(), 1);
+        let copied_text = state.clipboard_text.clone();
+
+        let second = state.open_tab(nbs_core::Document::new());
+        assert_eq!(state.clipboard_text, copied_text, "切标签不清全局剪贴板");
+        state.hover_cell = Some((20, 1));
+        dispatch(&mut state, commands::Command::Paste, &ctx);
+        assert_eq!(state.doc.selection.notes.len(), 1);
+        state.doc.place_selection();
+        assert!(has_note(&state, 20, 1));
+
+        assert!(state.switch_tab(first));
+        state.doc.select_all();
+        dispatch(&mut state, commands::Command::Cut, &ctx);
+        assert!(state.doc.song.get(3, 0).is_none(), "剪切要摘走源音符");
+        assert!(state.switch_tab(second));
+        state.hover_cell = Some((30, 2));
+        dispatch(&mut state, commands::Command::Paste, &ctx);
+        state.doc.place_selection();
+        assert!(has_note(&state, 30, 2), "另一首也能粘到剪切内容");
+        assert_eq!(state.clipboard.len(), 1);
+    }
+
+    /// 原版 4px 起拖阈值与松手重排：拖到哪一首，台前选中项仍按 id 保持。
+    #[test]
+    fn song_tab_drag_threshold_reorders_and_keeps_the_active_id() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        let mut first = nbs_core::model::Song::new();
+        first.filename = Some(PathBuf::from("drag-first.nbs"));
+        state.doc.replace_song(first);
+        let first_id = state.active_tab().unwrap();
+        let mut second = nbs_core::model::Song::new();
+        second.filename = Some(PathBuf::from("drag-second.nbs"));
+        let second_id = state.push_tab(second);
+        let mut third = nbs_core::model::Song::new();
+        third.filename = Some(PathBuf::from("drag-third.nbs"));
+        let third_id = state.push_tab(third);
+        frame_out(&mut state, &ctx, base_input());
+        frame_out(&mut state, &ctx, base_input());
+
+        let mut press = base_input();
+        press
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(50.0, 40.0)));
+        press.events.push(egui::Event::PointerButton {
+            pos: egui::pos2(50.0, 40.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Default::default(),
+        });
+        frame_out(&mut state, &ctx, press);
+        assert!(state.tab_drag.is_some());
+        assert!(!state.tab_drag.unwrap().dragging, "刚按下还没过 4px");
+        let mut slide = base_input();
+        slide
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(53.0, 40.0)));
+        frame_out(&mut state, &ctx, slide);
+        assert!(!state.tab_drag.unwrap().dragging, "3px 不算起拖");
+        let mut slide = base_input();
+        slide
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(70.0, 40.0)));
+        frame_out(&mut state, &ctx, slide);
+        assert!(state.tab_drag.unwrap().dragging, "超过 4px 才起拖");
+        let mut slide = base_input();
+        slide
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(400.0, 40.0)));
+        frame_out(&mut state, &ctx, slide);
+        assert_eq!(state.tab_drag.unwrap().target, 2);
+        let mut release = base_input();
+        release
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(400.0, 40.0)));
+        release.events.push(egui::Event::PointerButton {
+            pos: egui::pos2(400.0, 40.0),
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Default::default(),
+        });
+        frame_out(&mut state, &ctx, release);
+        assert_eq!(state.store.order(), &[second_id, third_id, first_id]);
+        assert_eq!(state.active_tab(), Some(first_id));
+        assert!(state.tab_drag.is_none());
+    }
+
+    /// 原版拖拽中按 Escape 或窗口失焦：取消重排，标签顺序与台前选中项都不动。
+    #[test]
+    fn song_tab_drag_escape_and_focus_loss_cancel() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        let mut first = nbs_core::model::Song::new();
+        first.filename = Some(PathBuf::from("cancel-first.nbs"));
+        state.doc.replace_song(first);
+        let first_id = state.active_tab().unwrap();
+        let mut second = nbs_core::model::Song::new();
+        second.filename = Some(PathBuf::from("cancel-second.nbs"));
+        let second_id = state.push_tab(second);
+        frame_out(&mut state, &ctx, base_input());
+        frame_out(&mut state, &ctx, base_input());
+        let start = |state: &mut EditorState, ctx: &egui::Context| {
+            let mut raw = base_input();
+            raw.events
+                .push(egui::Event::PointerMoved(egui::pos2(50.0, 40.0)));
+            raw.events.push(egui::Event::PointerButton {
+                pos: egui::pos2(50.0, 40.0),
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            });
+            frame_out(state, ctx, raw);
+            let mut raw = base_input();
+            raw.events
+                .push(egui::Event::PointerMoved(egui::pos2(80.0, 40.0)));
+            frame_out(state, ctx, raw);
+            assert!(state.tab_drag.unwrap().dragging);
+        };
+        start(&mut state, &ctx);
+        press_key(&mut state, &ctx, egui::Key::Escape);
+        assert!(state.tab_drag.is_none());
+        assert_eq!(state.store.order(), &[first_id, second_id]);
+
+        let mut release = base_input();
+        release
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(80.0, 40.0)));
+        release.events.push(egui::Event::PointerButton {
+            pos: egui::pos2(80.0, 40.0),
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Default::default(),
+        });
+        frame_out(&mut state, &ctx, release);
+        start(&mut state, &ctx);
+        let mut lost = base_input();
+        for viewport in lost.viewports.values_mut() {
+            viewport.focused = Some(false);
+        }
+        lost.events
+            .push(egui::Event::PointerMoved(egui::pos2(120.0, 40.0)));
+        frame_out(&mut state, &ctx, lost);
+        assert!(state.tab_drag.is_none());
+        assert_eq!(state.store.order(), &[first_id, second_id]);
+        assert_eq!(state.active_tab(), Some(first_id));
+    }
+
+    /// 标签条右键菜单四条动作真实可点；这里验收「关闭右侧歌曲」。
+    #[test]
+    fn song_tab_context_menu_closes_the_right_side() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.window = None;
+        let mut first = nbs_core::model::Song::new();
+        first.filename = Some(PathBuf::from("menu-first.nbs"));
+        state.doc.replace_song(first);
+        let first_id = state.active_tab().unwrap();
+        let mut second = nbs_core::model::Song::new();
+        second.filename = Some(PathBuf::from("menu-second.nbs"));
+        let second_id = state.push_tab(second);
+        let mut third = nbs_core::model::Song::new();
+        third.filename = Some(PathBuf::from("menu-third.nbs"));
+        let third_id = state.push_tab(third);
+
+        frame_out(&mut state, &ctx, base_input());
+        let out = frame_out(&mut state, &ctx, base_input());
+        let at = text_center_if(&out.shapes, |t| t == "menu-second.nbs");
+        secondary_click_point(&mut state, &ctx, at);
+        frame(&mut state, &ctx);
+        click_text(&mut state, &ctx, "关闭右侧歌曲");
+        assert_eq!(state.store.order(), &[first_id, second_id]);
+        assert!(!state.store.contains(third_id));
+        assert_eq!(state.active_tab(), Some(second_id));
+        assert!(state.tab_menu.is_none());
     }
 
     /// logo 是欢迎窗／关于窗里唯一一块 165×165 的贴图（`spr_logo` 半尺寸），帧号直接
@@ -2889,7 +3419,7 @@ mod gui_window_tests {
         assert!(!state.prefs.check_prerelease);
         click_text(&mut state, &ctx, "检查开发版本");
         assert_eq!(state.modals.items.len(), 1, "开启开发版检查要先弹警告");
-        assert!(state.modals.items[0].yes_no);
+        assert_eq!(state.modals.items[0].buttons, state::ModalButtons::YesNo);
         assert!(!state.prefs.check_prerelease, "答之前不能先改值");
         click_text(&mut state, &ctx, "是");
         assert!(state.prefs.check_prerelease, "答「是」要真的打开");
@@ -4717,7 +5247,7 @@ mod gui_window_tests {
 
         click_text(&mut state, &ctx, "使用默认值");
         assert_eq!(state.modals.items.len(), 1, "原版这里先弹一句确认");
-        assert!(state.modals.items[0].yes_no);
+        assert_eq!(state.modals.items[0].buttons, state::ModalButtons::YesNo);
         assert_eq!(state.theme.accent_base, [200, 20, 60], "答之前不改");
         click_text(&mut state, &ctx, "否");
         frame(&mut state, &ctx);
@@ -5363,8 +5893,7 @@ mod gui_piano_tests {
         // 同一个 Context 复用：上一阶段指针停在 (30,800)（最左白键），warm 帧
         // 会接着左移一格，先把指针挪出琴键区再取基准值。
         let mut warm = input();
-        warm
-            .events
+        warm.events
             .push(egui::Event::PointerMoved(egui::pos2(640.0, 200.0)));
         run(&mut state, &ctx, warm);
         let start = state.piano_start;
@@ -5506,6 +6035,43 @@ mod fx_wiring_tests {
             .collect()
     }
 
+    /// 分离浮窗与主窗同时存活，但浮窗接管绘制时主窗中央区停画网格，只显示提示；
+    /// 关闭分离后舞台特效和琴键回主窗。
+    #[test]
+    fn detached_effects_pause_main_grid_and_show_notice() {
+        let _prefs = isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.prefs.language = 1;
+        state.fx.lock().stack.set_active("synthesia", true);
+
+        frame(&mut state, &ctx);
+        assert_eq!(state.interaction.visible_notes, 0, "未分离时舞台接管网格");
+        assert!(state.piano_rect.is_some(), "未分离时琴键在主窗");
+
+        state.prefs.fx_window = true;
+        state.interaction.visible_notes = 23;
+        let texts = frame(&mut state, &ctx);
+        assert_eq!(state.interaction.visible_notes, 0, "分离后主窗不画编辑网格");
+        assert!(state.piano_rect.is_none(), "分离后主窗不画琴键");
+        assert!(
+            texts.iter().any(|s| s.contains("当前正在特效窗口渲染")),
+            "主窗中央区要显示浮窗渲染提示"
+        );
+
+        state.prefs.fx_window = false;
+        assert!(!state.prefs.fx_window);
+        assert!(state.fx.lock().stage_active(), "特效应仍启用");
+        state.interaction.visible_notes = 0;
+        frame(&mut state, &ctx);
+        assert!(!state.prefs.fx_window, "跑一帧后分离开关仍关闭");
+        assert!(!state.player, "测试状态不是播放器档");
+        assert!(state.fx.lock().stage_active(), "跑一帧后特效仍启用");
+        assert_eq!(state.interaction.visible_notes, 0, "关闭分离后舞台回主窗");
+        assert!(state.piano_rect.is_some(), "关闭分离后琴键回主窗");
+    }
+
     /// `visible_notes` 只有 `draw_grid` 会写，正好当「这一帧网格跑没跑」的探针。
     #[test]
     fn a_stage_effect_takes_the_center_panel_and_keeps_the_piano_panel() {
@@ -5519,10 +6085,13 @@ mod fx_wiring_tests {
             state.interaction.visible_notes > 0,
             "一条特效都没开时网格照跑"
         );
-        assert!(state.piano_rect.is_some(), "show_piano 出厂为真，琴键面板要上报矩形");
+        assert!(
+            state.piano_rect.is_some(),
+            "show_piano 出厂为真，琴键面板要上报矩形"
+        );
 
         state.interaction.visible_notes = 0;
-        state.fx.stack.set_active("synthesia", true);
+        state.fx.lock().stack.set_active("synthesia", true);
         frame(&mut state, &ctx);
         assert_eq!(
             state.interaction.visible_notes, 0,
@@ -5532,7 +6101,7 @@ mod fx_wiring_tests {
             .piano_rect
             .expect("瀑布的键盘就是底部那条面板，舞台期间它照样要画");
         assert!(
-            !state.fx.stack.frame().is_empty(),
+            !state.fx.lock().stack.frame().is_empty(),
             "舞台那一帧要真的排出图元"
         );
         // 「音符刚好落到琴键上」的口径：击中线压在面板上沿（黑键顶出来的那条剪影线），
@@ -5541,6 +6110,7 @@ mod fx_wiring_tests {
         assert!(
             state
                 .fx
+                .lock()
                 .stack
                 .frame()
                 .prims
@@ -5565,9 +6135,9 @@ mod fx_wiring_tests {
         assert!(state.piano_rect.is_none(), "琴键面板关掉后矩形要清空");
         assert!(state.interaction.visible_notes > 0, "网格照跑");
 
-        state.fx.stack.set_active("block_row", true);
+        state.fx.lock().stack.set_active("block_row", true);
         frame(&mut state, &ctx);
-        assert!(state.fx.wants_piano(), "乐器方块排要求底部有琴键");
+        assert!(state.fx.lock().wants_piano(), "乐器方块排要求底部有琴键");
         assert!(
             state.piano_rect.is_some(),
             "开着 wants_piano 的特效时琴键面板要被顶回来"
@@ -5582,8 +6152,8 @@ mod fx_wiring_tests {
     fn fx_prefs_survive_a_restart() {
         let _prefs = isolate_prefs();
         let mut state = EditorState::for_test();
-        state.fx.stack.set_active("synthesia", true);
-        state.fx.stack.set_opacity(0.4);
+        state.fx.lock().stack.set_active("synthesia", true);
+        state.fx.lock().stack.set_opacity(0.4);
         state.sync_prefs();
         assert_eq!(state.prefs.fx_active, vec!["synthesia".to_owned()]);
         assert!((state.prefs.fx_opacity - 0.4).abs() < 1e-6);
@@ -5594,14 +6164,14 @@ mod fx_wiring_tests {
         state.save_prefs();
 
         let back = EditorState::new();
-        assert!(back.fx.stack.is_active("synthesia"), "重启后勾选状态要回来");
+        assert!(back.fx.lock().stack.is_active("synthesia"), "重启后勾选状态要回来");
         assert!(
-            (back.fx.stack.opacity() - 0.4).abs() < 1e-3,
+            (back.fx.lock().stack.opacity() - 0.4).abs() < 1e-3,
             "透明度落在 prefs.fx_opacity 那一档"
         );
     }
 
-    /// 「设置 → 播放特效…」那扇窗：清单是全量枚举注册表来的，两条内置特效各带
+    /// 「设置 → 播放特效…」那扇窗：清单是全量枚举注册表来的，每条内置特效各带
     /// 自己的身份（舞台 / 叠加）。底座不该认识任何一条具体特效。
     #[test]
     fn the_effects_window_lists_every_registered_effect() {
@@ -5610,13 +6180,13 @@ mod fx_wiring_tests {
         let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.language = 1;
-        assert_eq!(state.fx.stack.ids().len(), 2, "内置两条特效");
+        assert_eq!(state.fx.lock().stack.ids().len(), 3, "内置三条特效");
 
         state.window = Some(WindowKind::PlaybackEffects);
         // 两帧：egui 的 Window 第一帧只定下尺寸，文字在第二帧的 shapes 里才捞得到。
         frame(&mut state, &ctx);
         let texts = frame(&mut state, &ctx);
-        for (name, kind) in [("钢琴瀑布", "舞台"), ("乐器方块排", "叠加")] {
+        for (name, kind) in [("钢琴瀑布", "舞台"), ("乐器方块排", "叠加"), ("声道方块", "叠加")] {
             let row = texts
                 .iter()
                 .find(|t| t.contains(name) && t.contains(kind))

@@ -196,6 +196,10 @@ pub struct Preferences {
     /// 危险动作（退出程序、替你答确认框、打开外链）是否可调。
     /// **独立**开关：勾「启用外部控制」绝不会把这条一起打开，取消勾选也不会清掉它。
     pub control_danger: bool,
+    /// 用户要求 #131：允许外部控制不切标签就修改后台文档。默认关；
+    /// 播放、文件、任务等全局操作仍只允许当前标签。
+    #[serde(default)]
+    pub control_allow_parked_write: bool,
     /// 播放特效：每个特效一份参数，键 = 特效的稳定 id（不是显示名，改名不冲存档）。
     /// 老存档没这条 → 空表，各特效由自己参数结构上的 `#[serde(default)]` 补出厂值。
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
@@ -205,6 +209,14 @@ pub struct Preferences {
     pub fx_active: Vec<String>,
     /// 叠加类特效的整体透明度（舞台类独占画面，不看这条）。
     pub fx_opacity: f32,
+    /// 把播放特效分离到独立原生浮窗；开启时主窗只编辑，不画特效和琴键。
+    pub fx_window: bool,
+    /// 浮窗通用透明背景：不铺整块底色，音符、粒子、参考线和琴键照常画。
+    pub fx_window_transparent: bool,
+    /// 浮窗是否始终压在其他窗口前面。默认关闭，避免遮挡视线。
+    pub fx_window_always_on_top: bool,
+    /// 浮窗鼠标穿透：点击直接落到下方应用；默认关闭，保留正常窗口操作。
+    pub fx_window_mouse_passthrough: bool,
 }
 
 /// 最近歌曲一条：路径 + 上次打开的时间（unix 秒，原版 `date_current_datetime()`）。
@@ -373,11 +385,16 @@ impl Default for Preferences {
             control_enabled: false,
             control_dirs: Vec::new(),
             control_danger: false,
+            control_allow_parked_write: false,
             // 播放特效出厂全关、参数用各特效自己的默认值（这里留空表，
             // 设置文件里也就不多写这两段）。
             fx: std::collections::HashMap::new(),
             fx_active: Vec::new(),
             fx_opacity: 0.85,
+            fx_window: false,
+            fx_window_transparent: false,
+            fx_window_always_on_top: false,
+            fx_window_mouse_passthrough: false,
         }
     }
 }
@@ -601,13 +618,8 @@ pub fn save_song_atomic(song: &Song, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// 自动保存一份备份（不改动当前文件名/脏标记）。
-pub fn autosave(song: &Song, prefs: &Preferences) -> Result<PathBuf, String> {
-    let dir = Preferences::backup_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| {
-        crate::tr(&format!("Failed to create backup directory: {e}"), &format!("创建备份目录失败: {e}"))
-            .to_string()
-    })?;
+/// 当前端口自动备份的固定路径（`{safe}.autosave.nbs`）。
+pub fn backup_path(song: &Song) -> PathBuf {
     let base = song
         .filename
         .as_ref()
@@ -616,11 +628,55 @@ pub fn autosave(song: &Song, prefs: &Preferences) -> Result<PathBuf, String> {
         .unwrap_or_else(|| "untitled".into());
     let safe: String = base
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    let path = dir.join(format!("{safe}.autosave.nbs"));
+    Preferences::backup_dir().join(format!("{safe}.autosave.nbs"))
+}
+
+/// 自动保存一份备份（不改动当前文件名/脏标记）。
+pub fn autosave(song: &Song, prefs: &Preferences) -> Result<PathBuf, String> {
+    let dir = Preferences::backup_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        crate::tr(&format!("Failed to create backup directory: {e}"), &format!("创建备份目录失败: {e}"))
+            .to_string()
+    })?;
+    let path = backup_path(song);
     save_song_atomic(song, &path)?;
     let _ = prefs;
+    Ok(path)
+}
+
+/// 原版 `save_unsaved()`：退出流程里另写一份恢复文件，不覆盖已有自动备份。
+pub fn save_shutdown_recovery(song: &Song) -> Result<PathBuf, String> {
+    let dir = Preferences::backup_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        crate::tr(
+            &format!("Failed to create backup directory: {e}"),
+            &format!("创建备份目录失败: {e}"),
+        )
+        .to_string()
+    })?;
+    let source = song
+        .filename
+        .as_ref()
+        .and_then(|p| p.file_stem())
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "untitled".into());
+    let stem: String = source.chars().take(48).collect();
+    let base = format!("{stem} (unsaved on exit)");
+    let mut path = dir.join(format!("{base}.nbs"));
+    let mut number = 2;
+    while path.exists() {
+        path = dir.join(format!("{base} {number}.nbs"));
+        number += 1;
+    }
+    save_song_atomic(song, &path)?;
     Ok(path)
 }
 
@@ -698,6 +754,10 @@ mod tests {
         p.last_version = Some("0.1.0".into());
         p.audio_output = "耳机 (Realtek(R) Audio)".into();
         p.note_text_min_percent = 35;
+        p.fx_window = true;
+        p.fx_window_transparent = true;
+        p.fx_window_always_on_top = true;
+        p.fx_window_mouse_passthrough = true;
         p.recent_files.push(crate::prefs::RecentFile {
             path: "C:/songs/demo.nbs".into(),
             time: 1760000001,
@@ -726,6 +786,10 @@ mod tests {
         assert_eq!(back.last_version.as_deref(), Some("0.1.0"), "上次版本号要落盘");
         assert_eq!(back.audio_output, "耳机 (Realtek(R) Audio)", "点名的输出设备要落盘");
         assert_eq!(back.note_text_min_percent, 35, "格内文字的隐藏阈值要落盘");
+        assert!(back.fx_window, "分离浮窗开关要落盘");
+        assert!(back.fx_window_transparent, "客户区背景透明开关要落盘");
+        assert!(back.fx_window_always_on_top, "浮窗置顶开关要落盘");
+        assert!(back.fx_window_mouse_passthrough, "浮窗鼠标穿透开关要落盘");
         // 旧配置文件里没有这几项时必须退回默认值，不能整个文件读不出来。
         let old = r#"{"version":1,"theme":3}"#;
         let back: Preferences = serde_json::from_str(old).unwrap();
@@ -740,6 +804,10 @@ mod tests {
             "旧配置缺键时阈值退回出厂 50%（端口自加 #92）"
         );
         assert!(!back.window_icon, "出厂用程序自带的图标");
+        assert!(!back.fx_window, "旧配置缺键时浮窗关闭");
+        assert!(!back.fx_window_transparent, "旧配置缺键时浮窗不透明");
+        assert!(!back.fx_window_always_on_top, "旧配置缺键时浮窗不置顶");
+        assert!(!back.fx_window_mouse_passthrough, "旧配置缺键时不穿透");
         assert_eq!(back.accent, [0, 120, 212], "强调色基色出厂 0,120,212");
         assert!(back.remove_effect, "旧配置缺键时退回出厂打开");
         assert_eq!(
@@ -927,7 +995,7 @@ mod tests {
         assert!(!old.warning_disc_chest);
     }
 
-    /// 外部控制这三条是我们自己加的（原版没有对应物），所以对旧文件的口径是「全关」：
+    /// 外部控制这几条是我们自己加的（原版没有对应物），所以对旧文件的口径是「全关」：
     /// 装了老版本、prefs.json 里根本没这些键的用户，不该升级完就多出一个在听的端口。
     #[test]
     fn control_opt_in_defaults_to_off_in_old_files() {
@@ -935,16 +1003,21 @@ mod tests {
         assert!(!old.control_enabled, "旧配置缺键时外部控制退回关闭");
         assert!(old.control_dirs.is_empty(), "旧配置缺键时不放行任何额外目录");
         assert!(!old.control_danger, "旧配置缺键时危险动作退回关闭");
+        assert!(!old.control_allow_parked_write, "旧配置缺键时后台写退回关闭");
         assert_eq!(old.theme, 2, "已有的键照常读出来");
 
         let p = Preferences {
             control_enabled: true,
             control_dirs: vec!["D:\\乐谱".to_string(), "D:\\采样".to_string()],
             control_danger: true,
+            control_allow_parked_write: true,
             ..Default::default()
         };
         let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
-        assert!(back.control_enabled && back.control_danger, "两条勾选都要存下来");
+        assert!(
+            back.control_enabled && back.control_danger && back.control_allow_parked_write,
+            "三条勾选都要存下来"
+        );
         assert_eq!(back.control_dirs, p.control_dirs, "目录列表要按顺序存下来");
     }
 
@@ -977,6 +1050,15 @@ mod tests {
         assert_eq!(back.total_blocks, 1);
         assert!(!p.with_extension("nbs.tmp").exists());
         let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn backup_path_uses_the_same_safe_stem_as_autosave() {
+        let mut song = Song::new();
+        song.filename = Some(PathBuf::from("C:/songs/我的 曲子!.nbs"));
+        let path = backup_path(&song);
+        assert_eq!(path.file_name().and_then(|s| s.to_str()), Some("我的_曲子_.autosave.nbs"));
+        assert_eq!(path.parent(), Some(Preferences::backup_dir().as_path()));
     }
 
     #[test]

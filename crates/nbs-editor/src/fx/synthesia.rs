@@ -15,7 +15,7 @@ use egui::{Color32, Pos2, Rect, Ui, Vec2};
 use super::blockrow::BlockRow;
 use super::keyboard::{is_white_key, KeyboardLayout, BLACK_LIFT, WHITE_HIT_H};
 use super::stage::Frame;
-use super::tiles::{instrument_color, tile_size};
+use super::tiles::{instrument_color, tile_size, TileLook};
 use super::timeline::FxNote;
 use super::{
     fade, is_light, note_block, EffectInfo, FxContext, PlaybackEffect, Surface, STAGE_BACKDROP,
@@ -88,6 +88,9 @@ pub struct Synthesia {
 
 impl Synthesia {
     pub const ID: &'static str = "synthesia";
+
+    /// 「乐器方块」样式就是把方块排搬进瀑布，贴图口径也跟它一致：方块面，不是等距立方体。
+    pub const TILE_LOOK: TileLook = TileLook::Face;
 
     pub fn new_with(params: Params) -> Self {
         Self {
@@ -258,7 +261,9 @@ impl PlaybackEffect for Synthesia {
             cx.backdrop
         };
         let light = is_light(back);
-        out.rect(cx.area, back, 0.0);
+        if !cx.transparent {
+            out.rect(cx.area, back, 0.0);
+        }
 
         if self.params.lanes {
             // 轨道线从键盘上缘拉到屏幕顶，间距就是白键宽；下端同样停在键盘剪影
@@ -330,7 +335,7 @@ impl PlaybackEffect for Synthesia {
                 Rect::from_center_size(center, Vec2::new(capsule_w, capsule_h))
             };
             if self.params.blocks {
-                let blk = note_block(cx, note.instrument, true);
+                let blk = note_block(cx, note.instrument, true, Self::TILE_LOOK);
                 let alpha = body_alpha(note.velocity, ahead);
                 match blk.texture {
                     Some(tex) => {
@@ -477,6 +482,7 @@ mod tests {
                 scale: 1.0,
                 accent: Color32::from_rgb(80, 160, 255),
                 backdrop: Color32::WHITE,
+                transparent: false,
                 area: stage(),
                 keyboard: None,
                 timeline: &self.timeline,
@@ -821,7 +827,13 @@ mod tests {
             );
         }
         // 查表同源：方块样式用的色 = 方块排给同一件乐器算出的色。
-        let want = note_block(&cx, cx.timeline.notes()[0].instrument, true).color;
+        let want = note_block(
+            &cx,
+            cx.timeline.notes()[0].instrument,
+            true,
+            Synthesia::TILE_LOOK,
+        )
+        .color;
         assert_eq!(blocks[0].1, want, "两条特效对同一件乐器必须同色");
     }
 
@@ -940,6 +952,24 @@ mod tests {
             top,
             "测试摆放里白键顶和黑键顶必须是两个高度"
         );
+    }
+
+    /// 浮窗通用透明背景：瀑布不再铺整块舞台底色，轨道、击中线与琴键仍可画。
+    #[test]
+    fn transparent_stage_does_not_fill_its_backdrop() {
+        let rig = Rig::new(&[]);
+        let mut cx = rig.cx(0.0, 0.0, false);
+        cx.transparent = true;
+        let mut fx = Synthesia::default();
+        let mut frame = Frame::default();
+        fx.draw(&cx, &mut frame);
+        assert!(
+            !frame.prims.iter().any(|prim| matches!(prim,
+                Primitive::Rect { rect, rounding, fill, .. }
+                    if *rect == stage() && *rounding == 0.0 && fill.a() > 0)),
+            "透明模式不能留下整块不透明底色"
+        );
+        assert!(!frame.is_empty(), "参考线和击中线照常画");
     }
 
     /// 琴键面板的底色口径跟着「黑色背景」走：勾了就一起黑，没勾就跟编辑区同色。

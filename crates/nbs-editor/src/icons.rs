@@ -288,6 +288,10 @@ pub struct Bank {
     macro_ikon: Strip,
     frame1: Strip,
     frame4: Strip,
+    /// 歌曲标签条（draw_song_tabs / draw_song_tab）：30 帧 4x31、关闭叉 4 帧 9x9、加号 15x15。
+    songtab: Strip,
+    closetab: Strip,
+    newtab: Strip,
     numbers: Strip,
     minecraft: Strip,
     minecraft_fluent: Strip,
@@ -456,6 +460,9 @@ impl Bank {
             macro_ikon: strip("macro", 16, 16)?,
             frame1: strip("frame1", 25, 23)?,
             frame4: strip("frame4", 16, 16)?,
+            songtab: strip("songtab", 4, 31)?,
+            closetab: strip("closetab", 9, 9)?,
+            newtab: strip("newtab", 15, 15)?,
             numbers: strip("numbers", 3, 5)?,
             minecraft: strip("minecraft", 20, 20)?,
             minecraft_fluent: strip("minecraft_fluent", 20, 20)?,
@@ -525,7 +532,7 @@ impl Bank {
     /// frame4 按钮底图。Fluent+hires 时换 4 倍条 `spr_frame4_hires`——它只有 Fluent
     /// 的 6 帧，帧号去掉主题偏移 = `状态 + 3*暗色`（`draw_layericon.gml`）；缺素材
     /// 或非 hires 退回普通条（帧号 = 3*主题 + 状态）。
-    fn frame4_blit(
+    pub(crate) fn frame4_blit(
         &self,
         p: &egui::Painter,
         at: Pos2,
@@ -542,6 +549,25 @@ impl Bank {
         }
         self.frame4
             .blit(p, at, Self::base(th.kind) + state, size, Color32::WHITE);
+    }
+
+    pub(crate) fn songtab(
+        &self,
+        p: &egui::Painter,
+        at: Pos2,
+        frame: usize,
+        size: Vec2,
+        tint: Color32,
+    ) {
+        self.songtab.blit(p, at, frame, size, tint);
+    }
+
+    pub(crate) fn closetab(&self, p: &egui::Painter, at: Pos2, frame: usize, tint: Color32) {
+        self.closetab.draw(p, at, frame, tint);
+    }
+
+    pub(crate) fn newtab(&self, p: &egui::Painter, at: Pos2, tint: Color32) {
+        self.newtab.draw(p, at, 0, tint);
     }
 
     fn ptr(ui: &egui::Ui, rect: Rect, id: Id) -> (egui::Response, bool) {

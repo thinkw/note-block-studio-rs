@@ -8,7 +8,7 @@ use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::Path;
 use std::time::Duration;
 
-use crate::bus::{Hello, HelloAck, Request, Response};
+use crate::bus::{Capabilities, Hello, HelloAck, Request, Response};
 use crate::discovery::Discovery;
 use crate::frame::{read_json_line, write_json_line};
 use crate::op::Op;
@@ -63,6 +63,7 @@ pub struct ControlClient {
     writer: TcpStream,
     next_id: u64,
     server_app: String,
+    capabilities: Capabilities,
 }
 
 impl ControlClient {
@@ -119,6 +120,7 @@ impl ControlClient {
             writer,
             next_id: 1,
             server_app: ack.app,
+            capabilities: ack.capabilities,
         })
     }
 
@@ -142,6 +144,11 @@ impl ControlClient {
         &self.server_app
     }
 
+    /// 握手时编辑器公布的能力；后台写开关以这一次握手为准。
+    pub fn capabilities(&self) -> &Capabilities {
+        &self.capabilities
+    }
+
     /// 发一条请求并等回执。失败既可能是传输层（[`ClientError`]），也可能是
     /// 语义层（[`Outcome::ok`] == false）——两个都要看，别只判 `is_ok()`。
     ///
@@ -152,9 +159,17 @@ impl ControlClient {
     /// 更坏的一版是它压根没来，于是每问都慢到等满。
     /// 重连之后这条判断也不用做：新连接上不存在上一问的回执。
     pub fn request(&mut self, op: Op) -> Result<Outcome, ClientError> {
+        self.request_tab(op, None)
+    }
+
+    pub fn request_tab(
+        &mut self,
+        op: Op,
+        tab: Option<crate::TabRef>,
+    ) -> Result<Outcome, ClientError> {
         let id = self.next_id;
         self.next_id += 1;
-        let req = Request { id, op };
+        let req = Request { id, tab, op };
         if write_json_line(&mut self.writer, &req).is_err() {
             self.abandon();
             // 写不进去 = 对端早就不认这条连接了（空闲被编辑器关掉就是这个样子）。

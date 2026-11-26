@@ -19,6 +19,7 @@
 pub mod engine;
 pub mod midi_preview;
 pub mod mixer;
+pub mod reference;
 pub mod samples;
 pub mod scheduler;
 

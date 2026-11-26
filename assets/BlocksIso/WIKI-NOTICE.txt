@@ -1,0 +1,47 @@
+本目录里逐张用 `!assets/BlocksIso/<名>.png` 白名单放行的图是 Minecraft Wiki 上的方块等距
+渲染图，底层像素属于 Mojang Studios / Microsoft，都不是我们的著作物。这段说明随目录一起走，
+整仓库口径见仓库根的 THIRD-PARTY-NOTICES.md。
+
+入库范围
+    20 张 300×300 RGBA PNG，合计 96478 字节，正好是 20 个内置乐器在播放特效里会画到的
+    那几颗方块：dirt, oak_planks, cobblestone, sand, glass, white_wool, clay, gold_block,
+    packed_ice, bone_block, iron_block, soul_sand, pumpkin, emerald_block, hay_block,
+    glowstone, copper_block, exposed_copper, weathered_copper, oxidized_copper。
+    名单不是手抄的：crates/nbs-editor/src/fx/tiles.rs 里的测试拿出厂表
+    INSTRUMENT_BLOCKS / COPPER_INS_BLOCKS 现算 resolve_file 的结果核对，改了出厂乐器表却没
+    补白名单，那条测试就红。文件主名也和那张表对齐（Wiki 原名 Block_of_Gold_JE6_BE3.png
+    入库时改成 gold_block.png），像素一个字节没动。
+
+来路
+    zh.minecraft.wiki 各方块条目信息框里的等距渲染图（File: 页）。这批图没有可脚本化的
+    抓取路径：Wiki 前面挂着 Anubis 人机验证，curl 直接请求只会拿到验证页，所以是浏览器
+    里人手另存、再按上面的口径改名的。原名、字节数、sha256、下载时间都记在同目录
+    PROVENANCE.json。
+    其中 4 张（陶土、圆石、橡木木板、白羊毛）的 Wiki 文件名在 2025 年之后换过版次后缀：
+    Clay_JE2_BE2 → JE4_BE2、Cobblestone_JE5_BE3 → JE7_BE3、Oak_Planks_JE6_BE3 → JE9_BE3、
+    White_Wool_JE2_BE2 → JE4_BE2。本机 `_旧版名_2025-08下载/` 存着旧名那一套；入库用的是
+    当前名对应的新版渲染，不是旧版。
+
+读图顺序
+    先哪一层由每条特效自己声明（fx/tiles.rs 的 TileLook，各特效的 TILE_LOOK 常量）：声道方块
+    的摞塔（pan_slots）先等距图（本目录），方块排（block_row）和瀑布的「乐器方块」
+    （synthesia）先 assets/Blocks 的方块面。首选那层没有这张才退另一层，两层都没有才退按
+    名字哈希的稳定色块。也就是说用户自定义乐器配了个本目录没有的方块，画面仍能出图；整目录
+    被删掉则退回方块面，两层素材都缺则退回色块 —— 特效不会不能用。
+
+条款口径
+    两层：
+    1) 底层像素是 Mojang 的，Minecraft EULA 保留所有权并把这类使用限定在「粉丝与创作者」
+       那档用途（原文引用见 THIRD-PARTY-NOTICES.md 第二节）。
+    2) Wiki 站方对上传文件通常标 CC BY-NC-SA 4.0（署名 + 非商业 + 相同方式共享）。本仓库
+       这 20 张的许可栏没逐张核对过，署名与「非商业」这两条因此按最严的口径处理：不主张
+       这些图归我们，不把它们用于任何商业发行，随仓库分发的代码本身也不靠这些素材才能跑。
+    我们不通过 AGPL-3.0-only 对这些图授予额外许可 —— 本仓库的 AGPL 只处分我们自己写的代码
+    与文档。要把这些图用在 Mojang 指引之外的场景（商用分发、二次打包成自己的素材库、训练用
+    数据），请直接向 Mojang / Microsoft 及 Wiki 站方取授权，或者改用无素材包：
+    `python tools/strip_mojang_assets.py`（本目录整体在剔除名单里）。
+
+投诉处理
+    若 Mojang / Microsoft 或 Minecraft Wiki 认为这些渲染图不该出现在本仓库：提 issue 或直接
+    联系维护者，收到即移除。移除只需要删掉 .gitignore 里那 20 行 `!` 和这个目录，代码一行
+    都不用改，特效自己退回方块面那一层（这条兜底在 tiles.rs 的两层查表里，不是为下架特写的）。

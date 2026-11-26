@@ -2,7 +2,8 @@
 
 要剔的东西和口径都写在 THIRD-PARTY-NOTICES.md 第一节。名单只有一个来源：
 
-* `assets/Blocks/` 下那 20 张 —— 直接读 `.gitignore` 里 `!assets/Blocks/<名>.png`
+* `assets/Blocks/` 与 `assets/BlocksIso/` 下各那 20 张（方块面 + Wiki 等距图）——
+  直接读 `.gitignore` 里 `!assets/Blocks/<名>.png`、`!assets/BlocksIso/<名>.png`
   那几行，跟入库白名单是同一份，不会飘；
 * `assets/Sounds/`、`assets/extranotes.zip`、以及 `assets/icons/` 里那六组
   明确是 Minecraft 内容衍生的精灵目录，写在下面的 `STRIP_PREFIXES` 里。
@@ -50,14 +51,21 @@ def tracked_files() -> list[str]:
 
 
 def block_whitelist() -> list[str]:
-    """`.gitignore` 里逐张放行的方块贴图 —— 和入库白名单同一份口径。"""
+    """`.gitignore` 里逐张放行的方块贴图 —— 和入库白名单同一份口径。
+
+    两个目录都算：`assets/Blocks/`（16×16 方块面）与 `assets/BlocksIso/`
+    （Wiki 的 300×300 等距图，只有声道方块的摞塔优先用这一层）。
+    """
     ignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
-    prefix = "!assets/Blocks/"
-    return [
-        "assets/Blocks/" + line.strip()[len(prefix) :]
-        for line in ignore.splitlines()
-        if line.strip().startswith(prefix) and line.strip().endswith(".png")
-    ]
+    out: list[str] = []
+    for sub in ("assets/Blocks/", "assets/BlocksIso/"):
+        prefix = "!" + sub
+        out += [
+            sub + line.strip()[len(prefix) :]
+            for line in ignore.splitlines()
+            if line.strip().startswith(prefix) and line.strip().endswith(".png")
+        ]
+    return out
 
 
 def is_stripped(path: str, blocks: list[str]) -> bool:
@@ -84,7 +92,10 @@ def main() -> int:
 
     print(f"tracked 总数 {len(files)}；剔 {len(drop)} 个（{dropped_bytes / 1024:.1f} KiB）；"
           f"留 {len(keep)} 个")
-    print(f"  {'assets/Blocks/（.gitignore 白名单那几张）':38} {len(blocks)}")
+    print(f"  {'assets/Blocks/（.gitignore 白名单那几张）':38} "
+          f"{len([b for b in blocks if b.startswith('assets/Blocks/')])}")
+    print(f"  {'assets/BlocksIso/（等距图白名单那几张）':38} "
+          f"{len([b for b in blocks if b.startswith('assets/BlocksIso/')])}")
     for prefix in STRIP_PREFIXES:
         n = len([f for f in drop if f.startswith(prefix)])
         print(f"  {prefix:38} {n}")
@@ -106,14 +117,19 @@ def main() -> int:
             f"剔除 {len(drop)} 个文件（{dropped_bytes} 字节），保留 {len(keep)} 个。",
             "",
             "缺的东西以及怎么补回来：",
-            "  assets/Blocks/*.png   跑 tools/fetch_block_textures.py（校验 jar sha1）",
-            "  assets/Sounds/*.ogg   取装机版 Minecraft Note Block Studio 的 Data\\Sounds",
-            "  assets/extranotes.zip 同上，取 Data\\extranotes.zip",
+            "  assets/Blocks/*.png     跑 tools/fetch_block_textures.py（校验 jar sha1）",
+            "  assets/BlocksIso/*.png  无脚本可扒（Wiki 有 Anubis 人机验证）：按",
+            "                          assets/BlocksIso/PROVENANCE.json 里的原名存图再改名",
+            "  assets/Sounds/*.ogg     取装机版 Minecraft Note Block Studio 的 Data\\Sounds",
+            "  assets/extranotes.zip   同上，取 Data\\extranotes.zip",
             "  assets/icons/{block*,instrumenticons}/  上游 OpenNBS 工程的导出产物，",
             "                     见 assets/icons/SOURCE.txt 与 tools/export_sprites.py",
             "",
-            "功能不受影响：播放特效找不到方块贴图时自动退回按名字哈希的稳定色块。",
-            "口径全文见仓库根的 THIRD-PARTY-NOTICES.md 与 assets/Blocks/MOJANG-NOTICE.txt。",
+            "功能不受影响：每条特效按自己声明的那层优先查图（方块排与瀑布的「乐器方块」= 方块",
+            "面，声道方块的摞塔 = 等距图），首选那层缺则退另一层，两层都缺退按名字哈希的稳定",
+            "色块，素材全缺也画得出格子。",
+            "口径全文见仓库根的 THIRD-PARTY-NOTICES.md、assets/Blocks/MOJANG-NOTICE.txt 与",
+            "assets/BlocksIso/WIKI-NOTICE.txt。",
             "",
         ]) + "\n",
         encoding="utf-8",

@@ -33,6 +33,17 @@ eframe = { version = "0.31", default-features = false, features = ["glow", "defa
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 lewton = "0.10"
+# 参考音频的解码后端（crates/nbs-audio/src/reference.rs）：原版只放 Ogg Vorbis，端口
+# 另外要 mp3 / flac / 各种位深的 wav 和 aiff，所以引纯 Rust 的 symphonia。只开用得到的：
+# pcm 是 wav/aiff 里的内部编码，mpa 含 MP1/MP2/MP3；容器只带 riff 和 flac，ogg 仍走 lewton，
+# 元数据解析（id3/ape）和 mkv 都不开。
+symphonia = { version = "0.6.1", default-features = false, features = [
+    "pcm",
+    "wav",
+    "aiff",
+    "flac",
+    "mpa",
+] }
 cpal = "0.18"
 midly = "0.5.3"
 rustysynth = "1.3.8"
@@ -41,6 +52,9 @@ crc32fast = "1"
 # jpeg 是「导入背景图片」要的（原版过滤器 *.png;*.jpg;*.jpeg），其余解码路径只用 png。
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 parking_lot = "0.12"
+# 歌曲标签槽位表（crates/nbs-editor/src/tabs.rs）。与 eframe→glow 那条依赖同版本，
+# Cargo.lock 里已有 1.1.1，离线可编。
+slotmap = "1.1.1"
 # 与 eframe 自己那条依赖同版本同特性，共用一份编译产物；nbs-app 里只在 Windows 目标下引用。
 winapi = { version = "0.3.9", features = ["winuser"] }
 # MCP 桥接（crates/nbs-mcp）专用：编辑器那侧一行都不引。

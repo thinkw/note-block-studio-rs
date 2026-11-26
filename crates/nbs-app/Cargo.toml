@@ -29,5 +29,5 @@ image = { workspace = true }
 # 开机更新检查走 WinINet（GameMaker http_get 的底层同款，见 src/update.rs）。
 winapi = { workspace = true, features = [
     "minwindef", "windef", "winerror", "wtypesbase", "combaseapi", "objbase", "shtypes",
-    "shobjidl", "shobjidl_core", "wininet",
+    "shobjidl", "shobjidl_core", "wininet", "winuser", "libloaderapi",
 ] }

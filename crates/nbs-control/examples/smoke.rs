@@ -181,8 +181,20 @@ fn run(config: &Path, work: &Path) -> i32 {
             expect_rev: None,
         }),
     );
-    show("Undo", client.request(Op::Undo { steps: None }));
-    show("Redo", client.request(Op::Redo { steps: None }));
+    show(
+        "Undo",
+        client.request(Op::Undo {
+            steps: None,
+            expect_rev: None,
+        }),
+    );
+    show(
+        "Redo",
+        client.request(Op::Redo {
+            steps: None,
+            expect_rev: None,
+        }),
+    );
     show(
         "SetMeta tempo+name",
         client.request(Op::SetMeta {
@@ -297,7 +309,7 @@ fn run(config: &Path, work: &Path) -> i32 {
     match client.request(Op::GetSnapshot) {
         Ok(out) => match &out.data {
             Some(nbs_control::Data::Snapshot(snap)) => println!(
-                "  界面现状: 确认框 {} 个，窗口 {:?}，脏 {}，播放头 {:.1}",
+                "  界面现状: 确认框 {:?} 个，窗口 {:?}，脏 {}，播放头 {:?}",
                 snap.modal_count, snap.open_window, snap.dirty, snap.playhead
             ),
             other => println!("  快照形态不对: {other:?}"),

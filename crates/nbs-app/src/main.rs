@@ -20,10 +20,16 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use eframe::egui;
+use nbs_editor::commands::Command;
+use nbs_editor::fx::window::FxWindowShared;
+use nbs_editor::state::QuitMode;
 use nbs_editor::EditorState;
 
+#[cfg(windows)]
+mod fx_window_style;
 #[cfg(windows)]
 mod mc_fetch;
 #[cfg(windows)]
@@ -51,6 +57,16 @@ struct NbsApp {
     /// 已经交给窗口的图标档位；`None` = 还没成功过，下一帧重试。
     #[cfg(windows)]
     icon_applied: Option<bool>,
+    /// 分离特效浮窗的共享句柄；关闭后丢掉，下次开启重新创建。
+    fx_window: Option<Arc<FxWindowShared>>,
+    /// 新浮窗只聚焦一次，避免默认不置顶时被主窗完全盖住。
+    fx_window_focus_pending: bool,
+    #[cfg(windows)]
+    fx_window_hwnd: Option<isize>,
+    #[cfg(windows)]
+    fx_window_style_applied: Option<bool>,
+    #[cfg(windows)]
+    fx_window_passthrough_applied: Option<bool>,
 }
 
 impl NbsApp {
@@ -93,22 +109,12 @@ impl NbsApp {
         if let Some(arg) = std::env::args().nth(1) {
             let path = PathBuf::from(arg);
             if path.extension().and_then(|s| s.to_str()) == Some("nbs") {
-                match nbs_core::nbs::load(&path) {
-                    Ok(song) => {
-                        state.doc.replace_song(song);
-                        state.prepare_audio();
-                        state.add_recent(path);
-                        state.set_message(nbs_editor::tr(
-                            "Song loaded from command line",
-                            "已从命令行载入歌曲",
-                        ));
-                    }
-                    Err(e) => state.set_message(if nbs_core::lang() == 1 {
-                        format!("载入失败: {e}")
-                    } else {
-                        format!("Load failed: {e}")
-                    }),
-                }
+                // 原版启动文件走 load_song(fn, 0, 1)：替换第 1 个标签，取消则保留原曲。
+                nbs_editor::commands::dispatch(
+                    &mut state,
+                    Command::OpenReplacingFirst(Some(path)),
+                    &cc.egui_ctx,
+                );
             }
         }
         // 外部控制：命令行、环境变量、设置页三层都没点名就一行代码都不多跑
@@ -124,6 +130,15 @@ impl NbsApp {
             .as_ref()
             .and_then(|req| start_control(&mut state, &cc.egui_ctx, req, true));
 
+        let fx_window_focus_pending = state.prefs.fx_window;
+        let fx_window = state.prefs.fx_window.then(|| {
+            Arc::new(FxWindowShared::new(
+                state.fx.clone(),
+                state.audio.clock(),
+                &state,
+            ))
+        });
+
         Self {
             state,
             last_title: String::new(),
@@ -133,6 +148,14 @@ impl NbsApp {
             icon_handles: [None, None],
             #[cfg(windows)]
             icon_applied: None,
+            fx_window,
+            fx_window_focus_pending,
+            #[cfg(windows)]
+            fx_window_hwnd: None,
+            #[cfg(windows)]
+            fx_window_style_applied: None,
+            #[cfg(windows)]
+            fx_window_passthrough_applied: None,
         }
     }
 }
@@ -398,26 +421,51 @@ impl eframe::App for NbsApp {
         }
     }
 
-    /// 原版 `control_draw.gml:153` 的 `draw_clear(window_background)`。
-    /// eframe 默认清成透明，glow 后端下就是一整片黑，凡是自己没重绘的面板都露黑底。
-    /// theme 3 开了背景强调时先铺一整窗 `accent[3]`（`control_draw.gml:69`）。
+    /// 所有视口共用透明清屏：根窗口自己在 `update` 里铺不透明底，分离浮窗才能
+    /// 真正透出桌面。eframe 的 `clear_color` 不是 per-viewport 的。
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        let c = if self.state.background_accent
-            && self.state.theme.kind == nbs_editor::ThemeKind::Fluent
-        {
-            self.state.theme.accent(3)
-        } else {
-            self.state.theme.window_bg
-        };
-        [
-            c.r() as f32 / 255.0,
-            c.g() as f32 / 255.0,
-            c.b() as f32 / 255.0,
-            1.0,
-        ]
+        [0.0, 0.0, 0.0, 0.0]
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 原生窗口关闭先拦住：原版 control_end 不可取消，但逐标签问完仍要保留失败恢复文件。
+        // eframe 允许用 CancelClose 把退出推迟到这些决定办完；已确认的退出不再拦。
+        if ctx.input(|i| i.viewport().close_requested()) && !self.state.quit_confirmed {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.state.emit(Command::BeginQuit(QuitMode::NativeClose));
+        }
+        if self.state.prefs.fx_window {
+            if self.fx_window.is_none() {
+                self.fx_window = Some(Arc::new(FxWindowShared::new(
+                    self.state.fx.clone(),
+                    self.state.audio.clock(),
+                    &self.state,
+                )));
+                self.fx_window_focus_pending = true;
+            }
+            if let Some(window) = &self.fx_window {
+                window.resume_state(&mut self.state);
+            }
+        } else {
+            self.fx_window = None;
+            self.fx_window_focus_pending = false;
+            #[cfg(windows)]
+            self.reset_fx_window_style();
+        }
+        if let Some(window) = &self.fx_window {
+            if window.take_close_requested() {
+                self.state.prefs.fx_window = false;
+                self.state.save_prefs();
+                self.fx_window = None;
+                self.fx_window_focus_pending = false;
+                #[cfg(windows)]
+                self.reset_fx_window_style();
+            }
+        }
+
+        // 根窗口不再依赖 clear_color；先把整窗铺回原来的主题色，壁纸与面板随后盖上。
+        ctx.layer_painter(egui::LayerId::background())
+            .rect_filled(ctx.screen_rect(), 0.0, self.root_backdrop());
         // 「旧图标」开关切换的那一帧，`EditorState` 才把 egui 的图标命令发出去，而这条命令要等
         // 帧末才冲刷给平台层；winit 收到后只写 ICON_SMALL，还是没缩放的 256x256。所以这里以
         // `applied_window_icon`（= 上一帧确实发过命令）为准，晚一帧再写 WM_SETICON，
@@ -441,6 +489,10 @@ impl eframe::App for NbsApp {
             self.last_title = title;
         }
         nbs_editor::show(ctx, &mut self.state);
+        if let Some(window) = &self.fx_window {
+            // 主窗这一帧先确保图标/字体/时间轴就绪，浮窗再拍视觉快照。
+            window.sync_from_state(&self.state);
+        }
         // 面板这一帧提的起停要求要画完之后再办：`control::start` 吃 `&mut EditorState`，
         // 而帧内它正被借去画界面；起 socket、写发现文件也不该发生在绘制路径里。
         if let Some(change) = self.state.control_change.take() {
@@ -473,10 +525,96 @@ impl eframe::App for NbsApp {
             });
             ctx.request_repaint();
         }
+
+        // deferred 子视口独立重绘：主窗最小化后回调仍可读音频共享状态并继续画。
+        // 每帧都要重新注册；停止注册时 eframe 会收掉旧浮窗。
+        if self.state.prefs.fx_window {
+            if let Some(window) = self.fx_window.clone() {
+                let builder = window.builder();
+                let id = nbs_editor::fx::window::viewport_id();
+                ctx.show_viewport_deferred(id, builder, move |ctx, class| {
+                    window.paint(ctx, class)
+                });
+                if self.fx_window_focus_pending {
+                    ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
+                    #[cfg(not(windows))]
+                    {
+                        self.fx_window_focus_pending = false;
+                    }
+                }
+                #[cfg(windows)]
+                self.apply_fx_window_style(ctx);
+            }
+        }
     }
 }
 
 impl NbsApp {
+    fn root_backdrop(&self) -> egui::Color32 {
+        if self.state.background_accent
+            && self.state.theme.kind == nbs_editor::ThemeKind::Fluent
+        {
+            self.state.theme.accent(3)
+        } else {
+            self.state.theme.window_bg
+        }
+    }
+
+    #[cfg(windows)]
+    fn reset_fx_window_style(&mut self) {
+        self.fx_window_hwnd = None;
+        self.fx_window_style_applied = None;
+        self.fx_window_passthrough_applied = None;
+    }
+
+    #[cfg(windows)]
+    fn apply_fx_window_style(&mut self, ctx: &egui::Context) {
+        if !self.state.prefs.fx_window {
+            self.reset_fx_window_style();
+            return;
+        }
+        if self
+            .fx_window_hwnd
+            .is_none_or(|hwnd| !fx_window_style::is_window(hwnd))
+        {
+            let title = if nbs_editor::lang() == 1 {
+                "播放特效"
+            } else {
+                "Playback effects"
+            };
+            self.fx_window_hwnd = fx_window_style::find_by_title(title);
+            self.fx_window_style_applied = None;
+            self.fx_window_passthrough_applied = None;
+        }
+        let Some(hwnd) = self.fx_window_hwnd else {
+            // 原生窗口在帧末才创建；下一帧再取 HWND。
+            ctx.request_repaint();
+            return;
+        };
+        if self.fx_window_focus_pending {
+            if !self.state.prefs.fx_window_always_on_top {
+                fx_window_style::bring_to_front_once(hwnd);
+            }
+            self.fx_window_focus_pending = false;
+        }
+        let transparent = self.state.prefs.fx_window_transparent;
+        if self.fx_window_style_applied != Some(transparent) {
+            let ok = fx_window_style::set_transparent(hwnd, transparent);
+            if !ok {
+                eprintln!("警告: 无法设置特效浮窗的 Windows DWM 透明合成");
+            }
+            // 失败也记下本次取值，避免每帧刷屏；用户再次切换时会重试。
+            self.fx_window_style_applied = Some(transparent);
+        }
+        let passthrough = self.state.prefs.fx_window_mouse_passthrough;
+        if self.fx_window_passthrough_applied != Some(passthrough) {
+            if !fx_window_style::set_mouse_passthrough(hwnd, passthrough) {
+                eprintln!("警告: 无法设置特效浮窗的鼠标穿透");
+            }
+            self.fx_window_passthrough_applied = Some(passthrough);
+        }
+    }
+
     /// 设置页那三个动作的落点。编辑器只提要求，起停在这里做：服务端句柄归本进程管，
     /// 退出时要在 `Drop` 里 `stop()`，发现文件才不会留下骗人的旧端口。
     fn apply_control_change(
@@ -556,7 +694,10 @@ fn main() -> eframe::Result<()> {
     // 启动走 `NativeOptions`（eframe 自己会同时设大小图标），运行中切换走帧首的
     // `window_icon::apply` + `EditorState` 发的 egui 窗口命令，两条路都要按当前设置选图。
     let prefs = nbs_io::prefs::Preferences::load();
-    let mut viewport = egui::ViewportBuilder::default().with_title("nbs-rust");
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("nbs-rust")
+        // 子浮窗要和根窗口共用同一份 GL 配置；根窗口仍由 update() 自己铺不透明底。
+        .with_transparent(true);
     // 原版 `control_create.gml:707-720`：播放器档窗口 800×500×window_scale，
     // 最小尺寸相同；编辑器档 min 也是 800×500×scale，端口沿用自定的 960×620。
     // 端口 `window_scale` 只缩画布不缩窗口（#80 定案），这里取基准尺寸。

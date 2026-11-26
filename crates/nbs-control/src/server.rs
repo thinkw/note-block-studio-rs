@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use crate::bus::{Hello, HelloAck, Inbox, Request, Response};
+use crate::bus::{Capabilities, Hello, HelloAck, Inbox, Request, Response};
 use crate::clients::ClientBoard;
 use crate::discovery::{now_unix, pid, Discovery};
 use crate::frame::{read_json_line, write_json_line};
@@ -36,6 +36,8 @@ pub struct ServerConfig {
     /// 等主线程回执的上限。主线程正常一帧就答完，超了说明它被长任务或关闭流程占住。
     pub request_timeout: Duration,
     pub max_clients: usize,
+    /// 后台标签写开关；设置页修改时由编辑器同步这个共享原子量。
+    pub parked_write: Arc<AtomicBool>,
 }
 
 impl ServerConfig {
@@ -51,6 +53,7 @@ impl ServerConfig {
             clients: ClientBoard::default(),
             request_timeout: Duration::from_secs(30),
             max_clients: 8,
+            parked_write: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -247,6 +250,9 @@ fn handle(mut stream: TcpStream, peer: SocketAddr, state: Arc<HandlerState>) {
         app: format!("{} {}", state.cfg.app_name, state.cfg.app_version)
             .trim()
             .to_string(),
+        capabilities: Capabilities {
+            parked_write: state.cfg.parked_write.load(Ordering::Relaxed),
+        },
         snapshot: None,
     };
     if write_json_line(&mut stream, &ack).is_err() {
@@ -278,10 +284,11 @@ fn handle(mut stream: TcpStream, peer: SocketAddr, state: Arc<HandlerState>) {
         if let Some(session) = &session {
             session.requested();
         }
-        let rx = state
-            .cfg
-            .inbox
-            .submit(req.id, format!("{peer} {}", hello.client), req.op);
+        let rx =
+            state
+                .cfg
+                .inbox
+                .submit_tab(req.id, format!("{peer} {}", hello.client), req.op, req.tab);
         let outcome = match rx.recv_timeout(state.cfg.request_timeout) {
             Ok(outcome) => outcome,
             Err(RecvTimeoutError::Timeout) => Outcome::err(
