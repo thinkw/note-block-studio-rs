@@ -288,3 +288,43 @@ nbs-mcp --call import_midi '{"path":"D:/out/take.mid","discard_changes":true}'
 6. IDE 侧看不到工具：确认 `command` 指向的是 `nbs-mcp`，不是 `nbs-rust`。
 
 日志和给人说的话一律走 stderr，stdout 只放协议字节和脚本要的产物——所以「IDE 里配置没生效，直接跑一下看看」这件事在 `--call` 上是能做的。
+
+## 15. 编译时 `failed to remove file nbs-mcp.exe`
+
+症状：`cargo build --release` 到最后一个 crate 报
+
+```
+error: failed to remove file `D:\develop\...\target\release\nbs-mcp.exe`
+Caused by: 拒绝访问。 (os error 5)
+```
+
+而且同一次构建里 `nbs-rust.exe` 已经换掉了——只有这一个删不动。
+
+**这不是调用失败，是文件占用**：Windows 上正在跑的 exe 镜像不让删也不让覆盖，cargo 只能先删后写。
+持锁的是那条**还在跑的 `nbs-mcp.exe` 进程**，它的父进程是 IDE 的会话 worker，不是 nbs-rs 编辑器。
+
+两件事因此管不着它：
+
+- 编辑器里取消勾选「启用外部控制」——那停的是**编辑器进程内**的 TCP 服务端，桥接是另一个进程；
+- 关掉编辑器窗口——桥接退出只看 stdin 有没有被客户端关掉（`serve` 在等 `waiting()`），编辑器在不在它不管。
+
+IDE 里把这条 MCP 服务关掉通常会杀掉进程；但**配置开关不保证回收已经派生出来的那一条**，
+所以残留的桥接会一直占着，直到那个会话或 worker 退出。
+
+先认出是哪条（它的命令行就是被锁的那份路径）：
+
+```
+tasklist | findstr /i nbs-mcp
+wmic process where "name='nbs-mcp.exe'" get ProcessId,ParentProcessId,CreationDate,CommandLine /format:list
+```
+
+按打扰从小到大三条路：
+
+1. `taskkill /PID <那条> /F`。桥接不存任何状态，回执都是当场问编辑器要的；IDE 里重新启用会拉一条新的。
+2. 把 IDE 的 MCP `command` 指到 `target` 目录**之外**的一份副本（发布后拷过去），
+   以后 cargo 怎么写 `target/release` 都不会和它抢同一个镜像。
+3. 开发期换输出目录：`cargo build --release --target-dir target-dev`。
+
+这是 §13 那轮口径带来的代价，不是缺陷：那一轮特意让「开局连不上也照样把服务起来」，
+就是为了不再逼你重启 IDE；常驻就意味着一直占着自己那份 exe。
+以前 IDE 比编辑器先启动时它会 `exit(2)`，反倒不占锁——同一件事换了两面。
