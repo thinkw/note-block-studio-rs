@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 nbs-core = { workspace = true }
 lewton = { workspace = true }
+symphonia = { workspace = true }
 cpal = { workspace = true }
 rustysynth = { workspace = true }
 parking_lot = { workspace = true }

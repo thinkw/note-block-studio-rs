@@ -539,7 +539,7 @@ impl SharedState {
         let frames = out.len() / channels.max(1);
         for f in 0..frames {
             let (mut l, mut r) = self.render_frame();
-            let reference = self.reference.render_sample();
+            let reference = self.reference.render_sample(self.sample_rate);
             if self.reference.is_solo() {
                 l = 0.0;
                 r = 0.0;

@@ -2725,6 +2725,9 @@ mod gui_window_tests {
         assert_eq!(state.reference.volume, 70);
     }
 
+    /// 参考音频行只在**已加载**之后才占一行（原版 `control_draw.gml:1456` 的
+    /// `reference_audio >= 0` 门），删掉之后整行一并消失；加载入口是
+    /// 文件→导入→参考音频……（`:1706/1801`），行内名称格只做「更换」。
     #[test]
     fn reference_row_loads_and_its_controls_change_the_real_track() {
         let _prefs = isolate_prefs();
@@ -2735,11 +2738,25 @@ mod gui_window_tests {
         state.prefs.language = 1;
         state.window = None;
 
-        click_text(&mut state, &ctx, "参考音频");
+        let has_row = |out: &egui::FullOutput| {
+            out.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text)
+                    if text.galley.text() == "参考音频")
+            })
+        };
+        frame_out(&mut state, &ctx, base_input());
+        let out = frame_out(&mut state, &ctx, base_input());
+        assert!(!has_row(&out), "没加载参考音频时不该画出参考行");
+
+        dispatch(
+            &mut state,
+            commands::Command::OpenDialog(crate::state::DialogAction::LoadReference),
+            &ctx,
+        );
         assert_eq!(
             state.file_dialog.as_ref().map(|d| d.action),
             Some(crate::state::DialogAction::LoadReference),
-            "名称格必须真的打开参考音频文件框"
+            "文件→导入→参考音频…… 必须打开参考音频文件框"
         );
         state.file_dialog = None;
         state.window = None;
@@ -2752,8 +2769,18 @@ mod gui_window_tests {
         state.reference.volume = 40;
         state.reference.offset_ms = 100;
         let out = frame_out(&mut state, &ctx, base_input());
+        assert!(has_row(&out), "加载后参考行必须出现");
         let name = text_center_if(&out.shapes, |t| t == "参考音频");
         let row_y = name.y + 2.0;
+
+        click_point(&mut state, &ctx, name);
+        assert_eq!(
+            state.file_dialog.as_ref().map(|d| d.action),
+            Some(crate::state::DialogAction::LoadReference),
+            "名称格必须真的打开参考音频文件框"
+        );
+        state.file_dialog = None;
+        state.window = None;
 
         click_point(&mut state, &ctx, egui::pos2(138.0, row_y));
         assert_eq!(state.reference.option, 0, "静音按钮要生效");
@@ -2777,12 +2804,12 @@ mod gui_window_tests {
         assert_eq!(state.reference.path, None, "删除按钮要清掉当前标签的参考轨");
         assert_eq!((state.reference.option, state.reference.volume), (2, 100));
         assert_eq!(state.reference.offset_ms, 0);
+        let out = frame_out(&mut state, &ctx, base_input());
+        assert!(!has_row(&out), "删除后参考行要一并消失");
+        state.reference.path = Some(PathBuf::from("ref.ogg"));
         state.fullscreen = true;
         let out = frame_out(&mut state, &ctx, base_input());
-        assert!(!out.shapes.iter().any(|shape| matches!(
-            &shape.shape,
-            egui::Shape::Text(text) if text.galley.text() == "参考音频"
-        )));
+        assert!(!has_row(&out), "全屏时不画参考行");
         state.fullscreen = false;
         state.reference.path = Some(PathBuf::from("old.ogg"));
         dispatch(
