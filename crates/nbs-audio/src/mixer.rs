@@ -54,6 +54,19 @@ impl Voice {
         p * (SAMPLE_RATE as f64 / output_rate.max(1) as f64)
     }
 
+    /// 真正听到的声像 0..=200（原版 `play_sound.gml:24`）：轨的声道不在正中时，
+    /// 音符自己的 pan 会被往中间拉一半。
+    ///
+    /// 单独抽出来是因为播放特效（声道方块）要按同一个数摆位置：画面里方块落在哪一槽，
+    /// 必须和耳朵听到的左右一致，而不是照 `note.panning` 的裸值。
+    pub fn effective_pan(note_panning: u8, layer_stereo: u8) -> u8 {
+        if layer_stereo == PAN_CENTER {
+            note_panning
+        } else {
+            ((layer_stereo as u16 + note_panning as u16) / 2) as u8
+        }
+    }
+
     /// 原版 `control_draw.gml:470-480` + `play_sound.gml:24`：
     /// `vol = (layer.volume/100) * note.velocity`
     /// `pan = layer.stereo == 100 ? note.panning : (layer.stereo + note.panning)/2`
@@ -70,11 +83,7 @@ impl Voice {
         if mono {
             return (g, g);
         }
-        let pan_eff = if layer_stereo == PAN_CENTER {
-            note.panning
-        } else {
-            ((layer_stereo as u16 + note.panning as u16) / 2) as u8
-        };
+        let pan_eff = Self::effective_pan(note.panning, layer_stereo);
         // 线性（单声道兼容）声像律：左右增益之和恒为 1，居中各 0.5。
         // 原版把 0..200 的 pan 直接交给发射器位置，引擎侧就是这条律——
         // 上游 issue #452 实测「编辑器播放比归一化导出恒定低 50%」即由此而来。

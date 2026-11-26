@@ -16,6 +16,9 @@
 //! `NBS_UIPNG_SCROLL=<tick>:<layer>` 把网格左上角滚到指定位置，验证可视区外的内容；
 //! `NBS_UIPNG_FX=<id[,id]>[:<播放头列号>]` 摆开播放特效（`synthesia` 舞台 / `block_row` 叠加），
 //! 播放头停在哪一列一起给，否则只画得出半截。
+//! `NBS_UIPNG_FX_PARAMS={"pan_slots":{"indent_from":20}}` 再把调参面板上的那些参数灌进去，
+//! 用来截「同一个特效不同参数」的对比图（和 `NBS_UIPNG_FX` 一样会写首选项，跑时配
+//! `NBS_RUST_CONFIG_DIR=.work/probe/cfg` 就不会碰真那份）。
 //! `NBS_UIPNG_KEY_PLAYED=<键号>:<秒>` 给某个琴键盖上「演奏后过了这么多秒」的时间戳，
 //! 用来截图验证播放时琴键跟着弹下（染黄 + `floor(7*down)` 位移）。
 //! `NBS_UIPNG_PREFS_MENU=theme|rate|output` 把首选项页里的某个下拉摆成打开状态
@@ -237,6 +240,18 @@ fn main() -> Result<(), String> {
         state.viewport.start_layer = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     }
 
+    // `NBS_UIPNG_PAN_SPREAD=<层数>`：把前 N 轨（0 = 全部）的声道均匀摊到 20..=180。
+    // 现成的歌全堆在正中，截「声道方块」看不出分槽，这里给探针造一点左右差别。
+    if let Ok(raw) = std::env::var("NBS_UIPNG_PAN_SPREAD") {
+        let want: usize = raw.parse().unwrap_or(0);
+        let layers = &mut state.doc.song.layers;
+        let total = if want == 0 { layers.len() } else { want.min(layers.len()) };
+        for (i, layer) in layers.iter_mut().enumerate().take(total) {
+            let t = if total < 2 { 0.5 } else { i as f32 / (total - 1) as f32 };
+            layer.stereo = (20.0 + 160.0 * t) as u8;
+        }
+    }
+
     // `NBS_UIPNG_FX=<id[,id]>[:<播放头列号>]`：摆开播放特效再渲染。特效按播放头算
     // 可见窗口，停在第 0 列只能看到半截，所以播放头也一起给。id 见 `FxStack::ids()`。
     if let Ok(spec) = std::env::var("NBS_UIPNG_FX") {
@@ -252,6 +267,24 @@ fn main() -> Result<(), String> {
         state.audio.clock_mut().seek(tick);
         // 载歌与否都会先摆着开机欢迎窗，它正好压在舞台那块上，截图什么都看不见。
         state.window = None;
+    }
+
+    // `NBS_UIPNG_FX_PARAMS={"pan_slots":{"indent_from":20}}`：按 id 把调参面板上的那些
+    // 参数一次性灌进特效，用来截不同参数的对比图（走 `FxStack::set_params`，和手滑同一条
+    // 路）。要排在 `NBS_UIPNG_FX` 之后：那一条自己不动参数，但顺序反了容易看不清谁生效。
+    // 和 `NBS_UIPNG_FX` 一样，这条也会把首选项写脏，别拿真存档当对照组。
+    if let Ok(raw) = std::env::var("NBS_UIPNG_FX_PARAMS") {
+        match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw) {
+            Ok(map) => {
+                let mut guard = state.fx.lock();
+                for (id, params) in map {
+                    if !guard.stack.set_params(&id, &params) {
+                        println!("FX_PARAMS: 没有特效 {id}，这一份没灌进去");
+                    }
+                }
+            }
+            Err(e) => println!("FX_PARAMS: 这不是 JSON 对象（{e}），全部忽略"),
+        }
     }
 
     // `NBS_UIPNG_KEY_PLAYED=<键号>:<过了多少秒>`：给某个琴键盖「演奏后过了这么多秒」的

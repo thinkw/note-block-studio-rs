@@ -1,0 +1,139 @@
+{
+  "source": "Minecraft Wiki（zh.minecraft.wiki）各方块条目信息框里的等距渲染图（File: 页），非本仓库自绘",
+  "obtained": "浏览器人手另存（Wiki 有 Anubis 人机验证，脚本 curl 拿不到图），原始文件在 D:\\视频素材\\锦上京",
+  "saved_at": "2026-11-25",
+  "image_size": "300x300 RGBA",
+  "content_bbox": "全部 20 张的可见内容都在 (16,2)-(284,298)，所以堆叠时不用逐张校正偏移",
+  "renamed": "入库时按 crates/nbs-editor/src/fx/tiles.rs 的 resolve_file 算出的文件主名改名（例：Block_of_Gold_JE6_BE3.png → gold_block.png），图字节未动",
+  "bytes": 96478,
+  "textures": 20,
+  "committed_textures": 20,
+  "fetched_at": "2026-11-25T18:42:30",
+  "license_note": "底层像素是 Mojang/Microsoft 的版权素材；Wiki 站方对上传文件一般标注 CC BY-NC-SA（含非商业条款），这 20 张的许可栏我们没逐张核对 —— 见 WIKI-NOTICE.txt 的处置承诺。",
+  "not_under_agpl": true,
+  "notice": "WIKI-NOTICE.txt",
+  "third_party_notices": "THIRD-PARTY-NOTICES.md",
+  "wiki_name_changed": "Hay Bale / Packed Ice / Sand / White Wool 四张的文件名在 2025 年之后改过（旧名另存于本机 _旧版名_2025-08下载/），这里用的是当前名那一套",
+  "files": [
+    {
+      "file": "bone_block.png",
+      "wiki_name": "Bone_Block_(UD)_JE2_BE2.png",
+      "bytes": 2727,
+      "sha256": "72b37c06adfaf65c591f4966e0a4ad7a67cd7470e3c2b7fb7dab7dd55d001f2d"
+    },
+    {
+      "file": "clay.png",
+      "wiki_name": "Clay_JE4_BE2.png",
+      "bytes": 4812,
+      "sha256": "669897e69fcf9e17ab11ac876310944e6452af49bd2c92cbe0eb33fd4320eb93"
+    },
+    {
+      "file": "cobblestone.png",
+      "wiki_name": "Cobblestone_JE7_BE3.png",
+      "bytes": 4766,
+      "sha256": "cda7c2b39d868bc891b33332b8246e955a4f61098bc0d1554d8b766a1cdb1316"
+    },
+    {
+      "file": "copper_block.png",
+      "wiki_name": "Copper_Block_JE1_BE1.png",
+      "bytes": 3906,
+      "sha256": "6aae4993840d3b563b4050de17783f4bd8ffc613e235bbe324f6d5aa84bee5f7"
+    },
+    {
+      "file": "dirt.png",
+      "wiki_name": "Dirt_JE2_BE2.png",
+      "bytes": 6986,
+      "sha256": "50c6f0ce27c62106cbe7e4bb4037c4e3bed2525ab9b6809e148b5bf36f314795"
+    },
+    {
+      "file": "emerald_block.png",
+      "wiki_name": "Block_of_Emerald_JE4_BE3.png",
+      "bytes": 3356,
+      "sha256": "4ef2178048f9aae36ec6b8ed8c64d38d0158b0d69b42392a2d26a9b4d8e2ca35"
+    },
+    {
+      "file": "exposed_copper.png",
+      "wiki_name": "Exposed_Copper_Block_JE1_BE1.png",
+      "bytes": 4403,
+      "sha256": "c0dee5c6c94c3c97d8ddba7324980d1f613c5f59d7481754ab3ea7691f43cb10"
+    },
+    {
+      "file": "glass.png",
+      "wiki_name": "Glass_JE4_BE4.png",
+      "bytes": 1729,
+      "sha256": "bcf26b51e1ae8f00143d333885b9012cf6586279381467ec086cb801b00680ab"
+    },
+    {
+      "file": "glowstone.png",
+      "wiki_name": "Glowstone_JE4.png",
+      "bytes": 5273,
+      "sha256": "e06d8771fc5ae043872e2db84bd5a0f2c9fe7a54116b7d30c41d5a25a78d0354"
+    },
+    {
+      "file": "gold_block.png",
+      "wiki_name": "Block_of_Gold_JE6_BE3.png",
+      "bytes": 6763,
+      "sha256": "11bd95d214290f9d903620b19159e34a02b1a48ff5a826b4bfe9ef9af3d1b0d4"
+    },
+    {
+      "file": "hay_block.png",
+      "wiki_name": "Hay_Bale_(UD)_JE3_BE3.png",
+      "bytes": 4299,
+      "sha256": "983f94afd4536171ad4530a595b38da05c9107e2bf7d6d2ad3c53f5e4032a9ca"
+    },
+    {
+      "file": "iron_block.png",
+      "wiki_name": "Block_of_Iron_JE4_BE3.png",
+      "bytes": 3005,
+      "sha256": "ea3f128f68e6d00c7054dc22562dba1d6750cd62d862976f243a3769e78eb908"
+    },
+    {
+      "file": "oak_planks.png",
+      "wiki_name": "Oak_Planks_JE9_BE3.png",
+      "bytes": 4464,
+      "sha256": "c260d37e406c744c2e18f4096c79acfac98b9c34d797ead4a90640d6c4bcc7c9"
+    },
+    {
+      "file": "oxidized_copper.png",
+      "wiki_name": "Oxidized_Copper_Block_JE1_BE1.png",
+      "bytes": 4123,
+      "sha256": "70ded6c2ff4ccd4f425fa8aee3f481a2d4cbd5a675a3bd78c4853cf5dfceb119"
+    },
+    {
+      "file": "packed_ice.png",
+      "wiki_name": "Packed_Ice_JE4_BE3.png",
+      "bytes": 3851,
+      "sha256": "a3be0e125d4ab992ba726c105c7bc239817e8624fb7083879a6e64b76d6ae73d"
+    },
+    {
+      "file": "pumpkin.png",
+      "wiki_name": "Pumpkin_JE3.png",
+      "bytes": 8236,
+      "sha256": "ab5e63cdb5b695ffa0a054decad6d237f312f77f214df4125a0612336d266bd3"
+    },
+    {
+      "file": "sand.png",
+      "wiki_name": "Sand_JE5_BE3.png",
+      "bytes": 7808,
+      "sha256": "382c64b9c4033ccc560be0cd6f02447e8d36a4c5dc9d832912785ef1a551aeea"
+    },
+    {
+      "file": "soul_sand.png",
+      "wiki_name": "Soul_Sand_JE2_BE2.png",
+      "bytes": 4790,
+      "sha256": "76448fa052955a49a1b08db3288bc0d52c4e16193146cf1bd4c5b887c9dd961f"
+    },
+    {
+      "file": "weathered_copper.png",
+      "wiki_name": "Weathered_Copper_Block_JE1_BE1.png",
+      "bytes": 4329,
+      "sha256": "6491005b343c09e4f78dc259659ee4c0d667bfcad383f0876b2e40c6e0e57b22"
+    },
+    {
+      "file": "white_wool.png",
+      "wiki_name": "White_Wool_JE4_BE2.png",
+      "bytes": 6852,
+      "sha256": "4a82e28a44e25bd7ff97ea1ced418167f268facec54ac3c923ecc79f8047e217"
+    }
+  ]
+}

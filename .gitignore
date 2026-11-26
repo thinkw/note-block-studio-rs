@@ -38,5 +38,32 @@ assets/Blocks/*
 !assets/Blocks/soul_sand.png
 !assets/Blocks/weathered_copper.png
 !assets/Blocks/white_wool.png
+# Minecraft Wiki 的等距方块渲染图（播放特效画方块用的那 20 颗，合计约 94 KB）。
+# 口径和上面一致：只入 20 个内置乐器会画到的，文件名由 `fx::tiles` 的测试现算核对。
+# 这批没脚本可扒（Wiki 有 Anubis 人机验证，curl 拿不到图），是人手下载后改名入库的，
+# 原名与来路记在 PROVENANCE.json，归属与许可声明在 WIKI-NOTICE.txt。
+assets/BlocksIso/*
+!assets/BlocksIso/PROVENANCE.json
+!assets/BlocksIso/WIKI-NOTICE.txt
+!assets/BlocksIso/bone_block.png
+!assets/BlocksIso/clay.png
+!assets/BlocksIso/cobblestone.png
+!assets/BlocksIso/copper_block.png
+!assets/BlocksIso/dirt.png
+!assets/BlocksIso/emerald_block.png
+!assets/BlocksIso/exposed_copper.png
+!assets/BlocksIso/glass.png
+!assets/BlocksIso/glowstone.png
+!assets/BlocksIso/gold_block.png
+!assets/BlocksIso/hay_block.png
+!assets/BlocksIso/iron_block.png
+!assets/BlocksIso/oak_planks.png
+!assets/BlocksIso/oxidized_copper.png
+!assets/BlocksIso/packed_ice.png
+!assets/BlocksIso/pumpkin.png
+!assets/BlocksIso/sand.png
+!assets/BlocksIso/soul_sand.png
+!assets/BlocksIso/weathered_copper.png
+!assets/BlocksIso/white_wool.png
 # tools/strip_mojang_assets.py 的产出（无素材发行包副本），不入库
 /dist/
