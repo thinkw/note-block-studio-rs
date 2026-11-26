@@ -140,7 +140,7 @@ pub struct Preferences {
     /// 端口自加（用户要求接 MAESTRO 导出）：MAESTRO 机体节目单的导出选项。
     /// 原版没有这条导出，所以也没有对应的 `[..._export]` 段，键名用 `maestro`。
     pub maestro: crate::maestro::MaestroOptions,
-    /// 端口自加（用户要求接 nbs-fractal 机体导出）：`.litematic` 整机投影的导出选项。
+    /// 端口自加（用户要求接 nbs-fractal 机体导出）：`.litematic` 机体投影的导出选项。
     pub fractal: crate::fractal::FractalOptions,
     /// 端口自加（用户要求接唱片工坊那一档）：编码唱片数据箱 `.litematic` 的导出选项。
     pub disc_chest: crate::disc_chest::DiscChestOptions,
@@ -157,7 +157,9 @@ pub struct Preferences {
     /// 端口自加：MAESTRO 那条「节目单要在已建好的机体里才出声」的一次性提示是否已看过。
     /// 语义同 `warning_schematic`（`false` = 还没提示过）。
     pub warning_maestro: bool,
-    /// 端口自加：fractal 那条「这份投影自带红石、贴下去就能响，不需要先建机体」的一次性提示。
+    /// 端口自加：fractal 那条「投影里没有时钟也没有电源、喂电要自己接」的一次性提示。
+    /// 键名沿用第一次加进来时的 `warning_fractal`；文案在 2026-11-23 从「贴下去就能响」改成了
+    /// 实测口径，已经看过旧提示的人不会再见到的这句，需要时手动把这一项置回 `false`。
     pub warning_fractal: bool,
     /// 端口自加：编码唱片那条「只是数据箱，得贴在已建好的机体里才出声」的一次性提示。
     /// 语义同 `warning_maestro`（`false` = 还没提示过）。

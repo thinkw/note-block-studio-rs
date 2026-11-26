@@ -9004,11 +9004,12 @@ fn maestro_export_window(state: &mut EditorState, ui: &mut Ui) {
 
 /// 端口自加（用户要求「把新给出来的两条路线接成两个导出样式」）：nbs-fractal 机体投影。
 /// 位置照 MAESTRO 节目单窗口：选项在上、改写清单贴着选项、底部三个按钮。
-/// 与节目单最大的不同是这份产物自带红石，所以窗口里不再讲「要先有机体」。
+/// 实测修正：这份产物里没有时钟也没有电源，所以窗口里照旧不讲「要先有机体」，
+/// 但也不许再说「贴下去就能响」——能不能走到底，交给下面那条红石线自检说。
 fn fractal_export_window(state: &mut EditorState, ui: &mut Ui) {
     ui.label(tr(
-        "This .litematic is a whole redstone music machine: note blocks, repeaters, pistons and wiring are already inside it.\nPaste it and it plays - there is no machine to build first.",
-        "这份 .litematic 是一台完整的红石音乐机：音符盒、中继器、活塞和线路都在里面。\n贴下去就能响，不需要事先搭好机体。",
+        "This .litematic is a machine projection: note blocks, repeaters and wiring are laid out inside it by nbs-fractal, but there is no clock and no power source - you supply the feed.\nThe report below carries a dust check that names every wire run past redstone dust's 15-block range.",
+        "这份 .litematic 是机体投影：音符盒、中继器、红石线都按 nbs-fractal 的布局铺在里面，但没有时钟也没有电源，喂电要你自己接。\n下面报告会有一条红石线自检，点名所有超过红石线 15 格传导预算的段——那些段的尾巴拿不到电。",
     ));
     ui.separator();
 

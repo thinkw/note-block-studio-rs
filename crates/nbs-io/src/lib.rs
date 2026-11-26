@@ -4,7 +4,7 @@
 //! - [`pattern`]       `.nbp` 选区片段（含 zlib+base64 剪贴板兼容）
 //! - [`schematic`]     `.schematic` / 结构方块 `.nbt`（大端 NBT + gzip）
 //! - [`maestro`]       MAESTRO 音乐机节目单（`.schem`，需已建好的机体才出声）
-//! - [`fractal`]       nbs-fractal 机体投影（`.litematic`，自带红石的整机）
+//! - [`fractal`]       nbs-fractal 机体投影（`.litematic`，里面没有时钟也没有电源，喂电自己接）
 //! - [`litematic`]     自写的 Litematica 写出器（多子区域 + 箱内物品，给编码唱片那一档用）
 //! - [`datapack`]      Minecraft 数据包（mcfunction + 二分 tick 查找树）
 //! - [`disc_chest`]    唱片工坊那一档的编码唱片数据箱（`.litematic`，需已建好的机体才出声）

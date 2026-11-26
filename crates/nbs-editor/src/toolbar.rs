@@ -273,7 +273,8 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                         state.emit(Command::OpenMaestroExport);
                         ui.close_menu();
                     }
-                    // 端口自加：nbs-fractal 的整机投影（.litematic），自带红石，贴下去就响。
+                    // 端口自加：nbs-fractal 的机体投影（.litematic），只有红石线几何，
+                    // 时钟和电源都得自己接；超 15 格的线会在导出报告里点名。
                     if ui
                         .button(tr("Fractal machine...", "Fractal 机体投影…"))
                         .clicked()

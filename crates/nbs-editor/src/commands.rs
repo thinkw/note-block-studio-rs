@@ -220,8 +220,8 @@ pub enum Command {
     OpenMaestroExport,
     /// 端口自加：MAESTRO 窗口「导出」按钮——预览报错就不弹保存框。
     ExportMaestroChecked,
-    /// 端口自加：nbs-fractal 整机投影入口（导出菜单）。第一次用先提示
-    /// 「这份投影自带红石，贴下去就能响，不需要机体」，随后算一遍预览再开窗口。
+    /// 端口自加：nbs-fractal 机体投影入口（导出菜单）。第一次用先提示
+    /// 「投影里没有时钟也没有电源，喂电要自己接」，随后算一遍预览再开窗口。
     OpenFractalExport,
     /// 端口自加：fractal 窗口「导出」按钮——预览报错就不弹保存框。
     ExportFractalChecked,
@@ -1063,20 +1063,24 @@ the machine in your world before pasting this structure.\n\nThis warning will ne
         }
         // ------------------------------------- Fractal 机体投影（端口自加）
         Command::OpenFractalExport => {
-            // 与 MAESTRO 相反：这份 .litematic 自带红石，贴下去就能响，不需要先搭机体。
-            // 第一次用把这一点说清楚，规矩照 warning_maestro：提示完就落盘，不再重复。
+            // 实测修正：这份 .litematic 是机体投影，里面既没有时钟也没有电源（Compact 两份实测
+            // 零电源位），旧文案「自带红石、贴下去就能响」不成立。规矩照 warning_maestro：提示完就落盘。
             let mut items: std::collections::VecDeque<Modal> = std::collections::VecDeque::new();
             if !state.prefs.warning_fractal {
                 items.push_back(Modal {
                     title: tr("Fractal machine projection", "Fractal 机体投影"),
                     text: if crate::lang() == 1 {
-                        "导出的 .litematic 是一台完整的红石音乐机：音符盒、中继器、\
-活塞和线路都摆在里面，贴下去就能响，不需要事先搭好机体。\n\n此提示将不再提示。"
+                        "导出的 .litematic 是机体投影：音符盒、中继器、红石线都按 nbs-fractal 的布局\
+铺在里面，但没有时钟也没有电源，喂电要你自己接，它才会开始走。\n\n红石线每 15 格就要一颗刷新中继器，\
+密曲里会有段落在预算之外——导出报告里的「红石线自检」会点名这些段，超出的尾巴拿不到电，\
+对应那几刻不会出声。\n\n此提示将不再提示。"
                             .into()
                     } else {
-                        "The exported .litematic is a complete redstone music machine: note \
-blocks, repeaters, pistons and wiring are all inside it, so it plays once pasted and you do not \
-need a prebuilt machine.\n\nThis warning will never be shown again."
+                        "The exported .litematic is a machine projection: note blocks, repeaters and \
+wiring are laid out inside it by nbs-fractal, but there is no clock and no power source, so you have \
+to supply the feed before anything moves.\n\nRedstone dust needs a booster every 15 blocks, and dense \
+songs leave runs past that budget - the \"dust check\" line in the export report names them, and the \
+tail of each such run gets no power, so those ticks stay silent.\n\nThis warning will never be shown again."
                             .into()
                     },
                     yes_no: false,

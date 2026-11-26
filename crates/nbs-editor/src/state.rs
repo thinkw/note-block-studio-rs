@@ -228,8 +228,9 @@ pub enum WindowKind {
     /// 端口自加（用户要求「导出那一栏多加个这个格式」）：MAESTRO 音乐机的节目单导出。
     /// 产物是给已建好的机体读的 `.schem`，本机没有声音。
     MaestroExport,
-    /// 端口自加（用户要求接第二条 20Hz 路子）：nbs-fractal 的整机投影导出。
-    /// 与 MAESTRO 相反，这份 `.litematic` 自带红石，贴下去就能响。
+    /// 端口自加（用户要求接第二条 20Hz 路子）：nbs-fractal 的机体投影导出。
+    /// 实测：这份 `.litematic` 里没有时钟也没有电源，喂电要自己接；报告里那条红石线自检
+    /// 会点名超过 15 格传导预算的段。
     FractalExport,
     /// 端口自加（用户要求接第二条 20Hz 路子）：唱片工坊那一档的编码唱片数据箱导出。
     /// 和 MAESTRO 同族——这份 `.litematic` 只有箱子，要贴在已建好的机体里才出声。
@@ -540,7 +541,7 @@ pub enum DialogAction {
     ExportPattern,
     /// 端口自加：MAESTRO 机体节目单的保存框，扩展名 `.schem`（WorldEdit gzip 格式）。
     ExportMaestro,
-    /// 端口自加：nbs-fractal 整机投影的保存框，扩展名 `.litematic`。
+    /// 端口自加：nbs-fractal 机体投影的保存框，扩展名 `.litematic`。
     ExportFractal,
     /// 端口自加：编码唱片数据箱的保存框，扩展名同样 `.litematic`，但内容只有箱子。
     ExportDiscChest,
@@ -832,7 +833,7 @@ impl FileDialog {
                 tr("Save pattern", "保存分段"),
                 vec![filter("Note Block Pattern (*.nbp)", "*.nbp")],
             ),
-            // 端口自加：fractal 整机投影。Litematica 认 .litematic（gzip NBT）。
+            // 端口自加：fractal 机体投影。Litematica 认 .litematic（gzip NBT）。
             DialogAction::ExportFractal => (
                 tr("Export Fractal machine", "导出 Fractal 机体投影"),
                 vec![filter("Litematica Projection (*.litematic)", "*.litematic")],

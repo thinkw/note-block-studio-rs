@@ -1689,7 +1689,17 @@ mod gui_window_tests {
         assert_eq!(
             state.modals.items.len(),
             1,
-            "第一次用要先说明「这是自带红石的整机」"
+            "第一次用要先说明「投影里没有时钟也没有电源」"
+        );
+        let notice = &state.modals.items[0].text;
+        assert!(
+            (notice.contains("没有时钟") || notice.contains("no clock"))
+                && (notice.contains("自检") || notice.contains("dust check")),
+            "提示要说清没有时钟/电源，并把报告里那条自检指出来：{notice}"
+        );
+        assert!(
+            !notice.contains("贴下去就能响") && !notice.contains("plays once pasted"),
+            "「自带红石、贴下去就能响」这个旧口径不许回来：{notice}"
         );
         assert_eq!(state.window, None, "提示没答完之前不开窗");
         assert!(state.fractal_report.is_some(), "开窗前先算好机体与清单");
