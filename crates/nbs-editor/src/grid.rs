@@ -18,7 +18,7 @@ use nbs_core::model::{
 use crate::commands::Command;
 use crate::fonts::{bold_font, info_big_font, info_med_font, main_font, small_font};
 use crate::icons::BlockSet;
-use crate::interaction::{DragMode, InputSnapshot};
+use crate::interaction::{DragMode, InputSnapshot, ScrollAction, ScrollGesture};
 use crate::layers_panel::time_str;
 use crate::state::{ContextKind, ContextMenu, EditMode, EditorState};
 use crate::theme::{Theme, ThemeKind};
@@ -610,37 +610,43 @@ fn handle_grid_input(state: &mut EditorState, input: &InputSnapshot, rect: Rect)
     // 滚轮：悬停音符调属性 / 按 `mousewheel` 档位决定是平移、换音色还是换键。
     // Ctrl+滚轮不在这里处理——原版把它归在键盘快捷键段（`control_draw.gml:736-751`），
     // 改的是整窗口缩放，见 `shortcuts.rs`。
+    //
+    // 一轮滚动只在开头定一次性质：指针是静止的，画面却跟着滚，不钉住的话滚到音符
+    // 底下那一帧就会改道去调那颗音符（本机实测：快甩中途撞上音符 → 平移立刻停、
+    // 剩下的动量全变成 ±1/帧 的音符参数）。
     if !blocked
         && pointer_in_grid
         && !input.ctrl
-        && (input.scroll.x.abs() > 0.0 || input.scroll.y.abs() > 0.0)
+        && (input.scroll != Vec2::ZERO || input.scroll_fine != Vec2::ZERO)
     {
-        let delta = input.scroll.y + input.scroll.x;
-        let d = if delta > 0.0 { 1 } else { -1 };
-        // 原版条件 `exist && changepitch`：停在音符上且开了「滚轮改音符属性」才改那颗音。
-        // 播放中额外禁掉：原版 `:211` 的 `playing = 0` 总闸只冻住 sela/selb 的刷新，
-        // `:276` 的 `selbx = starta + sela` 却照用自动平移后的 starta，于是滚轮改的是
-        // 「鼠标上一次指过的那一列」而非指针底下那颗 —— 端口按指针算，改到的确实是
-        // 指针下那颗，但播放中滚轮本来就只该平移视口，碰音符是误伤。
-        let note_cell = hover.filter(|(t, l)| {
-            state.prefs.changepitch
-                && !state.is_playing()
-                && (state.doc.song.has(*t as u32, *l as u32)
-                    || state.doc.selection.contains(*t, *l))
-        });
-        if let Some((t, l)) = note_cell {
-            state.emit(Command::WheelOnNote {
-                tick: t as u32,
-                layer: l as u32,
-                delta: d,
-                shift: input.shift,
-            });
-        } else if state.prefs.mousewheel == 1 {
-            // 原版 `mousewheel = 1`：滚轮换音色，此时滚轮不再平移视口。
-            state.emit(Command::WheelInstrument(d));
-        } else if state.prefs.mousewheel == 2 {
-            state.emit(Command::WheelKey(d));
-        } else {
+        let gesture = scroll_gesture(state, input, hover);
+        // 带事件的帧：raw 是本帧到达的滚轮量（点数），三种改属性的分支只在这里发，
+        // 免得 egui 漏桶的尾巴把一次滚轮放大成每帧一步。
+        if input.scroll != Vec2::ZERO {
+            let delta = input.scroll.y + input.scroll.x;
+            let d = if delta > 0.0 { 1 } else { -1 };
+            match gesture.action {
+                // 原版条件 `exist && changepitch`：停在音符上且开了「滚轮改音符属性」才改那颗音。
+                // 播放中额外禁掉：原版 `:211` 的 `playing = 0` 总闸只冻住 sela/selb 的刷新，
+                // `:276` 的 `selbx = starta + sela` 却照用自动平移后的 starta，于是滚轮改的是
+                // 「鼠标上一次指过的那一列」而非指针底下那颗 —— 端口按指针算，改到的确实是
+                // 指针下那颗，但播放中滚轮本来就只该平移视口，碰音符是误伤。
+                ScrollAction::Note(t, l) => state.emit(Command::WheelOnNote {
+                    tick: t as u32,
+                    layer: l as u32,
+                    delta: d,
+                    shift: input.shift,
+                }),
+                // 原版 `mousewheel = 1`：滚轮换音色，此时滚轮不再平移视口。
+                ScrollAction::Instrument => state.emit(Command::WheelInstrument(d)),
+                ScrollAction::Key => state.emit(Command::WheelKey(d)),
+                ScrollAction::Pan => {
+                    scroll_bars(state, input, state.viewport.cell(), BarAxis::Both)
+                }
+            }
+        } else if gesture.touch && gesture.action == ScrollAction::Pan {
+            // 触控板那一轮的尾巴（手指已抬起、漏桶还在放）：继续平移，这就是惯性的来源。
+            // 鼠标滚轮不走这里 —— 否则一格会变成 1.25 格、还拖 200ms 才停。
             scroll_bars(state, input, state.viewport.cell(), BarAxis::Both);
         }
     }
@@ -1025,6 +1031,51 @@ enum BarAxis {
     Both,
     Horizontal,
     Vertical,
+}
+
+/// 一轮连续滚动的间隔上限（秒）：超过这么久没看到滚动就当作新一轮、重新定性。
+/// 本机实测 egui 漏桶的尾巴最长约 200ms，取 250ms 既能盖住整条尾巴，又不会把两轮粘成一条。
+const SCROLL_STREAM_GAP: f64 = 0.25;
+
+/// 取本轮滚动的性质（触控板 / 鼠标）和动作（平移 / 改音符 / 换音色 / 换键）。
+/// 一轮的第一帧决定动作，之后同轮的帧沿用；来源判据只往「触控板」方向改判，
+/// 因为开头那一帧可能刚好落在整数格上。
+fn scroll_gesture(
+    state: &mut EditorState,
+    input: &InputSnapshot,
+    hover: Option<(i64, i64)>,
+) -> ScrollGesture {
+    if let Some(mut g) = state
+        .interaction
+        .scroll_gesture
+        .filter(|g| input.time - g.seen_at <= SCROLL_STREAM_GAP)
+    {
+        g.seen_at = input.time;
+        g.touch |= input.wheel_trackpad;
+        state.interaction.scroll_gesture = Some(g);
+        return g;
+    }
+    let note_cell = hover.filter(|(t, l)| {
+        state.prefs.changepitch
+            && !state.is_playing()
+            && (state.doc.song.has(*t as u32, *l as u32) || state.doc.selection.contains(*t, *l))
+    });
+    let action = if let Some((t, l)) = note_cell {
+        ScrollAction::Note(t, l)
+    } else if state.prefs.mousewheel == 1 {
+        ScrollAction::Instrument
+    } else if state.prefs.mousewheel == 2 {
+        ScrollAction::Key
+    } else {
+        ScrollAction::Pan
+    };
+    let g = ScrollGesture {
+        touch: input.wheel_trackpad,
+        action,
+        seen_at: input.time,
+    };
+    state.interaction.scroll_gesture = Some(g);
+    g
 }
 
 /// 滚轮 / 触控板平移视口，三件事都在这一个函数里（#93.2 / #93.3 / #93.4）：
@@ -1715,6 +1766,25 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
         }
     }
 
+    // 端口自加（撤销/重做定位）：刚被撤掉或应用的那一步碰过的格子各描一圈边，1.5 秒淡出。
+    // 框形沿用原版删除效果的 2px 内缩 + 1px 线宽，但不放大、不加圆角：这条框要一直
+    // 精确压在格子上，否则看不出「刚才动的是哪一格」。视口外的格子直接跳过。
+    if let Some(fx) = &state.undo_fx {
+        let col = th.accent(if th.fdark { 6 } else { 0 });
+        let stroke = Stroke::new(1.0_f32 * u, alpha(col, (fx.alpha() * 255.0) as u8));
+        for (tick, layer) in &fx.cells {
+            if *tick < t0 || *tick >= t1 || *layer < l0 || *layer >= l1 {
+                continue;
+            }
+            p.rect_stroke(
+                vp.cell_rect(*tick as i64, *layer as i64).shrink(2.0 * u),
+                0.0,
+                stroke,
+                StrokeKind::Inside,
+            );
+        }
+    }
+
     // 区间两条边界线在网格里的半截（原版 `control_draw.gml:1136/1139` 拉满
     // `(totalrows + 1) * 32 / 15` 高的那两笔）：音符之上、播放头之下，和原版同序。
     if state.section_exists {
@@ -2289,12 +2359,124 @@ mod tests {
     }
 
     /// 一帧触控板（像素）：egui 会同时填 `raw` 和 `smooth`，这里按同样的值给两轴。
+    /// 注意真实比例是漏桶的 ≈32%（本机实测 raw 40 时 fine ≈ 12.8），这里取 1:1 只是为了
+    /// 让断言好读；来源判据 `wheel_trackpad` 必须给真，否则和 Windows 上的实际流不符。
     fn pad(x: f32, y: f32) -> InputSnapshot {
         InputSnapshot {
             scroll: Vec2::new(x, y),
             scroll_fine: Vec2::new(x, y),
+            wheel_trackpad: true,
             ..Default::default()
         }
+    }
+
+    /// 手指抬起后的「尾巴帧」：本帧没有任何滚轮事件（`wheel_trackpad` 因此为假），
+    /// 只剩 egui 漏桶放出来的那部分。
+    fn pad_tail(y: f32, at: f64) -> InputSnapshot {
+        InputSnapshot {
+            scroll: Vec2::ZERO,
+            scroll_fine: Vec2::new(0.0, y),
+            wheel_trackpad: false,
+            time: at,
+            ..Default::default()
+        }
+    }
+
+    /// 一轮滚动的性质必须钉在开头：画面滚到音符底下那一帧不许改道去调那颗音符，
+    /// 而触控板抬手后的漏桶尾巴要继续平移（本机实测这段尾巴约 170–200ms、最长 ≈3 格）。
+    #[test]
+    fn a_scroll_stream_keeps_the_action_it_started_with() {
+        let _prefs = crate::isolate_prefs();
+        let grid = Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 128.0));
+        let at = pos2(100.0, 64.0);
+        let roll = |st: &mut EditorState, input: &InputSnapshot| -> usize {
+            let before = st.pending.len();
+            handle_grid_input(st, input, grid);
+            st.pending.len() - before
+        };
+
+        // 开头指针落在空处 → 这一轮钉成「平移」。
+        let mut st = scroll_state();
+        st.prefs.changepitch = true;
+        let mut first = pad(0.0, -40.0);
+        first.pointer = Some(at);
+        assert_eq!(roll(&mut st, &first), 0, "空处起滑只平移，不发命令");
+        assert_eq!(st.viewport.start_layer, 1, "触控板一格 = 平移一层");
+
+        // 平移把一颗音符送到了指针底下：同轮内不许改道。
+        let (t, l) = st.viewport.cell_at(at).expect("指针还在网格内");
+        st.doc.song.set(t, l, nbs_core::model::Note::new(0, 45));
+        let mut second = pad(0.0, -40.0);
+        second.pointer = Some(at);
+        second.time = 0.02;
+        assert_eq!(
+            roll(&mut st, &second),
+            0,
+            "同一轮中途撞上音符，不许把剩下的动量改成调音符"
+        );
+        assert_eq!(st.viewport.start_layer, 2, "同一轮要接着平移");
+
+        // 抬手后的尾巴帧（本帧没有事件、只剩漏桶）：继续平移 —— 这就是惯性的来源。
+        let mut tail = pad_tail(-20.0, 0.05);
+        tail.pointer = Some(at);
+        assert_eq!(roll(&mut st, &tail), 0, "尾巴帧不该发改属性的命令");
+        assert_eq!(
+            st.viewport.start_layer, 3,
+            "抬手后尾巴仍要往前推（旧代码在这里把整段尾巴丢掉）"
+        );
+
+        // 停 0.3 秒再来一轮：重新按指针下的东西定性 → 这回该改音符了。
+        let (t, l) = st.viewport.cell_at(at).expect("指针还在网格内");
+        st.doc.song.set(t, l, nbs_core::model::Note::new(0, 45));
+        let layer = st.viewport.start_layer;
+        let mut fresh = pad(0.0, -40.0);
+        fresh.pointer = Some(at);
+        fresh.time = 0.38;
+        assert_eq!(
+            roll(&mut st, &fresh),
+            1,
+            "隔 0.3s 是新一轮，指针下有音符就该改它"
+        );
+        assert_eq!(st.viewport.start_layer, layer, "改音符那一轮不再平移视口");
+
+        // 反向：开头就压在音符上 → 整轮都只改那颗，且尾巴帧不重复发（否则一次滚轮会变每帧一步）。
+        let mut st = scroll_state();
+        st.prefs.changepitch = true;
+        st.doc.song.set(3, 2, nbs_core::model::Note::new(0, 45));
+        let over_note = pos2(st.viewport.tick_x(3) + 16.0, st.viewport.layer_y(2) + 16.0);
+        let mut first = pad(0.0, -40.0);
+        first.pointer = Some(over_note);
+        assert_eq!(roll(&mut st, &first), 1, "压在音符上起滑 = 改那颗音符");
+        assert_eq!(st.viewport.start_layer, 0, "改音符的那一轮不平移");
+        let mut tail = pad_tail(-40.0, 0.04);
+        tail.pointer = Some(over_note);
+        assert_eq!(
+            roll(&mut st, &tail),
+            0,
+            "尾巴帧不许把一次滚轮放大成每帧一步"
+        );
+        assert_eq!(st.viewport.start_layer, 0, "改音符的那一轮尾巴也不平移");
+    }
+
+    /// 鼠标滚轮（整格）保持原样：只认带事件的帧，egui 漏桶的尾巴不许继续平移，
+    /// 否则一格会变成 1.25 格、还要拖 200ms 才停。
+    #[test]
+    fn a_mouse_notch_does_not_inherit_the_trackpad_tail() {
+        let _prefs = crate::isolate_prefs();
+        let grid = Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 128.0));
+        let at = pos2(100.0, 64.0);
+        let mut st = scroll_state();
+        let mut notch = wheel(0.0, -1.0);
+        notch.pointer = Some(at);
+        handle_grid_input(&mut st, &notch, grid);
+        let layer = st.viewport.start_layer;
+        let mut tail = pad_tail(-30.0, 0.02);
+        tail.pointer = Some(at);
+        handle_grid_input(&mut st, &tail, grid);
+        assert_eq!(
+            st.viewport.start_layer, layer,
+            "鼠标滚轮的漏桶尾巴不许继续平移"
+        );
     }
 
     /// 一根滚得动的条：320×128 的网格（11 列 × 5 行）配 200 刻 / 40 层的歌。

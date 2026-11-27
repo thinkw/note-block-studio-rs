@@ -147,6 +147,40 @@ impl Viewport {
         x1 >= t0 as i64 && x0 <= t1 as i64 && y1 >= l0 as i64 && y0 <= l1 as i64
     }
 
+    /// 端口自加（撤销定位）：把闭区间格子范围平移进视野。已经全看得见就一动不动，
+    /// 看不见也只推到刚好露出边缘，范围比视野还宽时对齐到左上角。
+    /// 原版 `action_undo()` 完全不碰 `starta/startb`，所以这里不复用
+    /// [`Self::follow_marker`] 的翻页档位，避免跳成「整页翻」那种大动作。
+    /// 返回是否真的动了视口。
+    pub fn reveal_range(&mut self, tick0: u32, layer0: u32, tick1: u32, layer1: u32) -> bool {
+        // 首帧还没布局时 size 为 0，下面的 `max(1.0)` 会把视野当成只有一格，
+        // 任何稍大点的范围都被判定成「放不下」而甩到左上角对齐，这里直接不动。
+        if self.size.x <= 0.0 || self.size.y <= 0.0 {
+            return false;
+        }
+        // 用完整可见的格数（同 follow_marker），带余量的 columns() 会晚一列才判定为看不见。
+        let cols = (self.size.x / self.cell()).floor().max(1.0) as i64;
+        let rows = (self.size.y / self.cell()).floor().max(1.0) as i64;
+        let before = (self.start_tick, self.start_layer);
+        let fit = |start: u32, lo: u32, hi: u32, span_view: i64| -> u32 {
+            let (lo, hi, start) = (lo as i64, hi as i64, start as i64);
+            let span = hi - lo + 1;
+            let next = if span >= span_view {
+                lo
+            } else if lo < start {
+                lo
+            } else if hi >= start + span_view {
+                hi + 1 - span_view
+            } else {
+                start
+            };
+            next.max(0) as u32
+        };
+        self.start_tick = fit(self.start_tick, tick0, tick1, cols);
+        self.start_layer = fit(self.start_layer, layer0, layer1, rows);
+        before != (self.start_tick, self.start_layer)
+    }
+
     /// 播放头滚动跟随，对应原版 `marker_pagebypage` 的三档
     /// （`control_draw.gml:1090-1106` + `:375`）。
     /// `backward` 就是原版的 `forward = -1`（按住 ← 或快退按钮）。
@@ -245,5 +279,49 @@ mod tests {
         v.start_tick = 0;
         v.follow_marker(24.5, 2, false);
         assert_eq!((v.start_tick, v.note_offset), (14, 16.0), "按帧：居中且带半刻位移");
+    }
+
+    /// 撤销定位（端口自加）：看得见绝不动，看不见只推到刚好露出，范围比视野宽才左上对齐。
+    #[test]
+    fn reveal_range_pans_the_minimum_amount() {
+        let mut v = Viewport::default();
+        v.size = egui::vec2(0.0, 0.0);
+        assert!(
+            !v.reveal_range(500, 3, 505, 4),
+            "还没布局就把视口甩进了范围左上角"
+        );
+        assert_eq!((v.start_tick, v.start_layer), (0, 0));
+
+        v.size = egui::vec2(640.0, 320.0); // 20 列 × 10 行
+        v.note_offset = 7.0;
+        v.start_tick = 100;
+        v.start_layer = 5;
+        assert!(!v.reveal_range(105, 6, 108, 8), "全在视野里还推视口");
+        assert_eq!((v.start_tick, v.start_layer), (100, 5));
+        assert_eq!(v.note_offset, 7.0, "定位不碰亚刻偏移");
+
+        assert!(v.reveal_range(40, 6, 45, 8), "左侧看不见要往前推");
+        assert_eq!(
+            (v.start_tick, v.start_layer),
+            (40, 5),
+            "往左推贴住左边界，行不动"
+        );
+
+        v.start_tick = 100;
+        assert!(v.reveal_range(130, 6, 139, 8), "右侧看不见要往后推");
+        assert_eq!(v.start_tick, 120, "推到 120..139 刚好 20 列");
+
+        v.start_tick = 0;
+        assert!(v.reveal_range(300, 0, 340, 3), "范围比视野宽要左上对齐");
+        assert_eq!(v.start_tick, 300);
+
+        v.start_tick = 0;
+        v.start_layer = 0;
+        assert!(v.reveal_range(0, 20, 1, 24), "行方向同理");
+        assert_eq!(
+            (v.start_tick, v.start_layer),
+            (0, 15),
+            "推到 15..24 刚好 10 行"
+        );
     }
 }

@@ -37,6 +37,8 @@ mod midi_win;
 #[cfg(windows)]
 mod native_dialog;
 #[cfg(windows)]
+mod tp_diag;
+#[cfg(windows)]
 mod update;
 #[cfg(windows)]
 mod window_icon;
@@ -428,6 +430,9 @@ impl eframe::App for NbsApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 滚动输入探针（NBS_TPDIAG=1 才有开销）：只记日志，不改任何滚动状态。
+        #[cfg(windows)]
+        tp_diag::tick(ctx);
         // 原生窗口关闭先拦住：原版 control_end 不可取消，但逐标签问完仍要保留失败恢复文件。
         // eframe 允许用 CancelClose 把退出推迟到这些决定办完；已确认的退出不再拦。
         if ctx.input(|i| i.viewport().close_requested()) && !self.state.quit_confirmed {

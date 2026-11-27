@@ -29,6 +29,8 @@ pub enum Command {
     SavePath(PathBuf),
     Undo,
     Redo,
+    /// 端口自加：历史列表点某一步 = 连着撤 / 做到「该步之后」的状态。
+    HistoryJump(usize),
     Copy,
     Cut,
     Paste,
@@ -355,6 +357,19 @@ pub enum Command {
     QuitCancel,
     /// 退出保存失败：程序退出就中止；原生关闭就尝试写恢复文件。
     QuitSaveFailed(crate::tabs::SongId),
+}
+
+/// 撤销 / 重做 / 点历史条目的共用收尾：提示报刚应用那条的动作名，再把视口和高亮定位过去。
+/// 原版 `action_undo()` 只置一个 `changed = 1`，既不报动作名也不跳视口，两句都是端口自加。
+/// 动作名原来取的是 `undo_label()` —— 那是「下一次撤销会退掉的动作」，报出来永远慢一步
+/// （撤掉 A 显示的是 A 前一条，全撤完显示空串）；改成按刚应用那条的下标直接取。
+fn finish_history_step(state: &mut EditorState, index: usize, verb: &str) {
+    let (label, scope) = match state.doc.history.get(index) {
+        Some(edit) => (edit.label.clone(), edit.scope()),
+        None => (String::new(), None),
+    };
+    state.set_message(format!("{verb}: {label}"));
+    state.reveal_history_step(scope);
 }
 
 /// 原版 `selection_delete.gml:24-28`：删除选区前按当前视口收集格子，
@@ -704,21 +719,40 @@ pub fn dispatch(state: &mut EditorState, cmd: Command, ctx: &Context) {
             save_stage(state, path);
         }
         Command::Undo => {
+            // 原版工具栏撤销图标是 `{playing = 0 action_undo()}`（`control_draw.gml:2035`）：
+            // 先停播再撤。Ctrl+Z 那路两版在播放中都不做事 —— 原版整个 Ctrl 快捷键块被
+            // `:624` 的 `if (playing = 0)` 挡住（GameMaker 条件里的 `=` 是比较），
+            // 端口在 shortcuts.rs 用 `!state.is_playing()` 抄了同一条闸门。
+            // 菜单那路原版不停播（`menu_click.gml:74`），端口统一在命令里停：
+            // 不停的话刚定位过去的视口，下一帧就被播放跟随拽回去，「每次撤回都定位」落空。
+            // 历史为空时不停（原版图标在无历史时是灰的，点不到）。
             if state.doc.undo() {
-                state.set_message(if crate::lang() == 1 {
-                    format!("撤销: {}", state.doc.history.undo_label().unwrap_or(""))
-                } else {
-                    format!("Undo: {}", state.doc.history.undo_label().unwrap_or(""))
-                });
+                state.audio.stop();
+                let index = state.doc.history.applied_index(true);
+                finish_history_step(state, index, crate::tr("Undo", "撤销"));
             }
         }
         Command::Redo => {
             if state.doc.redo() {
-                state.set_message(if crate::lang() == 1 {
-                    format!("重做: {}", state.doc.history.redo_label().unwrap_or(""))
+                state.audio.stop();
+                let index = state.doc.history.applied_index(false);
+                finish_history_step(state, index, crate::tr("Redo", "重做"));
+            }
+        }
+        Command::HistoryJump(target) => {
+            // 端口自加（用户要求的「点历史条目回到那一步」）：原版 `historypos` 只能 ±1
+            // （`action_undo` / `action_redo`），没有多点直达；跳转也不像原版那样截断分支，
+            // 前后都能跳。停播的理由同撤销图标：不停的话定位会被播放跟随立刻拽回去。
+            let from = state.doc.history.cursor();
+            if let Some(index) = state.doc.jump_history(target) {
+                state.audio.stop();
+                // 步号是列表里那一行的 1 基序号，和用户看到的对得上。
+                let verb = if target > from {
+                    format!("{} #{}", crate::tr("Advanced to", "前进到"), index + 1)
                 } else {
-                    format!("Redo: {}", state.doc.history.redo_label().unwrap_or(""))
-                });
+                    format!("{} #{}", crate::tr("Rewound to", "回退到"), index + 1)
+                };
+                finish_history_step(state, index, &verb);
             }
         }
         Command::Copy => {
@@ -6326,6 +6360,189 @@ mod tests {
         state.remove_effects[0].age = 1.0;
         state.tick_transport(&ctx);
         assert!(state.remove_effects.is_empty(), "寿命到了要销毁");
+    }
+
+    /// 端口自加（撤销定位）：撤掉的那一步不在视野里就把视口推过去、挂上 1.5 秒高亮，
+    /// 播放中先停播（原版工具栏图标 `control_draw.gml:2035` 的 `{playing = 0 action_undo()}`）。
+    #[test]
+    fn undo_reveals_the_step_it_reverted() {
+        let _cn = crate::LangGuard::set(1);
+        let ctx = Context::default();
+        let cells = |s: &EditorState| {
+            s.undo_fx
+                .as_ref()
+                .map(|fx| fx.cells.clone())
+                .unwrap_or_default()
+        };
+        let mut state = state_with(Song::new());
+        state.doc.place_note(60, 3, Note::new(0, 45));
+        state.audio.clock_mut().play();
+        dispatch(&mut state, Command::Undo, &ctx);
+        assert!(state.doc.song.get(60, 3).is_none(), "音符没被撤掉");
+        assert!(!state.is_playing(), "撤销时没停播");
+        // 默认视口 800×400 = 25 列 12 行：只推到 36..60，让那一列刚好贴住右边缘。
+        assert_eq!(state.viewport.start_tick, 36, "视口没定位过去");
+        assert_eq!(
+            state.viewport.start_layer, 0,
+            "行方向本来就看得见，不该跟着动"
+        );
+        assert_eq!(cells(&state), vec![(60, 3)], "高亮没挂在那一步的格子上");
+        assert_eq!(
+            state.message.as_ref().map(|(m, _)| m.as_str()),
+            Some("撤销: 放置音符"),
+            "提示报的不是刚撤掉那一步的动作名"
+        );
+
+        state.tick_transport(&ctx);
+        assert!(state.undo_fx.is_some(), "1.5 秒寿命没到就被清了");
+        state.undo_fx.as_mut().unwrap().age = crate::state::UndoFx::LIFE;
+        state.tick_transport(&ctx);
+        assert!(state.undo_fx.is_none(), "寿命到了要清掉");
+
+        // 两步以上时，提示必须报刚撤掉那条的名字，不能报成它前一条（旧实现慢一步）。
+        let mut two = state_with(Song::new());
+        two.doc.place_note(1, 0, Note::new(0, 45));
+        two.doc
+            .edit_meta("改歌曲名", |m| m.name = "新名字".to_string());
+        dispatch(&mut two, Command::Undo, &ctx);
+        assert_eq!(
+            two.message.as_ref().map(|(m, _)| m.as_str()),
+            Some("撤销: 改歌曲名"),
+            "提示报成了前一步的动作名"
+        );
+        dispatch(&mut two, Command::Undo, &ctx);
+        assert_eq!(
+            two.message.as_ref().map(|(m, _)| m.as_str()),
+            Some("撤销: 放置音符"),
+            "提示报成了前一步的动作名"
+        );
+    }
+
+    /// 已经看得见的那一步绝不动视口；重做走同一套收尾。
+    #[test]
+    fn redo_reveals_and_visible_steps_leave_the_viewport_alone() {
+        let _cn = crate::LangGuard::set(1);
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        state.doc.place_note(5, 2, Note::new(0, 45));
+        dispatch(&mut state, Command::Undo, &ctx);
+        assert_eq!(
+            (state.viewport.start_tick, state.viewport.start_layer),
+            (0, 0),
+            "格子在视野里还推视口"
+        );
+        assert_eq!(
+            state.undo_fx.as_ref().map(|fx| fx.cells.clone()),
+            Some(vec![(5, 2)])
+        );
+        dispatch(&mut state, Command::Redo, &ctx);
+        assert_eq!(
+            state.doc.song.get(5, 2),
+            Some(Note::new(0, 45)),
+            "重做没把音符放回来"
+        );
+        assert_eq!(
+            state.undo_fx.as_ref().map(|fx| fx.cells.clone()),
+            Some(vec![(5, 2)]),
+            "重做后没挂高亮"
+        );
+        assert_eq!(
+            state.message.as_ref().map(|(m, _)| m.as_str()),
+            Some("重做: 放置音符")
+        );
+    }
+
+    /// 只改元数据的一步（改歌曲名）没有格子可指：不平移视口、不挂高亮，提示照旧。
+    #[test]
+    fn a_step_without_cells_reveals_nothing() {
+        let _cn = crate::LangGuard::set(1);
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        state
+            .doc
+            .edit_meta("歌曲改名", |m| m.name = "新名字".to_string());
+        state.viewport.start_tick = 7;
+        dispatch(&mut state, Command::Undo, &ctx);
+        assert_eq!(state.doc.song.meta.name, "", "元数据没撤掉");
+        assert_eq!(state.viewport.start_tick, 7, "没有格子却动了视口");
+        assert!(state.undo_fx.is_none(), "没有格子却挂了高亮");
+    }
+
+    /// 端口自加（刀3）：点历史条目 = 连着撤 / 做到那一步之后，提示报步号和动作名，
+    /// 视口与高亮落在最后真正应用的那一步上；已经在位时什么都不动，也不发消息。
+    #[test]
+    fn history_jump_walks_the_stack_and_reveals() {
+        let _cn = crate::LangGuard::set(1);
+        let ctx = Context::default();
+        let cells = |s: &EditorState| {
+            s.undo_fx
+                .as_ref()
+                .map(|fx| fx.cells.clone())
+                .unwrap_or_default()
+        };
+        let msg = |s: &EditorState| {
+            s.message
+                .as_ref()
+                .map(|(m, _)| m.clone())
+                .unwrap_or_default()
+        };
+        let mut state = state_with(Song::new());
+        state.doc.place_note(1, 0, Note::new(0, 45));
+        state.doc.place_note(70, 4, Note::new(0, 45));
+        state.doc.place_note(71, 4, Note::new(0, 45));
+
+        dispatch(&mut state, Command::HistoryJump(1), &ctx);
+        assert_eq!(state.doc.history.cursor(), 1);
+        assert_eq!(
+            state.doc.song.get(1, 0),
+            Some(Note::new(0, 45)),
+            "第 1 步不该被退掉"
+        );
+        assert!(state.doc.song.get(70, 4).is_none());
+        assert!(state.doc.song.get(71, 4).is_none());
+        assert_eq!(
+            msg(&state),
+            "回退到 #2: 放置音符",
+            "提示报的不是最后退掉的那一步"
+        );
+        assert_eq!(cells(&state), vec![(70, 4)], "定位要落在最后退掉的那一步");
+
+        dispatch(&mut state, Command::HistoryJump(3), &ctx);
+        assert_eq!(
+            state.doc.song.get(71, 4),
+            Some(Note::new(0, 45)),
+            "往前跳没把音符带回来"
+        );
+        assert_eq!(msg(&state), "前进到 #3: 放置音符");
+        assert_eq!(cells(&state), vec![(71, 4)]);
+
+        state.set_message("哨兵");
+        dispatch(&mut state, Command::HistoryJump(3), &ctx);
+        assert_eq!(msg(&state), "哨兵", "已经在位却还发提示");
+        assert_eq!(state.doc.history.cursor(), 3);
+
+        // 跳转不截断 redo 分支：退回去之后还能整串跳回来。
+        dispatch(&mut state, Command::HistoryJump(0), &ctx);
+        assert!(state.doc.song.get(1, 0).is_none());
+        assert_eq!(state.doc.history.len(), 3, "跳转不该丢掉条目");
+        dispatch(&mut state, Command::HistoryJump(3), &ctx);
+        assert_eq!(state.doc.song.get(70, 4), Some(Note::new(0, 45)));
+    }
+
+    /// 端口自加（刀3）：跳回中间状态后再改一笔，后面的 redo 分支照样被截断
+    /// （`History::push` 的老规矩，跳转不该把它绕开）。
+    #[test]
+    fn a_new_edit_after_a_jump_still_truncates_the_redo_branch() {
+        let ctx = Context::default();
+        let mut state = state_with(Song::new());
+        state.doc.place_note(1, 0, Note::new(0, 45));
+        state.doc.place_note(2, 0, Note::new(0, 45));
+        state.doc.place_note(3, 0, Note::new(0, 45));
+        dispatch(&mut state, Command::HistoryJump(1), &ctx);
+        assert_eq!(state.doc.history.len(), 3, "跳转本身不该丢掉条目");
+        state.doc.place_note(9, 0, Note::new(0, 45));
+        assert_eq!(state.doc.history.len(), 2, "新一步没截断 redo 分支");
+        assert!(!state.doc.history.can_redo());
     }
 
     /// 原版 `remove_block_manual.gml:64-68`：右键单删也生成效果；锁定层不删也不生成。

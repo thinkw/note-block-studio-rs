@@ -174,6 +174,28 @@ impl RemoveFx {
     }
 }
 
+/// 端口自加（用户要求的「撤销时定位到那一步」）：撤销/重做后在那一步真正改过的
+/// 格子上描一圈边框，1.5 秒线性淡出。原版 `action_undo()` 既不滚动视口也没有任何
+/// 提示，撤回后视角不动 —— 这里存的是**绝对**格坐标（[`RemoveFx`] 存相对视口的偏移），
+/// 所以高亮会跟着滚动一起移动，不会像原版删除效果那样留在屏幕原地。
+#[derive(Clone, Debug, Default)]
+pub struct UndoFx {
+    /// 受影响格子，来自 `nbs_core::history::EditScope::cells`。
+    pub cells: Vec<(u32, u32)>,
+    /// 已存活的真实秒数。
+    pub age: f32,
+}
+
+impl UndoFx {
+    /// 高亮寿命（秒）：比原版删除效果（1/3.6 ≈ 0.28 秒）长得多，
+    /// 因为这条要让人看清「刚才那一下动的是哪儿」。
+    pub const LIFE: f32 = 1.5;
+
+    pub fn alpha(&self) -> f32 {
+        (1.0 - self.age / Self::LIFE).clamp(0.0, 1.0)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WindowKind {
     /// 原版 `w_songinfo`（`macros.gml:96`）：只读卡片，脚注是「点击任意位置以关闭」，
@@ -1361,6 +1383,8 @@ pub struct EditorState {
     /// 原版 `obj_removeeff` 实例：删除音符时格子上的淡出边框。
     /// `rel` 是相对当前视口左上格的格坐标（原版存 `xx - starta`，不随滚动移动）。
     pub remove_effects: Vec<RemoveFx>,
+    /// 端口自加：撤销/重做定位高亮（见 [`UndoFx`]），`None` = 当前没有要显示的一步。
+    pub undo_fx: Option<UndoFx>,
     /// 原版 `draw_window_macro_arpeggio` 的 57 号文本框（琶音规律）。原版把它存在
     /// `draw_text_edit` 的会话缓冲里：跨开关窗保留，但不落 settings.ini。
     pub arpeggio_pattern: String,
@@ -1783,6 +1807,7 @@ impl EditorState {
             layer_drag: None,
             reference_drag: None,
             remove_effects: Vec::new(),
+            undo_fx: None,
             arpeggio_pattern: String::new(),
             stagger_pattern: String::new(),
             tremolotype: 0,
@@ -2546,6 +2571,21 @@ impl EditorState {
         }
     }
 
+    /// 端口自加（撤销/重做定位）：把视口平移到这一步真正改过的格子范围，并挂上高亮框。
+    /// 原版 `action_undo()` 完全不碰 `starta/startb`，撤回后视角原地不动；这里按用户要求
+    /// 跳过去，只在真看不见时平移（`Viewport::reveal_range` 保证最小位移）。
+    /// `scope` 为 `None`（只改图层名 / 歌曲元数据这类没有格子的步骤）时两样都不做。
+    pub fn reveal_history_step(&mut self, scope: Option<nbs_core::history::EditScope>) {
+        self.undo_fx = None;
+        let Some(scope) = scope else { return };
+        let (t0, l0, t1, l1) = scope.bounds;
+        self.viewport.reveal_range(t0, l0, t1, l1);
+        self.undo_fx = Some(UndoFx {
+            cells: scope.cells,
+            age: 0.0,
+        });
+    }
+
     /// 每帧同步独立播放时钟。真实播放时位置由音频回调的采样计数推进，
     /// UI 只读；无音频设备时才由内部 `Instant` 时钟代理。
     /// **绝不在这里写 tempo/loop** —— 否则会覆盖 Tempo Changer 的运行时变速。
@@ -2641,6 +2681,18 @@ impl EditorState {
                 ctx.request_repaint_after(std::time::Duration::from_secs_f64(
                     1.0 / self.prefs.refresh_limit(),
                 ));
+            }
+        }
+        // 端口自加：撤销定位高亮也按真实时间淡出，寿命一到整个丢掉。
+        if let Some(fx) = &mut self.undo_fx {
+            let dt = ctx.input(|i| i.stable_dt).clamp(0.0, 0.1) as f32;
+            fx.age += dt;
+            if fx.alpha() > 0.0 {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                    1.0 / self.prefs.refresh_limit(),
+                ));
+            } else {
+                self.undo_fx = None;
             }
         }
         // 原版快退 / 快进：按住时按歌曲速度滚动；播放中倒退是双倍速
