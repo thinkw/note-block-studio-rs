@@ -290,7 +290,12 @@ nbs-mcp --call import_midi '{"path":"D:/out/take.mid","discard_changes":true}'
 4. 连上了但一条都调不动：看 `error.code`，`modal_open` / `window_open` 是界面挡着，`not_allowed` 是闸门没开；
 5. 失败的是 `transport` 而不是 `error.code`：那是桥接这一层没送到，跟参数无关，别去改 JSON。
    「放着不动一段时间之后全失败」就是这一类，见 §13——读操作桥接自己会重连重发，写操作要你先对一眼 `rev`；
-6. IDE 侧看不到工具：确认 `command` 指向的是 `nbs-mcp`，不是 `nbs-rust`。
+6. IDE 侧看不到工具：确认 `command` 指向的是 `nbs-mcp`，不是 `nbs-rust`；
+7. 「参数少写了一个字段，回执却成功」这条路已经堵上：MCP 每条工具的顶层入参都声明
+   `additionalProperties: false`，多给或拼错的字段名当场拒，报错里点名是哪个字段、合法的是哪些。
+   `--call` 那一行还会替你补上工具名和 `--dump-tools <工具>`。
+   管的只是**顶层入参**：`tab` / `options` / `meta` 这些来自线协议、嵌在 `$defs` 里的结构照各自的默认值走，
+   那套形状要留给协议前后兼容，不适合收紧。
 
 日志和给人说的话一律走 stderr，stdout 只放协议字节和脚本要的产物——所以「IDE 里配置没生效，直接跑一下看看」这件事在 `--call` 上是能做的。
 

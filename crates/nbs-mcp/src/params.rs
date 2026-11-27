@@ -15,6 +15,7 @@ use nbs_control::{
 
 /// 只读工具的可选标签寻址；省略 = 当前标签。
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TabOnly {
     #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
     #[serde(default)]
@@ -22,6 +23,7 @@ pub struct TabOnly {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SwitchTab {
     #[schemars(description = "稳定 id 或当前位置 index，二选一")]
     pub tab: TabRef,
@@ -34,6 +36,7 @@ impl From<SwitchTab> for Op {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CloseTab {
     #[schemars(description = "稳定 id 或当前位置 index，二选一")]
     pub tab: TabRef,
@@ -53,6 +56,7 @@ impl From<CloseTab> for Op {
 
 /// `run_action` 逃生舱的一条调用：动作名 + 它的参数原样。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RunAction {
     #[schemars(description = "稳定 id 或当前位置 index；交互动作只允许当前标签")]
     #[serde(default)]
@@ -79,6 +83,7 @@ impl From<RunAction> for Op {
 
 /// `set_notes` / `remove_cells` 里的一格坐标。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CellRef {
     #[schemars(description = "tick 列号，从 0 起算，和 .nbs 文件一致")]
     pub tick: u32,
@@ -159,6 +164,7 @@ impl JsonSchema for Pitch {
 
 /// `set_notes` 的一格。字段和 [`CellNote`] 一一对应，只差音高允许用音名写。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CellInput {
     #[schemars(description = "tick 列号，从 0 起算，和 .nbs 文件一致")]
     pub tick: u32,
@@ -195,6 +201,7 @@ impl From<CellInput> for CellNote {
 
 /// 只带 `expect_rev` 的写操作（把浮动选区落回歌曲）。
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RevOnly {
     #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
     #[serde(default)]
@@ -215,6 +222,7 @@ impl From<RevOnly> for Op {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetNotes {
     #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
     #[serde(default)]
@@ -257,6 +265,7 @@ impl From<GetNotes> for Op {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetLayers {
     #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
     #[serde(default)]
@@ -279,6 +288,7 @@ impl From<GetLayers> for Op {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetNotes {
     #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
     #[serde(default)]
@@ -308,6 +318,7 @@ impl From<SetNotes> for Op {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RemoveCells {
     #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
     #[serde(default)]
@@ -335,6 +346,7 @@ impl From<RemoveCells> for Op {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BatchFieldArgs {
     #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
     #[serde(default)]
@@ -371,6 +383,7 @@ impl From<BatchFieldArgs> for Op {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Transpose {
     #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
     #[serde(default)]
@@ -397,6 +410,7 @@ impl From<Transpose> for Op {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Select {
     #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
     #[serde(default)]
@@ -420,6 +434,7 @@ impl From<Select> for Op {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LayerAdd {
     #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
     #[serde(default)]
@@ -448,6 +463,7 @@ impl From<LayerAdd> for Op {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LayerIndex {
     #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
     #[serde(default)]
@@ -471,6 +487,7 @@ impl From<LayerIndex> for Op {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LayerUpdate {
     #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
     #[serde(default)]
@@ -497,6 +514,7 @@ impl From<LayerUpdate> for Op {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LayerMove {
     #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
     #[serde(default)]
@@ -523,6 +541,7 @@ impl From<LayerMove> for Op {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetMetaArgs {
     #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
     #[serde(default)]
@@ -547,6 +566,7 @@ impl From<SetMetaArgs> for Op {
 
 /// `undo` / `redo` 共用：一个形状对应两个方向，所以转成哪个 `Op` 由调用处定。
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Steps {
     #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
     #[serde(default)]
@@ -560,6 +580,7 @@ pub struct Steps {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ClearSong {
     #[schemars(description = "稳定 id 或当前位置 index；清空只允许当前标签")]
     #[serde(default)]
@@ -584,6 +605,7 @@ impl From<ClearSong> for Op {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Seek {
     #[schemars(description = "落点 tick，可以是小数（落在两格之间）；负数被拒")]
     pub tick: f64,
@@ -596,6 +618,7 @@ impl From<Seek> for Op {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetLoop {
     #[schemars(description = "循环开关；只改这一项，不动其他元数据")]
     pub enabled: bool,
@@ -608,6 +631,7 @@ impl From<SetLoop> for Op {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct OpenPath {
     #[schemars(
         description = "要开的 .nbs / .schematic 绝对路径，必须落在编辑器允许的目录里（启动时的 --control-dir）"
@@ -628,6 +652,7 @@ impl From<OpenPath> for Op {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SavePath {
     #[schemars(description = "目标 .nbs 路径，必须落在编辑器允许的目录里")]
     pub path: String,
@@ -654,6 +679,7 @@ impl From<SavePath> for Op {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ImportMidi {
     #[schemars(description = "要导入的 .mid 路径，必须落在编辑器允许的目录里")]
     pub path: String,
@@ -690,6 +716,7 @@ impl From<ImportMidi> for Op {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct InspectMidi {
     #[schemars(description = "要看的那个 .mid 路径，必须落在编辑器允许的目录里")]
     pub path: String,
@@ -714,6 +741,7 @@ impl From<InspectMidi> for Op {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Export {
     #[schemars(description = "输出路径，必须落在编辑器允许的目录里")]
     pub path: String,
@@ -748,6 +776,7 @@ impl From<Export> for Op {
 
 /// `job_status` / `job_cancel` 共用：同一个 id 对应两个动作，转成哪个 `Op` 由调用处定。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct JobId {
     #[schemars(description = "export 回执里带回来的任务句柄")]
     pub id: u64,
@@ -755,6 +784,7 @@ pub struct JobId {
 
 /// `transcribe_probe` 没有参数：它只是问本机转录环境现在是什么样子。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TranscribePrepareEnv {
     #[schemars(
         description = "装 cu128（CUDA）构建还是 CPU 构建；省略 = 用编辑器「音频转 MIDI」窗口里当前那个勾。这一步要下几百 MB"
@@ -765,6 +795,7 @@ pub struct TranscribePrepareEnv {
 
 /// `transcribe_prepare_model` 与 `transcribe_audio` 共用同一份 `options`。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TranscribePrepareModel {
     #[schemars(
         description = "要预检的模型与解码参数；省略哪个字段就用窗口里当前那一份。这一步会按名字下权重（CC BY-NC 4.0），也要人勾过许可"
@@ -774,6 +805,7 @@ pub struct TranscribePrepareModel {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TranscribeAudio {
     #[schemars(
         description = "要识别的音频路径，必须落在编辑器允许的目录里且真的存在（wav/flac/mp3/ogg/m4a/aac/aif/aiff/opus/webm）"
@@ -878,6 +910,70 @@ mod tests {
             let err = cell(bad.clone()).unwrap_err().to_string();
             assert!(err.contains("要么给"), "{bad} → {err}");
         }
+    }
+
+    /// 拼错的字段名不能被读成「省略」：`velocity` 写成 `veloctiy` 时力度悄悄落回默认值，
+    /// 回执却是成功，这种错只有耳朵能发现。MCP 这一层的入参结构一律 `deny_unknown_fields`，
+    /// 而且这份严格要出现在 schema 里（AI 先读 schema 再拼参数），不能只在服务端生效。
+    /// 管的只是顶层入参对象：`$defs` 里的协议结构（`tab` / `options` / `meta`）照各自的默认值走，
+    /// 那套形状还要服务线协议的前后兼容。
+    #[test]
+    fn every_input_struct_refuses_fields_it_does_not_declare() {
+        macro_rules! strict {
+            ($($t:ty),+ $(,)?) => {
+                $(
+                    let schema = serde_json::to_value(schemars::schema_for!($t)).unwrap();
+                    assert_eq!(
+                        schema.get("additionalProperties"),
+                        Some(&serde_json::json!(false)),
+                        concat!(stringify!($t), " 的 schema 没声明自己不收多余字段")
+                    );
+                    let err = serde_json::from_value::<$t>(serde_json::json!({"not_a_field": 1}))
+                        .expect_err("未知字段该被拒");
+                    let why = err.to_string();
+                    assert!(
+                        why.contains("not_a_field"),
+                        "{} 的报错要点名拼错的那个字段：{}",
+                        stringify!($t),
+                        why
+                    );
+                )+
+            };
+        }
+        strict!(
+            TabOnly,
+            SwitchTab,
+            CloseTab,
+            RunAction,
+            CellRef,
+            CellInput,
+            RevOnly,
+            GetNotes,
+            GetLayers,
+            SetNotes,
+            RemoveCells,
+            BatchFieldArgs,
+            Transpose,
+            Select,
+            LayerAdd,
+            LayerIndex,
+            LayerUpdate,
+            LayerMove,
+            SetMetaArgs,
+            Steps,
+            ClearSong,
+            Seek,
+            SetLoop,
+            OpenPath,
+            SavePath,
+            ImportMidi,
+            InspectMidi,
+            Export,
+            JobId,
+            TranscribePrepareEnv,
+            TranscribePrepareModel,
+            TranscribeAudio,
+        );
     }
 
     /// AI 是先读 schema 再拼参数的，所以 schema 必须同时把两种写法说出来；

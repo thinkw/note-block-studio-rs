@@ -71,7 +71,17 @@ pub fn plan(name: &str, args: &Value) -> Result<Plan, DispatchError> {
         return Ok(Plan::BridgeInfo);
     }
     let op = op_for(name, args)?;
-    let tab = typed::<TabOnly>(name, args)?.tab;
+    // `tab` 是信封字段、每条工具都可能带，所以单独从 payload 里取；把整份参数再按某个
+    // 结构读一遍的做法已经不行了——那些结构现在不收没声明过的字段。
+    let tab = match args.get("tab") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(serde_json::from_value::<TabRef>(value.clone()).map_err(|e| {
+            DispatchError::BadArgs {
+                tool: name.to_string(),
+                message: format!("tab 读不进去：{e}"),
+            }
+        })?),
+    };
     if let Some(tab) = tab {
         tab.validate().map_err(|message| DispatchError::BadArgs {
             tool: name.to_string(),
