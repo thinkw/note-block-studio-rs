@@ -354,6 +354,7 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                     state.emit(Command::Redo);
                     ui.close_menu();
                 }
+                history_submenu(state, ui);
                 ui.separator();
                 if ui.button(tr("Copy  Ctrl+C", "复制  Ctrl+C")).clicked() {
                     state.emit(Command::Copy);
@@ -615,6 +616,60 @@ pub(crate) fn macros_menu_items() -> [(&'static str, Option<&'static str>, char,
         ("Set pitch...", Some("设定音高......"), 'Y', pitch),
         ("Reset all properties", Some("重置所有属性"), 'U', reset),
     ]
+}
+
+/// 「最近操作」一次列几步。原版的历史表本来就是 16 格
+/// （`control_create.gml:259-260` 的 `historylen` / `history[a, 0..15]`），
+/// 端口把容量放大到了 512，列表仍只列最近这些，菜单才不会长到屏幕外。
+const HISTORY_ROWS: usize = 15;
+
+/// 端口自加（用户要求的「鼠标放上去展开最近的操作」）：编辑菜单 Undo/Redo 两行下面的
+/// 子菜单，最新的一步排最前，每行是「序号 · 动作名 · 拍/层范围」，`●` 标出当前位置。
+/// 点一行 = 连着撤 / 做到那一步之后（`Command::HistoryJump`）。
+/// 原版没有这块：Edit 菜单只有 Undo / Redo 两行（`menu_click.gml:74-75`），
+/// 那张 16 格历史表从来不显示动作名。
+fn history_submenu(state: &mut EditorState, ui: &mut Ui) {
+    ui.menu_button(tr("Recent steps...", "最近操作……"), |ui| {
+        let (len, cursor) = (state.doc.history.len(), state.doc.history.cursor());
+        // 先把要显示的几行取成字符串，避免边画按钮边借着历史栈（点击要改 state）。
+        let rows: Vec<(usize, String, bool)> = state
+            .doc
+            .history
+            .entries()
+            .skip(len.saturating_sub(HISTORY_ROWS))
+            .map(|(index, edit)| {
+                let mut text = edit.label.clone();
+                if let Some(scope) = edit.scope() {
+                    let (t0, l0, t1, l1) = scope.bounds;
+                    // `tick` 中英同词（端口里早有「循环起点 tick」这类写法），避免和
+                    // 表示 beat 的「拍」撞车。
+                    text.push_str(&format!(
+                        "  (tick {t0}–{t1} · {} {l0}–{l1})",
+                        tr("layer", "层")
+                    ));
+                }
+                (index, text, index + 1 == cursor)
+            })
+            .collect();
+        if rows.is_empty() {
+            ui.label(tr("No steps yet", "还没有操作"));
+            return;
+        }
+        for (index, text, current) in rows.into_iter().rev() {
+            // `●` 那行就是当前状态，点它什么都不会发生，直接灰掉。
+            let label = format!("{}{}. {text}", if current { "● " } else { "" }, index + 1);
+            if ui.add_enabled(!current, egui::Button::new(label)).clicked() {
+                state.emit(Command::HistoryJump(index + 1));
+                ui.close_menu();
+            }
+        }
+        if len > HISTORY_ROWS {
+            ui.label(tr(
+                "Only the latest steps are listed; the stack keeps more.",
+                "列表只列最近这几步，栈里还有更早的。",
+            ));
+        }
+    });
 }
 
 /// 原版在 Edit 菜单和网格右键菜单里都出现的三段乐器列表：

@@ -4682,6 +4682,90 @@ mod gui_window_tests {
         }
     }
 
+    /// 端口自加（刀2）：编辑菜单里「最近操作……」子菜单逐条画出「序号 · 动作名 · 范围」，
+    /// 最新一步排最前，`●` 标在当前位置那一条上（点它什么都不会发生，所以是灰的）。
+    /// 原版 Edit 菜单只有 Undo / Redo 两行，16 格历史表从不显示动作名。
+    #[test]
+    fn history_submenu_lists_recent_steps_newest_first() {
+        // 历史动作名是在记录那一刻按线程语言定型的，先钉成中文再落笔。
+        let _zh = crate::LangGuard::set(1);
+        let ctx = egui::Context::default();
+        let mut state = state_with_selection();
+        state.theme.apply(&ctx);
+        state.doc.replace_song(nbs_core::model::Song::new());
+        state
+            .doc
+            .place_note(3, 1, nbs_core::model::Note::new(0, 45));
+        state
+            .doc
+            .place_note(40, 2, nbs_core::model::Note::new(0, 45));
+        click_text(&mut state, &ctx, "编辑");
+        click_text(&mut state, &ctx, "最近操作……");
+        let rows = drawn_at(&mut state, &ctx);
+        let y_of = |t: &str| {
+            rows.iter()
+                .find(|(s, _)| s == t)
+                .map(|(_, pos)| pos.y)
+                .unwrap_or_else(|| panic!("子菜单里没画出「{t}」，实得：{rows:?}"))
+        };
+        let newest = y_of("● 2. 放置音符  (tick 40–40 · 层 2–2)");
+        let oldest = y_of("1. 放置音符  (tick 3–3 · 层 1–1)");
+        assert!(newest < oldest, "最新的一步要排在更上面");
+    }
+
+    /// 上屏检查（「代码里有 ≠ 看得见」）：撤销之后，被撤掉的那一格必须真在网格上描出
+    /// 一圈边框，而不是只把状态挂在 `EditorState` 上；淡出结束后不再画。
+    /// 认的是**矩形位置**而不是颜色：描边色带 alpha，egui 落形时会把 rgb 一起乘掉，
+    /// 颜色每帧都在变，只有格子的几何是恒定的。
+    #[test]
+    fn the_undo_reveal_reaches_the_screen() {
+        let _zh = crate::LangGuard::set(1);
+        let ctx = egui::Context::default();
+        let mut state = state_with_selection();
+        state.theme.apply(&ctx);
+        state.doc.replace_song(nbs_core::model::Song::new());
+        state
+            .doc
+            .place_note(3, 1, nbs_core::model::Note::new(0, 45));
+        // 先让布局落定：网格起点要等首帧分配才知道，`cell_rect` 给的是屏幕绝对坐标。
+        let before = settle(&mut state, &ctx);
+        crate::commands::dispatch(&mut state, crate::commands::Command::Undo, &ctx);
+        let out = settle(&mut state, &ctx);
+        // (3, 1) 就在视口左上角这一带，撤销不会推动视口，两帧能共用同一个落点。
+        let want = state
+            .viewport
+            .cell_rect(3, 1)
+            .shrink(2.0 * state.viewport.u());
+        let marks = |frame: &egui::FullOutput| {
+            frame
+                .shapes
+                .iter()
+                .filter(|cs| match &cs.shape {
+                    egui::Shape::Rect(r) => {
+                        r.stroke.width > 0.0
+                            && r.fill == egui::Color32::TRANSPARENT
+                            && r.rect == want
+                    }
+                    _ => false,
+                })
+                .count()
+        };
+        assert_eq!(
+            marks(&out),
+            marks(&before) + 1,
+            "(3, 1) 那格的定位边框没上屏"
+        );
+        assert!(state.undo_fx.is_some(), "还在淡出期就被清掉了");
+
+        state.undo_fx.as_mut().unwrap().age = crate::state::UndoFx::LIFE;
+        assert_eq!(
+            marks(&settle(&mut state, &ctx)),
+            marks(&before),
+            "淡出结束后还留着边框"
+        );
+        assert!(state.undo_fx.is_none(), "寿命到了却没清掉状态");
+    }
+
     /// 原版子菜单父项带 `inactive(selected = 0 || selection_l = 0)`：没有选区整条置灰，
     /// 点不开子菜单，也就开不了宏窗口。
     #[test]

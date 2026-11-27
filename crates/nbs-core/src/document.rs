@@ -758,6 +758,14 @@ impl Document {
         self.history.redo(&mut self.song, &mut self.selection)
     }
 
+    /// 跳到「前 `target` 条已应用」的状态（口径同 `History::cursor`），见
+    /// [`History::jump_to`](crate::history::History::jump_to)。
+    /// 返回最后一次实际应用的条目下标，已经在位或越界时返回 `None`。
+    pub fn jump_history(&mut self, target: usize) -> Option<usize> {
+        self.history
+            .jump_to(target, &mut self.song, &mut self.selection)
+    }
+
     pub fn replace_song(&mut self, song: Song) {
         // rev 只增不减，且换歌也要推进它（在旧值上 +1，而不是沿用载入值）：两首新载入的
         // 歌都带 rev=0，沿用就会撞在同一个数上，凡是拿 rev 当缓存键的下游（右上角兼容
