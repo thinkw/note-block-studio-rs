@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use nbs_control::{
     BatchField, CellNote, ExportFormat, ImportEnhancedOptions, ImportMidiOptions, LayerSet,
-    NoteView, Op, Playback, Scope, SelectTarget, SetMeta, TabRef, TranscribeOptions,
+    NoteFilter, NoteView, Op, Playback, Scope, SelectTarget, SetMeta, TabRef, TranscribeOptions,
 };
 
 /// 只读工具的可选标签寻址；省略 = 当前标签。
@@ -341,8 +341,21 @@ pub struct RemoveCells {
     #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
     #[serde(default)]
     pub tab: Option<TabRef>,
-    #[schemars(description = "要摘掉的格子坐标；空格子不算改动")]
+    #[schemars(description = "要摘掉的格子坐标；空格子不算改动。和 scope 二选一")]
+    #[serde(default)]
     pub cells: Vec<CellRef>,
+    #[schemars(
+        description = "按范围摘：{\"scope\":\"rect\",\"tick_from\":0,\"layer_from\":0,\"tick_to\":31,\"layer_to\":3} 或 {\"scope\":\"all\"}。\
+只动范围内**已有音符**的格子；selection 不认（浮动选区里的音符已经离开网格了，放回去是 place_selection）"
+    )]
+    #[serde(default)]
+    pub scope: Option<Scope>,
+    #[schemars(
+        description = "范围内再挑一刀，只在给了 scope 时有意义：instrument / key_from / key_to / \
+velocity_min / velocity_max / outside_mc_range。省略 = 范围内全删。每格都算「与」"
+    )]
+    #[serde(default)]
+    pub filter: Option<NoteFilter>,
     #[schemars(description = "写进撤销历史的那句话，省略则用默认描述")]
     #[serde(default)]
     pub label: Option<String>,
@@ -357,6 +370,8 @@ impl From<RemoveCells> for Op {
     fn from(a: RemoveCells) -> Self {
         Op::RemoveCells {
             cells: a.cells.into_iter().map(|c| (c.tick, c.layer)).collect(),
+            scope: a.scope,
+            filter: a.filter,
             label: a.label,
             expect_rev: a.expect_rev,
         }

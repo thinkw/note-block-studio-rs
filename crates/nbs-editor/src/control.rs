@@ -27,9 +27,9 @@ use nbs_control::{
     ImportEnhancedChannel, ImportEnhancedOptions, ImportMidiOptions, ImportRangeMode, ImportSlot,
     ImportSubstitution, Inbox, InstrumentInfo, JobHandle, JobInfo, JobRegistry, JobStatus,
     LayerInfo, MidiChannelPlan, MidiDrumPlan, MidiEnhancedReport, MidiPartPlan, MidiPlan,
-    MidiTrackInfo, NoteCell, NoteRun, NoteView, Op, Outcome, Playback, Scope, SelectTarget,
-    SelectionInfo, ServerConfig, SetMeta, Snapshot, TabInfo, TabRef, TranscribeOptions,
-    PROTOCOL_VERSION,
+    MidiTrackInfo, NoteCell, NoteFilter, NoteRun, NoteView, Op, Outcome, Playback, Scope,
+    SelectTarget, SelectionInfo, ServerConfig, SetMeta, Snapshot, TabInfo, TabRef,
+    TranscribeOptions, PROTOCOL_VERSION,
 };
 use nbs_core::model::{
     Note, Song, FIRST_CUSTOM_INDEX, KEY_MAX, MC_KEY_MAX, MC_KEY_MIN, PAN_MAX, PIT_MAX, VEL_MAX,
@@ -987,12 +987,32 @@ fn write(
         }
         Op::RemoveCells {
             cells,
+            scope,
+            filter,
             label,
             expect_rev,
         } => {
             rev_check(*expect_rev, state.doc.song.rev)?;
+            if !cells.is_empty() && scope.is_some() {
+                return Err(bad(
+                    "cells 和 scope 各点了一份要删的，到底听哪份不清楚——挑一个",
+                    "cells and scope each name a set to remove; pick one",
+                ));
+            }
+            if let Some(scope) = scope {
+                return remove_in_scope(state, scope, filter.as_ref(), label.as_deref());
+            }
+            if filter.is_some() {
+                return Err(bad(
+                    "filter 是配 scope 用的：逐格点名的 cells 里没有可筛的东西，要按条件删请给 scope",
+                    "filter goes with scope: named cells leave nothing to filter - give a scope",
+                ));
+            }
             if cells.is_empty() {
-                return Err(bad("cells 为空", "cells is empty"));
+                return Err(bad(
+                    "cells 为空，也没给 scope：要么点名格子，要么给个范围",
+                    "cells is empty and no scope given: name the cells or give a range",
+                ));
             }
             if cells.len() > MAX_CELLS_PER_CALL {
                 return Err(too_many(cells.len()));
@@ -5106,19 +5126,32 @@ fn notes_in_scope(
     state: &EditorState,
     scope: &Scope,
 ) -> Result<(Vec<(u32, u32, Note)>, usize), ErrorInfo> {
+    let locked = state.doc.song.locked_layers();
+    let mut skipped = 0usize;
+    let out = notes_in_range(state, scope)?
+        .into_iter()
+        .filter(|(_, layer, _)| {
+            let is_locked = locked.get(*layer as usize).copied().unwrap_or(false);
+            skipped += usize::from(is_locked);
+            !is_locked
+        })
+        .collect();
+    Ok((out, skipped))
+}
+
+/// 范围内的音符，**不动锁定层那一刀**：范围校验只有这一处，谁要自己配对「命中几格、
+/// 因为锁定跳过几格」就得拿全量，否则报出去的数是筛过之后的，和范围里的实际数对不上。
+fn notes_in_range(state: &EditorState, scope: &Scope) -> Result<Vec<(u32, u32, Note)>, ErrorInfo> {
     let song = &state.doc.song;
-    let locked = song.locked_layers();
-    let raw: Vec<(u32, u32, Note)> = match scope {
-        Scope::All => song.iter_notes().collect(),
-        Scope::Selection => {
-            return Err(ErrorInfo::new(
-                ErrorCode::Internal,
-                say(
-                    "Scope::Selection 不该走到这条分支",
-                    "Scope::Selection should not reach notes_in_scope",
-                ),
-            ))
-        }
+    match scope {
+        Scope::All => Ok(song.iter_notes().collect()),
+        Scope::Selection => Err(ErrorInfo::new(
+            ErrorCode::Internal,
+            say(
+                "Scope::Selection 不该走到范围展开这条分支",
+                "Scope::Selection should not reach notes_in_range",
+            ),
+        )),
         Scope::Rect {
             tick_from,
             layer_from,
@@ -5131,19 +5164,179 @@ fn notes_in_scope(
                     "range bounds must have to >= from",
                 ));
             }
-            song.notes_in_rect(*tick_from, *layer_from, *tick_to, *layer_to)
+            Ok(song.notes_in_rect(*tick_from, *layer_from, *tick_to, *layer_to))
         }
-    };
+    }
+}
+
+/// 按范围 + 条件摘格子。三个数分开报：命中几格、摘掉几格、锁定层里有几格没敢动。
+/// 只报「删了 N 格」会把后两件事读成同一件——尤其条件写窄了的时候，人以为范围里全清了。
+/// 一格都不命中时**不开事务**：撤销列表和 `rev` 不该因为一次空删动一下。
+fn remove_in_scope(
+    state: &mut EditorState,
+    scope: &Scope,
+    filter: Option<&NoteFilter>,
+    label: Option<&str>,
+) -> Result<(Option<Data>, String), ErrorInfo> {
+    if matches!(scope, Scope::Selection) {
+        return Err(bad(
+            "remove_cells 的 scope 只认 all / rect：浮动选区里的音符已经离开网格了，\
+             放回去用 place_selection（或 select target=none），要摘网格上的请用 all 或 rect",
+            "remove_cells accepts scope=all or rect: the floating selection already left the \
+             grid - put it back with place_selection (or select target=none)",
+        ));
+    }
+    let owned = filter.cloned().unwrap_or_default();
+    check_filter(state, &owned)?;
+    let raw = notes_in_range(state, scope)?;
+    let locked = state.doc.song.locked_layers();
+    let mut targets = Vec::new();
+    let mut matched = 0usize;
     let mut skipped = 0usize;
-    let out = raw
-        .into_iter()
-        .filter(|(_, layer, _)| {
-            let is_locked = locked.get(*layer as usize).copied().unwrap_or(false);
-            skipped += usize::from(is_locked);
-            !is_locked
-        })
-        .collect();
-    Ok((out, skipped))
+    for (tick, layer, note) in &raw {
+        if !owned.matches(note.instrument, note.key, note.velocity, (MC_KEY_MIN, MC_KEY_MAX)) {
+            continue;
+        }
+        matched += 1;
+        if locked.get(*layer as usize).copied().unwrap_or(false) {
+            skipped += 1;
+            continue;
+        }
+        targets.push((*tick, *layer));
+    }
+    if matched > MAX_CELLS_PER_CALL {
+        return Err(too_many(matched));
+    }
+    let scope_line = scope_label(scope);
+    if matched == 0 {
+        let scanned = raw.len();
+        return Ok((
+            None,
+            say(
+                format!("{scope_line}：范围内 {scanned} 格，没有一格符合条件，未改动"),
+                format!("{scope_line}: {scanned} cells in range, none matched; nothing changed"),
+            ),
+        ));
+    }
+    let mut tx = state.doc.begin(
+        label
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| say("删除音符", "Remove notes")),
+    );
+    for (tick, layer) in &targets {
+        tx.watch(*tick, *layer);
+    }
+    for (tick, layer) in &targets {
+        tx.song().remove(*tick, *layer);
+    }
+    tx.commit();
+    let removed = targets.len();
+    let mut line = if owned.is_unrestricted() {
+        say(
+            format!("{scope_line}：命中 {matched} 格，已摘 {removed} 格"),
+            format!("{scope_line}: {matched} matched, {removed} removed"),
+        )
+    } else {
+        let cond = filter_label(&owned);
+        say(
+            format!("{scope_line}（条件 {cond}）：命中 {matched} 格，已摘 {removed} 格"),
+            format!("{scope_line} (filter {cond}): {matched} matched, {removed} removed"),
+        )
+    };
+    if skipped > 0 {
+        line.push_str(&locked_skip_line(skipped));
+    }
+    Ok((None, line))
+}
+
+/// 条件里的数先验一遍：拼错的键号、不存在的音色、上下界反了都得当场说，
+/// 不能退化成「命中 0 格」——那会把一个笔误读成「这段本来就没东西」。
+fn check_filter(state: &EditorState, filter: &NoteFilter) -> Result<(), ErrorInfo> {
+    if let Some(instrument) = filter.instrument {
+        check_instrument(state, instrument)?;
+    }
+    let bounds = [
+        ("key_from", filter.key_from, KEY_MAX),
+        ("key_to", filter.key_to, KEY_MAX),
+        ("velocity_min", filter.velocity_min, VEL_MAX),
+        ("velocity_max", filter.velocity_max, VEL_MAX),
+    ];
+    for (name, value, max) in bounds {
+        if let Some(value) = value {
+            if value > max {
+                return Err(out_of_range(
+                    format!("{name} {value} 超出 0..={max}"),
+                    format!("{name} {value} is outside 0..={max}"),
+                ));
+            }
+        }
+    }
+    if let (Some(low), Some(high)) = (filter.key_from, filter.key_to) {
+        if low > high {
+            return Err(bad(
+                format!("key_from {low} 大于 key_to {high}，这一条永远不成立"),
+                format!("key_from {low} > key_to {high} can never match"),
+            ));
+        }
+    }
+    if let (Some(low), Some(high)) = (filter.velocity_min, filter.velocity_max) {
+        if low > high {
+            return Err(bad(
+                format!("velocity_min {low} 大于 velocity_max {high}，这一条永远不成立"),
+                format!("velocity_min {low} > velocity_max {high} can never match"),
+            ));
+        }
+    }
+    if filter.outside_mc_range == Some(false) {
+        return Err(bad(
+            "outside_mc_range 只有 true 有意义：要「落在 33..=57 之内」请用 key_from / key_to",
+            "outside_mc_range is only meaningful as true; use key_from / key_to for the inside",
+        ));
+    }
+    Ok(())
+}
+
+/// 范围那一半的自述，和 `filter_label` 拼成一句能复述请求原文的话。
+fn scope_label(scope: &Scope) -> String {
+    match scope {
+        Scope::All => say("整首歌", "whole song"),
+        Scope::Selection => say("浮动选区", "floating selection"),
+        Scope::Rect {
+            tick_from,
+            layer_from,
+            tick_to,
+            layer_to,
+        } => say(
+            format!("tick {tick_from}..={tick_to} × 层 {layer_from}..={layer_to}"),
+            format!("ticks {tick_from}..={tick_to} x layers {layer_from}..={layer_to}"),
+        ),
+    }
+}
+
+/// 字段名直接用协议里的英文 token，和 `change_line` 一个口径：中文句子也写英文字段名。
+fn filter_label(filter: &NoteFilter) -> String {
+    let mut parts = Vec::new();
+    if let Some(instrument) = filter.instrument {
+        parts.push(format!("instrument={instrument}"));
+    }
+    if filter.key_from.is_some() || filter.key_to.is_some() {
+        parts.push(format!(
+            "key {}..={}",
+            filter.key_from.unwrap_or(0),
+            filter.key_to.unwrap_or(KEY_MAX)
+        ));
+    }
+    if filter.velocity_min.is_some() || filter.velocity_max.is_some() {
+        parts.push(format!(
+            "velocity {}..={}",
+            filter.velocity_min.unwrap_or(0),
+            filter.velocity_max.unwrap_or(VEL_MAX)
+        ));
+    }
+    if filter.outside_mc_range == Some(true) {
+        parts.push(format!("outside {MC_KEY_MIN}..={MC_KEY_MAX}"));
+    }
+    parts.join(", ")
 }
 
 #[cfg(test)]
@@ -7830,5 +8023,314 @@ mod tests {
             .message
             .contains(&say("一次只跑一个", "only one runs at a time")));
         let _ = slot;
+    }
+
+    /// 摆一颗不带事务的音符：用例只关心这一次删除看到什么，起点自己铺最省事。
+    fn put(h: &mut Harness, tick: u32, layer: u32, instrument: u8, key: u8, velocity: u8) {
+        h.state.doc.song.set(
+            tick,
+            layer,
+            Note {
+                instrument,
+                key,
+                velocity,
+                panning: 100,
+                pitch: 0,
+            },
+        );
+        h.state.doc.song.recalculate();
+    }
+
+    fn lock_layer(h: &mut Harness, index: u32) {
+        let out = h.run(&Op::LayerUpdate {
+            index,
+            set: LayerSet {
+                lock: Some("locked".into()),
+                ..Default::default()
+            },
+            expect_rev: None,
+        });
+        assert!(out.ok, "{:?}", out.error);
+    }
+
+    fn rect(tick_to: u32, layer_to: u32) -> Scope {
+        Scope::Rect {
+            tick_from: 0,
+            layer_from: 0,
+            tick_to,
+            layer_to,
+        }
+    }
+
+    fn remove(scope: Option<Scope>, filter: Option<NoteFilter>, cells: Vec<(u32, u32)>) -> Op {
+        Op::RemoveCells {
+            cells,
+            scope,
+            filter,
+            label: None,
+            expect_rev: None,
+        }
+    }
+
+    /// 按范围删的三个数必须分开：命中 = 范围里符合条件的所有格子（含锁定层那些没敢动的），
+    /// 摘掉 = 真从网格上下来的，跳过 = 因为锁定层留着的。合成一个数的话
+    /// 「删了 3 个」会让人以为锁定层也清了。
+    #[test]
+    fn remove_by_scope_counts_matched_removed_and_locked() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        h.ensure_layers(3);
+        put(&mut h, 0, 0, 1, 40, 100);
+        put(&mut h, 8, 1, 1, 45, 100);
+        put(&mut h, 40, 0, 1, 40, 100); // tick 在段外
+        put(&mut h, 0, 2, 1, 40, 100); // 层在段内，但锁着
+        lock_layer(&mut h, 2);
+
+        let out = h.run(&remove(Some(rect(31, 2)), None, vec![]));
+        assert!(out.ok, "{:?}", out.error);
+        assert!(h.note(0, 0).is_none() && h.note(8, 1).is_none(), "段内的该没了");
+        assert!(h.note(40, 0).is_some(), "段外的不该动");
+        assert!(h.note(0, 2).is_some(), "锁定层的不该动");
+        let message = &out.report.message;
+        assert!(
+            message.contains("3 matched") && message.contains("2 removed"),
+            "命中 3（含锁定那颗）、摘掉 2：{message}"
+        );
+        assert!(
+            message.contains('1') && message.contains("locked"),
+            "锁定层跳过 1 要单独说一句：{message}"
+        );
+        assert_eq!(out.report.cells_changed, 2, "变更量只数真下来的");
+    }
+
+    /// 条件之间是「与」；`outside_mc_range` 是唯一那条两个方向的（低于下界**或**高于上界），
+    /// 单段区间表达不了，所以它得自己验一遍——写错优先级就会变成「只删偏低的那些」。
+    #[test]
+    fn remove_by_scope_filters_are_anded_and_outside_is_two_directions() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        h.ensure_layers(1);
+        put(&mut h, 0, 0, 1, 40, 10); // 轻
+        put(&mut h, 1, 0, 1, 40, 90); // 响
+        put(&mut h, 2, 0, 3, 40, 10); // 轻，但换了个音色
+        let out = h.run(&remove(
+            Some(Scope::All),
+            Some(NoteFilter {
+                velocity_max: Some(20),
+                ..Default::default()
+            }),
+            vec![],
+        ));
+        assert!(out.ok, "{:?}", out.error);
+        assert!(
+            h.note(0, 0).is_none() && h.note(2, 0).is_none() && h.note(1, 0).is_some(),
+            "力度 ≤20 的两颗该走，响的那颗该留"
+        );
+        assert!(
+            out.report.message.contains("velocity 0..=20"),
+            "条件要复述在回执里：{}",
+            out.report.message
+        );
+
+        // 再加一条音色条件：轻音符里只动 instrument=1 那颗，instrument=3 那颗该留着。
+        put(&mut h, 3, 0, 1, 40, 10);
+        put(&mut h, 4, 0, 3, 40, 10);
+        let out = h.run(&remove(
+            Some(Scope::All),
+            Some(NoteFilter {
+                velocity_max: Some(20),
+                instrument: Some(1),
+                ..Default::default()
+            }),
+            vec![],
+        ));
+        assert!(out.ok, "{:?}", out.error);
+        assert!(h.note(3, 0).is_none(), "音色对得上的轻音符该走");
+        assert!(h.note(4, 0).is_some(), "音色不符的轻音符不该动");
+        assert!(
+            out.report.message.contains("instrument=1, velocity 0..=20"),
+            "两条条件都要复述：{}",
+            out.report.message
+        );
+
+        // 超出 MC 音域：偏低（<33）和偏高（>57）都得算，键 45 在域内不该动。
+        h.empty_song();
+        put(&mut h, 0, 0, 1, 20, 100);
+        put(&mut h, 1, 0, 1, 70, 100);
+        put(&mut h, 2, 0, 1, 45, 100);
+        let out = h.run(&remove(
+            Some(Scope::All),
+            Some(NoteFilter {
+                outside_mc_range: Some(true),
+                ..Default::default()
+            }),
+            vec![],
+        ));
+        assert!(out.ok, "{:?}", out.error);
+        assert!(
+            h.note(0, 0).is_none() && h.note(1, 0).is_none() && h.note(2, 0).is_some(),
+            "两个方向都该摘，域内那颗不该动"
+        );
+    }
+
+    /// 一格都没命中时**不开事务**：撤销表多一条空改动、`rev` 往前跳一格，都是在让调用方
+    /// 以为「这里发生过什么」。回执要说清扫了多少格。
+    #[test]
+    fn remove_by_scope_that_hits_nothing_leaves_the_song_untouched() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        put(&mut h, 0, 0, 1, 40, 100);
+        put(&mut h, 1, 0, 1, 41, 100);
+        let rev = h.state.doc.song.rev;
+        let history = h.state.doc.history.len();
+        let out = h.run(&remove(
+            Some(rect(31, 0)),
+            Some(NoteFilter {
+                velocity_max: Some(5),
+                ..Default::default()
+            }),
+            vec![],
+        ));
+        assert!(out.ok, "{:?}", out.error);
+        assert!(h.note(0, 0).is_some() && h.note(1, 0).is_some(), "一颗都不该动");
+        assert_eq!(h.state.doc.song.rev, rev, "空删不该推进 rev");
+        assert_eq!(h.state.doc.history.len(), history, "空删不该进撤销表");
+        assert_eq!(out.report.cells_changed, 0);
+        assert!(
+            out.report.message.contains("2") && out.report.message.contains("none matched"),
+            "要说出扫了 2 格、没一格命中：{}",
+            out.report.message
+        );
+    }
+
+    /// 说得不清楚的一律当场拒，不能退化成「命中 0 格」——那会把笔误读成「这段本来没东西」。
+    #[test]
+    fn remove_by_scope_rejects_ambiguous_or_impossible_conditions() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        put(&mut h, 0, 0, 1, 40, 100);
+
+        // 每一条都要点名「为什么不行」：只比对错误码的话，两桩不同的事会共用同一个码
+        // （漏了 scope 的 filter 和空 cells 都是 bad_argument），改错一处测试照样绿。
+        let cases: Vec<(Op, ErrorCode, &str, &str)> = vec![
+            (
+                remove(Some(rect(8, 0)), None, vec![(3, 0)]),
+                ErrorCode::BadArgument,
+                "cells 和 scope 同时给",
+                "cells and scope",
+            ),
+            (
+                remove(
+                    None,
+                    Some(NoteFilter {
+                        velocity_max: Some(1),
+                        ..Default::default()
+                    }),
+                    vec![],
+                ),
+                ErrorCode::BadArgument,
+                "filter 没配 scope",
+                "filter goes with scope",
+            ),
+            (
+                remove(
+                    None,
+                    Some(NoteFilter {
+                        velocity_max: Some(1),
+                        ..Default::default()
+                    }),
+                    vec![(0, 0)],
+                ),
+                ErrorCode::BadArgument,
+                "逐格那一支配 filter",
+                "filter goes with scope",
+            ),
+            (
+                remove(Some(Scope::Selection), None, vec![]),
+                ErrorCode::BadArgument,
+                "scope=selection 不该收",
+                "scope=all or rect",
+            ),
+            (
+                remove(
+                    Some(Scope::All),
+                    Some(NoteFilter {
+                        instrument: Some(25),
+                        ..Default::default()
+                    }),
+                    vec![],
+                ),
+                ErrorCode::OutOfRange,
+                "本工程没有这个音色",
+                "Instrument 25 does not exist",
+            ),
+            (
+                remove(
+                    Some(Scope::All),
+                    Some(NoteFilter {
+                        key_from: Some(50),
+                        key_to: Some(40),
+                        ..Default::default()
+                    }),
+                    vec![],
+                ),
+                ErrorCode::BadArgument,
+                "上下界反了",
+                "can never match",
+            ),
+            (
+                remove(
+                    Some(Scope::All),
+                    Some(NoteFilter {
+                        outside_mc_range: Some(false),
+                        ..Default::default()
+                    }),
+                    vec![],
+                ),
+                ErrorCode::BadArgument,
+                "outside=false 没意义",
+                "only meaningful as true",
+            ),
+            (
+                remove(
+                    Some(Scope::All),
+                    Some(NoteFilter {
+                        velocity_max: Some(200),
+                        ..Default::default()
+                    }),
+                    vec![],
+                ),
+                ErrorCode::OutOfRange,
+                "力度上界超了模型的数",
+                "velocity_max 200 is outside 0..=100",
+            ),
+            (
+                remove(
+                    Some(Scope::Rect {
+                        tick_from: 8,
+                        layer_from: 0,
+                        tick_to: 0,
+                        layer_to: 0,
+                    }),
+                    None,
+                    vec![],
+                ),
+                ErrorCode::BadArgument,
+                "范围的 to 小于 from",
+                "to >= from",
+            ),
+        ];
+        for (op, want, why, needle) in cases {
+            let out = h.run(&op);
+            assert_eq!(code(&out), want, "{why}：{out:?}");
+            let reason = out.error.expect("被拒要有原因").message;
+            assert!(reason.contains(needle), "{why}：回执要点名原因，实际 {reason}");
+            assert!(h.note(0, 0).is_some(), "{why}：被拒也不该动到音符");
+        }
+        assert_eq!(h.state.doc.song.get(0, 0).unwrap().velocity, 100);
     }
 }

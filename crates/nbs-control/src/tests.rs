@@ -18,7 +18,9 @@ use crate::midi::{
     ImportChannelMap, ImportDrumMap, ImportEnhancedOptions, ImportMidiOptions, ImportRangeMode,
     MidiPlan,
 };
-use crate::op::{CellNote, ExportFormat, NoteView, Op, Playback, Scope, SelectTarget};
+use crate::op::{
+    CellNote, ExportFormat, NoteFilter, NoteView, Op, Playback, Scope, SelectTarget,
+};
 use crate::outcome::{
     BarOverview, ChangeReport, Data, ErrorCode, JobInfo, JobStatus, LayerInfo, NoteCell, NoteRun,
     Outcome,
@@ -1370,4 +1372,99 @@ fn a_dropped_link_says_closed_instead_of_bad_reply() {
         "连接断了要说成「断了」，报成 BadReply 会把人支去改参数：{out:?}"
     );
     server.join().unwrap();
+}
+
+/// `remove_cells` 现在有两种说法：逐格的 `cells`（老那条）和按范围 + 条件。
+/// 老帧必须照旧解得开，新帧省略的那一半不能占字节——否则旧服务端会以为要点名格子。
+#[test]
+fn remove_cells_takes_named_cells_or_a_range() {
+    let legacy = r#"{"kind":"remove_cells","cells":[[4,1]],"label":null}"#;
+    let Op::RemoveCells {
+        cells, scope, filter, ..
+    } = serde_json::from_str::<Op>(legacy).expect("老帧解不开就是断了兼容")
+    else {
+        panic!("kind 认得不对");
+    };
+    assert_eq!(cells, vec![(4, 1)]);
+    assert_eq!(scope, None, "没给范围就是逐格那一支");
+    assert_eq!(filter, None);
+
+    let ranged = Op::RemoveCells {
+        cells: vec![],
+        scope: Some(Scope::Rect {
+            tick_from: 0,
+            layer_from: 0,
+            tick_to: 31,
+            layer_to: 2,
+        }),
+        filter: Some(NoteFilter {
+            instrument: Some(3),
+            velocity_max: Some(20),
+            outside_mc_range: Some(true),
+            ..Default::default()
+        }),
+        label: None,
+        expect_rev: Some(7),
+    };
+    let text = serde_json::to_string(&ranged).unwrap();
+    assert!(
+        text.contains(r#""scope":{"scope":"rect""#) && text.contains(r#""tick_to":31"#),
+        "范围要按 rect 那套上线，和 batch_field / transpose 同一个形状：{text}"
+    );
+    assert!(
+        text.contains(r#""instrument":3"#)
+            && text.contains(r#""velocity_max":20"#)
+            && text.contains(r#""outside_mc_range":true"#),
+        "条件要带字段名，光一串数说不清是哪一条：{text}"
+    );
+    assert!(
+        !text.contains(r#""cells""#),
+        "空 cells 不该占字节，否则旧服务端以为要点名格子：{text}"
+    );
+    assert_eq!(serde_json::from_str::<Op>(&text).unwrap(), ranged);
+}
+
+/// 条件本身是协议层的东西，语义在这里钉住：`outside_mc_range` 是唯一那条两方向的
+/// （低于下界**或**高于上界），写成单段区间那种比较就会只删偏低的那些。
+#[test]
+fn note_filter_matches_are_anded_and_outside_is_two_directions() {
+    let mc = (33u8, 57u8);
+    assert!(NoteFilter::default().is_unrestricted());
+    assert!(
+        !NoteFilter {
+            velocity_max: Some(20),
+            ..Default::default()
+        }
+        .is_unrestricted(),
+        "设了一条就不算没限制"
+    );
+
+    let outside = NoteFilter {
+        outside_mc_range: Some(true),
+        ..Default::default()
+    };
+    assert!(outside.matches(1, 20, 100, mc), "偏低该命中");
+    assert!(outside.matches(1, 70, 100, mc), "偏高也该命中");
+    assert!(
+        !outside.matches(1, 45, 100, mc),
+        "域内那颗不该被当成「超出」"
+    );
+
+    let both = NoteFilter {
+        instrument: Some(1),
+        key_from: Some(40),
+        key_to: Some(50),
+        velocity_min: Some(10),
+        velocity_max: Some(30),
+        ..Default::default()
+    };
+    assert!(both.matches(1, 45, 20, mc));
+    for (instrument, key, velocity) in [(2, 45, 20), (1, 39, 20), (1, 51, 20), (1, 45, 9)] {
+        assert!(
+            !both.matches(instrument, key, velocity, mc),
+            "条件之间是「与」：instrument={instrument} key={key} velocity={velocity} 不该命中"
+        );
+    }
+    // 边界都含：闭区间写成人话最容易读反的那一头。
+    assert!(both.matches(1, 40, 30, mc));
 }

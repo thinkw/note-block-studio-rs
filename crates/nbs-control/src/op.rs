@@ -63,6 +63,86 @@ pub enum Scope {
     },
 }
 
+/// 从一堆格子里挑出「就是这批」的条件。每一格省略 = 这一条不设限，全部成立才算命中（与，不是或）。
+///
+/// 它只回答「这一格是不是你要摘的那批」——不改任何值、不做取模。命中集合是从范围内
+/// **已有音符**的格子里挑出来的，所以空格子永远不算命中，`matched=0` 说的就是「这一段没有你要的东西」。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct NoteFilter {
+    #[cfg_attr(
+        feature = "schema",
+        schemars(description = "只算这个音色的格子；本工程没这个音色会直接拒，不会当成「没命中」")
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instrument: Option<u8>,
+    #[cfg_attr(
+        feature = "schema",
+        schemars(description = "键号下界（含），省略 = 不设限")
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_from: Option<u8>,
+    #[cfg_attr(
+        feature = "schema",
+        schemars(description = "键号上界（含），省略 = 不设限")
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_to: Option<u8>,
+    #[cfg_attr(
+        feature = "schema",
+        schemars(description = "力度下界（含），省略 = 不设限")
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub velocity_min: Option<u8>,
+    #[cfg_attr(
+        feature = "schema",
+        schemars(description = "力度上界（含），省略 = 不设限。摘掉太轻的音符就填这一格")
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub velocity_max: Option<u8>,
+    /// 这一条 `key_from` / `key_to` 表达不了：那是「低于下界**或**高于上界」，两个方向。
+    #[cfg_attr(
+        feature = "schema",
+        schemars(description = "true = 只算 MC 两个八度（33..=57）之外的音符")
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outside_mc_range: Option<bool>,
+}
+
+impl NoteFilter {
+    /// 一个条件都没设 = 范围内全要。
+    pub fn is_unrestricted(&self) -> bool {
+        self.instrument.is_none()
+            && self.key_from.is_none()
+            && self.key_to.is_none()
+            && self.velocity_min.is_none()
+            && self.velocity_max.is_none()
+            && self.outside_mc_range.is_none()
+    }
+
+    /// 这一格算不算命中。MC 那两个八度的边界由调用方给：那是导出侧的口径，
+    /// 协议里不该写死一个数，否则哪天改了键域这边就悄悄错了。
+    pub fn matches(&self, instrument: u8, key: u8, velocity: u8, mc_key: (u8, u8)) -> bool {
+        if self.instrument.is_some_and(|want| want != instrument) {
+            return false;
+        }
+        if self.key_from.is_some_and(|low| key < low) || self.key_to.is_some_and(|high| key > high) {
+            return false;
+        }
+        if self.velocity_min.is_some_and(|low| velocity < low)
+            || self.velocity_max.is_some_and(|high| velocity > high)
+        {
+            return false;
+        }
+        // 「超出 MC 音域」是低于下界**或**高于上界，两个方向，单段区间那种写法表达不了。
+        if self.outside_mc_range == Some(true) && key >= mc_key.0 && key <= mc_key.1 {
+            return false;
+        }
+        true
+    }
+}
+
 /// 选区操作的目标。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "target", rename_all = "snake_case")]
@@ -329,7 +409,16 @@ pub enum Op {
         expect_rev: Option<u64>,
     },
     RemoveCells {
+        /// 逐格摘除：这一支的行为和老版本一致（空格子不算改动、锁定层挡下）。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         cells: Vec<(u32, u32)>,
+        /// 按范围摘除。和 `cells` 二选一：两份说法同时给等于没说清到底删哪批。
+        /// 这里只认 `all` / `rect`——浮动选区里的音符已经离开网格了，摘它不是删格子。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<Scope>,
+        /// 只在给了 `scope` 时有意义：从范围内已有音符里再挑一刀。省略 = 范围内全删。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<NoteFilter>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

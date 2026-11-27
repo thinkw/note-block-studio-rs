@@ -189,9 +189,35 @@ MCP 那一侧的 `isError`：**两层里任何一层答「不」，`isError` 都
 - `tick` / `layer` 都从 0 起算，和 `.nbs` 文件一致；
 - `key` 是 0..=87 的键号，**也收音名**：`45` 与 `"F#4"` 等价，`"C4"`、`"Bb4"`、`"F♯3"` 都认。等音异名（`"Cb4"`、`"B#3"`）和不写八度（`"C"`）会被拒而不是被猜——它们在键盘上没有唯一位置；
 - Minecraft 原生只播 33..=57。`get_instruments` 的回执里带 `mc_key_range`，就是编辑器判 `out_of_range` 用的同一对数；超出范围的音符会照写，但会标出来，导出后是静音音符盒；
-- `instrument` 先问 `get_instruments` 再写：内置 0..=19，自定义从 20 起，随手写个不存在的号会得到 `bad_argument`；
+- `instrument` 先问 `get_instruments` 再写：内置 0..=19，自定义从 20 起，随手写个不存在的号会得到 `out_of_range`；
 - `velocity` 省略取 100，`panning` 省略取 100（中央），`pitch`（音分）省略取 0；
 - 一次 `set_notes` = 一次撤销，整批先校验后落笔，要么全成要么全不动。
+
+### 按范围删（`remove_cells`）
+
+摘格子有两种说法，**二选一**：逐格点名 `cells`，或给一个 `scope` 让服务端自己去挑里面已有的音符。两份同时给是 `bad_argument`——到底听哪份不清楚。
+
+```bash
+nbs-mcp --call remove_cells '{"cells":[{"tick":4,"layer":1}]}'
+nbs-mcp --call remove_cells '{"scope":{"scope":"rect","tick_from":0,"layer_from":0,"tick_to":31,"layer_to":3},"filter":{"velocity_max":20}}'
+nbs-mcp --call remove_cells '{"scope":{"scope":"all"},"filter":{"outside_mc_range":true}}'
+```
+
+`scope` 的形状和 `batch_field` / `transpose` 用的完全一样（`{"scope":"all"}` 或 `{"scope":"rect", 四个边界}`，`to` 必须不小于 `from`）。这里只认 `all` / `rect`：`selection` 会当场拒——浮动选区里的音符**已经离开网格**了，那是「摘出来待放回去」的一批，放回去用 `place_selection`（或 `select target=none`），不是删网格上的格子。
+
+`filter` 只在给了 `scope` 时有意义（配逐格 `cells` 同样会被拒，因为逐格点名的东西没有可筛的余地）。字段是 `instrument` / `key_from` / `key_to` / `velocity_min` / `velocity_max` / `outside_mc_range`，省略的那条不设限，**都成立才算命中**（与，不是或）。`outside_mc_range: true` 是唯一一条两方向的：键号低于 33 **或** 高于 57 都算——这正是导出前最常清的那批静音音符盒，用 `key_from` / `key_to` 那种单段区间表达不了（`false` 会被拒，那是「不设限」的另一种写法，请省掉）。
+
+回执把三个数分开报，因为它们是三件事：
+
+```
+remove_cells ok ... "ticks 0..=31 x layers 0..=3 (filter velocity 0..=20): 5 matched, 4 removed, skipped 1 notes on locked layers"
+```
+
+- `matched` = 范围里符合条件的格子，含锁定层上那些**没敢动**的；
+- `removed` = 真从网格上下来的，`report.cells_changed` 就是它；
+- 锁定层那一份只报数、不动手，要清就先 `layer_update` 解锁。
+
+一格都没命中时**不开事务**：`rev` 不推进、撤销表多不出空条目，回执会说「范围内扫了几格、没有一格符合条件」。条件里的数会先验一遍——不存在的音色（`out_of_range`）、上下界反了、力度写得比模型上限还大（`>100`），都当场拒掉，不会退化成一句「命中 0 格」让笔误看起来像「这段本来就没东西」。命中数超过一次调用的 50000 格上限同样要分批（`bad_argument`，会说给了多少）。
 
 音名↔键号那张表是**从 A 起**的（`A0=0`、`B0=1`、`C1=2`…，八度号跟着 NBS 惯例走），别按「C0=0」心算：
 按 C 起算会把 sol/la/si 那一档整体低半音，而写进去和读回来用的是同一张表，所以两头都对得上、只有耳朵能发现。

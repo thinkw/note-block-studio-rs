@@ -641,7 +641,12 @@ impl Bridge {
         self.call_tab(a.into(), tab).await
     }
 
-    /// 按坐标摘掉若干格子。空格子不算改动，所以 `cells_changed` 可能小于你给的条数。
+    /// 摘音符，两种说法二选一：逐格点名 `cells`，或给 `scope`（`all` / `rect`）再配一条可选的
+    /// `filter`（`instrument` / `key_from` / `key_to` / `velocity_min` / `velocity_max` /
+    /// `outside_mc_range`，条件之间是「与」）按范围删。
+    /// 空格子不算改动；锁定层上的音符是**跳过**不是删掉，回执把命中 / 摘掉 / 跳过三个数分开报。
+    /// 一格都没命中时不动 `rev`、不进撤销表。`scope=selection` 不认：浮动选区里的音符已经离开网格了，
+    /// 要放回去用 `place_selection`。
     #[tool]
     async fn remove_cells(&self, Parameters(a): Parameters<RemoveCells>) -> Result<Json<Reply>, CallToolResult> {
         let tab = a.tab;
@@ -944,7 +949,7 @@ impl ServerHandler for Bridge {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nbs_control::{ExportFormat, Scope};
+    use nbs_control::{ExportFormat, NoteFilter, Scope};
 
     #[test]
     fn tool_names_are_unique_and_every_tool_says_something() {
@@ -1224,6 +1229,8 @@ mod tests {
         let removed = roundtrip(Op::from(RemoveCells {
             tab: None,
             cells: vec![CellRef { tick: 4, layer: 1 }],
+            scope: None,
+            filter: None,
             label: None,
             expect_rev: None,
         }));
@@ -1234,6 +1241,40 @@ mod tests {
         assert!(
             !removed.contains("label"),
             "省略的字段不该占字节：{removed}"
+        );
+        assert!(
+            !removed.contains("scope") && !removed.contains("filter"),
+            "逐格那一支不该带上新字段的空壳：{removed}"
+        );
+        // 范围那一支：scope 是内部打标签的枚举，形状必须和 batch_field / transpose 用的一致，
+        // filter 是嵌套对象——两条都要在线上看得见，否则服务端只会收到「cells 为空」。
+        let by_range = roundtrip(Op::from(RemoveCells {
+            tab: None,
+            cells: vec![],
+            scope: Some(Scope::Rect {
+                tick_from: 0,
+                layer_from: 0,
+                tick_to: 31,
+                layer_to: 3,
+            }),
+            filter: Some(NoteFilter {
+                velocity_max: Some(20),
+                ..Default::default()
+            }),
+            label: None,
+            expect_rev: None,
+        }));
+        assert!(
+            by_range.contains(r#""scope":{"scope":"rect""#) && by_range.contains(r#""tick_to":31"#),
+            "范围要按 rect 上线：{by_range}"
+        );
+        assert!(
+            by_range.contains(r#""filter":{"velocity_max":20}"#),
+            "条件要带字段名上线，光一个数说不清是哪一条：{by_range}"
+        );
+        assert!(
+            !by_range.contains(r#""cells""#),
+            "空 cells 不该占字节，否则老服务端会以为要点名格子：{by_range}"
         );
         check(
             Op::from(SavePath {
