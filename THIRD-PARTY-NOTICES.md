@@ -15,10 +15,17 @@
 
 | 路径 | 数量 / 体积 | 是什么 | 来路 |
 |---|---|---|---|
-| `assets/Blocks/*.png` | 20 张 / 4,147 B | 20 个内置乐器在播放特效里画到的方块贴图 | Mojang 客户端 jar 内 `assets/minecraft/textures/block/`，版本与 sha1 记在 `assets/Blocks/PROVENANCE.json`，抓取工具 `tools/fetch_block_textures.py`。同目录抓出来的其余 1019 张被 `.gitignore` 忽略，不入库 |
+| `assets/Blocks/*.png` | 20 张 / 4,147 B | 20 个内置乐器在播放特效里画到的方块**面**贴图 | Mojang 客户端 jar 内 `assets/minecraft/textures/block/`，版本与 sha1 记在 `assets/Blocks/PROVENANCE.json`，抓取工具 `tools/fetch_block_textures.py`。同目录抓出来的其余 1019 张被 `.gitignore` 忽略，不入库 |
+| `assets/BlocksIso/*.png` | 20 张 / 96,478 B | 同一批方块的**等距机体渲染图**（300×300，播放特效里只有声道方块的摞塔画这一层；方块排和瀑布的「乐器方块」用上面那批 16×16 面贴图） | Minecraft Wiki（zh.minecraft.wiki）各方块条目信息框的 `File:` 图。Wiki 前面有 Anubis 人机验证，脚本扒不到，是浏览器人手另存后按 `resolve_file` 的主名改名的；原名、字节数、sha256 记在 `assets/BlocksIso/PROVENANCE.json`，声明在 `assets/BlocksIso/WIKI-NOTICE.txt` |
 | `assets/Sounds/*.ogg` | 20 段 / 128,512 B | note block 各乐器的原版采样（harp / bdrum / trumpet…） | 上游 OpenNBS 装机版 `Data\Sounds` 原样拷贝，我们没有重录或 remix |
 | `assets/icons/{block,block_color,block_color_shape,block_sel,block_shape,instrumenticons}/` | 145 帧 | 音符盒方块精灵、按方块上色的音符帧、20 个内置乐器的 16×16 方块图标 | 从上游 GameMaker 工程导出（`tools/export_sprites.py`），内容本身是 Minecraft 素材的衍生 |
 | `assets/extranotes.zip` | 1 个 / 462,095 B | 额外音符贴图包，装机版原样拷贝（md5 记在 `assets/icons/SOURCE.txt` 末段） | 同装机版；我们 `include_bytes!` 内嵌的是同一份字节 |
+
+等距图那 20 张是**两层权利叠在一起**：底层像素还是 Mojang 的（第二节那几句原文同样管着
+它们），Wiki 站方对上传文件通常标 **CC BY-NC-SA 4.0**（署名 + 非商业 + 相同方式共享）。
+这 20 张的许可栏我们没逐张核对过，所以按最严的一档处理：不主张这些图归我们、不把它们
+用于任何商业发行、代码本身不依赖这些图才能跑（缺图就退方块面，再退色块）。要拿它们做
+超出这个范围的事，请同时向 Mojang/Microsoft 和 Wiki 站方取授权。
 
 其余 `assets/icons/` 下的字形（合计 873 个文件 / 579,411 B）来自上游
 OpenNBS/OpenNoteBlockStudio 的 GameMaker 工程，按上游 `LICENSE`（**MIT**，
@@ -61,8 +68,12 @@ python tools/strip_mojang_assets.py --out dist/no-assets
 ```
 
 它把 tracked 文件拷一份到 `dist/no-assets`，剔掉第一节表里列的那些 Mojang 素材，并在
-产物里写一份 `NO-ASSETS.txt` 说明缺了什么、怎么补回来。缺图不缺功能：播放特效会自动
-退回按名字哈希的稳定色块，`block_row` 的回执会说一句「没找到方块贴图，改用色块代替」。
+产物里写一份 `NO-ASSETS.txt` 说明缺了什么、怎么补回来。缺图不缺功能：播放特效查一个方块
+名先看这条特效要哪一层（`block_row`/`synthesia` 的「乐器方块」= 方块面 `assets/Blocks`，
+`pan_slots` 的摞塔 = 等距图 `assets/BlocksIso`），首选那层没有再退另一层，两层都没有才按
+名字哈希成稳定色块，`block_row` 的回执会说一句「没找到方块贴图，改用色块代替」。等距图那批
+没有脚本可扒（Anubis），无素材包要补回来只能照 `assets/BlocksIso/PROVENANCE.json` 的原名
+手动存图再改名。
 
 ## 四、第三方代码
 
@@ -83,6 +94,7 @@ WeblySleek UI（公有领域）；那些字体走装机素材，不在本仓库�
 ## 六、下架与修改口径
 
 Mojang 或任何权利人认为某一处不该出现在本仓库：直接提 issue。我们的处理顺序是
-①按 `MOJANG-NOTICE.txt` 里写的那一步删白名单 / 删该路径，②代码不改（缺素材的色块兜底
-本来就在），③在这一页记一句「已按 X 要求移除」。改出厂乐器表时如果要新增方块贴图，
-`.gitignore` 的白名单和这条链上的测试会一起提醒你把图补进第一节那张表。
+①按 `MOJANG-NOTICE.txt` / `WIKI-NOTICE.txt` 里写的那一步删白名单 / 删该路径，②代码不改
+（缺素材的兜底本来就在：等距图整目录删掉会退到方块面，两层都缺才退色块），③在这一页记
+一句「已按 X 要求移除」。改出厂乐器表时如果要新增方块贴图，`.gitignore` 的白名单和这条链
+上的测试会一起提醒你把图补进第一节那张表（两个目录各一条测试）。

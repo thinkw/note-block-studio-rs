@@ -6161,7 +6161,7 @@ mod fx_wiring_tests {
         );
     }
 
-    /// 「设置 → 播放特效…」那扇窗：清单是全量枚举注册表来的，两条内置特效各带
+    /// 「设置 → 播放特效…」那扇窗：清单是全量枚举注册表来的，每条内置特效各带
     /// 自己的身份（舞台 / 叠加）。底座不该认识任何一条具体特效。
     #[test]
     fn the_effects_window_lists_every_registered_effect() {
@@ -6170,13 +6170,13 @@ mod fx_wiring_tests {
         let mut state = EditorState::for_test();
         state.theme.apply(&ctx);
         state.prefs.language = 1;
-        assert_eq!(state.fx.lock().stack.ids().len(), 2, "内置两条特效");
+        assert_eq!(state.fx.lock().stack.ids().len(), 3, "内置三条特效");
 
         state.window = Some(WindowKind::PlaybackEffects);
         // 两帧：egui 的 Window 第一帧只定下尺寸，文字在第二帧的 shapes 里才捞得到。
         frame(&mut state, &ctx);
         let texts = frame(&mut state, &ctx);
-        for (name, kind) in [("钢琴瀑布", "舞台"), ("乐器方块排", "叠加")] {
+        for (name, kind) in [("钢琴瀑布", "舞台"), ("乐器方块排", "叠加"), ("声道方块", "叠加")] {
             let row = texts
                 .iter()
                 .find(|t| t.contains(name) && t.contains(kind))

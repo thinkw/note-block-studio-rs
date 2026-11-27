@@ -15,7 +15,7 @@ use egui::{Color32, Pos2, Rect, Ui, Vec2};
 use super::blockrow::BlockRow;
 use super::keyboard::{is_white_key, KeyboardLayout, BLACK_LIFT, WHITE_HIT_H};
 use super::stage::Frame;
-use super::tiles::{instrument_color, tile_size};
+use super::tiles::{instrument_color, tile_size, TileLook};
 use super::timeline::FxNote;
 use super::{
     fade, is_light, note_block, EffectInfo, FxContext, PlaybackEffect, Surface, STAGE_BACKDROP,
@@ -88,6 +88,9 @@ pub struct Synthesia {
 
 impl Synthesia {
     pub const ID: &'static str = "synthesia";
+
+    /// 「乐器方块」样式就是把方块排搬进瀑布，贴图口径也跟它一致：方块面，不是等距立方体。
+    pub const TILE_LOOK: TileLook = TileLook::Face;
 
     pub fn new_with(params: Params) -> Self {
         Self {
@@ -332,7 +335,7 @@ impl PlaybackEffect for Synthesia {
                 Rect::from_center_size(center, Vec2::new(capsule_w, capsule_h))
             };
             if self.params.blocks {
-                let blk = note_block(cx, note.instrument, true);
+                let blk = note_block(cx, note.instrument, true, Self::TILE_LOOK);
                 let alpha = body_alpha(note.velocity, ahead);
                 match blk.texture {
                     Some(tex) => {
@@ -824,7 +827,13 @@ mod tests {
             );
         }
         // 查表同源：方块样式用的色 = 方块排给同一件乐器算出的色。
-        let want = note_block(&cx, cx.timeline.notes()[0].instrument, true).color;
+        let want = note_block(
+            &cx,
+            cx.timeline.notes()[0].instrument,
+            true,
+            Synthesia::TILE_LOOK,
+        )
+        .color;
         assert_eq!(blocks[0].1, want, "两条特效对同一件乐器必须同色");
     }
 

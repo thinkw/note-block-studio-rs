@@ -19,7 +19,7 @@ use egui::{Color32, Pos2, Rect, Ui, Vec2};
 
 use super::keyboard::{KeyboardLayout, WHITE_HIT_H};
 use super::stage::Frame;
-use super::tiles::tile_size;
+use super::tiles::{tile_size, TileLook};
 use super::{fade, note_block, EffectInfo, FxContext, PlaybackEffect, Surface};
 use crate::tr;
 use nbs_core::model::KEY_MAX;
@@ -84,6 +84,10 @@ pub struct BlockRow {
 
 impl BlockRow {
     pub const ID: &'static str = "block_row";
+
+    /// 摞在键上的方块用**方块面**（16×16 那种），不是 Wiki 的等距立方体——用户看过就否：
+    /// 「方块排不要用 wiki 上下载的方块，要用回之前的那种方块」。等距图只留给声道方块的摞塔。
+    pub const TILE_LOOK: TileLook = TileLook::Face;
 
     /// 方块落在哪副键的上方：优先用底部钢琴栏的摆放，没有就自己在下缘铺一条。
     pub fn layout(cx: &FxContext) -> KeyboardLayout {
@@ -296,7 +300,12 @@ impl PlaybackEffect for BlockRow {
             // 只有导出表里真配了方块的乐器才走贴图；没配过的（自定义乐器默认全是石头）
             // 用乐器色，否则一整排方块全同，看着就是「不随乐器变」。
             // 这一条和瀑布的「乐器方块」样式共用（[`super::note_block`]），两边必须同图同色。
-            let blk = note_block(cx, note.instrument, self.params.use_tiles);
+            let blk = note_block(
+                cx,
+                note.instrument,
+                self.params.use_tiles,
+                Self::TILE_LOOK,
+            );
             unconfigured |= blk.unconfigured;
             match blk.texture {
                 Some(tex) => out.image(rect, tex, Color32::from_white_alpha((255.0 * alpha) as u8)),

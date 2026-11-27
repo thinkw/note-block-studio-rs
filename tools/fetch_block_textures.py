@@ -15,6 +15,11 @@
 出厂表现算核对），其余 1000 多张跟乐器无关、不入库，只留在这台机器上。
 权利归属、条款口径与投诉退路写在 assets/Blocks/MOJANG-NOTICE.txt；整仓库的第三方
 声明在 THIRD-PARTY-NOTICES.md（那里还给了产出无素材发行包的 tools/strip_mojang_assets.py）。
+
+这个脚本只管 assets/Blocks/ 那一层（16×16 的方块**面**）。播放特效优先用的
+assets/BlocksIso/（Minecraft Wiki 的 300×300 等距机体渲染图）不在这里扒：Wiki 前面挂着
+Anubis 人机验证，脚本请求只会拿到验证页，那 20 张是浏览器人手另存、再按 tiles.rs 的
+resolve_file 主名改名的，原名与 sha256 记在 assets/BlocksIso/PROVENANCE.json。
 """
 
 from __future__ import annotations
