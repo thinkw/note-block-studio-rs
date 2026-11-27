@@ -57,6 +57,8 @@ pub struct Interaction {
     /// 触控板滚动的浮点余量（原版 `macos_scroll_temp_starta/b`）：x 管刻、y 管层，
     /// 不足一格的滑动先进这里，攒够一整格才动 `start_tick` / `start_layer`。
     pub scroll_carry: Vec2,
+    /// 正在进行的这一轮滚动（见 `grid::scroll_gesture`）。`None` = 轮与轮之间。
+    pub scroll_gesture: Option<ScrollGesture>,
     pub cursor: CursorIcon,
     /// 本帧点击是否发生在网格区域（阻止弹窗误吞输入）。
     pub click_in_grid: bool,
@@ -79,6 +81,7 @@ impl Default for Interaction {
             hover: None,
             edge_scroll: Vec2::ZERO,
             scroll_carry: Vec2::ZERO,
+            scroll_gesture: None,
             cursor: CursorIcon::Default,
             click_in_grid: false,
             suppress_next_click: false,
@@ -116,6 +119,31 @@ impl Interaction {
     }
 }
 
+/// 一轮连续滚动开始时定下的动作，整轮沿用，中途不改道（见 `grid::scroll_gesture`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollAction {
+    /// 平移视口。
+    Pan,
+    /// 改这颗音符的属性（原版 `exist && changepitch`）。
+    Note(i64, i64),
+    /// 原版 `mousewheel = 1`：轮换音色。
+    Instrument,
+    /// 原版 `mousewheel = 2`：轮换键。
+    Key,
+}
+
+/// 正在进行的这一轮滚动。触控板一轮 = 手指按下到抬起后的漏桶放完，可能几十帧；
+/// 期间指针底下的格子会随画面移动而变，所以判定必须在轮开始时钉住。
+#[derive(Clone, Copy, Debug)]
+pub struct ScrollGesture {
+    /// true = 触控板细滑：整格之外的漏桶余量（`scroll_fine`）也要放行。
+    /// false = 鼠标滚轮：只认带事件的帧，漏桶尾巴不平移（否则一格会变 1.25 格、拖 200ms）。
+    pub touch: bool,
+    pub action: ScrollAction,
+    /// 最近一次看到这轮输入的 egui 时间（秒），超过 `grid::SCROLL_STREAM_GAP` 就算新一轮。
+    pub seen_at: f64,
+}
+
 /// 一帧输入快照，避免在绘制过程中反复借用 `InputState`。
 #[derive(Clone, Debug, Default)]
 pub struct InputSnapshot {
@@ -134,31 +162,63 @@ pub struct InputSnapshot {
     pub shift: bool,
     pub alt: bool,
     pub scroll: Vec2,
-    /// `smooth_scroll_delta`：egui 只把「Point 型、单事件不足 8px」的滚动放进这里
-    /// （`input_state/mod.rs:340` 的 `is_smooth_scroll`），所以它非零就等于触控板细滑，
-    /// 用它和 `raw_scroll_delta` 是否相同来区分鼠标滚轮。
+    /// `smooth_scroll_delta`：egui 把滚轮量过一遍漏桶（`input_state/mod.rs:369-385`，
+    /// 每帧放 `1 − 0.1^(dt/0.1)` ≈ 32%）后本帧放出来的那部分。
+    /// **注意**：这个桶对鼠标滚轮同样生效，所以它非零并不代表来自触控板 ——
+    /// 本机实测（Precision Touchpad YML1176）鼠标一格也会给出 `fine ≈ 12.8`。
+    /// 真正的来源判据是 `wheel_trackpad`。
     pub scroll_fine: Vec2,
+    /// 本帧的滚轮事件像触控板：出现过分数的格（Windows 一格 = 120 的整数倍，
+    /// 精确触控板给的是小数），或单事件不足一整格。
+    pub wheel_trackpad: bool,
+    /// `InputState::time`：给滚轮流定超时用（反应式渲染下帧数不能当时间用）。
+    pub time: f64,
 }
 
 impl InputSnapshot {
     pub fn read(ui: &Ui) -> Self {
-        ui.input(|i| Self {
-            hover: i.pointer.hover_pos(),
-            pointer: i.pointer.latest_pos(),
-            primary_pressed: i.pointer.button_pressed(egui::PointerButton::Primary),
-            primary_down: i.pointer.primary_down(),
-            primary_released: i.pointer.button_released(egui::PointerButton::Primary),
-            secondary_pressed: i.pointer.button_pressed(egui::PointerButton::Secondary),
-            secondary_down: i.pointer.secondary_down(),
-            secondary_released: i.pointer.button_released(egui::PointerButton::Secondary),
-            middle_pressed: i.pointer.button_pressed(egui::PointerButton::Middle),
-            middle_down: i.pointer.middle_down(),
-            middle_released: i.pointer.button_released(egui::PointerButton::Middle),
-            ctrl: i.modifiers.ctrl,
-            shift: i.modifiers.shift,
-            alt: i.modifiers.alt,
-            scroll: i.raw_scroll_delta,
-            scroll_fine: i.smooth_scroll_delta,
+        ui.input(|i| {
+            // 判来源：Windows 的鼠标滚轮每事件是 120 的整数倍（winit 除以 120 后是
+            // 1.0 / 3.0 这种整数格），精确触控板给的是小数、且常常不足一格。
+            // 本机 900 条事件实测：91% 是小数格，鼠标那一段全是整数格。
+            let sub_notch = |v: f32| -> bool {
+                let a = v.abs();
+                a > 0.0 && (a < 1.0 || (a - a.round()).abs() >= 0.011)
+            };
+            let mut trackpad = false;
+            for event in i.events.iter() {
+                if let egui::Event::MouseWheel { unit, delta, .. } = event {
+                    let fine = match unit {
+                        egui::MouseWheelUnit::Point => true,
+                        egui::MouseWheelUnit::Page => false,
+                        egui::MouseWheelUnit::Line => sub_notch(delta.x) || sub_notch(delta.y),
+                    };
+                    if fine {
+                        trackpad = true;
+                        break;
+                    }
+                }
+            }
+            Self {
+                hover: i.pointer.hover_pos(),
+                pointer: i.pointer.latest_pos(),
+                primary_pressed: i.pointer.button_pressed(egui::PointerButton::Primary),
+                primary_down: i.pointer.primary_down(),
+                primary_released: i.pointer.button_released(egui::PointerButton::Primary),
+                secondary_pressed: i.pointer.button_pressed(egui::PointerButton::Secondary),
+                secondary_down: i.pointer.secondary_down(),
+                secondary_released: i.pointer.button_released(egui::PointerButton::Secondary),
+                middle_pressed: i.pointer.button_pressed(egui::PointerButton::Middle),
+                middle_down: i.pointer.middle_down(),
+                middle_released: i.pointer.button_released(egui::PointerButton::Middle),
+                ctrl: i.modifiers.ctrl,
+                shift: i.modifiers.shift,
+                alt: i.modifiers.alt,
+                scroll: i.raw_scroll_delta,
+                scroll_fine: i.smooth_scroll_delta,
+                wheel_trackpad: trackpad,
+                time: i.time,
+            }
         })
     }
 }
