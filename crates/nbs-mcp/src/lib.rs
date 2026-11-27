@@ -126,7 +126,10 @@ fn link_guard(link: &Arc<Mutex<Link>>) -> std::sync::MutexGuard<'_, Link> {
 
 /// 传输层彻底失败之后怎么说、怎么收尾：把连接重建一次（但不重发），
 /// 让下一问站在一条新连接上，同时把「现在到底连不连得上」如实报出来。
-fn lost_link(endpoint: &Endpoint, link: &Arc<Mutex<Link>>, reason: &str, read_only: bool) -> String {
+///
+/// `resend` 是这一问**本来允不允许重发**（不是「重发过没有」）：允许的那一类走到这里
+/// 说明已经试过两次都不通，不允许的那一类要说清没替人重放、以及怎么自己确认落没落。
+fn lost_link(endpoint: &Endpoint, link: &Arc<Mutex<Link>>, reason: &str, resend: bool) -> String {
     let now = match connect(endpoint) {
         Ok(fresh) => {
             let mut guard = link_guard(link);
@@ -136,13 +139,17 @@ fn lost_link(endpoint: &Endpoint, link: &Arc<Mutex<Link>>, reason: &str, read_on
         }
         Err(e) => format!("现在重新连也连不上：{e}"),
     };
-    if read_only {
-        format!("{reason}；读操作已经自动重发过一次，还是不通。{now}")
+    if resend {
+        format!("{reason}；这一问属于「重发不会多出副作用」那一类，已经自动重发过一次，还是不通。{now}")
     } else {
         format!(
             "{reason}；这条连接已丢掉并重新连上，但**没有**替你重发这一问\
-             （写操作不自动重发：请求可能已经落进主线程收件箱，重发就是改两遍）。\
-             先 get_snapshot 对一眼 rev 和变更量，再决定要不要重放。{now}"
+             （改数据、起播放、落盘的操作不自动重发：第一次可能已经落进主线程收件箱，\
+             重发就是做两遍）。落没落别看猜——先 `get_history` 读 `undo_label`：\
+             这一笔真生效的话它就是撤销列表第一条的 label（`set_notes` 那批给的 label，\
+             没给则是默认那句），紧接着的 `rev` 也该比上一次回执大；\
+             落盘的那一类直接看产物文件在不在。两个都对不上才是「没落下来」，那时重放才安全。\
+             {now}"
         )
     }
 }
@@ -153,8 +160,8 @@ fn lost_link(endpoint: &Endpoint, link: &Arc<Mutex<Link>>, reason: &str, read_on
 /// 这里丢的是句柄本身）：晚到的回执照对不到「还能继续用」——
 /// 下一问若在这条连接上读，先读到的是上一问那张过期回执，看着像答对了其实答的是旧事。
 ///
-/// `resend` 决定要不要在重连之后**自动重发一次**，调用方按 `Op::is_read_only()` 给：
-/// 读操作重发没有副作用；写操作绝不重发。
+/// `resend` 决定要不要在重连之后**自动重发一次**，调用方按 `Op::is_resend_safe()` 给：
+/// 只读外加幂等的走带动作（`seek` / `stop`）重发没有副作用；写操作和起播绝不重发。
 ///
 /// 返回的第二个值是「这一答是重发之后拿到的」，用来在回执里补一句说明。
 fn dispatch_link(
@@ -164,7 +171,6 @@ fn dispatch_link(
     tab: Option<nbs_control::TabRef>,
     resend: bool,
 ) -> Result<(Outcome, bool), String> {
-    let read_only = op.is_read_only();
     let mut resent = false;
     loop {
         let mut client = {
@@ -185,7 +191,7 @@ fn dispatch_link(
                 return Ok((outcome, resent));
             }
             Err(err) if resent || !resend => {
-                return Err(lost_link(endpoint, link, &err.to_string(), read_only))
+                return Err(lost_link(endpoint, link, &err.to_string(), resend))
             }
             Err(_) => resent = true,
         }
@@ -343,7 +349,8 @@ impl Bridge {
         let endpoint = self.endpoint.clone();
         let link = Arc::clone(&self.link);
         let channel = self.channel();
-        let resend = op.is_read_only();
+        // 断线重发名单：只读 + 幂等的走带动作（seek / stop），见 `Op::is_resend_safe`。
+        let resend = op.is_resend_safe();
         let joined = tokio::task::spawn_blocking(move || {
             dispatch_link(&endpoint, &link, op, tab, resend)
         })
@@ -1355,7 +1362,8 @@ mod tests {
     #[tokio::test]
     async fn a_dead_link_never_resends_a_write() {
         // 写操作不重发：请求可能已经落进主线程收件箱，重发就是改两遍。
-        // 但它照样要重连一条备着，失败文案也得指路「先对一眼 rev 再决定重放」。
+        // 但它照样要重连一条备着，失败文案也得指路「先看清这一笔落没落」——
+        // 「先对一眼 rev」那句太空：rev 变大可能是别人改的，撤销列表第一条才是这一笔的凭据。
         let fake = FakeEditor::start(&[Fate::QuitAfterHello, Fate::AnswerOnce]);
         let bridge = fake.live();
         let reply = bridge
@@ -1367,8 +1375,8 @@ mod tests {
         let text = reply.transport.expect("撞上断线的写操作必须报 transport");
         assert!(text.contains("没有"), "文案要说清没重发：{text}");
         assert!(
-            text.contains("get_snapshot"),
-            "文案要指路先对一眼 rev：{text}"
+            text.contains("get_history") && text.contains("undo_label"),
+            "文案要指名拿撤销列表第一条当凭据，而不是让人猜：{text}"
         );
         assert_eq!(reply.outcome, None, "没送到就不该编造一份编辑器回执");
         assert_eq!(
@@ -1379,6 +1387,51 @@ mod tests {
         settled("重连好的第二条连接在册", || {
             fake.connections.load(Ordering::SeqCst) >= 2
         });
+    }
+
+    #[tokio::test]
+    async fn seek_and_stop_are_replayed_but_play_is_not() {
+        // 空闲断线之后「定位一下」「停下来」不该要人手工补一次——这两条幂等，重发不出副作用。
+        // 但 play 不在名单里：重发会把人正听着的播放从头冲一遍，响过几次回执里看不见。
+        let fake = FakeEditor::start(&[Fate::AnswerOnce]);
+        let bridge = fake.live();
+        assert!(
+            bridge.exec(Op::GetSnapshot).await.succeeded(),
+            "先把连接用到「已经答过一问、下一问会撞上死连接」这一步"
+        );
+
+        for (op, what) in [
+            (Op::Playback(Playback::Seek { tick: 8.0 }), "seek"),
+            (Op::Playback(Playback::Stop), "stop"),
+        ] {
+            let out = bridge.exec(op).await;
+            assert!(
+                out.succeeded(),
+                "{what} 该在断线后自动重发一次，实际 transport = {:?}",
+                out.transport
+            );
+        }
+        assert_eq!(
+            fake.requests.load(Ordering::SeqCst),
+            3,
+            "第一问 + seek 重发 + stop 重发：每条连接只答一问，所以每次都各问了一次"
+        );
+
+        // 同一套连接状态换成 play：写出去没人接，桥接不许替人重放，只能报 transport。
+        let play = bridge.exec(Op::Playback(Playback::Play)).await;
+        let text = play
+            .transport
+            .clone()
+            .expect("play 撞上死连接必须报没送到");
+        assert!(
+            !play.succeeded() && text.contains("没有"),
+            "play 不能进重发名单：{text}"
+        );
+        assert_eq!(
+            fake.requests.load(Ordering::SeqCst),
+            3,
+            "play 那一问被重发了出去：请求数该停在 3"
+        );
     }
 
     #[tokio::test]

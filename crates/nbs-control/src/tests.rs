@@ -339,6 +339,38 @@ fn read_only_ops_are_the_safe_subset() {
     .is_read_only());
 }
 
+/// 断线重发的那份名单判的是「重发一次会不会多出看不见的事」，不是「改不改状态」：
+/// `seek` / `stop` 会改走带但幂等，所以进来；`play` 也幂等不了，响没响过几次只有耳朵知道，
+/// 所以出去。这两个集合以后会各自长，别图省事合成一个。
+#[test]
+fn the_resend_list_adds_seek_and_stop_but_keeps_play_out() {
+    assert!(Op::Playback(Playback::Seek { tick: 12.0 }).is_resend_safe());
+    assert!(Op::Playback(Playback::Stop).is_resend_safe());
+    assert!(
+        Op::GetSnapshot.is_resend_safe(),
+        "只读的那些全都在名单里（它是名单的前半）"
+    );
+    assert!(!Op::Playback(Playback::Play).is_resend_safe());
+    assert!(!Op::Playback(Playback::Pause).is_resend_safe());
+    assert!(!Op::Playback(Playback::SetLoop { enabled: true }).is_resend_safe());
+    assert!(!Op::Save.is_resend_safe());
+    assert!(
+        !Op::SavePath {
+            path: "x.nbs".to_string(),
+            version: None,
+            overwrite: true
+        }
+        .is_resend_safe()
+    );
+    assert!(
+        !Op::ClearSong {
+            expect_rev: None,
+            discard_changes: true
+        }
+        .is_resend_safe()
+    );
+}
+
 /// 小节视图的两端都要过得在线格式上：入参那两个字段是给 AI 填的，`bar_overview` 是
 /// 编辑器拼好、桥接原样转出去的——任何一侧悄悄改名都会变成「参数没了」而不是报错。
 #[test]

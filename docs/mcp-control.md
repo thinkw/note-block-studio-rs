@@ -281,12 +281,17 @@ nbs-mcp --call import_midi '{"path":"D:/out/take.mid","discard_changes":true}'
    留着它，下一问先读到的是上一问那张过期回执（旧 `rev`、旧计数），看着像答对了其实答的是过去的事；
    更坏的一版是那一答压根没来，于是每问都慢到等满 45s。
 2. 下一问从新握手开始重连。
-3. **只有只读工具会自动重发一次**。只读 = `Op::is_read_only()` 那 13 条，对应工具名：
-   `ping`、`list_actions`、`get_snapshot`、`get_notes`、`get_layers`、`get_selection`、
-   `get_instruments`、`get_diagnostics`、`get_history`、`list_tabs`、`job_status`、`job_list`、`inspect_midi`。
+3. **只有「重发不会多出副作用」那一类会自动重发一次**。这一份名单是 `Op::is_resend_safe()`：
+   只读的那 13 条（`ping`、`list_actions`、`get_snapshot`、`get_notes`、`get_layers`、`get_selection`、
+   `get_instruments`、`get_diagnostics`、`get_history`、`list_tabs`、`job_status`、`job_list`、`inspect_midi`）
+   **外加 `seek` 和 `stop`**——它们碰走带，但落的是绝对位置、或本来就该停着，重发一次和发一次一样。
    重发之后拿到的是新连接上现算的答案，`rev` 也是那时的；桥接会往 stderr 写一行「断过一次」，日志里翻得到。
-4. **写操作绝不自动重发**：请求可能已经落进主线程的收件箱了，重发一遍就是改两回。
-   这种失败回的是 `transport`，文案会点名「没有替你重发」，并让你先用 `get_snapshot` 对一眼 `rev` 和变更量再决定要不要重放。
+4. **写操作和起播绝不自动重发**：请求可能已经落进主线程的收件箱了，重发一遍就是改两回。
+   `play` 也在这条里（它同样可能已经落过一次：重发是把人正听着的播放从头冲一遍，而「响过几次」回执里看不见），
+   `pause` / `set_loop` 一起留在名单外——桥接不知道服务端此刻的走带状态，要不要重来该由调用方判断。
+   这种失败回的是 `transport`，文案会点名「没有替你重发」，并让你先 `get_history` 读 `undo_label`：
+   这一笔真生效的话它就是撤销列表第一条的 label（`set_notes` 那批写的 label，没写则是默认那句），
+   紧接着的 `rev` 也该比上一次回执大；落盘那一类直接看产物文件在不在。两个都对不上才是「没落下来」，那时重放才安全。
    连接照样重建好了，下一问站在新的那条上。
 
 `server_info` 现在当场敲一次 `ping` 再答，分两格：`bridge` 那格是桥接自己（不用编辑器在场也答得出），
@@ -309,7 +314,8 @@ nbs-mcp --call import_midi '{"path":"D:/out/take.mid","discard_changes":true}'
 3. 路径对不上就 `--config-dir`，或者从 `control.json` 里取端口和令牌走 `--port` / `--token`；
 4. 连上了但一条都调不动：看 `error.code`，`modal_open` / `window_open` 是界面挡着，`not_allowed` 是闸门没开；
 5. 失败的是 `transport` 而不是 `error.code`：那是桥接这一层没送到，跟参数无关，别去改 JSON。
-   「放着不动一段时间之后全失败」就是这一类，见 §13——读操作桥接自己会重连重发，写操作要你先对一眼 `rev`；
+   「放着不动一段时间之后全失败」就是这一类，见 §13——读操作和 `seek` / `stop` 桥接自己会重连重发，
+   写操作与 `play` 不重发，要你先拿 `get_history` 的 `undo_label` 确认这一笔落没落，再决定要不要重放；
 6. IDE 侧看不到工具：确认 `command` 指向的是 `nbs-mcp`，不是 `nbs-rust`；
 7. 「参数少写了一个字段，回执却成功」这条路已经堵上：MCP 每条工具的顶层入参都声明
    `additionalProperties: false`，多给或拼错的字段名当场拒，报错里点名是哪个字段、合法的是哪些。
