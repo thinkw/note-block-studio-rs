@@ -265,6 +265,7 @@ fn quoted(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::Bridge;
+    use nbs_control::NoteView;
     use serde_json::json;
 
     fn payload() -> Value {
@@ -381,6 +382,9 @@ mod tests {
                     layer_to: None,
                     ticks_per_bar: None,
                     bars: None,
+                    limit: None,
+                    max_bytes: None,
+                    view: None,
                 },
                 tab: Some(tab),
             }
@@ -479,8 +483,45 @@ mod tests {
                 layer_from: None,
                 layer_to: None,
                 ticks_per_bar: None,
-                bars: None
+                bars: None,
+                limit: None,
+                max_bytes: None,
+                view: None,
             }
+        );
+        // 预算与形状三档也得走同一条转换：命令行给 `view` 和工具面给 `view` 不能读出两种东西。
+        assert_eq!(
+            op_for(
+                "get_notes",
+                &json!({"limit": 5, "max_bytes": 8192, "view": "columns"})
+            )
+            .unwrap(),
+            Op::GetNotes {
+                tick_from: None,
+                tick_to: None,
+                layer_from: None,
+                layer_to: None,
+                ticks_per_bar: None,
+                bars: None,
+                limit: Some(5),
+                max_bytes: Some(8_192),
+                view: Some(NoteView::Columns),
+            }
+        );
+        assert!(
+            matches!(
+                op_for("get_notes", &json!({"view": "runs"})).unwrap(),
+                Op::GetNotes {
+                    view: Some(NoteView::Runs),
+                    ..
+                }
+            ),
+            "段视图这个名字要认"
+        );
+        // 认不出的形状名不能当成「没给」：静默回落到 cells 就是让调用方读一份没要的东西。
+        assert!(
+            op_for("get_notes", &json!({"view": "grid"})).is_err(),
+            "view 的取值是闭集，拼错要当场拒"
         );
         // 小节写法走的是数组，`--call` 的 JSON 和工具面入参必须落回同一个 Op。
         assert_eq!(
@@ -491,7 +532,10 @@ mod tests {
                 layer_from: None,
                 layer_to: None,
                 ticks_per_bar: Some(12),
-                bars: Some([0, 3])
+                bars: Some([0, 3]),
+                limit: None,
+                max_bytes: None,
+                view: None,
             }
         );
         assert_eq!(

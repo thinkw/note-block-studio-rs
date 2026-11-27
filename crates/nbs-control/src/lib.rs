@@ -36,7 +36,8 @@ pub use clients::{ClientBoard, ClientSession};
 pub use discovery::{Discovery, DISCOVERY_FILE};
 pub use frame::{read_json_line, write_json_line, MAX_FRAME_BYTES};
 pub use op::{
-    BatchField, CellNote, ExportFormat, LayerSet, Op, Playback, Scope, SelectTarget, SetMeta,
+    BatchField, CellNote, ExportFormat, LayerSet, NoteView, Op, Playback, Scope, SelectTarget,
+    SetMeta,
 };
 pub use midi::{
     ImportChannelMap, ImportDrumMap, ImportEnhancedChannel, ImportEnhancedOptions, ImportMidiOptions,
@@ -45,7 +46,8 @@ pub use midi::{
 };
 pub use outcome::{
     ActionInfo, BarOverview, ChangeReport, Data, Diagnostics, ErrorCode, ErrorInfo, HistoryInfo,
-    InstrumentInfo, JobInfo, JobStatus, LayerInfo, NoteCell, Outcome, SelectionInfo, Snapshot, TabInfo,
+    InstrumentInfo, JobInfo, JobStatus, LayerInfo, NoteCell, NoteRun, Outcome, SelectionInfo,
+    Snapshot, TabInfo,
 };
 pub use transcribe::TranscribeOptions;
 pub use server::{ControlServer, ServerConfig};

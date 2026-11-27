@@ -67,6 +67,7 @@ IDE 配置里要填的是**后者的绝对路径**，机器上只留一份，别
 ```bash
 nbs-mcp --call get_snapshot
 nbs-mcp --call get_notes '{"tick_from":0,"tick_to":31}' --json
+nbs-mcp --call get_notes '{"view":"runs","limit":200}' --json
 nbs-mcp --call clear_song '{"discard_changes":true}'
 nbs-mcp --call set_notes '{"cells":[{"tick":0,"layer":0,"instrument":0,"key":"C4"}]}'
 ```
@@ -119,6 +120,24 @@ MCP 那一侧的 `isError`：**两层里任何一层答「不」，`isError` 都
 
 `open_file` / `import_midi` 是整首替换，撤销历史一起清空，算不出差量，所以这两条的 `cells_changed` / `layers_changed` 是**新工程的规模**（几个音符、几层）；`song_session` 同时加一，用它判断「工程被换过」比看数字更直接。
 
+### 读音符的额度（`get_notes`）
+
+一次 `get_notes` 默认最多回 **1000 格**、约 **128 KiB**，两个额度谁先掐住算谁，回执 message 会说这一趟是被
+`limit` 还是 `max_bytes` 定的。要更多就点名：`limit` 硬上限 20000，`max_bytes` 硬上限 1 MiB——给得比硬上限大不报错，
+会被压回上限并在 message 里明说压回了，所以「我要全部」不会变成「那就都给我」。
+截断时 `data.truncated` 是 true，**`total` 始终是区间内真实条数**（不是回给你的条数），所以「还差多少」看得境况，别把截断当整首。
+回给你的顺序是 tick 升序、同 tick 按层升序，截断切在中间，所以续读请用**把区间切小**（按 tick 段或按层段）的方式分段问，别拿最后一条的 tick 当下一起点——那一 tick 上层号更大的格子会被跳过。
+
+三种形态按用途选，`view` 省略就是 `cells`：
+
+- `cells`：逐格数组（`tick/layer/instrument/key/velocity/panning/pitch`），要精确改哪一格时用；也是唯一会给**小节文字视图**（`bar_overview`）的形态，`bars` / `ticks_per_bar` 只在它上面出文字，别的形态里这两个参数只用来定区间。
+- `columns`：同一批数据拆成 8 根等长数组（`tick/layer/instrument/key/velocity/panning/pitch/out_of_range`），逐格等价、按数组对齐读，折算每格字节约是 `cells` 的三成，适合整段过一遍；条数额度跟 `cells` 同一个。
+- `runs`：按段汇总（层、乐器、音高、起止 tick、格数、力度起止）——**同层同乐器同音高且 tick 连续就并成一段**，力度记成起止两个数，所以一条渐音是一段而不是十几段。摸谱面结构用它最省，上限管的是段数（`total_runs` / `total_cells` 给全量的段数和格数，`truncated` 只说明段被切过）。
+
+字节额度是按形态估的（`cells` 每条约 112 字节、`columns` 折算每格约 33、`runs` 每段约 128），估的是 JSON 字节的量级，
+真实大小随数值位数上下浮动，所以额度是「这一趟别撑爆上下文」的闸门，不是精确配额。想先摸底就 `get_snapshot`
+（`total_blocks` / `song_length` / `layer_count`）或 `get_notes` 的 `runs`，别一上来读整首。
+
 ## 7. 闸门：不带就等于不认错
 
 这几个开关默认全是「不」，因为「AI 猜你想要覆盖」和「你想要覆盖」是两件事：
@@ -163,6 +182,7 @@ MCP 那一侧的 `isError`：**两层里任何一层答「不」，`isError` 都
   按小节读旋律就 `nbs-mcp --call get_notes '{"bars":[0,3]}' --json`，
   回执的 `data.bar_overview` 每节一行 `tick:音名(音色)`（音名由状态栏同一张表生成，不用自己把键号心算回去）；
   想换宽度加 `ticks_per_bar`（可与 `bars` 同给），一次最多 256 节，`bars` 与 `tick_from` / `tick_to` 互斥；
+  这份文字视图只长在 `view=cells`（默认那档）上——`columns` / `runs` 里这两个参数只用来定区间，回执会说一句；
 - **`play` 的落点**：从当前播放头起播；播放头已经到或越过曲尾时先归零，回执说一句「已归零」。
   需要显式起点就先 `seek` 再 `play`；
 - `pause` 留住播放头，`stop` 把播放头送回 0，`seek` 的 tick 可以是小数（落在两格之间）；

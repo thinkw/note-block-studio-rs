@@ -161,6 +161,23 @@ pub struct NoteCell {
     pub out_of_range: bool,
 }
 
+/// 一段连续发声：同层、同音色、同键、tick 一格接一格。`get_notes` 的 `runs` 视图用它，
+/// 读整段延音时比逐格省一大半字节——代价是段内每一格只剩起止两个力度值。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NoteRun {
+    pub layer: u32,
+    pub instrument: u8,
+    pub key: u8,
+    /// 闭区间：段首格。
+    pub tick_from: u32,
+    /// 闭区间：段尾格。连续段里 `tick_to - tick_from + 1 == cells`。
+    pub tick_to: u32,
+    pub cells: usize,
+    /// 段首与段尾的力度。中间怎么分档这段看不出来，要逐格得用 `cells` 视图。
+    pub velocity_from: u8,
+    pub velocity_to: u8,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BarOverview {
     /// 小节号，从 0 起算。
@@ -316,9 +333,35 @@ pub enum Data {
         /// 因为超过上限而被截断时为 true，调用方得知道自己在看部分结果。
         truncated: bool,
         limit: usize,
+        /// 范围里的真实格数（`cells` 可能被上限截短）。有它才谈得上分页：
+        /// 不用再从文字里数「我是不是少读了」。
+        total: usize,
         /// 小节文字视图：请求里给了 `bars` 或 `ticks_per_bar` 才非空。
         /// 名字和入参的 `bars`（一对小节号）刻意错开——同一个词指两样形状会读错。
         bar_overview: Vec<BarOverview>,
+    },
+    /// 同样一段格子的列式写法：字段名每列只出现一次，整段读下来比 `notes` 省一大半字节。
+    /// 八条数组等长，第 `i` 项合起来就是第 `i` 格；顺序和 `notes` 一致（tick 升序、同 tick 按层）。
+    NoteColumns {
+        tick: Vec<u32>,
+        layer: Vec<u32>,
+        instrument: Vec<u8>,
+        key: Vec<u8>,
+        velocity: Vec<u8>,
+        panning: Vec<u8>,
+        pitch: Vec<i16>,
+        out_of_range: Vec<bool>,
+        truncated: bool,
+        limit: usize,
+        total: usize,
+    },
+    /// 延音段摘要：见 [`NoteRun`]。段数与格数各自都有真实值，段数少不等于格子少。
+    NoteRuns {
+        runs: Vec<NoteRun>,
+        truncated: bool,
+        limit: usize,
+        total_runs: usize,
+        total_cells: usize,
     },
     Layers {
         layers: Vec<LayerInfo>,

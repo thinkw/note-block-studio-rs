@@ -9,8 +9,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use nbs_control::{
-    BatchField, CellNote, ExportFormat, ImportEnhancedOptions, ImportMidiOptions, LayerSet, Op,
-    Playback, Scope, SelectTarget, SetMeta, TabRef, TranscribeOptions,
+    BatchField, CellNote, ExportFormat, ImportEnhancedOptions, ImportMidiOptions, LayerSet,
+    NoteView, Op, Playback, Scope, SelectTarget, SetMeta, TabRef, TranscribeOptions,
 };
 
 /// 只读工具的可选标签寻址；省略 = 当前标签。
@@ -249,6 +249,21 @@ pub struct GetNotes {
     )]
     #[serde(default)]
     pub bars: Option<[u32; 2]>,
+    #[schemars(
+        description = "一次最多回多少条（cells / columns 按格算，runs 按段算）；省略 = 1000，硬上限 20000，写更大只会被压回来"
+    )]
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[schemars(
+        description = "按多大载荷折算条数；省略 = 131072 字节，硬上限 1048576。和 limit 谁小谁管，回执会说清是哪一条卡住的"
+    )]
+    #[serde(default)]
+    pub max_bytes: Option<usize>,
+    #[schemars(
+        description = "回什么形状：cells（默认，逐格，带小节文字视图）| columns（八条等长数组，同数据省三成字节）| runs（连续延音段摘要，读长音用）"
+    )]
+    #[serde(default)]
+    pub view: Option<NoteView>,
 }
 
 impl From<GetNotes> for Op {
@@ -260,6 +275,9 @@ impl From<GetNotes> for Op {
             layer_to: a.layer_to,
             ticks_per_bar: a.ticks_per_bar,
             bars: a.bars,
+            limit: a.limit,
+            max_bytes: a.max_bytes,
+            view: a.view,
         }
     }
 }

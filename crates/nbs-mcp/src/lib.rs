@@ -470,11 +470,15 @@ impl Bridge {
         self.call_tab(Op::GetSnapshot, a.tab).await
     }
 
-    /// 读一段范围内的音符格子。返回上限由服务端定，`truncated=true` 说明只给了一部分，
-    /// 需要缩小 `tick_from..=tick_to` 再读。
+    /// 读一段范围内的音符格子。一次回多少由 `limit`（默认 1000）和 `max_bytes`（默认 128 KiB）
+    /// 里更小的那个定，`truncated=true` 说明只回了一部分，`total` 是范围里的真实条数——
+    /// 想少读点就缩小 `tick_from..=tick_to`，别把部分结果当整首。
+    /// `view` 换形状：`cells`（默认，逐格）/ `columns`（八条等长数组，同样数据省三成字节，
+    /// 整段读谱用它）/ `runs`（同层同音色同键的连续格子合成一段，读延音省地方，
+    /// 代价是段内中间的力度分档看不见）。
     /// 想按小节读 melody：给 `bars:[起,止]`（两头都含，一次最多 256 节），tick 区间由小节号算，
     /// 回执的 `data.bar_overview` 每节一行 `tick:音名(音色)`——键号要心算才会唱，而错的那半音
-    /// 只有耳朵能发现，所以这份文字视图由状态栏同一张表生成。
+    /// 只有耳朵能发现，所以这份文字视图由状态栏同一张表生成（只长在 `view=cells` 上）。
     #[tool]
     async fn get_notes(&self, Parameters(a): Parameters<GetNotes>) -> Result<Json<Reply>, CallToolResult> {
         let tab = a.tab;

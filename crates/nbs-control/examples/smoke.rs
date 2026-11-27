@@ -139,6 +139,9 @@ fn run(config: &Path, work: &Path) -> i32 {
             layer_to: Some(0),
             ticks_per_bar: None,
             bars: None,
+            limit: None,
+            max_bytes: None,
+            view: None,
         }),
     );
     show(
@@ -150,6 +153,9 @@ fn run(config: &Path, work: &Path) -> i32 {
             layer_to: None,
             ticks_per_bar: None,
             bars: None,
+            limit: None,
+            max_bytes: None,
+            view: None,
         }),
     );
     show(
@@ -161,6 +167,9 @@ fn run(config: &Path, work: &Path) -> i32 {
             layer_to: None,
             ticks_per_bar: None,
             bars: Some([0, 1]),
+            limit: None,
+            max_bytes: None,
+            view: None,
         }),
     );
     show(

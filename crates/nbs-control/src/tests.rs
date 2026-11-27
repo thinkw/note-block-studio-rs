@@ -18,9 +18,10 @@ use crate::midi::{
     ImportChannelMap, ImportDrumMap, ImportEnhancedOptions, ImportMidiOptions, ImportRangeMode,
     MidiPlan,
 };
-use crate::op::{CellNote, ExportFormat, Op, Playback, Scope, SelectTarget};
+use crate::op::{CellNote, ExportFormat, NoteView, Op, Playback, Scope, SelectTarget};
 use crate::outcome::{
-    BarOverview, ChangeReport, Data, ErrorCode, JobInfo, JobStatus, LayerInfo, NoteCell, Outcome,
+    BarOverview, ChangeReport, Data, ErrorCode, JobInfo, JobStatus, LayerInfo, NoteCell, NoteRun,
+    Outcome,
 };
 use crate::server::{ControlServer, ServerConfig};
 use crate::task::{CancelOutcome, JobKind, JobRegistry, SpawnReject};
@@ -316,7 +317,10 @@ fn read_only_ops_are_the_safe_subset() {
         layer_from: None,
         layer_to: None,
         ticks_per_bar: None,
-        bars: None
+        bars: None,
+        limit: None,
+        max_bytes: None,
+        view: None,
     }
     .is_read_only());
     assert!(Op::JobList.is_read_only());
@@ -346,9 +350,19 @@ fn the_bar_view_survives_the_wire() {
         layer_to: None,
         ticks_per_bar: Some(12),
         bars: Some([0, 255]),
+        limit: Some(500),
+        max_bytes: Some(8_192),
+        view: Some(NoteView::Runs),
     };
     let text = serde_json::to_string(&op).unwrap();
     assert!(text.contains("\"bars\":[0,255]"), "{text}");
+    // 预算那三个字段也要在字面上留痕：省略时一个键都不占，给了就得是这三个键名。
+    assert!(
+        text.contains("\"limit\":500")
+            && text.contains("\"max_bytes\":8192")
+            && text.contains("\"view\":\"runs\""),
+        "{text}"
+    );
     assert_eq!(serde_json::from_str::<Op>(&text).unwrap(), op);
 
     let data = Data::Notes {
@@ -364,6 +378,7 @@ fn the_bar_view_survives_the_wire() {
         }],
         truncated: false,
         limit: 20_000,
+        total: 1,
         bar_overview: vec![BarOverview {
             bar: 0,
             tick_from: 0,
@@ -375,6 +390,44 @@ fn the_bar_view_survives_the_wire() {
     let text = serde_json::to_string(&data).unwrap();
     assert!(text.contains("\"bar_overview\""), "{text}");
     assert_eq!(serde_json::from_str::<Data>(&text).unwrap(), data);
+
+    // 列式与延音段是两种新形状，桥接端只转手不重拼：标签名必须钉在字面上。
+    let columns = Data::NoteColumns {
+        tick: vec![0, 1],
+        layer: vec![0, 0],
+        instrument: vec![1, 1],
+        key: vec![39, 41],
+        velocity: vec![100, 90],
+        panning: vec![100, 100],
+        pitch: vec![0, -3],
+        out_of_range: vec![false, false],
+        truncated: false,
+        limit: 1_000,
+        total: 2,
+    };
+    let text = serde_json::to_string(&columns).unwrap();
+    assert!(text.starts_with("{\"kind\":\"note_columns\""), "{text}");
+    assert_eq!(serde_json::from_str::<Data>(&text).unwrap(), columns);
+
+    let runs = Data::NoteRuns {
+        runs: vec![NoteRun {
+            layer: 0,
+            instrument: 1,
+            key: 39,
+            tick_from: 0,
+            tick_to: 3,
+            cells: 4,
+            velocity_from: 100,
+            velocity_to: 80,
+        }],
+        truncated: true,
+        limit: 1,
+        total_runs: 9,
+        total_cells: 40,
+    };
+    let text = serde_json::to_string(&runs).unwrap();
+    assert!(text.starts_with("{\"kind\":\"note_runs\""), "{text}");
+    assert_eq!(serde_json::from_str::<Data>(&text).unwrap(), runs);
 }
 
 /// 图层这一面两端都在 wire 上：`get_layers` 的区间是外部调用方填的，`layer` 回声是
@@ -473,6 +526,9 @@ fn inbox_preserves_the_optional_tab_envelope() {
             layer_to: None,
             ticks_per_bar: None,
             bars: None,
+            limit: None,
+            max_bytes: None,
+            view: None,
         },
         Some(tab),
     );

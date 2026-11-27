@@ -227,6 +227,21 @@ pub enum ExportFormat {
     Png,
 }
 
+/// `GetNotes` 返回什么形状。三档互斥，所以是一个枚举而不是两个 bool——
+/// 「列式的段摘要」这种没人能解释的组合不该被允许写出来。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum NoteView {
+    /// 逐格：每格一个对象，字段名重复八遍。默认。
+    #[default]
+    Cells,
+    /// 列式：八条等长数组，同一段数据比 `cells` 省一大半字节。
+    Columns,
+    /// 延音段摘要：同层、同音色、同键、tick 连续的一串格子合成一段。
+    Runs,
+}
+
 /// 一次外部调用。所有变体都带显式参数，没有「按当前状态猜」的入口。
 ///
 /// 线格式定成 `{"op":{"kind":"set_notes", ...}}`：`kind` 当 tag、外面再套一层 `op`，
@@ -266,6 +281,17 @@ pub enum Op {
         /// 并且回执里带一份小节文字视图。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bars: Option<[u32; 2]>,
+        /// 一次最多回多少条（`cells` / `columns` 按格算，`runs` 按段算）。
+        /// 省略 = 1000 条；超过 20000 按 20000 走，回执会说。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+        /// 字节预算：按每格（每段）的估算字节折算成条数，和 `limit` 谁小听谁的。
+        /// 省略 = 128 KiB；超过 1 MiB 按 1 MiB 走，回执会说。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_bytes: Option<usize>,
+        /// 返回形状：`cells`（默认）/ `columns`（列式，省字节）/ `runs`（延音段摘要）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<NoteView>,
     },
     /// 图层清单。`layer_from` / `layer_to` 是**层号闭区间**，省略 = 全部层。
     /// 层多的时候给个窗口：整张表要按层数算字节，86 层就是十来 KB。

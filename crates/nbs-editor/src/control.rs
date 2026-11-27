@@ -27,8 +27,9 @@ use nbs_control::{
     ImportEnhancedChannel, ImportEnhancedOptions, ImportMidiOptions, ImportRangeMode, ImportSlot,
     ImportSubstitution, Inbox, InstrumentInfo, JobHandle, JobInfo, JobRegistry, JobStatus,
     LayerInfo, MidiChannelPlan, MidiDrumPlan, MidiEnhancedReport, MidiPartPlan, MidiPlan,
-    MidiTrackInfo, NoteCell, Op, Outcome, Playback, Scope, SelectTarget, SelectionInfo,
-    ServerConfig, SetMeta, Snapshot, TabInfo, TabRef, TranscribeOptions, PROTOCOL_VERSION,
+    MidiTrackInfo, NoteCell, NoteRun, NoteView, Op, Outcome, Playback, Scope, SelectTarget,
+    SelectionInfo, ServerConfig, SetMeta, Snapshot, TabInfo, TabRef, TranscribeOptions,
+    PROTOCOL_VERSION,
 };
 use nbs_core::model::{
     Note, Song, FIRST_CUSTOM_INDEX, KEY_MAX, MC_KEY_MAX, MC_KEY_MIN, PAN_MAX, PIT_MAX, VEL_MAX,
@@ -39,8 +40,23 @@ use crate::state::{EditorState, Flag};
 
 /// 一条请求最多写多少格。AI 一次生成上万音符是正常活，但让主线程一帧卡死不值得。
 const MAX_CELLS_PER_CALL: usize = 50_000;
-/// `GetNotes` 一次最多回多少格，截断会显式标出来。
+/// `GetNotes` 一次最多回多少条，截断会显式标出来。这是**硬上限**：调用方把 `limit`
+/// 写得比它还大，只会被压回来并在回执里说一句，不会被当成「那就都给我」。
 const MAX_CELLS_RETURNED: usize = 20_000;
+/// 没给 `limit` 时一次回多少条。2 万格是十万字节量级，一个 AI 读谱正常只要几百条，
+/// 默认卡小是让「顺手读一段」不把上下文吃光。
+const DEFAULT_CELLS_RETURNED: usize = 1_000;
+/// 没给 `max_bytes` 时按多大载荷折算条数。
+const DEFAULT_NOTE_BYTES: usize = 128 * 1024;
+/// `max_bytes` 的硬上限：1 MiB。超过它就不算「读一段」，是在把整首歌往协议帧里灌。
+const MAX_NOTE_BYTES: usize = 1024 * 1024;
+/// 三种形状的每条目字节估算，用来把 `max_bytes` 换成条数。
+///
+/// 用 `serde_json` 实测过（`the_note_byte_estimate_tracks_the_real_payload`）：键名、
+/// 数值位数都算进去了，偏差控制在一成上下。改 `NoteCell` / `NoteRun` 的字段时这里要跟着改。
+const BYTES_PER_NOTE_CELL: usize = 112;
+const BYTES_PER_NOTE_COLUMN: usize = 33;
+const BYTES_PER_NOTE_RUN: usize = 128;
 /// 小节文字视图一次最多切几节：再多就不是「读一段」，而是让主线程拼一份没人读的长文本。
 const MAX_BARS_RETURNED: usize = 256;
 /// 一小节的文字最多列几格，超了以 `…` 收尾（`cells` 仍是真实条数）。
@@ -573,6 +589,9 @@ fn execute_active(
             layer_to,
             ticks_per_bar,
             bars,
+            limit,
+            max_bytes,
+            view,
         } => match read_notes(
             state,
             *tick_from,
@@ -581,6 +600,9 @@ fn execute_active(
             *layer_to,
             *ticks_per_bar,
             *bars,
+            *limit,
+            *max_bytes,
+            *view,
         ) {
             Ok((data, message)) => ok_data(state, data, message),
             Err(error) => Outcome::err(error, current_report(state, String::new())),
@@ -2971,8 +2993,142 @@ fn format_tag(format: &nbs_control::ExportFormat) -> &'static str {
     }
 }
 
-/// 读一侧的取格子：范围越界直接拒，命中太多则截断并明说。
-/// 截断必须显式，否则调用方会把前 2 万格当成整首歌。
+/// 只数格子、不克隆音符：截断回执要说清「范围里真实有多少条」，这份代价不该跟着预算走。
+fn count_notes(song: &Song, tf: u32, tt: u32, lf: u32, lt: u32) -> usize {
+    if tt < tf || lt < lf {
+        return 0;
+    }
+    song.columns
+        .range(tf..=tt)
+        .map(|(_, column)| column.notes.range(lf..=lt).count())
+        .sum()
+}
+
+/// 取前 `want` 格，顺序固定为 tick 升序、同 tick 按层升序。调用方一律多要一格留给
+/// 「还有没有」的判断：整段矩形物化一遍再扔掉大半，是让主线程白干的写法。
+fn take_notes(song: &Song, tf: u32, tt: u32, lf: u32, lt: u32, want: usize) -> Vec<(u32, u32, Note)> {
+    let mut out = Vec::new();
+    if want == 0 || tt < tf || lt < lf {
+        return out;
+    }
+    'column: for (&tick, cell) in song.columns.range(tf..=tt) {
+        for (&layer, note) in cell.notes.range(lf..=lt) {
+            out.push((tick, layer, *note));
+            if out.len() >= want {
+                break 'column;
+            }
+        }
+    }
+    out
+}
+
+/// 延音段：同层、同音色、同键、tick 一格接一格算一段。段的先后按**起处**排，和逐格视图
+/// 同一个口径——同一区间用两种形状读，第 N 段说的得是同一批格子，而不是「谁先断掉谁先出场」。
+/// 段数与格数照旧数到末了，内容只留前 `cap` 段。
+fn runs_in_rect(
+    song: &Song,
+    tf: u32,
+    tt: u32,
+    lf: u32,
+    lt: u32,
+    cap: usize,
+) -> (Vec<NoteRun>, usize, usize) {
+    // 每层记着「现在开着的那一段」：段本体之外还记它在 `runs` 里的下标，超出上限的段不再留。
+    let mut open: Vec<Option<(NoteRun, Option<usize>)>> = Vec::new();
+    let mut runs: Vec<NoteRun> = Vec::new();
+    let mut total_runs = 0usize;
+    let mut total_cells = 0usize;
+    if tt < tf || lt < lf {
+        return (runs, total_runs, total_cells);
+    }
+    for (&tick, cell) in song.columns.range(tf..=tt) {
+        for (&layer, note) in cell.notes.range(lf..=lt) {
+            total_cells += 1;
+            let slot = (layer - lf) as usize;
+            if open.len() <= slot {
+                open.resize(slot + 1, None);
+            }
+            let current = open[slot].take();
+            let keeps = match &current {
+                Some((run, _)) => {
+                    run.instrument == note.instrument
+                        && run.key == note.key
+                        && run.tick_to + 1 == tick
+                }
+                None => false,
+            };
+            if keeps {
+                let (mut run, kept) = current.expect("keeps 刚查过它");
+                run.tick_to = tick;
+                run.cells += 1;
+                run.velocity_to = note.velocity;
+                if let Some(index) = kept {
+                    runs[index] = run.clone();
+                }
+                open[slot] = Some((run, kept));
+                continue;
+            }
+            total_runs += 1;
+            let run = NoteRun {
+                layer,
+                instrument: note.instrument,
+                key: note.key,
+                tick_from: tick,
+                tick_to: tick,
+                cells: 1,
+                velocity_from: note.velocity,
+                velocity_to: note.velocity,
+            };
+            let kept = (runs.len() < cap).then(|| {
+                runs.push(run.clone());
+                runs.len() - 1
+            });
+            open[slot] = Some((run, kept));
+        }
+    }
+    (runs, total_runs, total_cells)
+}
+
+/// `get_notes` 一次回多少条：条数上限和字节预算折成一个条数，并说清哪一条在管。
+///
+/// 每条目只给字节**估算**（见 `BYTES_PER_NOTE_*`）。定这两个数的本意是「别让一次调用
+/// 吃掉几十 KB 上下文」，不是精确计费——所以真值拿测试对着 `serde_json` 量（
+/// `the_note_byte_estimate_tracks_the_real_payload`），差过两成就得回来改这里。
+struct NoteQuota {
+    /// 生效条数上限，0 = 一条都不回。
+    count: usize,
+    /// 管住这次的是 `max_bytes` 还是 `limit`。
+    by_bytes: bool,
+    /// 每条目字节估算。
+    row_bytes: usize,
+    /// true = 调用方给的值高过硬上限。
+    clamped: bool,
+}
+
+fn note_quota(view: NoteView, limit: Option<usize>, max_bytes: Option<usize>) -> NoteQuota {
+    let row_bytes = match view {
+        NoteView::Cells => BYTES_PER_NOTE_CELL,
+        NoteView::Columns => BYTES_PER_NOTE_COLUMN,
+        NoteView::Runs => BYTES_PER_NOTE_RUN,
+    };
+    let wanted_limit = limit.unwrap_or(DEFAULT_CELLS_RETURNED);
+    let wanted_bytes = max_bytes.unwrap_or(DEFAULT_NOTE_BYTES);
+    let eff_limit = wanted_limit.min(MAX_CELLS_RETURNED);
+    let eff_bytes = wanted_bytes.min(MAX_NOTE_BYTES);
+    let by_bytes = (eff_bytes / row_bytes.max(1)).max(1);
+    NoteQuota {
+        count: eff_limit.min(by_bytes),
+        // 谁小谁管，说的是**压过之后**的两个数：给了一百万条、天花板两万，
+        // 那这一刀是条数上限砍的，不该推给字节预算。
+        by_bytes: by_bytes < eff_limit,
+        row_bytes,
+        clamped: wanted_limit > MAX_CELLS_RETURNED || wanted_bytes > MAX_NOTE_BYTES,
+    }
+}
+
+/// 读一侧的取格子：范围越界直接拒，命中太多则按预算截断并明说总数。
+/// 截断必须显式，否则调用方会把回出去的那几条当成整首歌。
+#[allow(clippy::too_many_arguments)]
 fn read_notes(
     state: &EditorState,
     tick_from: Option<u32>,
@@ -2981,6 +3137,9 @@ fn read_notes(
     layer_to: Option<u32>,
     ticks_per_bar: Option<u32>,
     bars: Option<[u32; 2]>,
+    limit: Option<usize>,
+    max_bytes: Option<usize>,
+    view: Option<NoteView>,
 ) -> Result<(Data, String), ErrorInfo> {
     let song = &state.doc.song;
     let layers = song.layers.len() as u32;
@@ -3055,19 +3214,136 @@ fn read_notes(
             ),
         ));
     }
-    let raw = song.notes_in_rect(tf, lf, tt, lt);
-    let total = raw.len();
-    let truncated = total > MAX_CELLS_RETURNED;
-    let cells: Vec<NoteCell> = raw
-        .iter()
-        .take(MAX_CELLS_RETURNED)
-        .map(|&(tick, layer, note)| note_cell(tick, layer, note))
-        .collect();
-    // 文字视图只在请求点名要时给：不要的人不该多一份没人读的文本。
-    let bar_views = if bars.is_some() || ticks_per_bar.is_some() {
+    let view = view.unwrap_or_default();
+    let quota = note_quota(view, limit, max_bytes);
+    // 小节文字视图只挂在 cells 形状上，而且要覆盖整段区间，所以那一路把矩形走满；
+    // 其余形状只为真正回得出去的那部分干活，延音段自己一趟走完。
+    let with_bars = view == NoteView::Cells && (bars.is_some() || ticks_per_bar.is_some());
+    let want = match view {
+        NoteView::Runs => 0,
+        _ if with_bars => usize::MAX,
+        _ => quota.count + 1,
+    };
+    let raw = take_notes(song, tf, tt, lf, lt, want);
+    let bar_views = if with_bars {
         bar_overviews(&raw, tf, tt, width, state.flags.flats)
     } else {
         Vec::new()
+    };
+    // 小节数先留一份：bar_views 之后要搬进回执，回执拼文字时不能再借它。
+    let bar_count = bar_views.len();
+    let cells_total = || count_notes(song, tf, tt, lf, lt);
+    let cell_rows = |n: usize| -> Vec<NoteCell> {
+        raw.iter()
+            .take(n)
+            .map(|&(tick, layer, note)| note_cell(tick, layer, note))
+            .collect()
+    };
+    let (data, extra, truncated) = match view {
+        NoteView::Cells => {
+            let total = if with_bars { raw.len() } else { cells_total() };
+            let shown = raw.len().min(quota.count);
+            let truncated = shown < total;
+            let extra = if truncated {
+                say(
+                    format!("范围里共 {total} 格，只回了前 {shown} 格"),
+                    format!("Range holds {total} cells, returning the first {shown}"),
+                )
+            } else {
+                String::new()
+            };
+            (
+                Data::Notes {
+                    cells: cell_rows(quota.count),
+                    truncated,
+                    limit: quota.count,
+                    total,
+                    bar_overview: bar_views,
+                },
+                extra,
+                truncated,
+            )
+        }
+        NoteView::Columns => {
+            let total = cells_total();
+            let shown = raw.len().min(quota.count);
+            let truncated = shown < total;
+            let extra = if truncated {
+                say(
+                    format!("范围里共 {total} 格，只回了前 {shown} 格"),
+                    format!("Range holds {total} cells, returning the first {shown}"),
+                )
+            } else {
+                String::new()
+            };
+            let mut tick = Vec::with_capacity(shown);
+            let mut layer = Vec::with_capacity(shown);
+            let mut instrument = Vec::with_capacity(shown);
+            let mut key = Vec::with_capacity(shown);
+            let mut velocity = Vec::with_capacity(shown);
+            let mut panning = Vec::with_capacity(shown);
+            let mut pitch = Vec::with_capacity(shown);
+            let mut out_of_range = Vec::with_capacity(shown);
+            // 拆列之前先过一遍 note_cell：out_of_range 的判据必须和 cells 视图同源，
+            // 两边各写一份的话，改天只会改到一处。
+            for cell in cell_rows(quota.count) {
+                tick.push(cell.tick);
+                layer.push(cell.layer);
+                instrument.push(cell.instrument);
+                key.push(cell.key);
+                velocity.push(cell.velocity);
+                panning.push(cell.panning);
+                pitch.push(cell.pitch);
+                out_of_range.push(cell.out_of_range);
+            }
+            (
+                Data::NoteColumns {
+                    tick,
+                    layer,
+                    instrument,
+                    key,
+                    velocity,
+                    panning,
+                    pitch,
+                    out_of_range,
+                    truncated,
+                    limit: quota.count,
+                    total,
+                },
+                extra,
+                truncated,
+            )
+        }
+        NoteView::Runs => {
+            let (runs, total_runs, total_cells) = runs_in_rect(song, tf, tt, lf, lt, quota.count);
+            let shown = runs.len();
+            let truncated = shown < total_runs;
+            // 段数少不等于格子少，两个数一起报，否则读的人以为这首曲子被压掉了大半。
+            let extra = if truncated {
+                say(
+                    format!("范围里共 {total_runs} 段 / {total_cells} 格，只回了前 {shown} 段"),
+                    format!(
+                        "Range holds {total_runs} runs over {total_cells} cells, returning the first {shown}"
+                    ),
+                )
+            } else {
+                say(
+                    format!("共 {total_runs} 段 / {total_cells} 格"),
+                    format!("{total_runs} runs over {total_cells} cells"),
+                )
+            };
+            (
+                Data::NoteRuns {
+                    runs,
+                    truncated,
+                    limit: quota.count,
+                    total_runs,
+                    total_cells,
+                },
+                extra,
+                truncated,
+            )
+        }
     };
     let mut message = String::new();
     // 省略的边界要说清算成了什么，否则调用方分不清「这段本来就空」和「我少读了」。
@@ -3077,42 +3353,55 @@ fn read_notes(
             format!("tick range resolved from the song: {tf}..={tt}"),
         ));
     }
-    if !bar_views.is_empty() {
+    if bar_count > 0 {
         if !message.is_empty() {
             message.push_str(if zh() { "；" } else { "; " });
         }
         // 宽度是从拍号来的还是人给的要说出来：同一份谱按 16 和按 12 切出来的小节不是一回事。
         message.push_str(&say(
             format!(
-                "{} 小节，每节 {width} 格（{}）",
-                bar_views.len(),
+                "{bar_count} 小节，每节 {width} 格（{}）",
                 if ticks_per_bar.is_some() { "指定" } else { "取自拍号" }
             ),
             format!(
-                "{} bars, {width} ticks each ({})",
-                bar_views.len(),
+                "{bar_count} bars, {width} ticks each ({})",
                 if ticks_per_bar.is_some() { "given" } else { "from time signature" }
             ),
+        ));
+    }
+    if view != NoteView::Cells && (bars.is_some() || ticks_per_bar.is_some()) {
+        if !message.is_empty() {
+            message.push_str(if zh() { "；" } else { "; " });
+        }
+        message.push_str(&say(
+            "小节文字视图只在 view=cells 给，这里 bars / ticks_per_bar 只用来定区间",
+            "the bar text view is cells-only; bars / ticks_per_bar only narrowed the range here",
         ));
     }
     if truncated {
         if !message.is_empty() {
             message.push_str(if zh() { "；" } else { "; " });
         }
+        message.push_str(&extra);
+        let source = if quota.by_bytes { "max_bytes" } else { "limit" };
         message.push_str(&say(
-            format!("范围里共 {total} 格，只回了前 {MAX_CELLS_RETURNED} 格"),
-            format!("Range holds {total} cells, returning the first {MAX_CELLS_RETURNED}"),
+            format!("（上限 {} 条由 {source} 定，每条约 {} 字节）", quota.count, quota.row_bytes),
+            format!(
+                " (cap {} items set by {source}, ~{} bytes per item)",
+                quota.count, quota.row_bytes
+            ),
         ));
+        if quota.clamped {
+            message.push_str(&say(
+                format!("；你给的额度高过硬上限，已压回（条数 ≤ {MAX_CELLS_RETURNED}，字节 ≤ {MAX_NOTE_BYTES}）"),
+                format!(
+                    "; the cap you asked for is above the hard ceiling and was pulled back ({} items / {} bytes)",
+                    MAX_CELLS_RETURNED, MAX_NOTE_BYTES
+                ),
+            ));
+        }
     }
-    Ok((
-        Data::Notes {
-            cells,
-            truncated,
-            limit: MAX_CELLS_RETURNED,
-            bar_overview: bar_views,
-        },
-        message,
-    ))
+    Ok((data, message))
 }
 
 /// 把矩形里的音符按小节切成一行行文字：`0:C4(2) 6:G4(2)`。
@@ -4967,6 +5256,9 @@ mod tests {
                 layer_to: None,
                 ticks_per_bar: None,
                 bars: None,
+                limit: None,
+                max_bytes: None,
+                view: None,
             },
         );
         assert!(out.ok, "{:?}", out.error);
@@ -5016,6 +5308,9 @@ mod tests {
                 layer_to: None,
                 ticks_per_bar: None,
                 bars: None,
+                limit: None,
+                max_bytes: None,
+                view: None,
             },
         );
         assert!(out.ok, "{:?}", out.error);
@@ -5381,6 +5676,9 @@ mod tests {
             layer_to: None,
             ticks_per_bar: None,
             bars: None,
+            limit: None,
+            max_bytes: None,
+            view: None,
         });
         assert!(out.ok, "{:?}", out.error);
         let cells = match out.data.as_ref().expect("读音符必带 data") {
@@ -5398,6 +5696,9 @@ mod tests {
             layer_to: None,
             ticks_per_bar: None,
             bars: None,
+            limit: None,
+            max_bytes: None,
+            view: None,
         });
         assert!(out.ok, "{:?}", out.error);
         assert!(
@@ -5413,10 +5714,420 @@ mod tests {
             layer_to: None,
             ticks_per_bar: None,
             bars: None,
+            limit: None,
+            max_bytes: None,
+            view: None,
         });
         assert!(!out.ok, "显式给反的区间不能静默读空");
         assert_eq!(code(&out), ErrorCode::BadArgument);
     }
+
+    /// 读音符用例的公共部分：区间一律给全曲，只换形状和预算。
+    fn ask_notes(
+        h: &mut Harness,
+        view: NoteView,
+        limit: Option<usize>,
+        max_bytes: Option<usize>,
+    ) -> Outcome {
+        h.run(&Op::GetNotes {
+            tick_from: None,
+            tick_to: None,
+            layer_from: None,
+            layer_to: None,
+            ticks_per_bar: None,
+            bars: None,
+            limit,
+            max_bytes,
+            view: Some(view),
+        })
+    }
+
+    /// 造一首 `rows` 拍 × `layers` 层的谱：每拍每层一格，好把预算卡在「正中间」。
+    fn fill_grid(h: &mut Harness, rows: u32, layers: u32) {
+        h.ensure_layers(layers as usize);
+        let cells: Vec<CellNote> = (0..rows)
+            .flat_map(|tick| {
+                (0..layers).map(move |layer| cell(tick, layer, 1, 40 + layer as u8 % 16))
+            })
+            .collect();
+        let out = h.run(&Op::SetNotes {
+            cells,
+            label: None,
+            expect_rev: None,
+        });
+        assert!(out.ok, "{:?}", out.error);
+    }
+
+    /// 取回执的数据体：不 unwrap，断言失败时才看得见 `out.error`。
+    fn data_of(out: &Outcome) -> &Data {
+        out.data.as_ref().expect("读音符必带 data")
+    }
+
+    /// 默认额度是小的一档，而且**截断了要在回执里说**：AI 读谱正常只关心几百格，
+    /// 把两万格当默认等于把上下文烧光；更糟的是少给了还不吭声。
+    #[test]
+    fn get_notes_stops_at_the_default_budget_and_says_so() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        fill_grid(&mut h, 1_200, 2);
+
+        let out = ask_notes(&mut h, NoteView::Cells, None, None);
+        assert!(out.ok, "{:?}", out.error);
+        let Data::Notes {
+            cells,
+            truncated,
+            limit,
+            total,
+            ..
+        } = out.data.unwrap()
+        else {
+            panic!("默认形状还得是逐格：{:?}", out.error)
+        };
+        assert_eq!(cells.len(), DEFAULT_CELLS_RETURNED, "默认只回一千条");
+        assert_eq!(total, 2_400, "总数是范围里的真实格数，不是回出去的那点");
+        assert!(truncated);
+        assert_eq!(limit, DEFAULT_CELLS_RETURNED);
+        // tick 优先、同 tick 按层：截一刀要正好落在「第 500 拍结束」这种整拍上，
+        // 半拍被切走的话读谱的人会对不上小节。
+        assert_eq!((cells[0].tick, cells[0].layer), (0, 0));
+        assert_eq!(cells.last().unwrap().tick, 499);
+        let reason = out.report.message;
+        assert!(
+            reason.contains("2400") && reason.contains("limit"),
+            "截断回执要报真实总数、点名是哪一个额度卡住的：{reason}"
+        );
+        assert!(
+            !reason.contains("1048576"),
+            "没超硬上限就别提硬上限：{reason}"
+        );
+    }
+
+    /// 上限是**上限**，不是「要多少给多少」：写得比天花板还高要压回来，并且要说清压过。
+    /// 另外「limit 给了很大但字节预算先卡住」这种组合，回执必须点名真正管事的那一条。
+    #[test]
+    fn note_budgets_clamp_and_name_the_binding_constraint() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        fill_grid(&mut h, 12_000, 3);
+
+        // 一百万条 + 顶格字节预算：列式每条便宜，两万的上限先落地，所以管事的是 limit。
+        let out = ask_notes(
+            &mut h,
+            NoteView::Columns,
+            Some(1_000_000),
+            Some(MAX_NOTE_BYTES),
+        );
+        assert!(out.ok, "{:?}", out.error);
+        let Data::NoteColumns {
+            tick,
+            truncated,
+            limit,
+            total,
+            ..
+        } = data_of(&out)
+        else {
+            panic!("列式形状不对")
+        };
+        assert_eq!(*total, 36_000, "总数要说范围里真实的格数");
+        assert_eq!(*limit, MAX_CELLS_RETURNED, "条数被硬上限压回两万");
+        assert_eq!(tick.len(), MAX_CELLS_RETURNED);
+        assert!(truncated);
+        let reason = &out.report.message;
+        assert!(
+            reason.contains("36000") && reason.contains("1048576") && reason.contains("limit"),
+            "压回要说压回、总数要说总数、管事的额度要点名：{reason}"
+        );
+
+        // 字节预算更小时，管事的是它，回执得改口。
+        let out = ask_notes(&mut h, NoteView::Cells, Some(1_000), Some(8_192));
+        let Data::Notes { cells, .. } = data_of(&out) else {
+            panic!("逐格形状不对")
+        };
+        assert_eq!(cells.len(), 8_192 / BYTES_PER_NOTE_CELL);
+        let reason = &out.report.message;
+        assert!(
+            reason.contains("max_bytes") && !reason.contains("1048576"),
+            "该点名 max_bytes，而且这条没超硬上限：{reason}"
+        );
+    }
+
+    /// 列式不是另一种数据，是同一种数据的另一种写法：八条数组必须等长、逐列对得上 cells，
+    /// 而且真的省字节——省不了就说明这个形状没有存在价值。
+    #[test]
+    fn the_columns_view_is_the_same_notes_in_eight_equal_arrays() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        fill_grid(&mut h, 200, 2);
+
+        let rows = ask_notes(&mut h, NoteView::Cells, Some(400), Some(MAX_NOTE_BYTES));
+        let cols = ask_notes(&mut h, NoteView::Columns, Some(400), Some(MAX_NOTE_BYTES));
+        let Data::Notes {
+            cells, truncated, ..
+        } = data_of(&rows)
+        else {
+            panic!("cells 形状不对")
+        };
+        assert!(!truncated && cells.len() == 400);
+        let Data::NoteColumns {
+            tick,
+            layer,
+            instrument,
+            key,
+            velocity,
+            panning,
+            pitch,
+            out_of_range,
+            truncated,
+            limit,
+            total,
+        } = data_of(&cols)
+        else {
+            panic!("列式形状不对")
+        };
+        assert!(!truncated && *limit == 400 && *total == 400);
+        for (n, column) in [
+            ("tick", &tick.len()),
+            ("layer", &layer.len()),
+            ("instrument", &instrument.len()),
+            ("key", &key.len()),
+            ("velocity", &velocity.len()),
+            ("panning", &panning.len()),
+            ("pitch", &pitch.len()),
+            ("out_of_range", &out_of_range.len()),
+        ] {
+            assert_eq!(*column, cells.len(), "{n} 这条不等长");
+        }
+        for i in 0..cells.len() {
+            assert_eq!(tick[i], cells[i].tick, "第 {i} 项的 tick");
+            assert_eq!(layer[i], cells[i].layer, "第 {i} 项的 layer");
+            assert_eq!(instrument[i], cells[i].instrument);
+            assert_eq!(key[i], cells[i].key);
+            assert_eq!(velocity[i], cells[i].velocity);
+            assert_eq!(panning[i], cells[i].panning);
+            assert_eq!(pitch[i], cells[i].pitch);
+            assert_eq!(out_of_range[i], cells[i].out_of_range);
+        }
+        // 省的是字段名那份开销：整份序列化对比才是调用方真正付的字节。
+        let row_bytes = serde_json::to_string(&rows.data).unwrap().len();
+        let column_bytes = serde_json::to_string(&cols.data).unwrap().len();
+        assert!(
+            column_bytes * 4 < row_bytes * 3,
+            "列式号称省两成以上，实测 {row_bytes} → {column_bytes}"
+        );
+    }
+
+    /// 延音段：同层、同音色、同键、tick 接得上才算一段。力度和声像变了**不断段**——
+    /// 延音期内做强弱是同一件乐器在呼吸，把它拆成两段会让读的人以为换了音符。
+    #[test]
+    fn the_runs_view_groups_only_contiguous_same_pitch() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        h.ensure_layers(3);
+        let cells = vec![
+            cell(0, 0, 1, 40),
+            cell(1, 0, 1, 40),
+            cell(2, 0, 1, 40),
+            cell(5, 0, 1, 40),
+            cell(6, 0, 2, 40),
+            cell(0, 1, 1, 40),
+            cell(1, 1, 1, 40),
+            cell(2, 1, 1, 45),
+        ];
+        assert!(h
+            .run(&Op::SetNotes {
+                cells,
+                label: None,
+                expect_rev: None,
+            })
+            .ok);
+
+        let out = ask_notes(&mut h, NoteView::Runs, None, None);
+        assert!(out.ok, "{:?}", out.error);
+        let Data::NoteRuns {
+            runs,
+            truncated,
+            limit,
+            total_runs,
+            total_cells,
+        } = out.data.unwrap()
+        else {
+            panic!("段摘要形状不对：{:?}", out.error)
+        };
+        assert_eq!(total_cells, 8, "格子总数不因合成段而少报");
+        assert_eq!(limit, DEFAULT_CELLS_RETURNED);
+        assert!(!truncated);
+        assert_eq!(
+            runs.iter()
+                .map(|r| (r.layer, r.instrument, r.key, r.tick_from, r.tick_to, r.cells))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, 1, 40, 0, 2, 3),
+                (1, 1, 40, 0, 1, 2),
+                (1, 1, 45, 2, 2, 1),
+                (0, 1, 40, 5, 5, 1),
+                (0, 2, 40, 6, 6, 1),
+            ],
+            "断拍、换音色、换键、换层都要分段；顺序按 tick 起处排，同 tick 按层"
+        );
+        assert_eq!((total_runs, runs.len()), (5, 5));
+
+        // 延音期内做强弱仍是同一段：力度变不断段，但起止两个值要各留住，
+        // 否则「这条延音是渐弱还是平的」这个问题在段视图里就没答案了。
+        let fade = |tick: u32, velocity: u8| CellNote {
+            tick,
+            layer: 2,
+            instrument: 1,
+            key: 50,
+            velocity: Some(velocity),
+            panning: None,
+            pitch: None,
+        };
+        assert!(h
+            .run(&Op::SetNotes {
+                cells: vec![fade(10, 100), fade(11, 70), fade(12, 40)],
+                label: None,
+                expect_rev: None,
+            })
+            .ok);
+        let out = ask_notes(&mut h, NoteView::Runs, None, None);
+        let Data::NoteRuns { runs, .. } = out.data.unwrap() else {
+            panic!("段摘要形状不对")
+        };
+        let last = runs.last().expect("该有新的一段");
+        assert_eq!(
+            (last.layer, last.tick_from, last.tick_to, last.cells),
+            (2, 10, 12, 3),
+            "力度变化不该把一段切成三段"
+        );
+        assert_eq!(
+            (last.velocity_from, last.velocity_to),
+            (100, 40),
+            "段内两端力度各留一个值"
+        );
+    }
+
+    /// 段的字节估算按「一段一格」量：那是同载荷下最贵的一档，估算要是连它都兜不住，
+    /// 说好 128 KiB 实际吐 300 KiB 这种事就没人能提前发现。
+    #[test]
+    fn the_runs_view_still_counts_every_run_when_cut() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        // 每拍一格、隔一拍断：2000 段，段数比格数一点不少。
+        let cells: Vec<CellNote> = (0..2_000u32).map(|i| cell(i * 2, 0, 1, 40)).collect();
+        assert!(h
+            .run(&Op::SetNotes {
+                cells,
+                label: None,
+                expect_rev: None,
+            })
+            .ok);
+
+        let out = ask_notes(&mut h, NoteView::Runs, Some(10), None);
+        let Data::NoteRuns {
+            runs,
+            truncated,
+            total_runs,
+            total_cells,
+            ..
+        } = out.data.unwrap()
+        else {
+            panic!("段摘要形状不对")
+        };
+        assert_eq!(runs.len(), 10, "limit 在段视图里数的是段");
+        assert!(truncated);
+        assert_eq!((total_runs, total_cells), (2_000, 2_000), "截断了也要数到末了");
+        assert!(
+            out.report.message.contains("2000") && out.report.message.contains("limit"),
+            "段与格两个数都要报：{}",
+            out.report.message
+        );
+    }
+
+    /// `bars` / `ticks_per_bar` 的小节文字只长在 cells 形状上。别的形状下它们仍然
+    /// 只管区间——这一点必须说出来，否则「我要了 bars 怎么没有」要靠猜。
+    #[test]
+    fn the_bar_text_view_is_cells_only_and_says_so() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        fill_grid(&mut h, 40, 1);
+
+        let out = h.run(&Op::GetNotes {
+            tick_from: None,
+            tick_to: None,
+            layer_from: None,
+            layer_to: None,
+            ticks_per_bar: Some(12),
+            bars: Some([0, 1]),
+            limit: None,
+            max_bytes: None,
+            view: Some(NoteView::Columns),
+        });
+        assert!(out.ok, "{:?}", out.error);
+        let Data::NoteColumns { tick, total, .. } = out.data.unwrap() else {
+            panic!("列式形状不对")
+        };
+        assert_eq!(total, 24, "bars 定的是区间：第 0、1 节各 12 格");
+        assert_eq!((tick.first().copied(), tick.last().copied()), (Some(0), Some(23)), "两头都含");
+        assert!(
+            out.report.message.contains("cells"),
+            "要一句点名 view=cells 的话：{}",
+            out.report.message
+        );
+    }
+
+    /// 每条目字节估算是折算条数用的，估歪了等于预算说谎。这里拿 `serde_json` 实测，
+    /// 三档形状各自摊到每一条的字节数落进 ±40% 才算这条常数还活着。
+    #[test]
+    fn the_note_byte_estimate_tracks_the_real_payload() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        h.ensure_layers(2);
+        // 隔一拍断一次：段视图里每条就是一段一格，那是同样载荷最贵的一档，
+        // 估算要是连它都兜不住，「说好 128 KiB 实际吐 300 KiB」就没人能提前发现。
+        let cells: Vec<CellNote> = (0..2_000u32)
+            .flat_map(|i| [cell(i * 2, 0, 1, 40), cell(i * 2, 1, 1, 48)])
+            .collect();
+        assert!(h
+            .run(&Op::SetNotes {
+                cells,
+                label: None,
+                expect_rev: None,
+            })
+            .ok);
+
+        let measure = |h: &mut Harness, view: NoteView| -> (usize, usize) {
+            let out = ask_notes(h, view, Some(MAX_CELLS_RETURNED), Some(MAX_NOTE_BYTES));
+            let data = out.data.expect("读得出就该有数据");
+            let items = match &data {
+                Data::Notes { cells, .. } => cells.len(),
+                Data::NoteColumns { tick, .. } => tick.len(),
+                Data::NoteRuns { runs, .. } => runs.len(),
+                other => panic!("形状不对：{other:?}"),
+            };
+            (serde_json::to_string(&data).unwrap().len(), items)
+        };
+
+        for (view, est) in [
+            (NoteView::Cells, BYTES_PER_NOTE_CELL),
+            (NoteView::Columns, BYTES_PER_NOTE_COLUMN),
+            (NoteView::Runs, BYTES_PER_NOTE_RUN),
+        ] {
+            let (bytes, items) = measure(&mut h, view);
+            let per = bytes / items.max(1);
+            assert!(
+                per * 10 <= est * 14 && est * 10 <= per * 14,
+                "{view:?} 实测每条 {per} 字节，估算 {est} 差过两成（{bytes} / {items}）"
+            );
+        }
+    }
+
 
     /// 按小节读的要拿到音名而不是键号：39 心算成「A3 那一档」这种事，错了只有耳朵能发现，
     /// 而写进去和读回来用的是同一张表，逐行对比也对得上。空小节同样占一行——
@@ -5441,6 +6152,9 @@ mod tests {
             layer_to: None,
             ticks_per_bar: None,
             bars: Some([0, 1]),
+            limit: None,
+            max_bytes: None,
+            view: None,
         });
         assert!(out.ok, "{:?}", out.error);
         let view = match out.data.as_ref().expect("读音符必带 data") {
@@ -5481,6 +6195,9 @@ mod tests {
             layer_to: None,
             ticks_per_bar: None,
             bars: None,
+            limit: None,
+            max_bytes: None,
+            view: None,
         });
         assert!(
             matches!(out.data.as_ref(), Some(Data::Notes { bar_overview, .. }) if bar_overview.is_empty())
@@ -5509,6 +6226,9 @@ mod tests {
             layer_to: None,
             ticks_per_bar: Some(12),
             bars: None,
+            limit: None,
+            max_bytes: None,
+            view: None,
         });
         assert!(out.ok, "{:?}", out.error);
         let view = match out.data.as_ref().expect("读音符必带 data") {
@@ -5537,6 +6257,9 @@ mod tests {
                 layer_to: None,
                 ticks_per_bar: None,
                 bars,
+                limit: None,
+                max_bytes: None,
+                view: None,
             })
         };
 
