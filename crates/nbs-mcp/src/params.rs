@@ -386,11 +386,27 @@ pub struct BatchFieldArgs {
     pub tab: Option<TabRef>,
     #[schemars(description = "要批量改哪个字段")]
     pub field: BatchField,
-    #[schemars(description = "\"set\" = 直接赋值；\"add\" = 在现值上加，越界由服务端夹取并回报")]
+    #[schemars(
+        description = "\"set\" = 直接赋值；\"add\" = 在现值上加，越界由服务端夹取并回报；\
+\"run\" = 按段内第几格取 values 那一档（一次铺完整条渐强／渐弱线），段=同层同乐器同音高且 tick 连续，\
+和 get_notes 的 view=runs 同一套切法"
+    )]
     pub mode: String,
-    #[schemars(description = "写入或叠加的数，边界由 field 决定")]
-    pub value: i32,
-    #[schemars(description = "作用范围：all / selection / rect。rect 只动范围内已有音符的格子")]
+    #[schemars(
+        description = "set / add 要填的数，边界由 field 决定；mode=run 时请省掉这一格（档位表在 values 里）"
+    )]
+    #[serde(default)]
+    pub value: Option<i32>,
+    #[schemars(
+        description = "mode=run 的档位表：段里第 i 格取 values[i]。比表短的段沿用最后一档（回执会说几句）。\
+隔 tick 的音各成一段、只会吃到第一档，那种线请先用 set_notes 补密或改 scope"
+    )]
+    #[serde(default)]
+    pub values: Option<Vec<i32>>,
+    #[schemars(
+        description = "作用范围：all / selection / rect。rect 只动范围内已有音符的格子；\
+mode=run 只认 all / rect（浮动选区没有网格位置，切不出段）"
+    )]
     pub scope: Scope,
     #[schemars(description = "写进撤销历史的那句话，省略则用默认描述")]
     #[serde(default)]
@@ -408,6 +424,7 @@ impl From<BatchFieldArgs> for Op {
             field: a.field,
             mode: a.mode,
             value: a.value,
+            values: a.values,
             scope: a.scope,
             label: a.label,
             expect_rev: a.expect_rev,

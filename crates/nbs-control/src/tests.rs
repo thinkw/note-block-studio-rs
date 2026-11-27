@@ -19,7 +19,7 @@ use crate::midi::{
     MidiPlan,
 };
 use crate::op::{
-    CellNote, ExportFormat, NoteFilter, NoteView, Op, Playback, Scope, SelectTarget,
+    BatchField, CellNote, ExportFormat, NoteFilter, NoteView, Op, Playback, Scope, SelectTarget,
 };
 use crate::outcome::{
     BarOverview, ChangeReport, Data, ErrorCode, JobInfo, JobStatus, LayerInfo, NoteCell, NoteRun,
@@ -1422,6 +1422,60 @@ fn remove_cells_takes_named_cells_or_a_range() {
         "空 cells 不该占字节，否则旧服务端以为要点名格子：{text}"
     );
     assert_eq!(serde_json::from_str::<Op>(&text).unwrap(), ranged);
+}
+
+/// `batch_field` 现在有两种数形：老帧只带 `value`，新帧可以只带 `values` 那张档位表。
+/// 两头都得解得开——`value` 从 `i32` 变成 `Option<i32>` 时漏掉 default，
+/// 现网那些「只写一个数」的调用会当场报缺字段；漏掉 skip 则每帧都多背两格空字段。
+#[test]
+fn batch_field_takes_one_number_or_a_step_table() {
+    let legacy =
+        r#"{"kind":"batch_field","field":"velocity","mode":"set","value":20,"scope":{"scope":"all"}}"#;
+    let Op::BatchField {
+        mode,
+        value,
+        values,
+        ..
+    } = serde_json::from_str::<Op>(legacy).expect("老帧解不开就是断了兼容")
+    else {
+        panic!("kind 认得不对");
+    };
+    assert_eq!(mode, "set");
+    assert_eq!(value, Some(20));
+    assert_eq!(values, None);
+
+    let stepped = r#"{"kind":"batch_field","field":"velocity","mode":"run","values":[20,40,60],"scope":{"scope":"rect","tick_from":0,"layer_from":0,"tick_to":31,"layer_to":1}}"#;
+    let Op::BatchField {
+        mode,
+        value,
+        values,
+        scope,
+        ..
+    } = serde_json::from_str::<Op>(stepped).expect("档位表那一支解不开")
+    else {
+        panic!("kind 认得不对");
+    };
+    assert_eq!(mode, "run");
+    assert_eq!(value, None, "没写 value 就是没给，不该当成 0");
+    assert_eq!(values, Some(vec![20, 40, 60]));
+    assert!(
+        matches!(scope, Scope::Rect { tick_to: 31, .. }),
+        "范围还是那套 rect：{scope:?}"
+    );
+    assert!(
+        !serde_json::to_string(&Op::BatchField {
+            field: BatchField::Velocity,
+            mode: "run".into(),
+            value: None,
+            values: Some(vec![20]),
+            scope: Scope::All,
+            label: None,
+            expect_rev: None,
+        })
+        .unwrap()
+        .contains(r#""value""#),
+        "没给的那一份不该占字节"
+    );
 }
 
 /// 条件本身是协议层的东西，语义在这里钉住：`outside_mc_range` 是唯一那条两方向的

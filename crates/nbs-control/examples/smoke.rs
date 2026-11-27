@@ -185,7 +185,8 @@ fn run(config: &Path, work: &Path) -> i32 {
         client.request(Op::BatchField {
             field: BatchField::Velocity,
             mode: "add".into(),
-            value: 10,
+            value: Some(10),
+            values: None,
             scope: Scope::Rect {
                 tick_from: 0,
                 layer_from: 0,

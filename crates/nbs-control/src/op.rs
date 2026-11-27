@@ -426,9 +426,16 @@ pub enum Op {
     },
     BatchField {
         field: BatchField,
-        /// "set" = 直接赋值，"add" = 在现值上加（越界由服务端夹取并回报）。
+        /// "set" = 直接赋值，"add" = 在现值上加（越界由服务端夹取并回报），
+        /// "run" = 按段内第几格取 `values` 那一档：一次调用铺完整条渐强／渐弱线。
+        /// 段的定义和 `get_notes` 的 `view=runs` 同源——同层、同乐器、同音高、tick 连续。
         mode: String,
-        value: i32,
+        /// `set` / `add` 用它；`run` 时这一格必须省下来（两份数同时给等于没说清听哪份）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<i32>,
+        /// `run` 用它：第 i 格取 `values[i]`，段比表长就沿用最后一档（回执会说几句）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        values: Option<Vec<i32>>,
         scope: Scope,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,

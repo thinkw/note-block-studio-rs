@@ -655,6 +655,10 @@ impl Bridge {
 
     /// 批量改某个字段（音色 / 音高 / 音量 / 声道 / 音分）。
     /// `mode="add"` 在现值上加，越界由服务端夹取并在回执里说明夹了多少，不会静默丢弃。
+    /// `mode="run"` 换一张档位表 `values`：按「段内第几格」取值，一次调用铺完整条渐强／渐弱线。
+    /// 段的切法和 `get_notes` 的 `view=runs` 同源（同层、同乐器、同音高、tick 连续），所以先问一遍
+    /// runs 再照那个形状写，两头对得上；比表长的段沿用最后一档，回执会说几句。
+    /// `run` 只认 `scope=all / rect`，且 `value` 与 `values` 二选一——两份数同时给等于没说清听哪份。
     #[tool]
     async fn batch_field(&self, Parameters(a): Parameters<BatchFieldArgs>) -> Result<Json<Reply>, CallToolResult> {
         let tab = a.tab;

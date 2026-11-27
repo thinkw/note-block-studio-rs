@@ -1045,6 +1045,7 @@ fn write(
             field,
             mode,
             value,
+            values,
             scope,
             label,
             expect_rev,
@@ -1053,13 +1054,36 @@ fn write(
             let add = match mode.as_str() {
                 "set" => false,
                 "add" => true,
+                // 按段铺档位是另一套走法：它要的是一张表而不是一个数，展开逻辑单独一条函数。
+                "run" => {
+                    return batch_field_by_run(
+                        state,
+                        *field,
+                        value.to_owned(),
+                        values.as_deref(),
+                        scope,
+                        label.as_deref(),
+                    )
+                }
                 other => {
                     return Err(bad(
-                        format!("mode 只认 set / add，收到 {other:?}"),
-                        format!("mode must be set or add, got {other:?}"),
+                        format!("mode 只认 set / add / run，收到 {other:?}"),
+                        format!("mode must be set, add or run, got {other:?}"),
                     ))
                 }
             };
+            if values.is_some() {
+                return Err(bad(
+                    "values 是 mode=run 那张档位表：set / add 请只给 value，两份同时给不知道听哪份",
+                    "values belongs to mode=run; set/add take a single value - both given is ambiguous",
+                ));
+            }
+            let value = value.ok_or_else(|| {
+                bad(
+                    format!("mode={mode} 要给 value（按段铺那条线请用 mode=run + values）"),
+                    format!("mode={mode} needs value (for a per-position line use mode=run + values)"),
+                )
+            })?;
             let label = label
                 .clone()
                 .unwrap_or_else(|| say("批量修改", "Batch change"));
@@ -1082,7 +1106,7 @@ fn write(
                     tx.track_selection();
                     tx.selection().change_all(|note| {
                         touched += 1;
-                        if apply_field(note, *field, add, *value, limits) {
+                        if apply_field(note, *field, add, value, limits) {
                             clamped += 1;
                         }
                     });
@@ -1100,7 +1124,7 @@ fn write(
                     }
                     for (tick, layer, mut note) in targets {
                         touched += 1;
-                        if apply_field(&mut note, *field, add, *value, limits) {
+                        if apply_field(&mut note, *field, add, value, limits) {
                             clamped += 1;
                         }
                         tx.song().set(tick, layer, note);
@@ -5249,6 +5273,147 @@ fn remove_in_scope(
     Ok((None, line))
 }
 
+/// `mode=run`：一张档位表按「段内第几格」铺开，一次调用写完一条渐强／渐弱线。
+///
+/// 段的口径和 `get_notes` 的 `view=runs` 同源（同层、同乐器、同音高、tick 连续），所以「先问
+/// 一遍 runs、再照那个形状写」两头对得上。超出表长的那一段复用最后一档，因为线的尾巴通常
+/// 就该停在那儿；回执会把「有多少格是靠复用填的」说出来，免得人以为表被截断了。
+fn batch_field_by_run(
+    state: &mut EditorState,
+    field: BatchField,
+    value: Option<i32>,
+    values: Option<&[i32]>,
+    scope: &Scope,
+    label: Option<&str>,
+) -> Result<(Option<Data>, String), ErrorInfo> {
+    if value.is_some() {
+        return Err(bad(
+            "mode=run 只吃 values 那张表：value 也给了就不知道听哪份。改一个数请用 mode=set / add",
+            "mode=run reads values only: value is also given, so which one wins is unclear - for a single number use mode=set or add",
+        ));
+    }
+    let steps = match values {
+        None => {
+            return Err(bad(
+                "mode=run 要的是 values 那张档位表：段里第 1、2、3… 格各写多少。改一个数请用 mode=set / add + value",
+                "mode=run needs values: the level for position 1, 2, 3... inside each run. For one number use mode=set or add with value",
+            ))
+        }
+        Some([]) => {
+            return Err(bad(
+                "values 是空的：按段铺至少要一档",
+                "values is empty: run mode needs at least one level",
+            ))
+        }
+        Some(steps) => steps,
+    };
+    if matches!(scope, Scope::Selection) {
+        return Err(bad(
+            "mode=run 的 scope 只认 all / rect：浮动选区里的音符已经离开网格，没有「段内第几格」可数",
+            "mode=run accepts scope=all or rect: the floating selection already left the grid, so there is no run position to count",
+        ));
+    }
+    // 范围校验只有 notes_in_range 那一处；拿它顺手把边界框喂给分段，两头不会算出两个范围。
+    let raw = notes_in_range(state, scope)?;
+    if raw.is_empty() {
+        return Ok((
+            None,
+            say(
+                format!("{}：范围里没有音符，未改动", scope_label(scope)),
+                format!("{}: no notes in range, nothing changed", scope_label(scope)),
+            ),
+        ));
+    }
+    let (tf, tt) = raw
+        .iter()
+        .fold((u32::MAX, 0u32), |(lo, hi), (tick, ..)| (lo.min(*tick), hi.max(*tick)));
+    let (lf, lt) = raw
+        .iter()
+        .fold((u32::MAX, 0u32), |(lo, hi), (_, layer, _)| {
+            (lo.min(*layer), hi.max(*layer))
+        });
+    // 额度给满：这里要的是每一格落在第几档，不是「前 N 段」。
+    let (runs, _, _) = runs_in_rect(&state.doc.song, tf, tt, lf, lt, usize::MAX);
+    let locked = state.doc.song.locked_layers();
+    let mut targets: Vec<(u32, u32, Note, usize)> = Vec::new();
+    let mut skipped = 0usize;
+    for run in &runs {
+        if locked.get(run.layer as usize).copied().unwrap_or(false) {
+            skipped += run.cells;
+            continue;
+        }
+        for position in 0..run.cells {
+            let tick = run.tick_from + position as u32;
+            if let Some(note) = state.doc.song.get(tick, run.layer) {
+                targets.push((tick, run.layer, note.clone(), position));
+            }
+        }
+    }
+    if targets.is_empty() {
+        return Ok((
+            None,
+            say(
+                format!(
+                    "{}：{skipped} 格全在锁定层上，一格没动",
+                    scope_label(scope)
+                ),
+                format!(
+                    "{}: all {skipped} cells sit on locked layers, none touched",
+                    scope_label(scope)
+                ),
+            ),
+        ));
+    }
+    if targets.len() > MAX_CELLS_PER_CALL {
+        return Err(too_many(targets.len()));
+    }
+    let limits = field_limits(state);
+    let (first, last) = targets
+        .iter()
+        .fold((u32::MAX, 0u32), |(lo, hi), (tick, ..)| (lo.min(*tick), hi.max(*tick)));
+    let runs_n = runs.len();
+    let label = label
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| say("批量修改", "Batch change"));
+    let mut tx = state.doc.begin(label);
+    let mut touched = 0usize;
+    let mut clamped = 0usize;
+    let mut reused = 0usize;
+    for (tick, layer, mut note, position) in targets {
+        if position >= steps.len() {
+            reused += 1;
+        }
+        let step = steps[position.min(steps.len() - 1)];
+        if apply_field(&mut note, field, false, step, limits) {
+            clamped += 1;
+        }
+        touched += 1;
+        tx.watch(tick, layer);
+        tx.song().set(tick, layer, note);
+    }
+    tx.commit();
+    let mut line = change_line(field_name(field), touched, clamped, false, skipped);
+    if reused > 0 {
+        line.push_str(&say(
+            format!(
+                "；超出表长 {reused} 格，沿用最后一档 {}",
+                steps[steps.len() - 1]
+            ),
+            format!(
+                "; {reused} past the table kept the last level {}",
+                steps[steps.len() - 1]
+            ),
+        ));
+    }
+    // 范围与段数得复述：档位是「段内第几格」，人要先认出铺的是哪一段，才校验得了结果。
+    let scope_line = scope_label(scope);
+    line.push_str(&say(
+        format!("；范围 {scope_line}，{runs_n} 段铺开落在 tick {first}..={last}"),
+        format!("; {scope_line}: {runs_n} runs spread over tick {first}..={last}"),
+    ));
+    Ok((None, line))
+}
+
 /// 条件里的数先验一遍：拼错的键号、不存在的音色、上下界反了都得当场说，
 /// 不能退化成「命中 0 格」——那会把一个笔误读成「这段本来就没东西」。
 fn check_filter(state: &EditorState, filter: &NoteFilter) -> Result<(), ErrorInfo> {
@@ -6557,7 +6722,8 @@ mod tests {
         let out = h.run(&Op::BatchField {
             field: BatchField::Velocity,
             mode: "set".into(),
-            value: 50,
+            value: Some(50),
+            values: None,
             scope: Scope::All,
             label: None,
             expect_rev: None,
@@ -8332,5 +8498,271 @@ mod tests {
             assert!(h.note(0, 0).is_some(), "{why}：被拒也不该动到音符");
         }
         assert_eq!(h.state.doc.song.get(0, 0).unwrap().velocity, 100);
+    }
+
+    fn batch(
+        field: BatchField,
+        mode: &str,
+        value: Option<i32>,
+        values: Option<Vec<i32>>,
+        scope: Scope,
+    ) -> Op {
+        Op::BatchField {
+            field,
+            mode: mode.into(),
+            value,
+            values,
+            scope,
+            label: None,
+            expect_rev: None,
+        }
+    }
+
+    /// `mode=run` 的档位说的是「段内第几格」，每换一段重新从表头起——这是它和 `mode=set`
+    /// 唯一的区别，所以用例一次摆两条段：长的那条尾巴复用最后一档，短的那条只吃前两档。
+    #[test]
+    fn batch_field_run_lays_the_table_on_each_run() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        h.ensure_layers(2);
+        for tick in 0..6u32 {
+            put(&mut h, tick, 0, 1, 40, 100);
+        }
+        for tick in 8..10u32 {
+            put(&mut h, tick, 1, 3, 52, 100);
+        }
+        put(&mut h, 40, 0, 1, 40, 100);
+
+        let out = h.run(&batch(
+            BatchField::Velocity,
+            "run",
+            None,
+            Some(vec![20, 40, 60, 80, 90]),
+            rect(31, 1),
+        ));
+        assert!(out.ok, "{:?}", out.error);
+        for (tick, want) in [20u8, 40, 60, 80, 90, 90].iter().enumerate() {
+            assert_eq!(
+                h.note(tick as u32, 0).map(|n| n.velocity),
+                Some(*want),
+                "第一条段的第 {} 格该取第 {} 档",
+                tick + 1,
+                tick + 1
+            );
+        }
+        assert_eq!(
+            h.note(8, 1).map(|n| n.velocity),
+            Some(20),
+            "第二条段该从表头重新起"
+        );
+        assert_eq!(h.note(9, 1).map(|n| n.velocity), Some(40));
+        assert_eq!(
+            h.note(40, 0).map(|n| n.velocity),
+            Some(100),
+            "范围外的不该动"
+        );
+        assert_eq!(out.report.cells_changed, 8, "8 格真改了值");
+        assert!(
+            out.report.message.contains("8 notes") && out.report.message.contains("2 runs"),
+            "改动格数和段数都要说：{}",
+            out.report.message
+        );
+        assert!(
+            out.report.message.contains("1 past the table kept the last level 90"),
+            "靠复用填上的那一格要单独说：{}",
+            out.report.message
+        );
+        assert!(
+            out.report.message.contains("ticks 0..=31 x layers 0..=1"),
+            "范围要复述在回执里：{}",
+            out.report.message
+        );
+
+        // 隔 tick 的音各成一段，所以那种「稀疏的线」只会吃到第一档。这是按段铺的口径本身，
+        // 不是漏了格子：要一条连续的线得先填密，或者逐格点名改用 set_notes。
+        h.empty_song();
+        for tick in (0..6u32).step_by(2) {
+            put(&mut h, tick, 0, 1, 40, 100);
+        }
+        let out = h.run(&batch(
+            BatchField::Velocity,
+            "run",
+            None,
+            Some(vec![20, 40, 60]),
+            rect(9, 0),
+        ));
+        assert!(out.ok, "{:?}", out.error);
+        for tick in [0u32, 2, 4] {
+            assert_eq!(
+                h.note(tick, 0).map(|n| n.velocity),
+                Some(20),
+                "tick {tick} 各成一段，只吃到第一档"
+            );
+        }
+        assert!(
+            out.report.message.contains("3 runs"),
+            "三段得在回执里说出来，不然人以为铺的是一条：{}",
+            out.report.message
+        );
+    }
+
+    /// 说不清楚的形状一律当场拒，而且要在动网格之前拒：铺到一半的回执最难查。
+    /// 每一条都点名「为什么不行」——只比对错误码的话，漏了表和表是空的会共用同一个码。
+    #[test]
+    fn batch_field_run_refuses_ambiguous_shapes() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        put(&mut h, 0, 0, 1, 40, 100);
+        let rev = h.state.doc.song.rev;
+
+        let cases: Vec<(Op, &str, &str)> = vec![
+            (
+                batch(
+                    BatchField::Velocity,
+                    "run",
+                    Some(50),
+                    Some(vec![20, 40]),
+                    Scope::All,
+                ),
+                "value 和 values 同时给",
+                "which one wins",
+            ),
+            (
+                batch(BatchField::Velocity, "run", None, None, Scope::All),
+                "run 没给档位表",
+                "needs values",
+            ),
+            (
+                batch(
+                    BatchField::Velocity,
+                    "run",
+                    None,
+                    Some(vec![]),
+                    Scope::All,
+                ),
+                "档位表是空的",
+                "at least one level",
+            ),
+            (
+                batch(
+                    BatchField::Velocity,
+                    "run",
+                    None,
+                    Some(vec![20]),
+                    Scope::Selection,
+                ),
+                "run 配 selection",
+                "scope=all or rect",
+            ),
+            (
+                batch(
+                    BatchField::Velocity,
+                    "set",
+                    Some(50),
+                    Some(vec![20]),
+                    Scope::All,
+                ),
+                "set 配档位表",
+                "values belongs to mode=run",
+            ),
+            (
+                batch(BatchField::Velocity, "set", None, None, Scope::All),
+                "set 没给数",
+                "needs value",
+            ),
+            (
+                batch(BatchField::Velocity, "mul", Some(50), None, Scope::All),
+                "不认识的 mode",
+                "must be set, add or run",
+            ),
+        ];
+        for (op, why, needle) in cases {
+            let out = h.run(&op);
+            assert_eq!(code(&out), ErrorCode::BadArgument, "{why}：{out:?}");
+            let reason = out.error.expect("被拒要有原因").message;
+            assert!(reason.contains(needle), "{why}：回执要点名原因，实际 {reason}");
+        }
+        assert_eq!(
+            h.state.doc.song.get(0, 0).unwrap().velocity,
+            100,
+            "被拒的那几趟一格都不该动"
+        );
+        assert_eq!(h.state.doc.song.rev, rev, "被拒的那几趟不该推进 rev");
+    }
+
+    /// 范围里一颗音符都没有时**不开事务**：`rev` 和撤销表都不该因为一次空铺动一下。
+    #[test]
+    fn batch_field_run_over_an_empty_range_leaves_the_song_untouched() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        put(&mut h, 0, 0, 1, 40, 100);
+        let rev = h.state.doc.song.rev;
+        let history = h.state.doc.history.len();
+
+        let out = h.run(&batch(
+            BatchField::Velocity,
+            "run",
+            None,
+            Some(vec![20, 40]),
+            Scope::Rect {
+                tick_from: 40,
+                layer_from: 0,
+                tick_to: 60,
+                layer_to: 0,
+            },
+        ));
+        assert!(out.ok, "{:?}", out.error);
+        assert_eq!(out.report.cells_changed, 0);
+        assert_eq!(h.state.doc.song.rev, rev, "空铺不该推进 rev");
+        assert_eq!(h.state.doc.history.len(), history, "空铺不该进撤销表");
+        assert!(
+            out.report.message.contains("no notes in range"),
+            "要说清是范围里没东西：{}",
+            out.report.message
+        );
+    }
+
+    /// 锁定层按原版语义**跳过**：动了别层的格子、这一层的数字一个不落地报出来。
+    #[test]
+    fn batch_field_run_skips_locked_layers_and_says_so() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        h.ensure_layers(2);
+        for tick in 0..4u32 {
+            put(&mut h, tick, 0, 1, 40, 100);
+            put(&mut h, tick, 1, 1, 40, 100);
+        }
+        lock_layer(&mut h, 1);
+
+        let out = h.run(&batch(
+            BatchField::Velocity,
+            "run",
+            None,
+            Some(vec![20, 40, 60, 80]),
+            rect(3, 1),
+        ));
+        assert!(out.ok, "{:?}", out.error);
+        for (tick, want) in [20u8, 40, 60, 80].iter().enumerate() {
+            assert_eq!(
+                h.note(tick as u32, 0).map(|n| n.velocity),
+                Some(*want),
+                "没锁的那层该按档铺"
+            );
+            assert_eq!(
+                h.note(tick as u32, 1).map(|n| n.velocity),
+                Some(100),
+                "锁定层那颗不该动"
+            );
+        }
+        assert_eq!(out.report.cells_changed, 4, "变更量只数真改了的");
+        assert!(
+            out.report.message.contains("skipped 4 notes on locked layers"),
+            "锁定层跳过几格要单独说：{}",
+            out.report.message
+        );
     }
 }
