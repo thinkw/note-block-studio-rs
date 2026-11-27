@@ -112,6 +112,11 @@ MCP 那一侧的 `isError`：**两层里任何一层答「不」，`isError` 都
 
 每条写操作的回执都带 `report`：`rev`、`cells_changed`、`layers_changed`、`meta_changed`、`dirty`、`history_len`。
 `cells_changed` 可能小于你给的条数——写下去和原来一样的格子不算改动。
+图层这一面按「谁改的谁回声」给数据：`layer_update` 只回 `data.layer`（`kind:"layer"`，被改的那一层），
+是哪一层写在 `report.message` 里；整张表只在 `get_layers`，层多时给它 `layer_from / layer_to`
+（层号闭区间，越界或反向回 `out_of_range`，回的是哪一段写在 message 里）。省略两头才是全表——
+整张表的字节随层数走，八十层的工程一次读回相当于一大批没人逐行看的数字。
+
 `open_file` / `import_midi` 是整首替换，撤销历史一起清空，算不出差量，所以这两条的 `cells_changed` / `layers_changed` 是**新工程的规模**（几个音符、几层）；`song_session` 同时加一，用它判断「工程被换过」比看数字更直接。
 
 ## 7. 闸门：不带就等于不认错

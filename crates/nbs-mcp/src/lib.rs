@@ -31,10 +31,10 @@ use serde::Serialize;
 pub use connect::{connect, parse_args, ArgsSource, CallRequest, Command, Endpoint, USAGE};
 use nbs_control::{ControlClient, Op, Outcome, Playback};
 pub use params::{
-    BatchFieldArgs, CellRef, ClearSong, Export, GetNotes, ImportMidi, InspectMidi, JobId, LayerAdd,
-    LayerIndex, LayerMove, LayerUpdate, OpenPath, RemoveCells, RevOnly, RunAction, SavePath, Seek,
-    Select, SetLoop, SetMetaArgs, SetNotes, Steps, TranscribeAudio, TranscribePrepareEnv,
-    TranscribePrepareModel, Transpose,
+    BatchFieldArgs, CellRef, ClearSong, Export, GetLayers, GetNotes, ImportMidi, InspectMidi,
+    JobId, LayerAdd, LayerIndex, LayerMove, LayerUpdate, OpenPath, RemoveCells, RevOnly, RunAction,
+    SavePath, Seek, Select, SetLoop, SetMetaArgs, SetNotes, Steps, TranscribeAudio,
+    TranscribePrepareEnv, TranscribePrepareModel, Transpose,
 };
 
 /// 一条工具回执。两个失败层各自点名自己的范围。
@@ -482,12 +482,15 @@ impl Bridge {
     }
 
     /// 图层清单：层号、名字、音量、左右声道、锁定 / solo 状态。
+    /// 层多时给 `layer_from / layer_to`（闭区间）：整张表按层数算字节，八十来层就是十来 KB。
+    /// 回的是哪一段会写在 message 里，省略两头才是全表。
     #[tool]
     async fn get_layers(
         &self,
-        Parameters(a): Parameters<crate::params::TabOnly>,
+        Parameters(a): Parameters<crate::params::GetLayers>,
     ) -> Result<Json<Reply>, CallToolResult> {
-        self.call_tab(Op::GetLayers, a.tab).await
+        let tab = a.tab;
+        self.call_tab(a.into(), tab).await
     }
 
     /// 当前选区：是否浮动选区、包围盒、音符数。写之前想知道「selection 是哪儿」就看它。
@@ -615,6 +618,7 @@ impl Bridge {
     }
 
     /// 改图层属性：名字、音量、声道、锁定状态（normal / locked / solo）。省略的字段不动。
+    /// 回执的 `data.layer` 只有被改的这一层（`kind:"layer"`），要整张表再叫 `get_layers`。
     #[tool]
     async fn layer_update(&self, Parameters(a): Parameters<LayerUpdate>) -> Result<Json<Reply>, CallToolResult> {
         let tab = a.tab;
@@ -1085,7 +1089,10 @@ mod tests {
         let request = nbs_control::bus::Request {
             id: 5,
             tab: Some(tab),
-            op: Op::GetLayers,
+            op: Op::GetLayers {
+                layer_from: None,
+                layer_to: None,
+            },
         };
         let frame = serde_json::to_string(&request).unwrap();
         assert!(frame.contains(r#""tab":{"id":88}"#), "{frame}");

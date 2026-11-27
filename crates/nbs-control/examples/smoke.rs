@@ -106,7 +106,13 @@ fn run(config: &Path, work: &Path) -> i32 {
 
     show("Ping", client.request(Op::Ping));
     show("GetSnapshot", client.request(Op::GetSnapshot));
-    show("GetLayers", client.request(Op::GetLayers));
+    show(
+        "GetLayers",
+        client.request(Op::GetLayers {
+            layer_from: None,
+            layer_to: None,
+        }),
+    );
     show("GetInstruments", client.request(Op::GetInstruments));
     show("GetDiagnostics", client.request(Op::GetDiagnostics));
     show("ListActions", client.request(Op::ListActions));

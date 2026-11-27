@@ -19,7 +19,9 @@ use crate::midi::{
     MidiPlan,
 };
 use crate::op::{CellNote, ExportFormat, Op, Playback, Scope, SelectTarget};
-use crate::outcome::{BarOverview, ChangeReport, Data, ErrorCode, JobInfo, JobStatus, NoteCell, Outcome};
+use crate::outcome::{
+    BarOverview, ChangeReport, Data, ErrorCode, JobInfo, JobStatus, LayerInfo, NoteCell, Outcome,
+};
 use crate::server::{ControlServer, ServerConfig};
 use crate::task::{CancelOutcome, JobKind, JobRegistry, SpawnReject};
 use crate::transcribe::TranscribeOptions;
@@ -373,6 +375,41 @@ fn the_bar_view_survives_the_wire() {
     let text = serde_json::to_string(&data).unwrap();
     assert!(text.contains("\"bar_overview\""), "{text}");
     assert_eq!(serde_json::from_str::<Data>(&text).unwrap(), data);
+}
+
+/// 图层这一面两端都在 wire 上：`get_layers` 的区间是外部调用方填的，`layer` 回声是
+/// 编辑器拼好、桥接原样转出去的。顺带钉住向后兼容——老客户端发的还是不带字段的
+/// `{"kind":"get_layers"}`，那一版没有区间，读回来必须等于「省略 = 全表」而不是报错。
+#[test]
+fn the_layer_surface_survives_the_wire() {
+    let ranged = Op::GetLayers {
+        layer_from: Some(34),
+        layer_to: Some(37),
+    };
+    let text = serde_json::to_string(&ranged).unwrap();
+    assert!(text.contains("\"layer_from\":34"), "{text}");
+    assert_eq!(serde_json::from_str::<Op>(&text).unwrap(), ranged);
+
+    let legacy: Op = serde_json::from_str(r#"{"kind":"get_layers"}"#).unwrap();
+    assert_eq!(legacy, Op::GetLayers { layer_from: None, layer_to: None }, "老形状要读成省略");
+    // 省略两头时不该多发两个 null 字段：那是「给了但没值」，和省略不是一回事。
+    let bare = serde_json::to_string(&legacy).unwrap();
+    assert!(!bare.contains("layer_from") && !bare.contains("layer_to"), "{bare}");
+
+    let echo = Data::Layer {
+        layer: LayerInfo {
+            index: 34,
+            name: "旋律".to_string(),
+            volume: 70,
+            stereo: 100,
+            lock: "normal".to_string(),
+            effectively_locked: false,
+            notes: 992,
+        },
+    };
+    let text = serde_json::to_string(&echo).unwrap();
+    assert!(text.contains("\"kind\":\"layer\""), "{text}");
+    assert_eq!(serde_json::from_str::<Data>(&text).unwrap(), echo);
 }
 
 // ---------------------------------------------------------------- 帧

@@ -267,7 +267,14 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bars: Option<[u32; 2]>,
     },
-    GetLayers,
+    /// 图层清单。`layer_from` / `layer_to` 是**层号闭区间**，省略 = 全部层。
+    /// 层多的时候给个窗口：整张表要按层数算字节，86 层就是十来 KB。
+    GetLayers {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layer_from: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layer_to: Option<u32>,
+    },
     GetSelection,
     GetInstruments,
     GetDiagnostics,
@@ -500,7 +507,7 @@ impl Op {
                 | Op::ListActions
                 | Op::GetSnapshot
                 | Op::GetNotes { .. }
-                | Op::GetLayers
+                | Op::GetLayers { .. }
                 | Op::GetSelection
                 | Op::GetInstruments
                 | Op::GetDiagnostics

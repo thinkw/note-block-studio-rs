@@ -366,7 +366,7 @@ fn is_tab_read(op: &Op) -> bool {
         op,
         Op::GetSnapshot
             | Op::GetNotes { .. }
-            | Op::GetLayers
+            | Op::GetLayers { .. }
             | Op::GetSelection
             | Op::GetInstruments
             | Op::GetHistory
@@ -585,13 +585,12 @@ fn execute_active(
             Ok((data, message)) => ok_data(state, data, message),
             Err(error) => Outcome::err(error, current_report(state, String::new())),
         },
-        Op::GetLayers => ok_data(
-            state,
-            Data::Layers {
-                layers: layer_infos(state),
-            },
-            String::new(),
-        ),
+        Op::GetLayers { layer_from, layer_to } => {
+            match read_layers(state, *layer_from, *layer_to) {
+                Ok((data, message)) => ok_data(state, data, message),
+                Err(error) => Outcome::err(error, current_report(state, String::new())),
+            }
+        }
         Op::GetSelection => ok_data(
             state,
             Data::Selection(Box::new(selection_info(&state.doc.selection))),
@@ -1339,13 +1338,14 @@ fn write(
                 }
             }
             tx.commit();
+            // 只回声被改的这一层：整张层表按层数算字节，改一层属性回十来 KB 没人读。
+            let echo = layer_row(state, *index);
+            let name = echo.as_ref().map(|l| l.name.clone()).unwrap_or_default();
             Ok((
-                Some(Data::Layers {
-                    layers: layer_infos(state),
-                }),
+                echo.map(|layer| Data::Layer { layer }),
                 say(
-                    format!("已更新图层 {index}"),
-                    format!("Updated layer {index}"),
+                    format!("已更新图层 {index}「{name}」"),
+                    format!("Updated layer {index} \"{name}\""),
                 ),
             ))
         }
@@ -3175,19 +3175,25 @@ fn note_cell(tick: u32, layer: u32, note: Note) -> NoteCell {
     }
 }
 
-fn layer_infos(state: &EditorState) -> Vec<LayerInfo> {
+/// 层表：`from..=to` 这段层号的属性与真实格数。调用方负责先把区间校过界。
+///
+/// 格数只能整趟扫音符，所以一次算完一段，别按层各扫一遍。
+fn layer_rows(state: &EditorState, from: usize, to: usize) -> Vec<LayerInfo> {
     let song = &state.doc.song;
     let any_solo = song.any_solo();
     let locked = song.locked_layers();
-    let mut counts = vec![0usize; song.layers.len()];
+    let mut counts = vec![0usize; to - from + 1];
     for (_, layer, _) in song.iter_notes() {
-        if let Some(slot) = counts.get_mut(layer as usize) {
-            *slot += 1;
+        let index = layer as usize;
+        if index >= from && index <= to {
+            counts[index - from] += 1;
         }
     }
     song.layers
         .iter()
         .enumerate()
+        .skip(from)
+        .take(counts.len())
         .map(|(index, layer)| LayerInfo {
             index: index as u32,
             name: layer.name.clone(),
@@ -3202,9 +3208,51 @@ fn layer_infos(state: &EditorState) -> Vec<LayerInfo> {
             // 「生效」锁定态和界面一致：有别的层独奏时，普通层其实发不出声。
             effectively_locked: layer.is_locked(any_solo)
                 || locked.get(index).copied().unwrap_or(false),
-            notes: counts.get(index).copied().unwrap_or(0),
+            notes: counts[index - from],
         })
         .collect()
+}
+
+fn layer_infos(state: &EditorState) -> Vec<LayerInfo> {
+    let len = state.doc.song.layers.len();
+    if len == 0 {
+        return Vec::new();
+    }
+    layer_rows(state, 0, len - 1)
+}
+
+/// 只回声一层：改完一层属性不该把整张层表推回去。
+fn layer_row(state: &EditorState, index: u32) -> Option<LayerInfo> {
+    layer_rows(state, index as usize, index as usize).pop()
+}
+
+/// 层号闭区间读数；省略两头 = 全部层。
+fn read_layers(
+    state: &EditorState,
+    layer_from: Option<u32>,
+    layer_to: Option<u32>,
+) -> Result<(Data, String), ErrorInfo> {
+    let len = state.doc.song.layers.len() as u32;
+    let last = len.saturating_sub(1);
+    let lf = layer_from.unwrap_or(0);
+    let lt = layer_to.unwrap_or(last);
+    if lf > lt || lt > last {
+        return Err(out_of_range(
+            format!("图层范围 {lf}..={lt} 超出 0..{last}"),
+            format!("Layer range {lf}..={lt} outside 0..{last}"),
+        ));
+    }
+    let layers = layer_rows(state, lf as usize, lt as usize);
+    // 给过边界就得说清回的是哪一段，否则部分清单和整张表在回执里长得一样。
+    let message = if layer_from.is_some() || layer_to.is_some() {
+        say(
+            format!("图层 {lf}..={lt}，共 {} 行（工程 {len} 层）", layers.len()),
+            format!("Layers {lf}..={lt}: {} of {len} rows", layers.len()),
+        )
+    } else {
+        String::new()
+    };
+    Ok((Data::Layers { layers }, message))
 }
 
 fn instrument_infos(state: &EditorState, active: bool) -> Vec<InstrumentInfo> {
@@ -5864,6 +5912,150 @@ mod tests {
         assert_eq!(h.state.doc.song.layers.len(), 3);
         assert_eq!(h.note(0, 0).map(|n| n.key), Some(36));
         assert!(h.note(0, 2).is_none());
+    }
+
+    /// 改一层属性却回声整张层表，是按层数算的白扔字节（八十来层 ≈ 十来 KB），而且调用方
+    /// 还得自己在表里找哪一行是它刚改的。现在只回声那一层，代价由 message 承担：
+    /// 层号与层名必须点名，否则回执说不出改的是谁。
+    #[test]
+    fn layer_update_echoes_only_the_layer_it_touched() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        // ClearSong 只清音符、图层原样留着，所以层号从当前层数往后接。
+        let base = h.state.doc.song.layers.len() as u32;
+        for name in ["前奏", "旋律", "打击"] {
+            let out = h.run(&Op::LayerAdd {
+                at: None,
+                name: Some(name.to_string()),
+                expect_rev: None,
+            });
+            assert!(out.ok, "{:?}", out.error);
+        }
+        let target = base + 1;
+        assert!(h
+            .run(&Op::SetNotes {
+                cells: vec![
+                    cell(0, target, 1, 40),
+                    cell(4, target, 1, 45),
+                    cell(1, target + 1, 1, 48),
+                ],
+                label: None,
+                expect_rev: None,
+            })
+            .ok);
+
+        let out = h.run(&Op::LayerUpdate {
+            index: target,
+            set: LayerSet {
+                volume: Some(70),
+                stereo: Some(40),
+                ..Default::default()
+            },
+            expect_rev: None,
+        });
+        assert!(out.ok, "{:?}", out.error);
+        let layer = match out.data.as_ref().expect("改完要带回声") {
+            Data::Layer { layer } => layer.clone(),
+            other => panic!("只该回声被改的那一层，拿到的是 {other:?}"),
+        };
+        assert_eq!(layer.index, target, "回声必须是刚改的那一层");
+        assert_eq!(layer.name, "旋律", "层名要跟着回声走，调用方不用再去查表");
+        assert_eq!(layer.volume, 70);
+        assert_eq!(layer.stereo, 40);
+        assert_eq!(layer.notes, 2, "格数是这一层自己的两格，不是全曲");
+        // 回声只剩一层，message 得说清改的是谁；措辞随界面语言变，所以只钉数据和层号。
+        assert!(
+            out.report.message.contains("旋律")
+                && out.report.message.contains(&target.to_string()),
+            "message 必须点名改的层：{}",
+            out.report.message
+        );
+    }
+
+    /// `get_layers` 以前吞掉层范围：给 34..37 照样回全 86 行，读的人只能整张表咽下去。
+    #[test]
+    fn get_layers_honours_the_layer_window() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        h.empty_song();
+        h.ensure_layers(6);
+        assert_eq!(h.state.doc.song.layers.len(), 6, "用例前提：补足到六层");
+        assert!(h
+            .run(&Op::SetNotes {
+                cells: vec![cell(0, 3, 1, 40), cell(4, 3, 1, 45), cell(1, 4, 1, 48)],
+                label: None,
+                expect_rev: None,
+            })
+            .ok);
+
+        let out = h.run(&Op::GetLayers {
+            layer_from: Some(3),
+            layer_to: Some(4),
+        });
+        assert!(out.ok, "{:?}", out.error);
+        let rows = match out.data.as_ref().expect("读层要有数据") {
+            Data::Layers { layers } => layers.clone(),
+            other => panic!("拿到的是 {other:?}"),
+        };
+        assert_eq!(
+            rows.iter().map(|l| l.index).collect::<Vec<_>>(),
+            vec![3, 4],
+            "只回点名的那两段"
+        );
+        assert_eq!(
+            rows.iter().map(|l| l.notes).collect::<Vec<_>>(),
+            vec![2, 1],
+            "窗口内的格数照样是真的"
+        );
+        // message 的措辞随界面语言变，所以只钉区间与总层数这两个两种语言都有的数字。
+        assert!(
+            out.report.message.contains("3..=4") && out.report.message.contains('6'),
+            "部分清单要说清回的是哪一段、总共几层：{}",
+            out.report.message
+        );
+
+        // 省略两头 = 全表，也不多说话：每行自带 index，本来就认得出自己。
+        let out = h.run(&Op::GetLayers {
+            layer_from: None,
+            layer_to: None,
+        });
+        assert!(out.ok, "{:?}", out.error);
+        match out.data.as_ref().expect("读层要有数据") {
+            Data::Layers { layers } => assert_eq!(layers.len(), 6, "省略 = 全部层"),
+            other => panic!("拿到的是 {other:?}"),
+        }
+        assert!(out.report.message.is_empty(), "全表不用额外声明：{}", out.report.message);
+
+        // 只给起点同样要说清边界落到了哪儿。
+        let out = h.run(&Op::GetLayers {
+            layer_from: Some(4),
+            layer_to: None,
+        });
+        assert!(out.ok, "{:?}", out.error);
+        match out.data.as_ref().expect("读层要有数据") {
+            Data::Layers { layers } => {
+                assert_eq!(layers.iter().map(|l| l.index).collect::<Vec<_>>(), vec![4, 5])
+            }
+            other => panic!("拿到的是 {other:?}"),
+        }
+        assert!(out.report.message.contains("4..=5"), "{}", out.report.message);
+
+        // 越界与反向区间一律拒，口径和 get_notes 一致：不能回一份悄悄缩小过的表。
+        assert_eq!(
+            code(&h.run(&Op::GetLayers {
+                layer_from: Some(3),
+                layer_to: Some(9),
+            })),
+            ErrorCode::OutOfRange
+        );
+        assert_eq!(
+            code(&h.run(&Op::GetLayers {
+                layer_from: Some(4),
+                layer_to: Some(3),
+            })),
+            ErrorCode::OutOfRange
+        );
     }
 
     #[test]

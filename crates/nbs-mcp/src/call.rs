@@ -16,8 +16,8 @@ use serde_json::Value;
 use nbs_control::{Data, Op, Outcome, Playback, TabRef};
 
 use crate::params::{
-    BatchFieldArgs, ClearSong, CloseTab, Export, GetNotes, ImportMidi, InspectMidi, JobId,
-    LayerAdd, LayerIndex, LayerMove, LayerUpdate, OpenPath, RemoveCells, RevOnly, RunAction,
+    BatchFieldArgs, ClearSong, CloseTab, Export, GetLayers, GetNotes, ImportMidi, InspectMidi,
+    JobId, LayerAdd, LayerIndex, LayerMove, LayerUpdate, OpenPath, RemoveCells, RevOnly, RunAction,
     SavePath, Seek, Select, SetLoop, SetMetaArgs, SetNotes, Steps, SwitchTab, TabOnly,
     TranscribeAudio, TranscribePrepareEnv, TranscribePrepareModel, Transpose,
 };
@@ -94,10 +94,6 @@ pub fn op_for(name: &str, args: &Value) -> Result<Op, DispatchError> {
             typed::<TabOnly>(name, args)?;
             Ok(Op::GetSnapshot)
         }
-        "get_layers" => {
-            typed::<TabOnly>(name, args)?;
-            Ok(Op::GetLayers)
-        }
         "get_selection" => {
             typed::<TabOnly>(name, args)?;
             Ok(Op::GetSelection)
@@ -143,6 +139,7 @@ pub fn op_for(name: &str, args: &Value) -> Result<Op, DispatchError> {
         // 其余每条的 `Params → Op` 只有一份实现，工具面走的也是那一条。
         "run_action" => Ok(typed::<RunAction>(name, args)?.into()),
         "get_notes" => Ok(typed::<GetNotes>(name, args)?.into()),
+        "get_layers" => Ok(typed::<GetLayers>(name, args)?.into()),
         "set_notes" => Ok(typed::<SetNotes>(name, args)?.into()),
         "remove_cells" => Ok(typed::<RemoveCells>(name, args)?.into()),
         "batch_field" => Ok(typed::<BatchFieldArgs>(name, args)?.into()),
@@ -490,6 +487,21 @@ mod tests {
         assert_eq!(
             op_for("seek", &json!({"tick":4.5})).unwrap(),
             Op::Playback(Playback::Seek { tick: 4.5 })
+        );
+        // 层窗口同理：命令行给的两个数字要落在同一条 Op 上，空参数 = 省略两头。
+        assert_eq!(
+            op_for("get_layers", &json!({"layer_from":34,"layer_to":37})).unwrap(),
+            Op::GetLayers {
+                layer_from: Some(34),
+                layer_to: Some(37),
+            }
+        );
+        assert_eq!(
+            op_for("get_layers", &json!({})).unwrap(),
+            Op::GetLayers {
+                layer_from: None,
+                layer_to: None,
+            }
         );
         assert_eq!(
             op_for("undo", &json!({"steps":3})).unwrap(),

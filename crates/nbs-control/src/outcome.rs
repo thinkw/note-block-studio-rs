@@ -323,6 +323,11 @@ pub enum Data {
     Layers {
         layers: Vec<LayerInfo>,
     },
+    /// 单层回声：改完了只报被改的那一层，别每次都把整张层表推回去。
+    /// `get_layers` 才给 [`Data::Layers`] 的清单。
+    Layer {
+        layer: LayerInfo,
+    },
     Selection(Box<SelectionInfo>),
     Instruments {
         instruments: Vec<InstrumentInfo>,

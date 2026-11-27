@@ -257,6 +257,28 @@ impl From<GetNotes> for Op {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct GetLayers {
+    #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
+    #[serde(default)]
+    pub tab: Option<TabRef>,
+    #[schemars(description = "起始层号，含；省略 = 0")]
+    #[serde(default)]
+    pub layer_from: Option<u32>,
+    #[schemars(description = "结束层号，含；省略 = 最后一层。层多时给个窗口，整张表按层数算字节")]
+    #[serde(default)]
+    pub layer_to: Option<u32>,
+}
+
+impl From<GetLayers> for Op {
+    fn from(a: GetLayers) -> Self {
+        Op::GetLayers {
+            layer_from: a.layer_from,
+            layer_to: a.layer_to,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct SetNotes {
     #[schemars(description = "稳定 id 或当前位置 index，二选一；省略 = 当前标签")]
     #[serde(default)]
