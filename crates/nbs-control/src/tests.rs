@@ -170,6 +170,7 @@ fn job_data_survives_the_real_wire() {
             protocol: crate::PROTOCOL_VERSION,
             rev: 7,
             song_session: 2,
+            pid: 4242,
         },
     ];
     for data in cases {
@@ -495,6 +496,30 @@ fn the_layer_surface_survives_the_wire() {
     let text = serde_json::to_string(&echo).unwrap();
     assert!(text.contains("\"kind\":\"layer\""), "{text}");
     assert_eq!(serde_json::from_str::<Data>(&text).unwrap(), echo);
+}
+
+/// 身份这一格要钉在字面上：桥接把 `Data` 原样转手，改名不会报错，只会让人拿不到。
+/// 同机开好几个编辑器时，`pid` 是唯一不会说谎的那个——`path` 另存就变，
+/// `song_session` 只跟着整首替换走，两个都认不出「刚才答话的是哪个进程」。
+#[test]
+fn the_pid_says_which_process_answered() {
+    let pong = Data::Pong {
+        app_version: "0.1.0".to_string(),
+        protocol: crate::PROTOCOL_VERSION,
+        rev: 7,
+        song_session: 2,
+        pid: 4242,
+    };
+    let text = serde_json::to_string(&pong).unwrap();
+    assert!(text.contains("\"pid\":4242"), "{text}");
+    assert_eq!(serde_json::from_str::<Data>(&text).unwrap(), pong);
+
+    // 旧编辑器不回这一格：要读成 0（= 对面没说），不能因为少一个字段把整份回执判死。
+    let legacy = r#"{"kind":"pong","app_version":"0.1.0","protocol":2,"rev":7,"song_session":2}"#;
+    match serde_json::from_str::<Data>(legacy).unwrap() {
+        Data::Pong { pid, .. } => assert_eq!(pid, 0, "缺 pid 的旧帧该读成「没说」"),
+        other => panic!("形状不对: {other:?}"),
+    }
 }
 
 // ---------------------------------------------------------------- 帧
@@ -899,6 +924,7 @@ fn fake_main_thread(inbox: Inbox, stop: Arc<AtomicBool>) -> std::thread::JoinHan
                         protocol: crate::PROTOCOL_VERSION,
                         rev: 42,
                         song_session: 9,
+                        pid: 4242,
                     },
                     report(42),
                 ),

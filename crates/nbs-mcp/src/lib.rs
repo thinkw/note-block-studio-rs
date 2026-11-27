@@ -154,6 +154,49 @@ fn lost_link(endpoint: &Endpoint, link: &Arc<Mutex<Link>>, reason: &str, resend:
     }
 }
 
+/// `server_info` 的「这到底是哪个编辑器」那一格。
+///
+/// 两个来源各说一半：发现文件说**桥接以为**编辑器是哪条端口、哪个进程，`ping` 回包说
+/// **谁真的答了**这一问。同机开好几个窗口、或发现文件是上一个实例留下的时候，
+/// 只有把两个并排放才看得出连错了人——之前有人拿 `song_session` 当身份，
+/// 而另存成别的文件之后它不变，于是把一次成功的调用读成「连错窗口了」。
+///
+/// 令牌（token）不在这一格里：它是本地访问控制的全部依据，不该出现在任何回执里。
+fn instance_view(ep: &Endpoint, editor_pid: Option<u32>) -> serde_json::Value {
+    // 直连是「我知道端口和令牌」那一档，没有发现文件可翻，不能说成「文件里没写」。
+    let found = if ep.direct.is_some() {
+        None
+    } else {
+        nbs_control::Discovery::read_from(&ep.config_dir).ok()
+    };
+    let direct = ep.direct.as_ref().map(|(port, _)| *port);
+    let (source, port, discovery_pid, started_unix, app) = match (&found, direct) {
+        (Some(d), _) => (
+            "discovery",
+            Some(u32::from(d.port)),
+            Some(d.pid),
+            Some(d.started_unix),
+            Some(d.app.clone()),
+        ),
+        (None, Some(port)) => ("direct", Some(u32::from(port)), None, None, None),
+        (None, None) => ("none", None, None, None, None),
+    };
+    // 两个都有值才谈得上对不对得上；缺一个回 null，那是「没法判」，不是「对不上」。
+    let same = match (editor_pid, discovery_pid) {
+        (Some(asked), Some(file)) => Some(asked == file),
+        _ => None,
+    };
+    serde_json::json!({
+        "source": source,
+        "port": port,
+        "editor_pid": editor_pid,
+        "discovery_pid": discovery_pid,
+        "same": same,
+        "started_unix": started_unix,
+        "app": app,
+    })
+}
+
 /// 投递一次请求。
 ///
 /// 传输层失败一律把这条连接丢掉（`nbs-control` 那边已经 `shutdown` 了 socket，
@@ -379,7 +422,7 @@ impl Bridge {
     /// 编辑器现在接不接得住：当场敲一次 `ping`。顺带把这条连接走通一遍——
     /// 空闲被编辑器关掉的话，这一次就会重连上，问出来的答案也是重连之后的。
     /// `Err` 里是「为什么接不住」，那句话直接给调用方看。
-    async fn server_probe(&self) -> Result<String, String> {
+    async fn server_probe(&self) -> Result<(String, Option<u32>), (String, Option<u32>)> {
         let endpoint = self.endpoint.clone();
         let link = Arc::clone(&self.link);
         let channel = self.channel();
@@ -388,19 +431,31 @@ impl Bridge {
         })
         .await
         {
-            Ok(Ok((outcome, _))) if outcome.ok => Ok(format!(
-                "通：{channel}，协议 v{} 对得上",
-                nbs_control::PROTOCOL_VERSION
+            Ok(Ok((outcome, _))) if outcome.ok => {
+                let pid = match &outcome.data {
+                    Some(nbs_control::Data::Pong { pid, .. }) => (*pid != 0).then_some(*pid),
+                    _ => None,
+                };
+                Ok((
+                    format!(
+                        "通：{channel}，协议 v{} 对得上",
+                        nbs_control::PROTOCOL_VERSION
+                    ),
+                    pid,
+                ))
+            }
+            Ok(Ok((outcome, _))) => Err((
+                format!(
+                    "{channel} 连上了，但把探活这一问拒了：{}",
+                    outcome
+                        .error
+                        .map(|e| e.message)
+                        .unwrap_or_else(|| "没有说明原因".to_string())
+                ),
+                None,
             )),
-            Ok(Ok((outcome, _))) => Err(format!(
-                "{channel} 连上了，但把探活这一问拒了：{}",
-                outcome
-                    .error
-                    .map(|e| e.message)
-                    .unwrap_or_else(|| "没有说明原因".to_string())
-            )),
-            Ok(Err(reason)) => Err(format!("编辑器没连上：{reason}")),
-            Err(_) => Err("桥接内部：探活的任务被取消了".to_string()),
+            Ok(Err(reason)) => Err((format!("编辑器没连上：{reason}"), None)),
+            Err(_) => Err(("桥接内部：探活的任务被取消了".to_string(), None)),
         }
     }
 
@@ -413,7 +468,7 @@ impl Bridge {
     /// 也该是 2（没连上）而不是 0（成功）。
     pub async fn bridge_info(&self) -> Reply {
         let channel = self.channel();
-        let face = |ok: bool, editor: &str, parked_write: Option<bool>| {
+        let face = |ok: bool, editor: &str, parked_write: Option<bool>, instance| {
             serde_json::json!({
                 "ok": ok,
                 "channel": channel,
@@ -421,18 +476,29 @@ impl Bridge {
                 "protocol": nbs_control::PROTOCOL_VERSION,
                 "parked_write": parked_write,
                 "editor": editor,
+                "instance": instance,
             })
         };
         let probe = self.server_probe().await;
         let parked_write = link_guard(&self.link).parked_write;
         match probe {
-            Ok(status) => Reply {
-                outcome: Some(face(true, &status, parked_write)),
+            Ok((status, editor_pid)) => Reply {
+                outcome: Some(face(
+                    true,
+                    &status,
+                    parked_write,
+                    instance_view(&self.endpoint, editor_pid),
+                )),
                 transport: None,
                 channel: Some(channel.clone()),
             },
-            Err(reason) => Reply {
-                outcome: Some(face(false, &reason, parked_write)),
+            Err((reason, editor_pid)) => Reply {
+                outcome: Some(face(
+                    false,
+                    &reason,
+                    parked_write,
+                    instance_view(&self.endpoint, editor_pid),
+                )),
                 transport: Some(reason),
                 channel: Some(channel),
             },
@@ -846,6 +912,11 @@ impl Bridge {
     /// 这条 MCP 通道连的是哪个编辑器、用什么参数连上的，以及**现在**编辑器接不接得住。
     /// 会当场敲一次 `ping`：「桥接活着」和「编辑器接得住」是两个状态，只报前者会出现
     /// 面板 ready、一调就错。接不住时这条的 `transport` 有值。
+    ///
+    /// `instance` 那格回答「刚才答话的是哪个进程」：`editor_pid` 是编辑器自报的，
+    /// `discovery_pid` / `port` / `started_unix` 是发现文件里的，`same` 是两者对不对得上
+    /// （直连或旧编辑器没回 pid 时是 null = 没法判）。**认文件用 `get_snapshot` 的 `path`，
+    /// 认进程用这里的 pid**；`song_session` 只在整首替换时推进，另存不改它，别拿来当身份。
     #[tool]
     async fn server_info(&self) -> Result<Json<Reply>, CallToolResult> {
         to_result(self.bridge_info().await)
@@ -1226,6 +1297,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    /// 假编辑器自报的进程号：`server_info` 的 `instance.editor_pid` 要能指着它对账。
+    const FAKE_EDITOR_PID: u32 = 4242;
+
     /// `AnswerOnce`：答完第一问就把连接关掉（空闲被服务端关掉之后的样子）。
     /// `QuitAfterHello`：握手成功但一句不答就关（下一问写出去再没人接）。
     #[derive(Clone, Copy)]
@@ -1290,8 +1364,20 @@ mod tests {
                             };
                         let Some(req) = asked else { return };
                         rq.fetch_add(1, Ordering::SeqCst);
+                        // 只有探活那一问回 Pong：`server_info` 的 `instance.editor_pid` 就来自这里，
+                        // 别的工具不需要形状，回 Empty 让它们专心验传输。
+                        let data = match req.op {
+                            nbs_control::Op::Ping => nbs_control::Data::Pong {
+                                app_version: "0.0.0-test".to_string(),
+                                protocol: nbs_control::PROTOCOL_VERSION,
+                                rev: 7,
+                                song_session: 2,
+                                pid: FAKE_EDITOR_PID,
+                            },
+                            _ => nbs_control::Data::Empty,
+                        };
                         let outcome = nbs_control::Outcome::ok(
-                            nbs_control::Data::Empty,
+                            data,
                             nbs_control::ChangeReport {
                                 rev: 7,
                                 ..Default::default()
@@ -1494,5 +1580,86 @@ mod tests {
             "探活失败的退出码要和「没连上」同一档，实际正文：{:?}",
             info.outcome
         );
+    }
+
+    /// 「连错窗口」这件事只有把两个来源并排放才看得见：发现文件说桥接以为是谁，
+    /// `ping` 回包说谁真的答了。`song_session` 顶不上这个位置——另存成别的文件它也不动。
+    #[tokio::test]
+    async fn server_info_names_the_process_that_answered() {
+        let fake = FakeEditor::start(&[Fate::AnswerOnce]);
+        let live = Bridge::detached(fake.endpoint.clone());
+        let info = live.bridge_info().await;
+        let face = info.outcome.as_ref().expect("有正文").clone();
+        let instance = &face["instance"];
+        assert_eq!(
+            instance["editor_pid"], FAKE_EDITOR_PID,
+            "编辑器自报的 pid 要原样进回执，实际：{instance}"
+        );
+        assert_eq!(
+            instance["source"], "direct",
+            "这份夹具走的是 --port/--token，没发现文件可翻：{instance}"
+        );
+        assert_eq!(
+            instance["same"], serde_json::Value::Null,
+            "只有一个来源时判不了对不对得上，得回 null 而不是 false：{instance}"
+        );
+        assert_eq!(
+            instance["port"],
+            u32::from(fake.endpoint.direct.expect("夹具是直连").0),
+            "直连也要把实际敲的端口报出来：{instance}"
+        );
+        assert!(
+            serde_json::to_string(&instance)
+                .unwrap()
+                .find("token")
+                .is_none(),
+            "这一格里不能出现令牌"
+        );
+    }
+
+    /// 发现文件是上一个实例留下的、或同机开了好几个编辑器：这一格要把「对不上」摆出来，
+    /// 否则调用方只能拿 `rev` 归零、`dirty` 为假这类正常现象去猜自己连错了人。
+    #[tokio::test]
+    async fn server_info_spots_a_stale_discovery_file() {
+        let fake = FakeEditor::start(&[Fate::AnswerOnce]);
+        let (port, _) = fake.endpoint.direct.expect("夹具给的是端口和令牌");
+        let dir = std::env::temp_dir().join(format!("nbs-mcp-instance-{port}"));
+        let write = |pid: u32| {
+            nbs_control::Discovery {
+                protocol: nbs_control::PROTOCOL_VERSION,
+                app: "nbs-fake 0.0.0-test".to_string(),
+                pid,
+                port,
+                token: "tok".to_string(),
+                started_unix: 1_700_000_000,
+            }
+            .write_to(&dir)
+            .expect("发现文件写不下去");
+        };
+
+        // 文件里写的就是答题那一个：same = true。
+        write(FAKE_EDITOR_PID);
+        let ep = Endpoint {
+            config_dir: dir.clone(),
+            direct: None,
+            client_name: "test".to_string(),
+        };
+        let info = Bridge::detached(ep.clone()).bridge_info().await;
+        let instance = info.outcome.as_ref().expect("有正文")["instance"].clone();
+        assert_eq!(instance["source"], "discovery", "实际：{instance}");
+        assert_eq!(instance["discovery_pid"], FAKE_EDITOR_PID, "实际：{instance}");
+        assert_eq!(instance["same"], true, "两个来源该说同一件事：{instance}");
+
+        // 文件被另一个实例改写过（或者端口被别的过程占了）：same = false，且两边的数都摆出来。
+        write(FAKE_EDITOR_PID + 1);
+        let info = Bridge::detached(ep).bridge_info().await;
+        let instance = info.outcome.as_ref().expect("有正文")["instance"].clone();
+        assert_eq!(
+            instance["same"], false,
+            "自报 {} 对不上文件 {}：{instance}",
+            instance["editor_pid"], instance["discovery_pid"]
+        );
+        assert_eq!(instance["editor_pid"], FAKE_EDITOR_PID, "实际：{instance}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

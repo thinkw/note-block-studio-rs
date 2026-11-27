@@ -567,6 +567,7 @@ fn execute_active(
                 protocol: ch.protocol,
                 rev: state.doc.song.rev,
                 song_session: state.store.active_session(),
+                pid: std::process::id(),
             },
             current_report(state, String::new()),
         ),
@@ -3677,6 +3678,7 @@ fn snapshot(
         diagnostics: Box::new(diagnostics(state)),
         modal_count: active.then(|| state.modals.items.len()),
         open_window: state.window.as_ref().map(|kind| format!("{kind:?}")),
+        pid: std::process::id(),
     }
 }
 
@@ -7020,6 +7022,45 @@ mod tests {
         let snap = snapshot(&h.state, &h.channel, true, h.state.store.active());
         assert_eq!(snap.rev, h.state.doc.song.rev);
         assert_eq!(snap.layers, h.state.doc.song.layers.len());
+    }
+
+    /// 回执要自己说清「答话的是哪个进程」：同机开好几个编辑器时，`path` 会因另存而变、
+    /// `song_session` 只跟着整首替换走，两个都认不出进程。这一格是桥接那侧对账用的凭据。
+    #[test]
+    fn every_answer_names_the_process_that_answered() {
+        let _prefs = crate::isolate_prefs();
+        let mut h = Harness::new();
+        let mine = std::process::id();
+        let Data::Pong { pid, .. } = h.run(&Op::Ping).data.expect("Ping 必带 Pong") else {
+            panic!("Ping 应回 Pong");
+        };
+        assert_eq!(pid, mine, "Pong 的 pid 就是答题这一方");
+        let snap = snapshot(&h.state, &h.channel, true, h.state.store.active());
+        assert_eq!(snap.pid, mine, "快照也要带");
+        // `open_window` 是「界面摊开了哪一扇面板」，不是窗口身份：夹具一起步就开着欢迎面板，
+        // 这一格报的是那件事，跟「这是哪首歌」无关。
+        assert_eq!(
+            snap.open_window.as_deref(),
+            Some("Greeting"),
+            "这一格说的是界面开着的面板，别拿它认工程"
+        );
+
+        // 旧版编辑器不回 pid：要读成 0（= 没说），不能让整份快照因为少一个字段散架。
+        // 走 `Data` 那一层：线格式的类型标签 `kind` 也在同一份 JSON 里，切错一个字节就验不到东西。
+        let mut text = serde_json::to_string(&Data::Snapshot(Box::new(snap)))
+            .expect("快照序列化得动");
+        let token = format!("\"pid\":{mine}");
+        let cut = text.find(&token).expect("快照里该有 pid 这一格");
+        // pid 是结构体最后一个字段，切掉它要把紧跟或紧前的那个逗号一起带走，别留下坏 JSON。
+        let head = text[..cut].trim_end_matches(',').to_string();
+        let tail = text[cut + token.len()..].trim_start_matches(',').to_string();
+        text = format!("{head}{tail}");
+        assert!(text.contains("\"kind\":\"snapshot\""), "{text}");
+        let back: Data = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"));
+        match back {
+            Data::Snapshot(legacy) => assert_eq!(legacy.pid, 0, "缺 pid 的旧帧读成「对面没说」"),
+            other => panic!("形状不对: {other:?}"),
+        }
     }
 
     /// 手写 `MidiData` 而不是拿导出器生成：`export_midi_bytes` 把所有音符都塞在通道 0 上，

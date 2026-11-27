@@ -308,8 +308,14 @@ pub struct Snapshot {
     pub diagnostics: Box<Diagnostics>,
     /// 未答完的模态框数量；收起标签返回 null。非 0 时写操作会被 `modal_open` 挡下。
     pub modal_count: Option<usize>,
-    /// 当前开着的窗口名（没有就 null）——它可能握着某次操作的草稿态。
+    /// 界面**当前开着的那一扇面板**的名字（`WindowKind` 的枚举名，如 `SongInfo`），没开就 null。
+    ///
+    /// 它不是「哪个窗口」的身份，别拿它认工程：那是编辑器里唯一的一扇程序窗口，
+    /// 这里报的是程序窗**里面**摊开的面板/模态窗。认身份看 `path` + `pid`。
     pub open_window: Option<String>,
+    /// 答话这一方的进程号：`path` 认文件，这一格认进程。旧版编辑器不回，默认 0 = 没说。
+    #[serde(default)]
+    pub pid: u32,
 }
 
 /// 成功回执的数据体。
@@ -322,6 +328,11 @@ pub enum Data {
         protocol: u32,
         rev: u64,
         song_session: u64,
+        /// 答话这一方的进程号。同一台机器开着好几个编辑器时，这是唯一不会说谎的身份——
+        /// `song_session` 只说「这份工程被换过几次」，`path` 另存就会变，两个都认不出「是哪个进程」。
+        /// 旧版编辑器不回这一格，所以默认 0 = 对面没说。
+        #[serde(default)]
+        pid: u32,
     },
     Snapshot(Box<Snapshot>),
     Tabs {
