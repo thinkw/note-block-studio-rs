@@ -1852,6 +1852,77 @@ mod gui_window_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 自家 20Hz 直轨布局走完整链路：菜单入口 → 窗口上屏 → 空歌闸门 →
+    /// `.schem` 保存框 → 真落盘。断言磁盘字节、报告和界面文本。
+    #[test]
+    fn half_tick_menu_entry_dialog_and_file_are_real() {
+        let _prefs = crate::isolate_prefs();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::for_test();
+        state.theme.apply(&ctx);
+        state.window = None;
+
+        dispatch(&mut state, commands::Command::OpenHalfTickExport, &ctx);
+        assert_eq!(state.window, Some(WindowKind::HalfTickExport));
+        let report = state.half_tick_report.clone().expect("开窗前先算好机体与自检");
+        assert!(report.notes > 0);
+        assert!(report.lanes >= 1);
+        assert_eq!(report.input_x, report.size[0] - 1);
+        assert!(report.longest_wire <= 15);
+        assert_eq!(report.notes_missing_trigger, 0);
+        assert_eq!(report.notes_missing_instrument, 0);
+        assert_eq!(report.notes_missing_support, 0);
+        assert_eq!(report.switch_buttons, 1);
+        assert_eq!(report.switch_pistons, 1);
+        assert_eq!(report.switch_redstone_blocks, 1);
+        assert_eq!(report.switch_repeaters, 1);
+
+        let _zh = crate::LangGuard::set(1);
+        state.prefs.language = 1;
+        let painted: Vec<String> = settle(&mut state, &ctx)
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        for want in ["20Hz 直轨布局", "包含锁定层", "机体与自检", "导出", "关闭"] {
+            assert!(painted.iter().any(|t| t == want), "窗口里应画得出「{want}」: {painted:?}");
+        }
+
+        let demo = state.doc.song.clone();
+        state.doc.replace_song(nbs_core::model::Song::new());
+        state.refresh_half_tick_preview();
+        dispatch(&mut state, commands::Command::ExportHalfTickChecked, &ctx);
+        assert_eq!(state.modals.items.len(), 1, "空歌该被闸门拦下");
+        assert!(state.file_dialog.is_none());
+        dispatch(&mut state, commands::Command::AnswerModal(true), &ctx);
+        state.doc.replace_song(demo);
+        state.refresh_half_tick_preview();
+
+        state.doc.song.filename = Some(PathBuf::from("Rust Rewrite Demo.nbs"));
+        dispatch(
+            &mut state,
+            commands::Command::OpenDialog(state::DialogAction::ExportHalfTick),
+            &ctx,
+        );
+        let dialog = state.file_dialog.as_ref().expect("对话框已打开");
+        assert_eq!(dialog.ext, "schem");
+        assert!(dialog.save);
+        assert_eq!(dialog.name, "Rust Rewrite Demo.schem");
+
+        let dir = scratch("half_tick");
+        let out = dir.join("straight.schem");
+        dispatch(&mut state, commands::Command::DialogConfirm(out.clone()), &ctx);
+        let bytes = std::fs::read(&out).expect("20Hz 直轨布局已落盘");
+        assert_eq!(&bytes[..2], &[0x1f, 0x8b]);
+        assert!(state.export_status.is_some());
+        assert_eq!(state.window, Some(WindowKind::HalfTickExport));
+        assert!(state.half_tick_report.as_ref().unwrap().notes > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 编码唱片数据箱那条导出（端口自加）走完整链路：菜单入口 → 一次性提示 → 窗口上屏 →
     /// 换机体重算 → 空歌闸门 → 保存框扩展名 → 真落盘。断言的是磁盘字节与报告。
     #[test]

@@ -4,6 +4,7 @@
 //! - [`pattern`]       `.nbp` 选区片段（含 zlib+base64 剪贴板兼容）
 //! - [`schematic`]     `.schematic` / 结构方块 `.nbt`（大端 NBT + gzip）
 //! - [`machine`]       机器布局的时间轴底层：`.nbs` → game tick 平面 → 平行道分配
+//! - [`half_tick`]     自家 20Hz 三槽直轨：15 槽车道自动并排，共用一对输入总线
 //! - [`sponge`]        通用 Sponge v3 `.schem` 写出器（机器布局无关，palette 动态登记）
 //! - [`maestro`]       MAESTRO 音乐机节目单（`.schem`，需已建好的机体才出声）
 //! - [`fractal`]       nbs-fractal 机体投影（`.litematic`，里面没有时钟也没有电源，喂电自己接）
@@ -17,6 +18,7 @@ pub mod audio_export;
 pub mod datapack;
 pub mod disc_chest;
 pub mod fractal;
+pub mod half_tick;
 pub mod image_export;
 pub mod litematic;
 pub mod machine;
@@ -51,6 +53,10 @@ pub use disc_chest::{
 pub use fractal::{
     export as export_fractal, preview as preview_fractal, FractalLayout, FractalOptions,
     FractalReport,
+};
+pub use half_tick::{
+    build as build_half_tick, export as export_half_tick, preview as preview_half_tick,
+    HalfTickOptions, HalfTickReport,
 };
 pub use image_export::{export_png, render_image, ImageOptions};
 pub use maestro::{

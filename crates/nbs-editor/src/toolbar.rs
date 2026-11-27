@@ -290,6 +290,14 @@ pub fn show_menu_bar(state: &mut EditorState, ui: &mut Ui) {
                         state.emit(Command::OpenFractalExport);
                         ui.close_menu();
                     }
+                    // 端口自加：自家 20Hz 单程直轨（.schem），两条 10Hz 臂相差 1gt。
+                    if ui
+                        .button(tr("20Hz straight layout...", "20Hz 直轨布局…"))
+                        .clicked()
+                    {
+                        state.emit(Command::OpenHalfTickExport);
+                        ui.close_menu();
+                    }
                     // 端口自加：唱片工坊那一档的编码唱片数据箱（.litematic），只有箱子，
                     // 要贴在已建好的机体里才出声。
                     if ui

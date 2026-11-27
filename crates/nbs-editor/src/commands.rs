@@ -224,6 +224,10 @@ pub enum Command {
     OpenFractalExport,
     /// 端口自加：fractal 窗口「导出」按钮——预览报错就不弹保存框。
     ExportFractalChecked,
+    /// 端口自加：自家 20Hz 单程直轨布局入口（导出菜单）。
+    OpenHalfTickExport,
+    /// 端口自加：20Hz 直轨布局窗口「导出」按钮。
+    ExportHalfTickChecked,
     /// 端口自加：唱片工坊那一档的编码唱片数据箱入口（导出菜单）。第一次用先提示
     /// 「这份投影只是箱子，要贴在已建好的机体里才出声」，随后算一遍预览再开窗口。
     OpenDiscChestExport,
@@ -1797,6 +1801,27 @@ tail of each such run gets no power, so those ticks stay silent.\n\nThis warning
                 }
             }
         }
+        // ------------------------------------- 自家 20Hz 直轨布局（端口自加）
+        Command::OpenHalfTickExport => {
+            state.refresh_half_tick_preview();
+            dispatch(state, Command::ShowWindow(WindowKind::HalfTickExport), ctx);
+        }
+        Command::ExportHalfTickChecked => {
+            let blocked = if let Some(e) = &state.half_tick_error {
+                Some(e.clone())
+            } else if state.half_tick_report.as_ref().map(|r| r.notes == 0).unwrap_or(false) {
+                Some(tr("There are no notes to export!", "没有音符可以导出！").to_string())
+            } else {
+                None
+            };
+            match blocked {
+                None => dispatch(state, Command::OpenDialog(DialogAction::ExportHalfTick), ctx),
+                Some(msg) => state.modals = ModalQueue::message(
+                    tr("20Hz straight layout", "20Hz 直轨布局"),
+                    &msg,
+                ),
+            }
+        }
         // ------------------------------------- 编码唱片数据箱（端口自加）
         Command::OpenDiscChestExport => {
             // 与 Fractal 相反、与 MAESTRO 同族：这份 .litematic 只有箱子，机体得先建好。
@@ -2788,6 +2813,41 @@ machine that is already built; change the machine or its speed and these chests 
                     }
                     // 导出完把窗口留着（同节目单那条路），失败时人也能看到原因。
                     state.window = Some(WindowKind::FractalExport);
+                }
+                DialogAction::ExportHalfTick => {
+                    let opts = state.half_tick_options.clone();
+                    match nbs_io::export_half_tick(&state.doc.song, &path, &opts) {
+                        Ok(report) => {
+                            let notes = report.notes;
+                            let head = if crate::lang() == 1 {
+                                format!("20Hz 直轨布局已保存到 {}\n\n{} 个音符落进机体。", path.display(), notes)
+                            } else {
+                                format!("20Hz straight layout saved to {}\n\n{} notes were placed.", path.display(), notes)
+                            };
+                            let mut status = vec![head];
+                            status.extend(report.lines());
+                            state.export_status = Some(status.join("\n"));
+                            state.half_tick_report = Some(report);
+                            state.half_tick_error = None;
+                            state.set_message(if crate::lang() == 1 {
+                                format!("20Hz 直轨布局已导出：{notes} 个音符")
+                            } else {
+                                format!("20Hz straight layout exported: {notes} notes")
+                            });
+                            state.save_prefs();
+                        }
+                        Err(e) => {
+                            state.export_status = None;
+                            state.half_tick_error = Some(e.clone());
+                            state.half_tick_report = None;
+                            state.set_message(if crate::lang() == 1 {
+                                format!("导出 20Hz 直轨布局失败: {e}")
+                            } else {
+                                format!("20Hz straight layout export failed: {e}")
+                            });
+                        }
+                    }
+                    state.window = Some(WindowKind::HalfTickExport);
                 }
                 DialogAction::ExportDiscChest => {
                     // 端口自加：按界面上的机体档与时间处理方式真导出，报告口径与预览一致。

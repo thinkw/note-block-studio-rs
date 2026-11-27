@@ -18,6 +18,12 @@ use crate::schematic::{gzip, Nbt};
 /// 与 [`crate::maestro`] 同一代：Java 1.21.4。
 pub const DATA_VERSION: i32 = 4189;
 
+/// Java 1.21.8：20Hz 直轨布局用，认识铜块小号一族的 `instrument` 状态。
+pub const DATA_VERSION_1_21_8: i32 = 4440;
+
+/// 用户提供的 26.2 样板版本；20Hz 三槽车道布局跟随这个 DataVersion。
+pub const DATA_VERSION_4903: i32 = 4903;
+
 /// Sponge v3 的三个尺寸标签是 `TAG_Short`，所以单轴上限就是这个数。
 pub const MAX_DIM: i32 = 32767;
 
@@ -43,6 +49,7 @@ pub struct SpongeSchematic {
     cells: Vec<i32>,
     palette: Vec<String>,
     index: HashMap<String, i32>,
+    data_version: i32,
 }
 
 impl SpongeSchematic {
@@ -72,6 +79,7 @@ impl SpongeSchematic {
             cells: vec![0; cells],
             palette: Vec::new(),
             index: HashMap::new(),
+            data_version: DATA_VERSION,
         };
         // palette 0 号必须是空气：整份网格初始就全指向它。
         assert_eq!(out.state("minecraft:air"), 0);
@@ -132,6 +140,17 @@ impl SpongeSchematic {
         self.cell(p).map(|i| self.cells[i])
     }
 
+    /// 改成目标游戏版本的 DataVersion；默认仍是 Java 1.21.4。
+    pub fn with_data_version(mut self, data_version: i32) -> Self {
+        self.data_version = data_version;
+        self
+    }
+
+    pub fn state_at(&self, p: Pos) -> Option<&str> {
+        let id = self.at(p)? as usize;
+        self.palette.get(id).map(String::as_str)
+    }
+
     pub fn size(&self) -> (i32, i32, i32) {
         (self.width, self.height, self.length)
     }
@@ -145,13 +164,34 @@ impl SpongeSchematic {
         self.cells.iter().filter(|id| **id != 0).count()
     }
 
+    /// 东西轴镜像：位置左右翻转，`east/west` 连接与 `facing=east/west` 一起翻转。
+    pub fn mirrored_x(self) -> Self {
+        let mut out = Self::new(self.width, self.length, self.height)
+            .expect("镜像不会改变已经合法的尺寸")
+            .with_data_version(self.data_version);
+        for y in 0..self.height {
+            for z in 0..self.length {
+                for x in 0..self.width {
+                    let id = self.cells[self.cell(Pos::new(x, y, z)).unwrap()] as usize;
+                    if id == 0 {
+                        continue;
+                    }
+                    let state = mirror_x_state(&self.palette[id]);
+                    out.set(Pos::new(self.width - 1 - x, y, z), &state)
+                        .expect("镜像坐标仍在原网格内");
+                }
+            }
+        }
+        out
+    }
+
     /// 未压缩的 `.schem` NBT 字节。
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut n = Nbt::default();
         n.compound("");
         n.compound("Schematic");
         n.int("Version", 3);
-        n.int("DataVersion", DATA_VERSION);
+        n.int("DataVersion", self.data_version);
         n.short("Width", self.width as i16);
         n.short("Height", self.height as i16);
         n.short("Length", self.length as i16);
@@ -186,6 +226,48 @@ impl SpongeSchematic {
             .to_string()
         })
     }
+}
+
+fn mirror_x_state(state: &str) -> String {
+    let Some((name, rest)) = state.split_once('[') else {
+        return state.to_string();
+    };
+    let inner = rest.strip_suffix(']').unwrap_or(rest);
+    let mut props: Vec<(String, String)> = inner
+        .split(',')
+        .filter_map(|part| {
+            let (key, value) = part.split_once('=')?;
+            Some((key.to_string(), value.to_string()))
+        })
+        .collect();
+    if let (Some(east), Some(west)) = (
+        props.iter().position(|(key, _)| key == "east"),
+        props.iter().position(|(key, _)| key == "west"),
+    ) {
+        let east_value = props[east].1.clone();
+        props[east].1 = props[west].1.clone();
+        props[west].1 = east_value;
+    }
+    for (key, value) in &mut props {
+        if key == "facing" {
+            if value == "east" {
+                *value = "west".to_string();
+            } else if value == "west" {
+                *value = "east".to_string();
+            }
+        }
+    }
+    let mut out = format!("{name}[");
+    for (i, (key, value)) in props.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(key);
+        out.push('=');
+        out.push_str(value);
+    }
+    out.push(']');
+    out
 }
 
 /// 无符号 LEB128：每字节低 7 位存数据，最高位为续位。
@@ -265,6 +347,28 @@ mod tests {
         for (i, id) in ids.iter().enumerate() {
             assert_eq!(*id, if i == want { 1 } else { 0 }, "第 {i} 格");
         }
+    }
+
+    #[test]
+    fn horizontal_mirror_flips_positions_connections_and_east_west_facing() {
+        let mut s = grid(3, 2, 1).with_data_version(DATA_VERSION_4903);
+        s.set(Pos::new(0, 0, 0), "minecraft:stone").unwrap();
+        s.set(
+            Pos::new(1, 0, 0),
+            "minecraft:redstone_wire[east=side,north=none,south=none,west=none,power=0]",
+        )
+        .unwrap();
+        s.set(Pos::new(2, 0, 0), "minecraft:repeater[facing=east]")
+            .unwrap();
+        let s = s.mirrored_x();
+        assert_eq!(s.state_at(Pos::new(2, 0, 0)), Some("minecraft:stone"));
+        let wire = s.state_at(Pos::new(1, 0, 0)).unwrap();
+        assert!(wire.contains("east=none") && wire.contains("west=side"), "{wire}");
+        let repeater = s.state_at(Pos::new(0, 0, 0)).unwrap();
+        assert!(repeater.contains("facing=west"), "{repeater}");
+        let root = parse(&s.to_bytes()).unwrap();
+        let sch = root.get("Schematic").unwrap();
+        assert_eq!(sch.get("DataVersion").and_then(Value::as_i32), Some(DATA_VERSION_4903));
     }
 
     #[test]

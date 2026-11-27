@@ -231,6 +231,8 @@ pub enum WindowKind {
     /// 实测：这份 `.litematic` 里没有时钟也没有电源，喂电要自己接；报告里那条红石线自检
     /// 会点名超过 15 格传导预算的段。
     FractalExport,
+    /// 端口自加：自家 20Hz 单程直轨布局，两条 10Hz 臂并排到头。
+    HalfTickExport,
     /// 端口自加（用户要求接第二条 20Hz 路子）：唱片工坊那一档的编码唱片数据箱导出。
     /// 和 MAESTRO 同族——这份 `.litematic` 只有箱子，要贴在已建好的机体里才出声。
     DiscChestExport,
@@ -319,6 +321,7 @@ impl WindowKind {
             Self::MaestroExport => tr("MAESTRO Machine Sheet", "MAESTRO 机体节目单"),
             // 端口自加，原版没有对应文案。
             Self::FractalExport => tr("Fractal Machine Projection", "Fractal 机体投影"),
+            Self::HalfTickExport => tr("20Hz Straight Layout", "20Hz 直轨布局"),
             // 端口自加，原版没有对应文案。
             Self::DiscChestExport => tr("Encoded Disc Chest", "编码唱片数据箱"),
             // 原版 `draw_window_track_export.gml:13`：CN "导出直轨"。
@@ -657,6 +660,8 @@ pub enum DialogAction {
     ExportMaestro,
     /// 端口自加：nbs-fractal 机体投影的保存框，扩展名 `.litematic`。
     ExportFractal,
+    /// 端口自加：自家 20Hz 直轨布局的保存框，扩展名 `.schem`。
+    ExportHalfTick,
     /// 端口自加：编码唱片数据箱的保存框，扩展名同样 `.litematic`，但内容只有箱子。
     ExportDiscChest,
     ImportMidi,
@@ -694,6 +699,7 @@ impl DialogAction {
                 | Self::ExportPattern
                 | Self::ExportMaestro
                 | Self::ExportFractal
+                | Self::ExportHalfTick
                 | Self::ExportDiscChest
                 | Self::SaveExtraNotes
                 | Self::SaveTranscriptionMidi
@@ -724,6 +730,7 @@ impl DialogAction {
             Self::ExportMaestro => "schem",
             // 端口自加：fractal 出的是 Litematica 投影（gzip NBT，扩展名 .litematic）。
             Self::ExportFractal | Self::ExportDiscChest => "litematic",
+            Self::ExportHalfTick => "schem",
             // 原版背景图对话框一次放行 png/jpg/jpeg（`menu_click.gml:57`）；
             // 这里的单扩展名只用于兜底列表和默认名，多个扩展名在 `accepts` 里放行。
             Self::ImportBackground => "png",
@@ -958,6 +965,10 @@ impl FileDialog {
             DialogAction::ExportFractal => (
                 tr("Export Fractal machine", "导出 Fractal 机体投影"),
                 vec![filter("Litematica Projection (*.litematic)", "*.litematic")],
+            ),
+            DialogAction::ExportHalfTick => (
+                tr("Export 20Hz straight layout", "导出 20Hz 直轨布局"),
+                vec![filter("Minecraft Schematic (*.schem)", "*.schem")],
             ),
             // 端口自加：编码唱片数据箱。同一份 Litematica 容器，只是里面只有箱子没有红石。
             DialogAction::ExportDiscChest => (
@@ -1411,6 +1422,8 @@ pub struct EditorState {
     pub maestro_options: nbs_io::MaestroOptions,
     /// 端口自加：nbs-fractal 机体投影的导出选项（布局族 + 奇偶分道 + 几个几何参数），随首选项落盘。
     pub fractal_options: nbs_io::FractalOptions,
+    /// 端口自加：自家 20Hz 直轨布局的导出选项，随首选项落盘。
+    pub half_tick_options: nbs_io::HalfTickOptions,
     /// 上次/当前预览算出的改写清单。窗口每次开、每次换模式都会重算，
     /// 导出成功后也用它给出「实际改写了什么」。
     pub maestro_report: Option<nbs_io::MaestroReport>,
@@ -1419,6 +1432,9 @@ pub struct EditorState {
     /// 端口自加：fractal 投影的预览清单与失败原因，用法同上面那对 maestro 字段。
     pub fractal_report: Option<nbs_io::FractalReport>,
     pub fractal_error: Option<String>,
+    /// 端口自加：20Hz 直轨布局的预览清单与失败原因。
+    pub half_tick_report: Option<nbs_io::HalfTickReport>,
+    pub half_tick_error: Option<String>,
     /// 端口自加：编码唱片数据箱的导出选项（机体档 + 时间处理方式 + 层高 + 留白/空行两条开关），
     /// 随首选项落盘。
     pub disc_chest_options: nbs_io::DiscChestOptions,
@@ -1677,6 +1693,7 @@ impl EditorState {
         let maestro_options = prefs.maestro.clone();
         // 端口自加：fractal 投影导出选项（`[fractal]`），出厂 Linear + 奇偶分道。
         let fractal_options = prefs.fractal;
+        let half_tick_options = prefs.half_tick;
         // 端口自加：编码唱片数据箱的导出选项，出厂照上游 `defaultConfig`（20 t/s、resample、层高 8）。
         let disc_chest_options = prefs.disc_chest;
         // 原版 `load_settings` 的 `[midi_import]` 段：14 个 `w_midi_*` 标量 +
@@ -1798,11 +1815,14 @@ impl EditorState {
             schematic_options,
             maestro_options,
             fractal_options,
+            half_tick_options,
             disc_chest_options,
             maestro_report: None,
             maestro_error: None,
             fractal_report: None,
             fractal_error: None,
+            half_tick_report: None,
+            half_tick_error: None,
             disc_chest_report: None,
             disc_chest_error: None,
             schematic_command_plan: None,
@@ -3046,6 +3066,7 @@ impl EditorState {
         self.prefs.schematic = self.schematic_options.clone();
         self.prefs.maestro = self.maestro_options.clone();
         self.prefs.fractal = self.fractal_options;
+        self.prefs.half_tick = self.half_tick_options;
         self.prefs.disc_chest = self.disc_chest_options;
         // MIDI 导入同理：`import_midi()` 结尾的 `save_settings()` 每次都把
         // 14 个 w_midi_* 和 128 组 ins_N / drum_N 全量写盘。
@@ -3104,6 +3125,20 @@ impl EditorState {
             Err(e) => {
                 self.fractal_report = None;
                 self.fractal_error = Some(e);
+            }
+        }
+    }
+
+    /// 端口自加：按当前 `half_tick_options` 重算 20Hz 直轨布局。
+    pub fn refresh_half_tick_preview(&mut self) {
+        match nbs_io::preview_half_tick(&self.doc.song, &self.half_tick_options) {
+            Ok(r) => {
+                self.half_tick_report = Some(r);
+                self.half_tick_error = None;
+            }
+            Err(e) => {
+                self.half_tick_report = None;
+                self.half_tick_error = Some(e);
             }
         }
     }
