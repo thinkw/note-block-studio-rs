@@ -227,6 +227,90 @@ pub struct ImportSubstitution {
     pub low: Option<u8>,
 }
 
+/// 延音档位，对应界面那三个单选。
+///
+/// 这个字段**两种写法都收**：`"off"` / `"all"` / `"tracks"` 是新契约，`true` / `false`
+/// 是已经发布出去的老契约（`true` = `all`、`false` = `off`）。回显只出字符串——
+/// 一份回声同时认两种写法，等于让调用方每次先判类型。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportSustain {
+    /// 不动尾音，沿用传统导入的「每 tick 一块」。
+    #[default]
+    Off,
+    /// 所有轨道的长音都按包络重敲。
+    All,
+    /// 只重敲 `sustain_tracks` 列出的轨道。
+    Tracks,
+}
+
+// 手写而不是 `#[serde(untagged)]`：untagged 失败时只吐一句「哪个变体都不匹配」，
+// 把允许值全藏了。理由和 `nbs-mcp` 的 `Pitch` 一样——这条面立的是「拼错要大声」。
+impl<'de> Deserialize<'de> for ImportSustain {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::Bool(on) => Ok(if on { Self::All } else { Self::Off }),
+            serde_json::Value::String(text) => match text.as_str() {
+                "off" => Ok(Self::Off),
+                "all" => Ok(Self::All),
+                "tracks" => Ok(Self::Tracks),
+                other => Err(D::Error::custom(format!(
+                    "sustain 只认 \"off\" / \"all\" / \"tracks\"（老写法 true / false 等于 all / off），收到 {other:?}"
+                ))),
+            },
+            other => Err(D::Error::custom(format!(
+                "sustain 要么是 \"off\" / \"all\" / \"tracks\"，要么是 true / false，实际是 {other}"
+            ))),
+        }
+    }
+}
+
+/// 手写而不是 derive：两种写法各自要带一句说明，derive 给不出这个 `anyOf` 形状。
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for ImportSustain {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ImportSustain".into()
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "延音：长音按该乐器实测余音重敲成多颗，而不是每 tick 一个块",
+            "anyOf": [
+                {
+                    "type": "string",
+                    "enum": ["off", "all", "tracks"],
+                    "description": "off = 关；all = 所有轨道都重敲；tracks = 只重敲 sustain_tracks 列出的轨道"
+                },
+                {
+                    "type": "boolean",
+                    "description": "老写法，仍然支持：true = all、false = off。tracks 只能走字符串那种"
+                }
+            ]
+        })
+    }
+}
+
+/// 重敲排多密，对应界面那个单选。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ImportSustainDensity {
+    /// 间隔 = 该乐器采样实测余音换算出的 tick 数。
+    #[default]
+    Measured,
+    /// 每 tick 一块（和 Miau 的步长对齐）。
+    EveryTick,
+}
+
 /// 增强导入那一整套。省略 = 传统路径（`enabled = false`）加上按这个文件算出的预设。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -255,16 +339,28 @@ pub struct ImportEnhancedOptions {
     pub force_fold: Option<bool>,
     #[cfg_attr(
         feature = "schema",
-        schemars(description = "延音：按实测衰减把长音重敲成多个音符，而不是每 tick 一个块")
+        schemars(description = "延音：把长音按该乐器实测余音重敲成多颗，而不是每 tick 一个块。off / all / tracks，老写法 true / false 仍收")
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sustain: Option<bool>,
+    pub sustain: Option<ImportSustain>,
     #[cfg_attr(
         feature = "schema",
-        schemars(description = "延音衰减：把重敲沿包络渐弱；false = 保持同一电平。只在 sustain 为真时有意义")
+        schemars(description = "sustain = tracks 时的白名单，存 MIDI 轨下标（和回执 tracks[].index 同一套编号）。空列表配 tracks 会被拒，因为那等于一颗都不重敲")
+    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sustain_tracks: Vec<u32>,
+    #[cfg_attr(
+        feature = "schema",
+        schemars(description = "延音衰减：把重敲沿包络渐弱；false = 保持同一电平。只在 sustain 为 all / tracks 时有意义")
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sustain_fade: Option<bool>,
+    #[cfg_attr(
+        feature = "schema",
+        schemars(description = "重敲排多密：measured = 按实测余音换算间隔（默认，也是老行为）；every_tick = 每 tick 一块（同 Miau）。只在 sustain 为 all / tracks 时有意义")
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sustain_density: Option<ImportSustainDensity>,
     #[cfg_attr(
         feature = "schema",
         schemars(description = "拆声部：把一条 MIDI 通道拆成两层（右手/左手或高/低声部）")
@@ -376,6 +472,9 @@ pub struct MidiPlan {
     /// 见过的最大通道号（不是通道个数），与原版 `midi_channels` 同义。
     pub channels_seen: u8,
     pub tracks: Vec<MidiTrackInfo>,
+    /// 按时值算「长到值得重敲」的那些轨（界面延音那一页的候选清单，同一个函数）。
+    /// 它只是**参考**：白名单可以列任意轨号，没进这份清单的轨照样能列，只是它的音大概率短到重敲不出第二颗。
+    pub sustain_candidates: Vec<u32>,
     /// 旋律通道的处理，**不含通道 9**——打击乐整段在 `drums` 里，两边不重复数。
     pub channels: Vec<MidiChannelPlan>,
     /// 通道 9：这个文件里出现过的鼓音，按首次出现顺序。

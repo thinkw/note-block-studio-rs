@@ -16,7 +16,7 @@ use crate::discovery::{Discovery, DISCOVERY_FILE};
 use crate::frame::{read_json_line, write_json_line};
 use crate::midi::{
     ImportChannelMap, ImportDrumMap, ImportEnhancedOptions, ImportMidiOptions, ImportRangeMode,
-    MidiPlan,
+    ImportSustain, ImportSustainDensity, MidiPlan,
 };
 use crate::op::{
     BatchField, CellNote, ExportFormat, NoteFilter, NoteView, Op, Playback, Scope, SelectTarget,
@@ -205,6 +205,9 @@ fn midi_import_surface_survives_the_wire() {
     let enhanced = ImportEnhancedOptions {
         enabled: Some(true),
         range_mode: Some(ImportRangeMode::Fold),
+        sustain: Some(ImportSustain::Tracks),
+        sustain_tracks: vec![0, 2],
+        sustain_density: Some(ImportSustainDensity::EveryTick),
         ..Default::default()
     };
     let import = Op::ImportMidi {
@@ -242,6 +245,18 @@ fn midi_import_surface_survives_the_wire() {
     })
     .unwrap();
     assert!(!bare_import.contains("remember"), "{bare_import}");
+    // 回显只出字符串：一份状态同时认两种写法，调用方每次都得先判类型。
+    let written = serde_json::to_string(&Op::InspectMidi {
+        path: "a.mid".to_string(),
+        options: None,
+        enhanced: Some(enhanced.clone()),
+    })
+    .unwrap();
+    assert!(
+        written.contains(r#""sustain":"tracks""#)
+            && written.contains(r#""sustain_density":"every_tick""#),
+        "{written}"
+    );
     // 预检只是把导入算法跑一遍，不该被写操作的闸门拦住。
     assert!(inspect.is_read_only());
     assert!(!import.is_read_only());
@@ -262,6 +277,41 @@ fn midi_import_surface_survives_the_wire() {
     assert_eq!(back, outcome);
 }
 
+/// `sustain` 一个字段收两种写法：已发布的老 bool 和三态字符串。乱写得说得出为什么不行——
+/// `#[serde(untagged)]` 只会吐一句「哪个变体都不匹配」，允许值全藏起来。
+#[test]
+fn sustain_reads_the_old_bool_and_the_new_word() {
+    let read = |raw: &str| -> Result<ImportSustain, String> {
+        serde_json::from_str::<ImportEnhancedOptions>(&format!(
+            r#"{{"enabled":true,"sustain":{raw}}}"#
+        ))
+        .map(|e| e.sustain.expect("字段读到了就该有值"))
+        .map_err(|e| e.to_string())
+    };
+    assert_eq!(read("true").unwrap(), ImportSustain::All);
+    assert_eq!(read("false").unwrap(), ImportSustain::Off);
+    assert_eq!(read(r#""all""#).unwrap(), ImportSustain::All);
+    assert_eq!(read(r#""off""#).unwrap(), ImportSustain::Off);
+    assert_eq!(read(r#""tracks""#).unwrap(), ImportSustain::Tracks);
+
+    let words = read(r#""hold""#).unwrap_err();
+    for name in ["off", "all", "tracks"] {
+        assert!(words.contains(name), "报错没点名 {name}：{words}");
+    }
+    let number = read("1").unwrap_err();
+    assert!(number.contains("true / false"), "报错没说 bool 也算一种写法：{number}");
+
+    // 白名单与密度档是纯加法：不给就不该在回显里多出两个空字段。
+    let bare = ImportEnhancedOptions {
+        enabled: Some(true),
+        ..Default::default()
+    };
+    let text = serde_json::to_string(&bare).unwrap();
+    assert!(
+        !text.contains("sustain_tracks") && !text.contains("sustain_density"),
+        "{text}"
+    );
+}
 /// 拼错的字段名不能读成「这一项没给」：那样回显看起来完全正常、用的却是基线，
 /// 而「导入时少勾了一项」这种事没人能从结果反推出来。所以这几个入参结构体不认未知字段。
 #[test]

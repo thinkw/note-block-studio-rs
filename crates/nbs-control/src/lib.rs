@@ -41,8 +41,8 @@ pub use op::{
 };
 pub use midi::{
     ImportChannelMap, ImportDrumMap, ImportEnhancedChannel, ImportEnhancedOptions, ImportMidiOptions,
-    ImportRangeMode, ImportSlot, ImportSubstitution, MidiChannelPlan, MidiDrumPlan,
-    MidiEnhancedReport, MidiPartPlan, MidiPlan, MidiTrackInfo,
+    ImportRangeMode, ImportSlot, ImportSubstitution, ImportSustain, ImportSustainDensity,
+    MidiChannelPlan, MidiDrumPlan, MidiEnhancedReport, MidiPartPlan, MidiPlan, MidiTrackInfo,
 };
 pub use outcome::{
     ActionInfo, BarOverview, ChangeReport, Data, Diagnostics, ErrorCode, ErrorInfo, HistoryInfo,

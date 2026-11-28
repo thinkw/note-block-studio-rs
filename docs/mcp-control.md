@@ -279,6 +279,22 @@ nbs-mcp --call import_midi '{"path":"D:/songs/jazz.mid","discard_changes":true}'
 - `remember: true` 是这条链上唯一会动用户长期设置的开关：把这次的映射写回 GM 表并存进偏好，等于替人点了窗上那个「记住」。省略就是 false，想改一次而不留痕就别给。
 - `precision` 收 0 / 1 / 3 / 7，对应窗上 1 / 2 / 4 / 8 倍；它同时决定 tick 密度，同一份文件 8 倍比 1 倍长四倍。
 
+### 延音那一族（`sustain` / `sustain_tracks` / `sustain_density`）
+
+延音 = 把一条长音按该乐器的**实测余音**重敲成多颗，而不是每 tick 铺一块。窗上是三档单选，这条面也照三档给：
+
+```bash
+nbs-mcp --call inspect_midi '{"path":"D:/songs/strings.mid","enhanced":{"enabled":true,"sustain":"tracks","sustain_tracks":[0]}}' --json
+```
+
+- `sustain` 收 `"off"` / `"all"` / `"tracks"`；**老写法 `true` / `false` 仍然认**（等于 `all` / `off`），但回执里只会出字符串那一种——一份回声同时认两种写法，调用方每次都得先判类型。
+- `tracks` = 只重敲 `sustain_tracks` 列出的轨。白名单存的是 **MIDI 轨下标**，和预检回执 `tracks[].index` 同一套编号；`sustain_candidates` 是界面那一页按时值筛出的候选（同一个函数算的），照着填就行。候选只是提示：不在里面的轨号仍是合法输入，只是那轨音短，大概敲不出第二下。
+- 四种「写了等于没写」的组合当场拒：`sustain = tracks` 而白名单是空的（一颗都不会重敲）、白名单给了但 `sustain` 不是 `tracks`（整份被跳过）、轨号超出这个文件的轨数、以及延音一族（`sustain_tracks` / `sustain_fade` / `sustain_density`）任何一项配 `sustain = off`。理由和拼错字段名同一类：结果看着正常，实际什么都没变。
+- `sustain_density` 是重敲排多密：`measured`（省略时的默认，也就是老行为）按实测余音换算间隔，`every_tick` 每 tick 一块（和 Miau 的步长对齐）。**它改变的是落在哪些 tick**，预检的 `notes`、导入后的 `get_notes` 都数得出差别；只有当换算出的间隔本来就是 1 格时两档才相同。
+- 白名单会排序去重后回显（`[1,0,1]` 回来是 `[0,1]`）——它是个集合，不是顺序有意的列表。
+- 这一切都以 `applied_enhanced` 的回声为准：预演一次、照着导一次，两份回声应当逐字段相同，不同就是该修的 bug。
+
+
 ## 11. 音频转 MIDI：许可、环境，和一条必须点名的交付路径
 
 四条件对应转录窗上的四个按钮，全部**立即回任务句柄**（python 子进程动辄几十秒到几十分钟，

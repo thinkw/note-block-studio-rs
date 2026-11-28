@@ -821,7 +821,10 @@ impl Bridge {
     /// `remember=true` 会写回用户的 GM 表和偏好，所以默认不动它，且只有传统路径会写回。
     /// 回执 `data` 是完整的导入核对单（`MidiPlan`），`applied` / `applied_enhanced`
     /// 回显这次**真正生效**的每一个字段——先 `inspect_midi` 预演、再拿同一份选项导，
-    /// 两边逐字段比得动。
+    /// 两边逐字段比得动。延音那一族：`sustain` 收 `"off"` / `"all"` / `"tracks"`
+    /// （老写法 `true` / `false` 仍认，等于 `all` / `off`），`tracks` 要配
+    /// `sustain_tracks`（轨号见 `inspect_midi` 回执的 `sustain_candidates`），
+    /// `sustain_density` 选重敲排多密。写了不生效的组合（如 `tracks` 配空白名单）当场拒。
     #[tool]
     async fn import_midi(&self, Parameters(a): Parameters<ImportMidi>) -> Result<Json<Reply>, CallToolResult> {
         self.call(a.into()).await
@@ -831,6 +834,8 @@ impl Bridge {
     /// 工程一点不动（`rev` 也不变）。回执和 `import_midi` 同一个形状，用来先看清
     /// 「通道 3 是不是被我标成静音了」「层数会不会超」再动手。
     /// 这一步在主线程算，大文件会给几十毫秒到几百毫秒的等待。
+    /// 回执里的 `tracks[].index` 就是延音白名单要的轨号，`sustain_candidates` 是界面那一页
+    /// 按时值筛出的候选（判据同源）——白名单可以填不在候选里的轨，只是那轨大概敲不出第二下。
     #[tool]
     async fn inspect_midi(&self, Parameters(a): Parameters<InspectMidi>) -> Result<Json<Reply>, CallToolResult> {
         self.call(a.into()).await

@@ -472,6 +472,44 @@ mod tests {
         .is_ok());
     }
 
+    /// `sustain` 两种写法都要在命令行这一层走得通，而且折成同一个 Op：
+    /// 已发布的老 bool 不能因为字段改成三态就变成「这条命令不认」。
+    #[test]
+    fn sustain_takes_both_spellings_at_the_command_line() {
+        let read = |raw: serde_json::Value| {
+            match op_for("inspect_midi", &raw).unwrap() {
+                Op::InspectMidi { enhanced, .. } => enhanced.expect("给了 enhanced 就该有"),
+                other => panic!("转换成了别的 Op：{other:?}"),
+            }
+        };
+        let old = read(json!({"path":"a.mid","enhanced":{"enabled":true,"sustain":true}}));
+        let word = read(json!({"path":"a.mid","enhanced":{"enabled":true,"sustain":"all"}}));
+        assert_eq!(old, word, "true 与 \"all\" 必须是同一个 Op");
+        assert_eq!(old.sustain, Some(nbs_control::ImportSustain::All));
+        let off = read(json!({"path":"a.mid","enhanced":{"enabled":true,"sustain":false}}));
+        assert_eq!(off.sustain, Some(nbs_control::ImportSustain::Off));
+        let listed = read(json!({"path":"a.mid","enhanced":{
+            "enabled": true, "sustain": "tracks", "sustain_tracks": [2, 0],
+            "sustain_density": "every_tick"
+        }}));
+        assert_eq!(listed.sustain, Some(nbs_control::ImportSustain::Tracks));
+        assert_eq!(listed.sustain_tracks, vec![2, 0], "顺序在这里没有含义，去排序那一层验");
+        assert_eq!(
+            listed.sustain_density,
+            Some(nbs_control::ImportSustainDensity::EveryTick)
+        );
+
+        let err = op_for(
+            "inspect_midi",
+            &json!({"path":"a.mid","enhanced":{"enabled":true,"sustain":"hold"}}),
+        )
+        .expect_err("乱写得被拒");
+        for name in ["off", "all", "tracks"] {
+            assert!(err.message().contains(name), "报错没点名 {name}：{}", err.message());
+        }
+    }
+
+
     /// 转换必须和工具面给的 `Op` 一字不差，否则命令行和 MCP 会走出两条路。
     #[test]
     fn params_land_on_the_same_op_as_the_tool_face() {

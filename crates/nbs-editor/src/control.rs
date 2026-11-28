@@ -25,7 +25,8 @@ use nbs_control::{
     ActionInfo, BarOverview, BatchField, CellNote, ChangeReport, ClientBoard, ControlServer, Data,
     Diagnostics, Discovery, ErrorCode, ErrorInfo, HistoryInfo, ImportChannelMap, ImportDrumMap,
     ImportEnhancedChannel, ImportEnhancedOptions, ImportMidiOptions, ImportRangeMode, ImportSlot,
-    ImportSubstitution, Inbox, InstrumentInfo, JobHandle, JobInfo, JobRegistry, JobStatus,
+    ImportSubstitution, ImportSustain, ImportSustainDensity, Inbox, InstrumentInfo, JobHandle,
+    JobInfo, JobRegistry, JobStatus,
     LayerInfo, MidiChannelPlan, MidiDrumPlan, MidiEnhancedReport, MidiPartPlan, MidiPlan,
     MidiTrackInfo, NoteCell, NoteFilter, NoteRun, NoteView, Op, Outcome, Playback, Scope,
     SelectTarget, SelectionInfo, ServerConfig, SetMeta, Snapshot, TabInfo, TabRef,
@@ -2202,6 +2203,8 @@ fn check_midi_overrides(
             || e.force_fold.is_some()
             || e.sustain.is_some()
             || e.sustain_fade.is_some()
+            || !e.sustain_tracks.is_empty()
+            || e.sustain_density.is_some()
             || e.separate_voices.is_some()
             || e.voice_ignore_metadata.is_some()
             || e.dedupe_notes.is_some()
@@ -2212,6 +2215,58 @@ fn check_midi_overrides(
                 "给了 enhanced 的其他字段却没带 enabled=true：这些字段会被整个跳过、走传统导入。要么带上 enabled，要么别给。",
                 "enhanced fields given without enabled=true would be skipped and the traditional importer used. Pass enabled or drop the fields.",
             ));
+        }
+        // 延音这一族在 `sustain = off` 时整族惰性：`sustain_plan` 判到 Off 就直接返回
+        // `None`，导入退回传统尾音。给了却不生效，和把字段名拼错是同一种坑，所以在这里拒掉。
+        let sustain = e.sustain.unwrap_or_default();
+        let mut given = Vec::new();
+        if e.sustain_fade.is_some() {
+            given.push("sustain_fade");
+        }
+        if !e.sustain_tracks.is_empty() {
+            given.push("sustain_tracks");
+        }
+        if e.sustain_density.is_some() {
+            given.push("sustain_density");
+        }
+        if sustain == ImportSustain::Off && !given.is_empty() {
+            return Err(bad(
+                format!(
+                    "{} 要 sustain 为 all 或 tracks 才生效，而这次 sustain 是 off：要么带上 sustain，要么别给这几项",
+                    given.join(" / ")
+                ),
+                format!(
+                    "{} only takes effect when sustain is all or tracks, but sustain is off: set sustain or drop those fields",
+                    given.join(" / ")
+                ),
+            ));
+        }
+        if sustain == ImportSustain::Tracks && e.sustain_tracks.is_empty() {
+            return Err(bad(
+                "sustain = tracks 是「只重敲列出的轨道」，可 sustain_tracks 是空的——那样一颗都不会重敲。要么列上轨号（候选见 inspect_midi 回执的 sustain_candidates），要么改用 all",
+                "sustain = tracks retriggers only listed tracks, but sustain_tracks is empty - nothing would be retriggered. List track indices (see sustain_candidates in the inspect_midi reply) or use all",
+            ));
+        }
+        if sustain != ImportSustain::Tracks && !e.sustain_tracks.is_empty() {
+            return Err(bad(
+                format!("sustain_tracks 只在 sustain = tracks 时用得上，这次 sustain 是 {sustain:?}：这份白名单会被整个跳过"),
+                format!("sustain_tracks is only read when sustain = tracks, but sustain is {sustain:?} - the list would be skipped"),
+            ));
+        }
+        let track_count = u32::try_from(midi.tracks.len()).unwrap_or(u32::MAX);
+        for &track in &e.sustain_tracks {
+            if track >= track_count {
+                return Err(out_of_range(
+                    format!(
+                        "白名单里的轨号 {track} 超出这个文件的 0..={}",
+                        track_count.saturating_sub(1)
+                    ),
+                    format!(
+                        "Listed track {track} is outside this file's 0..={}",
+                        track_count.saturating_sub(1)
+                    ),
+                ));
+            }
         }
         let mut seen_channel = [false; 16];
         for c in &e.channels {
@@ -2388,16 +2443,32 @@ fn midi_effective(
         }
         enh.smart_substitute = e.smart_substitute.unwrap_or(enh.smart_substitute);
         enh.force_fold = e.force_fold.unwrap_or(enh.force_fold);
-        // MCP 契约里 sustain 还是 bool（origin/main 已发布）：true = 所有轨道都重敲。
-        // 三态的「只重敲选中的轨道」和白名单只在界面里给，MCP 读回统一报 true。
-        if let Some(on) = e.sustain {
-            enh.sustain = if on {
-                nbs_io::midi_enhanced::SustainMode::All
-            } else {
-                nbs_io::midi_enhanced::SustainMode::Off
+        // 三态直接落值：bool 那种老写法在反序列化时就折成 all / off 了（`ImportSustain`）。
+        if let Some(mode) = e.sustain {
+            enh.sustain = match mode {
+                ImportSustain::Off => nbs_io::midi_enhanced::SustainMode::Off,
+                ImportSustain::All => nbs_io::midi_enhanced::SustainMode::All,
+                ImportSustain::Tracks => nbs_io::midi_enhanced::SustainMode::Tracks,
             };
         }
+        // 白名单是个集合：重复的轨号合成一条，排序后回显也稳定（界面上勾选也是排序存的）。
+        if !e.sustain_tracks.is_empty() {
+            let mut listed = e
+                .sustain_tracks
+                .iter()
+                .map(|&track| track as usize)
+                .collect::<Vec<_>>();
+            listed.sort_unstable();
+            listed.dedup();
+            enh.sustain_tracks = listed;
+        }
         enh.sustain_fade = e.sustain_fade.unwrap_or(enh.sustain_fade);
+        if let Some(density) = e.sustain_density {
+            enh.sustain_density = match density {
+                ImportSustainDensity::Measured => nbs_io::midi_enhanced::SustainDensity::Measured,
+                ImportSustainDensity::EveryTick => nbs_io::midi_enhanced::SustainDensity::EveryTick,
+            };
+        }
         enh.separate_voices = e.separate_voices.unwrap_or(enh.separate_voices);
         enh.voice_ignore_metadata = e
             .voice_ignore_metadata
@@ -2503,6 +2574,11 @@ fn midi_compute(
                 name: track.name.clone(),
                 events: track.events.len(),
             })
+            .collect(),
+        // 和界面延音那一页同一份判据：调用方要列白名单，得先看得见「哪些轨长到会重敲出差别」。
+        sustain_candidates: nbs_io::midi_enhanced::sustain_candidate_tracks(&midi)
+            .into_iter()
+            .filter_map(|track| u32::try_from(track).ok())
             .collect(),
         channels: (0..=midi.channels)
             .filter(|channel| *channel != 9)
@@ -2651,8 +2727,21 @@ fn midi_echo_enhanced(enh: &nbs_io::midi_enhanced::EnhancedMidiOptions) -> Impor
         }),
         smart_substitute: Some(enh.smart_substitute),
         force_fold: Some(enh.force_fold),
-        sustain: Some(enh.sustain != nbs_io::midi_enhanced::SustainMode::Off),
+        sustain: Some(match enh.sustain {
+            nbs_io::midi_enhanced::SustainMode::Off => ImportSustain::Off,
+            nbs_io::midi_enhanced::SustainMode::All => ImportSustain::All,
+            nbs_io::midi_enhanced::SustainMode::Tracks => ImportSustain::Tracks,
+        }),
+        sustain_tracks: enh
+            .sustain_tracks
+            .iter()
+            .filter_map(|&track| u32::try_from(track).ok())
+            .collect(),
         sustain_fade: Some(enh.sustain_fade),
+        sustain_density: Some(match enh.sustain_density {
+            nbs_io::midi_enhanced::SustainDensity::Measured => ImportSustainDensity::Measured,
+            nbs_io::midi_enhanced::SustainDensity::EveryTick => ImportSustainDensity::EveryTick,
+        }),
         separate_voices: Some(enh.separate_voices),
         voice_ignore_metadata: Some(enh.voice_ignore_metadata),
         dedupe_notes: Some(enh.dedupe_notes),
@@ -7915,7 +8004,7 @@ mod tests {
         let h = Harness::new();
         let midi = midi_fixture();
         let half = ImportEnhancedOptions {
-            sustain: Some(true),
+            sustain: Some(ImportSustain::All),
             ..Default::default()
         };
         let refused = midi_effective(&h.state, &midi, None, Some(&half), false)
@@ -7930,7 +8019,7 @@ mod tests {
             Some(&ImportEnhancedOptions {
                 enabled: Some(true),
                 range_mode: Some(ImportRangeMode::Fold),
-                sustain: Some(true),
+                sustain: Some(ImportSustain::All),
                 channels: vec![ImportEnhancedChannel {
                     channel: 0,
                     transpose: Some(12),
@@ -7971,6 +8060,180 @@ mod tests {
             plan.applied_enhanced.substitutes.iter().find(|s| s.instrument == 0).map(|s| s.high),
             Some(Some(5))
         );
+    }
+
+    /// 把 0 号轨的音拉长到「值得重敲」：候选判据是平均时值 ≥2 拍、长音占比 ≥0.75（拍 = 480 分）。
+    fn long_held_midi() -> nbs_io::midi::MidiData {
+        let mut midi = midi_fixture();
+        for event in &mut midi.tracks[0].events {
+            event.until = event.pos + 1920;
+        }
+        midi.maxpos = 2400;
+        midi
+    }
+
+    /// 三态、白名单、密度档必须走完全程：入参读得进、回显读得回、而且真的改变落地的格子。
+    /// 断在任何一环都是「上了半截旋钮」——调用方拧得动，却看不见自己拧到哪。
+    #[test]
+    fn sustain_carries_a_mode_a_whitelist_and_a_density() {
+        let _prefs = crate::isolate_prefs();
+        let h = Harness::new();
+        let midi = long_held_midi();
+        let listed = ImportEnhancedOptions {
+            enabled: Some(true),
+            sustain: Some(ImportSustain::Tracks),
+            // 乱序 + 重复：白名单是个集合，回显不该把这些原样吐回去。
+            sustain_tracks: vec![1, 0, 1],
+            sustain_fade: Some(false),
+            sustain_density: Some(ImportSustainDensity::EveryTick),
+            ..Default::default()
+        };
+        let (_, enh) = midi_effective(&h.state, &midi, None, Some(&listed), false)
+            .expect("三态 + 白名单 + 密度档该读得进");
+        assert_eq!(enh.sustain, nbs_io::midi_enhanced::SustainMode::Tracks);
+        assert_eq!(enh.sustain_tracks, vec![0, 1], "白名单排序去重");
+        assert_eq!(
+            enh.sustain_density,
+            nbs_io::midi_enhanced::SustainDensity::EveryTick
+        );
+        let echo = midi_echo_enhanced(&enh);
+        assert_eq!(echo.sustain, Some(ImportSustain::Tracks), "回声不能压回 bool");
+        assert_eq!(echo.sustain_tracks, vec![0, 1], "白名单要在回声里");
+        assert_eq!(
+            echo.sustain_density,
+            Some(ImportSustainDensity::EveryTick),
+            "密度档要在回声里"
+        );
+        let text = serde_json::to_string(&echo).unwrap();
+        assert!(text.contains(r#""sustain":"tracks""#), "{text}");
+
+        // 省略密度档 = 保持现状那一档，不是「关掉延音」。
+        let (_, plain) = midi_effective(
+            &h.state,
+            &midi,
+            None,
+            Some(&ImportEnhancedOptions {
+                enabled: Some(true),
+                sustain: Some(ImportSustain::All),
+                ..Default::default()
+            }),
+            false,
+        )
+        .expect("all 不配白名单也成立");
+        assert_eq!(
+            plain.sustain_density,
+            nbs_io::midi_enhanced::SustainDensity::Measured,
+            "默认必须是实测档，否则这次改动会悄悄换掉所有人的尾音"
+        );
+        assert!(plain.sustain_tracks.is_empty(), "all 读的是全部轨，不碰白名单");
+    }
+
+    /// 密度档不是摆设：它改的是重敲落在哪些 tick，`get_notes` 数得出来。
+    #[test]
+    fn sustain_density_changes_the_cells_that_land() {
+        let _prefs = crate::isolate_prefs();
+        let h = Harness::new();
+        let counted = |density: ImportSustainDensity| {
+            let computed = midi_compute(
+                &h.state,
+                long_held_midi(),
+                "m".to_string(),
+                // 延音挂在尾音下面：`note_duration` 关着时那一条根本不走重敲分支。
+                Some(&ImportMidiOptions {
+                    note_duration: Some(true),
+                    ..Default::default()
+                }),
+                Some(&ImportEnhancedOptions {
+                    enabled: Some(true),
+                    sustain: Some(ImportSustain::All),
+                    sustain_fade: Some(false),
+                    sustain_density: Some(density),
+                    ..Default::default()
+                }),
+                false,
+            )
+            .expect("延音算得动");
+            (computed.plan.notes, computed.plan.sustain_candidates)
+        };
+        let (every_tick, candidates) = counted(ImportSustainDensity::EveryTick);
+        let (measured, _) = counted(ImportSustainDensity::Measured);
+        assert!(
+            every_tick > measured,
+            "每 tick 一块必须比实测间隔排得密：{every_tick} vs {measured}"
+        );
+        assert_eq!(candidates, vec![0], "候选只列长音轨，鼓轨那条不该进来");
+    }
+
+    /// 白名单只填「不在候选里」的轨 = 一颗都不会重敲。这不算错（候选只是提示），
+    /// 但回执要把候选列出来，否则调用方无从知道自己填的是一轨短音。
+    #[test]
+    fn a_whitelist_outside_the_candidates_still_validates() {
+        let _prefs = crate::isolate_prefs();
+        let h = Harness::new();
+        let midi = long_held_midi();
+        let (_, enh) = midi_effective(
+            &h.state,
+            &midi,
+            None,
+            Some(&ImportEnhancedOptions {
+                enabled: Some(true),
+                sustain: Some(ImportSustain::Tracks),
+                sustain_tracks: vec![1],
+                ..Default::default()
+            }),
+            false,
+        )
+        .expect("1 号轨不在候选里，但它是个合法轨号");
+        assert_eq!(enh.sustain_tracks, vec![1]);
+    }
+
+    /// 延音这一族的四条「写了等于没写」当场拒：静默 no-op 是这条面上最贵的一类 bug。
+    #[test]
+    fn the_sustain_family_refuses_to_be_silently_ignored() {
+        let _prefs = crate::isolate_prefs();
+        let h = Harness::new();
+        let midi = long_held_midi();
+        let refused = |enhanced: &ImportEnhancedOptions| -> (ErrorCode, String) {
+            let error = midi_effective(&h.state, &midi, None, Some(enhanced), false)
+                .expect_err("该拒");
+            (error.code, error.message)
+        };
+        let on = ImportSustain::All;
+        let (code, message) = refused(&ImportEnhancedOptions {
+            enabled: Some(true),
+            sustain_fade: Some(true),
+            ..Default::default()
+        });
+        assert_eq!(code, ErrorCode::BadArgument, "{message}");
+        assert!(message.contains("sustain"), "{message}");
+
+        let (code, message) = refused(&ImportEnhancedOptions {
+            enabled: Some(true),
+            sustain: Some(ImportSustain::Tracks),
+            ..Default::default()
+        });
+        assert_eq!(code, ErrorCode::BadArgument, "{message}");
+        assert!(
+            message.contains("sustain_candidates"),
+            "空白的 tracks 要指路去哪填：{message}"
+        );
+
+        let (code, message) = refused(&ImportEnhancedOptions {
+            enabled: Some(true),
+            sustain: Some(on),
+            sustain_tracks: vec![0],
+            ..Default::default()
+        });
+        assert_eq!(code, ErrorCode::BadArgument, "{message}");
+
+        let (code, message) = refused(&ImportEnhancedOptions {
+            enabled: Some(true),
+            sustain: Some(ImportSustain::Tracks),
+            sustain_tracks: vec![9],
+            ..Default::default()
+        });
+        assert_eq!(code, ErrorCode::OutOfRange, "{message}");
+        assert!(message.contains("0..=1"), "要说清这文件只有两条轨：{message}");
     }
 
     /// 下载那一下只能人自己在窗口里勾：三条要下载的都得它，报错要说清该谁去勾。
