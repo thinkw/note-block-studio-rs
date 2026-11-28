@@ -1717,7 +1717,7 @@ impl EditorState {
         let maestro_options = prefs.maestro.clone();
         // 端口自加：fractal 投影导出选项（`[fractal]`），出厂 Linear + 奇偶分道。
         let fractal_options = prefs.fractal;
-        let half_tick_options = prefs.half_tick;
+        let half_tick_options = prefs.half_tick.clone();
         // 端口自加：编码唱片数据箱的导出选项，出厂照上游 `defaultConfig`（20 t/s、resample、层高 8）。
         let disc_chest_options = prefs.disc_chest;
         // 原版 `load_settings` 的 `[midi_import]` 段：14 个 `w_midi_*` 标量 +
@@ -3118,7 +3118,7 @@ impl EditorState {
         self.prefs.schematic = self.schematic_options.clone();
         self.prefs.maestro = self.maestro_options.clone();
         self.prefs.fractal = self.fractal_options;
-        self.prefs.half_tick = self.half_tick_options;
+        self.prefs.half_tick = self.half_tick_options.clone();
         self.prefs.disc_chest = self.disc_chest_options;
         // MIDI 导入同理：`import_midi()` 结尾的 `save_settings()` 每次都把
         // 14 个 w_midi_* 和 128 组 ins_N / drum_N 全量写盘。

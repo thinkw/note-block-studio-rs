@@ -1868,6 +1868,7 @@ mod gui_window_tests {
         assert!(report.notes > 0);
         assert!(report.lanes >= 1);
         assert_eq!(report.input_x, report.size[0] - 1);
+        assert_eq!(report.framework_block, "minecraft:smooth_stone");
         assert!(report.longest_wire <= 15);
         assert_eq!(report.notes_missing_trigger, 0);
         assert_eq!(report.notes_missing_instrument, 0);
@@ -1887,7 +1888,7 @@ mod gui_window_tests {
                 _ => None,
             })
             .collect();
-        for want in ["20Hz 直轨布局", "包含锁定层", "机体与自检", "导出", "关闭"] {
+        for want in ["20Hz 直轨布局", "包含锁定层", "框架方块", "机体与自检", "导出", "关闭"] {
             assert!(painted.iter().any(|t| t == want), "窗口里应画得出「{want}」: {painted:?}");
         }
 

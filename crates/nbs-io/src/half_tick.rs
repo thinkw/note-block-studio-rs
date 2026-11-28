@@ -24,21 +24,24 @@ const FIRST_NOTE_Z: i32 = 7;
 const DUST_BUDGET: usize = 15;
 const CENTERS: [i32; 5] = [1, 4, 7, 10, 13];
 
-const STONE: &str = "minecraft:smooth_stone";
-const NOTE_SUPPORT: &str = "minecraft:stone";
+const DEFAULT_FRAMEWORK_BLOCK: &str = "minecraft:smooth_stone";
 const SWITCH_BUTTON: &str = "minecraft:oak_button[face=wall,facing=west,powered=false]";
 const SWITCH_PISTON: &str = "minecraft:sticky_piston[facing=south,extended=false]";
 const SWITCH_REDSTONE_BLOCK: &str = "minecraft:redstone_block";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct HalfTickOptions {
     pub include_locked: bool,
+    pub framework_block: String,
 }
 
 impl Default for HalfTickOptions {
     fn default() -> Self {
-        Self { include_locked: false }
+        Self {
+            include_locked: false,
+            framework_block: DEFAULT_FRAMEWORK_BLOCK.to_string(),
+        }
     }
 }
 
@@ -55,6 +58,7 @@ pub struct HalfTickReport {
     pub lane_width: i32,
     pub lane_gap: i32,
     pub lane_pitch: i32,
+    pub framework_block: String,
     pub input_y: [i32; 2],
     pub input_z: i32,
     pub input_x: i32,
@@ -83,6 +87,7 @@ impl HalfTickReport {
         let mut zh = vec![
             format!("20Hz 三槽直轨：{}×{}×{}，{} 个非空气方块，{} 种状态。", self.size[0], self.size[1], self.size[2], self.placed, self.palette_len),
             format!("自动 {} 条道，每道 {} 槽，道间距 {}；最大复音 {}。", self.lanes, VOICES_PER_LANE, self.lane_pitch, self.voices),
+            format!("框架方块：{}（乐器方块除外）。", self.framework_block),
             format!("共用输入 x={}、y={}/{}、z={}，朝南视角从左向右（世界 -x）；段间中继器 {}，等长轨道补偿 {} 格（{} game tick）。", self.input_x, self.input_y[0], self.input_y[1], self.input_z, self.bus_repeaters, self.compensation_cells, self.lead_in_gt),
             format!("开关：按钮 {}、粘性活塞 {}、红石块 {}、开关中继器 {}。", self.switch_buttons, self.switch_pistons, self.switch_redstone_blocks, self.switch_repeaters),
             format!("放下音符盒 {} 颗；中继器 {}。", self.notes, self.repeaters),
@@ -93,6 +98,7 @@ impl HalfTickReport {
         let mut en = vec![
             format!("20Hz three-slot straight layout: {}x{}x{}, {} non-air blocks, {} states.", self.size[0], self.size[1], self.size[2], self.placed, self.palette_len),
             format!("{} automatic lanes, {} slots per lane, lane pitch {}; maximum polyphony {}.", self.lanes, VOICES_PER_LANE, self.lane_pitch, self.voices),
+            format!("Framework block: {} (instrument blocks stay fixed).", self.framework_block),
             format!("Shared input at x={}, y={}/{}, z={}, left to right when facing south (world -x); {} bus repeaters; equal-length track compensation {} cells ({} game ticks).", self.input_x, self.input_y[0], self.input_y[1], self.input_z, self.bus_repeaters, self.compensation_cells, self.lead_in_gt),
             format!("Switch: {} buttons, {} sticky pistons, {} redstone blocks, {} switch repeaters.", self.switch_buttons, self.switch_pistons, self.switch_redstone_blocks, self.switch_repeaters),
             format!("{} note blocks; {} repeaters.", self.notes, self.repeaters),
@@ -116,7 +122,44 @@ impl HalfTickReport {
     }
 }
 
+fn valid_block_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-' | b'.'))
+}
+
+fn normalize_framework_block(raw: &str) -> Result<String, String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.contains('[') || raw.contains(']') {
+        return Err(crate::tr(
+            "Framework block must be a block ID such as minecraft:smooth_stone, without [properties].",
+            "框架方块请填方块 ID，例如 minecraft:smooth_stone，不要带 [属性]。",
+        )
+        .to_string());
+    }
+    let (namespace, path) = match raw.split_once(':') {
+        Some((namespace, path)) => (namespace, path),
+        None => ("minecraft", raw),
+    };
+    if !valid_block_id(namespace) || !valid_block_id(path) {
+        return Err(crate::tr(
+            "Framework block ID contains invalid characters.",
+            "框架方块 ID 含非法字符。",
+        )
+        .to_string());
+    }
+    let id = format!("{namespace}:{path}");
+    if id == "minecraft:air" {
+        return Err(crate::tr(
+            "Framework block cannot be air.",
+            "框架方块不能是空气。",
+        )
+        .to_string());
+    }
+    Ok(id)
+}
+
 pub fn build(song: &Song, opts: &HalfTickOptions) -> Result<(HalfTickReport, SpongeSchematic), String> {
+    let framework = normalize_framework_block(&opts.framework_block)?;
     let plane = EventPlane::build(song, opts.include_locked);
     let ticks = by_game_tick(&plane.events);
     let voices = ticks.iter().map(|(_, notes)| notes.len()).max().unwrap_or(0);
@@ -131,10 +174,10 @@ pub fn build(song: &Song, opts: &HalfTickOptions) -> Result<(HalfTickReport, Spo
     let mut schem = SpongeSchematic::new(width, length, height)?
         .with_data_version(DATA_VERSION_4903);
 
-    build_input_buses(&mut schem, lanes)?;
-    build_switch(&mut schem)?;
+    build_input_buses(&mut schem, lanes, &framework)?;
+    build_switch(&mut schem, &framework)?;
     for lane in 0..lanes {
-        build_lane_backbone(&mut schem, lane, cells)?;
+        build_lane_backbone(&mut schem, lane, cells, &framework)?;
     }
 
     for (gt, notes) in &ticks {
@@ -150,14 +193,20 @@ pub fn build(song: &Song, opts: &HalfTickOptions) -> Result<(HalfTickReport, Spo
             let z = FIRST_NOTE_Z + 2 * c as i32;
             set(&mut schem, Pos::new(x, y, z), &note_state(note))?;
             set(&mut schem, Pos::new(x, y - 1, z), instrument_block(note.instrument))?;
-            set(&mut schem, Pos::new(x, y - 2, z), NOTE_SUPPORT)?;
+            set(&mut schem, Pos::new(x, y - 2, z), &framework)?;
         }
     }
 
-    support_wires(&mut schem)?;
-    let stats = census(&schem);
+    support_wires(&mut schem, &framework)?;
+    let stats = census(&schem, &framework);
     let mut schem = schem.mirrored_x();
     set(&mut schem, Pos::new(width - 3, ROW_EVEN_Y, 1), SWITCH_BUTTON)?;
+    for y in [ROW_EVEN_Y, ROW_ODD_Y] {
+        for gap in 0..lanes - 1 {
+            let x = (gap + 1) as i32 * LANE_PITCH - LANE_GAP;
+            set(&mut schem, Pos::new(x, y, INPUT_Z), &repeater("east"))?;
+        }
+    }
     let report = HalfTickReport {
         size: [width, height, length],
         placed: schem.placed(),
@@ -170,6 +219,7 @@ pub fn build(song: &Song, opts: &HalfTickOptions) -> Result<(HalfTickReport, Spo
         lane_width: LANE_WIDTH,
         lane_gap: LANE_GAP,
         lane_pitch: LANE_PITCH,
+        framework_block: framework.clone(),
         input_y: [ROW_EVEN_Y, ROW_ODD_Y],
         input_z: INPUT_Z,
         input_x: width - 1,
@@ -253,12 +303,12 @@ fn wire_links(east: Link, north: Link, south: Link, west: Link) -> String {
     )
 }
 
-fn build_input_buses(s: &mut SpongeSchematic, lanes: usize) -> Result<(), String> {
+fn build_input_buses(s: &mut SpongeSchematic, lanes: usize, framework: &str) -> Result<(), String> {
     for y in [ROW_EVEN_Y, ROW_ODD_Y] {
         for lane in 0..lanes {
             let base = lane as i32 * LANE_PITCH;
             for x in base..base + LANE_WIDTH {
-                set(s, Pos::new(x, y - 1, INPUT_Z), STONE)?;
+                set(s, Pos::new(x, y - 1, INPUT_Z), framework)?;
                 let west = if x > base || lane > 0 { Link::Side } else { Link::None };
                 let east = if x + 1 < base + LANE_WIDTH || lane + 1 < lanes { Link::Side } else { Link::None };
                 set(s, Pos::new(x, y, INPUT_Z), &wire_links(east, Link::None, Link::None, west))?;
@@ -266,7 +316,7 @@ fn build_input_buses(s: &mut SpongeSchematic, lanes: usize) -> Result<(), String
         }
         for gap in 0..lanes - 1 {
             let x = (gap + 1) as i32 * LANE_PITCH - LANE_GAP;
-            set(s, Pos::new(x, y - 1, INPUT_Z), STONE)?;
+            set(s, Pos::new(x, y - 1, INPUT_Z), framework)?;
             set(s, Pos::new(x, y, INPUT_Z), &repeater("east"))?;
         }
     }
@@ -293,16 +343,16 @@ fn put_switch_wire(
     set(s, switch_pos(p), &wire_links(west, north, south, east))
 }
 
-fn build_switch(s: &mut SpongeSchematic) -> Result<(), String> {
+fn build_switch(s: &mut SpongeSchematic, framework: &str) -> Result<(), String> {
     for z in 0..5 {
-        put_switch(s, Pos::new(14, 0, z), STONE)?;
+        put_switch(s, Pos::new(14, 0, z), framework)?;
     }
     for x in 12..=14 {
-        put_switch(s, Pos::new(x, 0, INPUT_Z), STONE)?;
-        put_switch(s, Pos::new(x, 4, INPUT_Z), STONE)?;
+        put_switch(s, Pos::new(x, 0, INPUT_Z), framework)?;
+        put_switch(s, Pos::new(x, 4, INPUT_Z), framework)?;
     }
     put_switch(s, Pos::new(12, 1, 1), SWITCH_BUTTON)?;
-    put_switch(s, Pos::new(13, 1, 1), STONE)?;
+    put_switch(s, Pos::new(13, 1, 1), framework)?;
     put_switch_wire(s, Pos::new(14, 1, 1), Link::None, Link::None, Link::Side, Link::Up)?;
     put_switch_wire(s, Pos::new(14, 1, 2), Link::None, Link::Side, Link::Side, Link::None)?;
     put_switch_wire(s, Pos::new(14, 1, 3), Link::None, Link::Side, Link::Side, Link::None)?;
@@ -311,13 +361,13 @@ fn build_switch(s: &mut SpongeSchematic) -> Result<(), String> {
     put_switch_wire(s, Pos::new(13, 1, 5), Link::Side, Link::None, Link::Side, Link::Side)?;
     put_switch_wire(s, Pos::new(14, 1, 5), Link::None, Link::Side, Link::None, Link::Side)?;
 
-    put_switch(s, Pos::new(13, 2, 0), STONE)?;
+    put_switch(s, Pos::new(13, 2, 0), framework)?;
     put_switch_wire(s, Pos::new(13, 2, 1), Link::Side, Link::Up, Link::None, Link::None)?;
     put_switch_wire(s, Pos::new(13, 3, 0), Link::Up, Link::None, Link::Side, Link::None)?;
-    put_switch(s, Pos::new(14, 3, 0), STONE)?;
+    put_switch(s, Pos::new(14, 3, 0), framework)?;
     put_switch_wire(s, Pos::new(14, 4, 0), Link::None, Link::None, Link::Up, Link::Side)?;
     for z in 1..5 {
-        put_switch(s, Pos::new(14, 4, z), STONE)?;
+        put_switch(s, Pos::new(14, 4, z), framework)?;
     }
 
     put_switch_wire(s, Pos::new(14, 5, 1), Link::None, Link::Side, Link::Side, Link::None)?;
@@ -329,7 +379,7 @@ fn build_switch(s: &mut SpongeSchematic) -> Result<(), String> {
     Ok(())
 }
 
-fn build_lane_backbone(s: &mut SpongeSchematic, lane: usize, cells: usize) -> Result<(), String> {
+fn build_lane_backbone(s: &mut SpongeSchematic, lane: usize, cells: usize, framework: &str) -> Result<(), String> {
     let base = lane as i32 * LANE_PITCH;
     for c in 0..cells {
         let repeater_z = FIRST_REPEATER_Z + 2 * c as i32;
@@ -337,9 +387,9 @@ fn build_lane_backbone(s: &mut SpongeSchematic, lane: usize, cells: usize) -> Re
         for y in [ROW_EVEN_Y, ROW_ODD_Y] {
             for center in CENTERS {
                 let x = base + center;
-                set(s, Pos::new(x, y - 1, repeater_z), STONE)?;
+                set(s, Pos::new(x, y - 1, repeater_z), framework)?;
                 set(s, Pos::new(x, y, repeater_z), &repeater("north"))?;
-                set(s, Pos::new(x, y, note_z), STONE)?;
+                set(s, Pos::new(x, y, note_z), framework)?;
             }
         }
     }
@@ -400,7 +450,7 @@ fn instrument_block_name(instrument: &str) -> &'static str {
     }
 }
 
-fn support_wires(s: &mut SpongeSchematic) -> Result<(), String> {
+fn support_wires(s: &mut SpongeSchematic, framework: &str) -> Result<(), String> {
     let (w, h, l) = s.size();
     let mut wires = Vec::new();
     for y in 0..h {
@@ -416,7 +466,7 @@ fn support_wires(s: &mut SpongeSchematic) -> Result<(), String> {
     }
     for (x, y, z) in wires {
         if y > 0 && s.state_at(crate::sponge::Pos::new(x, y - 1, z)) == Some("minecraft:air") {
-            set(s, Pos::new(x, y - 1, z), STONE)?;
+            set(s, Pos::new(x, y - 1, z), framework)?;
         }
     }
     Ok(())
@@ -454,7 +504,7 @@ fn link_from_state(state: &str, dir: &str) -> Link {
     }
 }
 
-fn census(s: &SpongeSchematic) -> Census {
+fn census(s: &SpongeSchematic, framework: &str) -> Census {
     let (w, h, l) = s.size();
     let mut out = Census::default();
     let mut wire_props = HashMap::new();
@@ -539,7 +589,7 @@ fn census(s: &SpongeSchematic) -> Census {
         let trigger = repeater_state.is_some_and(|v| {
             v.starts_with("minecraft:repeater[") && prop_value(v, "facing") == Some("north")
         }) && center_state.is_some_and(|v| {
-            v.starts_with("minecraft:note_block[") || v == "minecraft:smooth_stone"
+            v.starts_with("minecraft:note_block[") || v == framework
         });
         if trigger {
             out.notes_with_trigger += 1;
@@ -554,7 +604,7 @@ fn census(s: &SpongeSchematic) -> Census {
         } else {
             out.notes_missing_instrument += 1;
         }
-        if s.state_at(crate::sponge::Pos::new(x, y - 2, z)) == Some(NOTE_SUPPORT) {
+        if s.state_at(crate::sponge::Pos::new(x, y - 2, z)) == Some(framework) {
             out.notes_with_support += 1;
         } else {
             out.notes_missing_support += 1;
@@ -672,7 +722,7 @@ mod tests {
         assert!(p.iter().any(|q| q.0 < 15 && q.2 == FIRST_NOTE_Z));
         for y in [ROW_EVEN_Y, ROW_ODD_Y] {
             assert!(schem.state_at(crate::sponge::Pos::new(15, y, INPUT_Z))
-                .is_some_and(|v| v.starts_with("minecraft:repeater[") && prop_value(v, "facing") == Some("west")));
+                .is_some_and(|v| v.starts_with("minecraft:repeater[") && prop_value(v, "facing") == Some("east")));
         }
     }
 
@@ -695,7 +745,7 @@ mod tests {
         for y in [ROW_EVEN_Y, ROW_ODD_Y] {
             for x in [15, 31] {
                 assert!(schem.state_at(crate::sponge::Pos::new(x, y, INPUT_Z))
-                    .is_some_and(|v| v.starts_with("minecraft:repeater[") && prop_value(v, "facing") == Some("west")));
+                    .is_some_and(|v| v.starts_with("minecraft:repeater[") && prop_value(v, "facing") == Some("east")));
             }
         }
     }
@@ -710,8 +760,35 @@ mod tests {
         assert_eq!(r.notes_missing_support, 0);
         for (x, y, z) in note_positions(&schem) {
             assert!(schem.state_at(crate::sponge::Pos::new(x, y - 1, z)).is_some());
-            assert_eq!(schem.state_at(crate::sponge::Pos::new(x, y - 2, z)), Some(NOTE_SUPPORT));
+            assert_eq!(schem.state_at(crate::sponge::Pos::new(x, y - 2, z)), Some(DEFAULT_FRAMEWORK_BLOCK));
         }
+    }
+
+    #[test]
+    fn framework_block_replaces_supports_but_not_instrument_blocks() {
+        let mut opts = HalfTickOptions::default();
+        opts.framework_block = "polished_deepslate".to_string();
+        let s = song(20.0, &[(0, 0, 0, 45)]);
+        let (r, schem) = build(&s, &opts).unwrap();
+        assert_eq!(r.framework_block, "minecraft:polished_deepslate");
+        let (x, y, z) = note_positions(&schem)[0];
+        assert_eq!(schem.state_at(crate::sponge::Pos::new(x, y - 1, z)), Some("minecraft:dirt"));
+        assert_eq!(schem.state_at(crate::sponge::Pos::new(x, y - 2, z)), Some("minecraft:polished_deepslate"));
+        let center = r.size[0] - 2;
+        assert_eq!(schem.state_at(crate::sponge::Pos::new(center, ROW_EVEN_Y, FIRST_NOTE_Z)), Some("minecraft:polished_deepslate"));
+        assert_eq!(schem.state_at(crate::sponge::Pos::new(center, ROW_EVEN_Y - 1, FIRST_REPEATER_Z)), Some("minecraft:polished_deepslate"));
+        assert_eq!(schem.state_at(crate::sponge::Pos::new(14, ROW_EVEN_Y - 1, 0)), Some("minecraft:polished_deepslate"));
+    }
+
+    #[test]
+    fn framework_block_is_normalized_and_invalid_values_are_rejected() {
+        let mut opts = HalfTickOptions::default();
+        opts.framework_block = "polished_deepslate".to_string();
+        assert_eq!(preview(&chord(1), &opts).unwrap().framework_block, "minecraft:polished_deepslate");
+        opts.framework_block = "minecraft:air".to_string();
+        assert!(preview(&chord(1), &opts).is_err());
+        opts.framework_block = "smooth_stone[waterlogged=false]".to_string();
+        assert!(preview(&chord(1), &opts).is_err());
     }
 
     #[test]

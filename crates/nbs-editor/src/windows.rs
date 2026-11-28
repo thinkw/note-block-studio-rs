@@ -9245,8 +9245,8 @@ fn fractal_export_window(state: &mut EditorState, ui: &mut Ui) {
 /// 报告检查共用总线、触发链和支撑，真机时序尚未验收。
 fn half_tick_export_window(state: &mut EditorState, ui: &mut Ui) {
     ui.label(tr(
-        "Each repeater drives three note slots; five repeaters cover one 15-slot lane. Lanes are added automatically with a one-block gap. The whole machine is mirrored horizontally so that, when facing south, the switch is on the left and lanes run left to right.\nGap repeaters face west. The leftmost lane waits two redstone ticks, the middle lane one, and the rightmost none. In-game timing still needs a real test.",
-        "每颗中继器管三个音槽，五颗中继器组成一条 15 槽车道。车道按复音自动增加，道间留 1 格。整机水平镜像后，朝南看时开关在左，车道从左向右。\n段间中继器朝西；最左道延迟两个红石刻，中间道延迟一个，最右道不延迟。真机时序还要验收。",
+        "Each repeater drives three note slots; five repeaters cover one 15-slot lane. Lanes are added automatically with a one-block gap. The whole machine is mirrored horizontally so that, when facing south, the switch is on the left and lanes run left to right.\nGap repeaters face east. The leftmost lane waits two redstone ticks, the middle lane one, and the rightmost none. In-game timing still needs a real test.",
+        "每颗中继器管三个音槽，五颗中继器组成一条 15 槽车道。车道按复音自动增加，道间留 1 格。整机水平镜像后，朝南看时开关在左，车道从左向右。\n段间中继器朝东；最左道延迟两个红石刻，中间道延迟一个，最右道不延迟。真机时序还要验收。",
     ));
     ui.separator();
     let mut changed = false;
@@ -9255,6 +9255,19 @@ fn half_tick_export_window(state: &mut EditorState, ui: &mut Ui) {
         tr("Include locked layers", "包含锁定层"),
     );
     changed |= locked.clicked();
+    ui.horizontal(|ui| {
+        ui.label(tr("Framework block", "框架方块"));
+        let edit = ui.add(
+            egui::TextEdit::singleline(&mut state.half_tick_options.framework_block)
+                .desired_width(260.0)
+                .hint_text("minecraft:smooth_stone"),
+        );
+        changed |= edit.changed();
+    });
+    ui.small(tr(
+        "Used for supports and frame blocks; instrument blocks stay fixed.",
+        "用于托底和框架方块；乐器方块不受影响。",
+    ));
     if changed {
         state.refresh_half_tick_preview();
     }

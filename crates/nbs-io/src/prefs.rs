@@ -970,15 +970,18 @@ mod tests {
         assert!(!old.warning_fractal);
     }
 
-    /// 自家 20Hz 直轨布局的锁定层选项要能落盘；老配置缺键时回到「不含锁定层」。
+    /// 自家 20Hz 直轨布局的锁定层与框架方块选项要能落盘；老配置缺键时回出厂值。
     #[test]
     fn half_tick_options_persist() {
         let mut p = Preferences::default();
         p.half_tick.include_locked = true;
+        p.half_tick.framework_block = "minecraft:polished_deepslate".to_string();
         let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert!(back.half_tick.include_locked);
+        assert_eq!(back.half_tick.framework_block, "minecraft:polished_deepslate");
         let old: Preferences = serde_json::from_str(r#"{"theme":2}"#).unwrap();
         assert!(!old.half_tick.include_locked);
+        assert_eq!(old.half_tick.framework_block, "minecraft:smooth_stone");
     }
 
     /// 编码唱片数据箱那条导出（端口自加）：机体档、时间处理方式、层高与一次性提示要能
