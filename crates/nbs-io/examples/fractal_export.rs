@@ -1,4 +1,4 @@
-//! 用 nbs-fractal 的几何出一架整机投影，顺带把报告原样打出来。
+//! 用 nbs-fractal 的几何出一张机体投影（没有时钟也没有电源），顺带把报告原样打出来。
 //!
 //! 运行：`cargo run -p nbs-io --offline --example fractal_export -- <输入.nbs> <输出.litematic> [linear|compact] [20|10]`
 //! 目的：产物交给独立解析脚本数方块，核对「进去多少音符、机体里落了多少」。

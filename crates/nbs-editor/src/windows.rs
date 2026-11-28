@@ -82,6 +82,8 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
         WindowKind::MaestroExport => 600.0,
         // 端口自加：Fractal 机体投影，选项一行比节目单多，同样 600。
         WindowKind::FractalExport => 600.0,
+        // 端口自加：自家 20Hz 直轨布局，报告行数与 Fractal 相近。
+        WindowKind::HalfTickExport => 600.0,
         // 端口自加：编码唱片数据箱，选项只有三行，清单和 Fractal 一样长，同样 600。
         WindowKind::DiscChestExport => 600.0,
         // 原版 `draw_window(x1, y1, x1 + 490, y1 + 450)`。
@@ -172,6 +174,7 @@ pub fn show_windows(state: &mut EditorState, ctx: &Context) {
             WindowKind::TrackExport => track_export_window(state, ui),
             WindowKind::MaestroExport => maestro_export_window(state, ui),
             WindowKind::FractalExport => fractal_export_window(state, ui),
+            WindowKind::HalfTickExport => half_tick_export_window(state, ui),
             WindowKind::DiscChestExport => disc_chest_export_window(state, ui),
             WindowKind::DatapackExport => datapack_export_window(state, ui),
             WindowKind::PngExport => png_export_window(state, ui),
@@ -9112,11 +9115,12 @@ fn maestro_export_window(state: &mut EditorState, ui: &mut Ui) {
 
 /// 端口自加（用户要求「把新给出来的两条路线接成两个导出样式」）：nbs-fractal 机体投影。
 /// 位置照 MAESTRO 节目单窗口：选项在上、改写清单贴着选项、底部三个按钮。
-/// 与节目单最大的不同是这份产物自带红石，所以窗口里不再讲「要先有机体」。
+/// 实测修正：这份产物里没有时钟也没有电源，所以窗口里照旧不讲「要先有机体」，
+/// 但也不许再说「贴下去就能响」——能不能走到底，交给下面那条红石线自检说。
 fn fractal_export_window(state: &mut EditorState, ui: &mut Ui) {
     ui.label(tr(
-        "This .litematic is a whole redstone music machine: note blocks, repeaters, pistons and wiring are already inside it.\nPaste it and it plays - there is no machine to build first.",
-        "这份 .litematic 是一台完整的红石音乐机：音符盒、中继器、活塞和线路都在里面。\n贴下去就能响，不需要事先搭好机体。",
+        "This .litematic is a machine projection: note blocks, repeaters and wiring are laid out inside it by nbs-fractal, but there is no clock and no power source - you supply the feed.\nThe report below carries a dust check that names every wire run past redstone dust's 15-block range.",
+        "这份 .litematic 是机体投影：音符盒、中继器、红石线都按 nbs-fractal 的布局铺在里面，但没有时钟也没有电源，喂电要你自己接。\n下面报告会有一条红石线自检，点名所有超过红石线 15 格传导预算的段——那些段的尾巴拿不到电。",
     ));
     ui.separator();
 
@@ -9229,6 +9233,57 @@ fn fractal_export_window(state: &mut EditorState, ui: &mut Ui) {
             state.set_message(tr(
                 "Fractal projection export defaults restored",
                 "已恢复 Fractal 机体投影默认设置",
+            ));
+        }
+        if ui.button(tr("Close", "关闭")).clicked() {
+            state.emit(Command::CloseWindow);
+        }
+    });
+}
+
+/// 端口自加：自家 20Hz 三槽直轨。整机水平镜像，朝南看时开关在左、车道向右；
+/// 报告检查共用总线、触发链和支撑，真机时序尚未验收。
+fn half_tick_export_window(state: &mut EditorState, ui: &mut Ui) {
+    ui.label(tr(
+        "Each repeater drives three note slots; five repeaters cover one 15-slot lane. Lanes are added automatically with a one-block gap. The whole machine is mirrored horizontally so that, when facing south, the switch is on the left and lanes run left to right.\nGap repeaters face west. The leftmost lane waits two redstone ticks, the middle lane one, and the rightmost none. In-game timing still needs a real test.",
+        "每颗中继器管三个音槽，五颗中继器组成一条 15 槽车道。车道按复音自动增加，道间留 1 格。整机水平镜像后，朝南看时开关在左，车道从左向右。\n段间中继器朝西；最左道延迟两个红石刻，中间道延迟一个，最右道不延迟。真机时序还要验收。",
+    ));
+    ui.separator();
+    let mut changed = false;
+    let locked = ui.checkbox(
+        &mut state.half_tick_options.include_locked,
+        tr("Include locked layers", "包含锁定层"),
+    );
+    changed |= locked.clicked();
+    if changed {
+        state.refresh_half_tick_preview();
+    }
+
+    ui.separator();
+    ui.label(tr("Machine and checks", "机体与自检"));
+    if let Some(e) = &state.half_tick_error {
+        ui.label(RichText::new(e.replace('\n', " ")).small().color(Color32::from_rgb(200, 90, 90)));
+    } else if let Some(r) = &state.half_tick_report {
+        for line in r.lines() {
+            ui.label(RichText::new(format!("· {line}")).small());
+        }
+    }
+    if let Some(s) = &state.export_status {
+        ui.separator();
+        ui.label(RichText::new(s).small());
+    }
+    ui.separator();
+    ui.horizontal(|ui| {
+        if ui.button(tr("Export", "导出")).clicked() {
+            state.emit(Command::ExportHalfTickChecked);
+        }
+        if ui.button(tr("Use default", "使用默认值")).clicked() {
+            state.half_tick_options = nbs_io::HalfTickOptions::default();
+            state.export_status = None;
+            state.refresh_half_tick_preview();
+            state.set_message(tr(
+                "20Hz straight layout defaults restored",
+                "已恢复 20Hz 直轨布局默认设置",
             ));
         }
         if ui.button(tr("Close", "关闭")).clicked() {

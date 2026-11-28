@@ -1,7 +1,10 @@
-//! nbs-fractal 机体投影导出（`.litematic`，**自带红石的整机**）。
+//! nbs-fractal 机体投影导出（`.litematic`）。
 //!
-//! 和 [`crate::maestro`] 那条正好互补：MAESTRO 只出错码箱，贴到已建好的机体上才响；
-//! 这里产出的是能独立运行的机体，贴下去就响。几何、延迟元件、方块选择全部来自上游
+//! 和 [`crate::maestro`] 那条互补：MAESTRO 只出错码箱，贴到已建好的机体上才响；这里产出机体
+//! 自己的几何。**但别把它说成「贴下去就能响」**——2026-11-23 用消费方库实测两份 Compact 投影
+//! 里既没有时钟也没有电源（palette 零火把/红石块/比较器/观察者，TileEntities 0），喂电要用户
+//! 自己接；接上之后能走多远，由 [`LaneStats`] 那条红石线自检说。
+//! 几何、延迟元件、方块选择全部来自上游
 //! `nbs-fractal`（AGPL-3.0-or-later，本仓 AGPL-3.0-only 的接收方可取 3.0；它的
 //! `rsnbs` / `litematica` 依赖是 MIT OR Apache-2.0），我们不重写它任何一格几何。
 //!
@@ -28,6 +31,7 @@ use nbs_core::tr;
 use nbs_fractal::layout::compact::MultiCompactLayout;
 use nbs_fractal::layout::linear::{MultiLinearLayout, ScaleMode, StackedLinearLayout};
 use nbs_fractal::layout::{Layout, LayoutExt, Metadata};
+use nbs_fractal::{BlockPos, BlockState};
 use rsnbs::note::{Instrument as UpInstrument, Note as UpNote, NoteStreamExt, Notes};
 use rsnbs::song::Song as Upstream;
 use rsnbs::types::TimeAnchor;
@@ -182,6 +186,8 @@ pub struct FractalReport {
     pub size: [i32; 3],
     /// 用到的方块状态种数（palette 长度），给「铺不铺得开」那类核对留个抓手。
     pub palette_len: usize,
+    /// 红石线连通段普查：见 [`LaneStats`]。
+    pub lanes: LaneStats,
 }
 
 impl FractalReport {
@@ -283,17 +289,302 @@ impl FractalReport {
         }
         v.push(msg(
             format!(
-                "Bounding box {}x{}x{} blocks, {} block states; this projection is a working machine, it needs no prebuilt structure.",
+                "Bounding box {}x{}x{} blocks, {} block states.",
                 self.size[0], self.size[1], self.size[2], self.palette_len
             ),
             format!(
-                "包围盒 {}×{}×{} 格，{} 种方块状态；这份投影是自带红石的整机，贴下去就能响，不需要先建机体。",
+                "包围盒 {}×{}×{} 格，{} 种方块状态。",
                 self.size[0], self.size[1], self.size[2], self.palette_len
             ),
         ));
+        // 电源这句只报实测格数。旧文案「自带红石，贴下去就能响」是错的：Compact 两份投影
+        // 实测零电源（无火把/红石块/拉杆），Linear 那份反而一贴就带电。别再替机型下结论。
+        let l = &self.lanes;
+        if l.sources == 0 {
+            v.push(msg(
+                "Nothing in here feeds redstone dust (no redstone torch, redstone block or lever), so the wiring needs a power feed of your own before anything moves.",
+                "这里面没有任何能给红石线供电的方块（红石火把、红石块、拉杆都没有），要你自己接一路喂电，线才会开始走。",
+            ));
+        } else {
+            v.push(msg(
+                format!(
+                    "{} block(s) here feed redstone dust, so the projection is live the moment it is pasted.",
+                    l.sources
+                ),
+                format!(
+                    "这里面有 {} 格方块能给红石线供电，贴下去当场就带电。",
+                    l.sources
+                ),
+            ));
+        }
+        if l.wire_cells == 0 {
+            v.push(msg(
+                "This layout lays no redstone wire, so the 15-block dust check does not apply to it.",
+                "这份布局不铺红石线，红石线 15 格传导预算这条自检对它不适用。",
+            ));
+        } else if l.over == 0 {
+            v.push(msg(
+                format!(
+                    "Dust check: {} connected run(s), longest {} block(s) - all inside the {}-block range, so one feed reaches every note on them.",
+                    l.lanes, l.longest, DUST_BUDGET
+                ),
+                format!(
+                    "红石线自检：{} 段连通线，最长 {} 格，都在 {} 格传导预算之内，从一头喂电就够得到全部音符。",
+                    l.lanes, l.longest, DUST_BUDGET
+                ),
+            ));
+        } else {
+            let mut tail = format!(
+                "Dust check: {} connected run(s), longest {} block(s); {} of them pass the {}-block range ({} blocks in those runs). Fed from one end only, {} block(s) sit past the budget and {} note block(s) hang on those over-length runs - which of them fall silent depends on where you feed from.",
+                l.lanes,
+                l.longest,
+                l.over,
+                DUST_BUDGET,
+                l.cells_over,
+                l.tail_cells,
+                l.notes_over
+            );
+            let mut zh = format!(
+                "红石线自检：{} 段连通线，最长 {} 格；其中 {} 段超过 {} 格传导预算（这类段共 {} 格）。只从一头喂电时，{} 格落在预算外拿不到电，挂在这些超预算段旁边的音符盒有 {} 颗——哪几颗不响看你从哪一头喂。",
+                l.lanes,
+                l.longest,
+                l.over,
+                DUST_BUDGET,
+                l.cells_over,
+                l.tail_cells,
+                l.notes_over
+            );
+            if l.dead_both > 0 {
+                tail.push_str(&format!(
+                    " {} block(s) are past the budget from both ends, so no feed direction saves them.",
+                    l.dead_both
+                ));
+                zh.push_str(&format!(
+                    "另有 {} 格从两头算都超出预算，换喂电方向救不回来。",
+                    l.dead_both
+                ));
+            }
+            for (len, min, max) in l.worst.iter() {
+                tail.push_str(&format!(
+                    " Worst run {} blocks: local x[{}..{}] y[{}..{}] z[{}..{}].",
+                    len, min[0], max[0], min[1], max[1], min[2], max[2]
+                ));
+                zh.push_str(&format!(
+                    " 最坏一段 {} 格，局部坐标 x[{}..{}] y[{}..{}] z[{}..{}]（粘贴后按粘贴原点平移）。",
+                    len, min[0], max[0], min[1], max[1], min[2], max[2]
+                ));
+            }
+            v.push(msg(tail, zh));
+        }
         v
     }
 }
+
+// ==================================================== 红石线自检
+
+/// 红石线的传导预算。minecraft.wiki「Redstone Dust」原文：红石线「can transmit a redstone
+/// power signal up to 15 blocks in distance」，每走一格掉 1 点强度，到 0 就走不动了。
+pub const DUST_BUDGET: usize = 15;
+
+/// 一格在自检里只分四种身份。连接关系取自上游烘进方块状态里的那四个属性，
+/// 所以普查回答的是「文件声称怎么连」，不是「粘贴后游戏会怎么重算」——后者没实测过。
+#[derive(Clone, Copy, PartialEq)]
+enum Cell {
+    Other,
+    Note,
+    Source,
+    /// 四个方向各占 2 bit（0 不连 / 1 平连 / 2 上阶），位序同 [`DIRS`]。
+    Wire(u8),
+}
+
+/// 红石线的四个方向。`up` 连的是高一格的线，所以那条偏移还要再加一层 y。
+const DIRS: [(&str, i32, i32); 4] = [
+    ("north", 0, -1),
+    ("south", 0, 1),
+    ("west", -1, 0),
+    ("east", 1, 0),
+];
+
+/// 红石线连通段的普查结果。道数、长度、超预算的段数都是量出来的，不是按曲子长度推的。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LaneStats {
+    /// 连通段总数。继电器、音符盒、固体方块都会把线切断，所以一段就是一截中间没有刷新点的裸线。
+    pub lanes: usize,
+    /// 这些段占了几格红石线。0 = 这份布局不铺线，自检不适用。
+    pub wire_cells: usize,
+    /// 最长一段几格。
+    pub longest: usize,
+    /// 超过 [`DUST_BUDGET`] 的段数。
+    pub over: usize,
+    /// 超预算段里的格数合计。
+    pub cells_over: usize,
+    /// `Σ(段长 − 15)`：只从一头喂电时，落在预算外、拿不到电的格数。
+    pub tail_cells: usize,
+    /// `Σ max(0, 段长 − 30)`：不管从哪一头喂都拿不到电的格数。
+    pub dead_both: usize,
+    /// 挂在超预算段旁边的音符盒颗数。哪几颗真不响取决于从哪一头喂，这个数是上界。
+    pub notes_over: usize,
+    /// 能给红石线供电的方块格数（`redstone_torch` / `redstone_wall_torch` /
+    /// `redstone_block` / `lever`）。0 = 这份投影里没有电源，得自己接喂电。
+    pub sources: usize,
+    /// 最长的几段（最多 3 条）：`(段长, 局部包围盒最小角, 最大角)`。粘贴后按粘贴原点平移就是能 tp 的坐标。
+    pub worst: Vec<(usize, [i32; 3], [i32; 3])>,
+}
+
+/// 把上游烘在红石线状态里的四个连接方向折成一个字节。
+fn wire_bits(st: &BlockState) -> u8 {
+    let mut bits = 0u8;
+    for (k, (key, _, _)) in DIRS.iter().enumerate() {
+        let v = match st.properties.get(*key).map(|c| c.as_ref()) {
+            Some("side") => 1u8,
+            Some("up") => 2u8,
+            _ => 0u8,
+        };
+        bits |= v << (2 * k);
+    }
+    bits
+}
+
+/// 逐格读布局，折成 [`Cell`] 表，再交给 [`lanes_of`]。
+fn census<L: Layout<()>>(layout: &L, size: [i32; 3]) -> LaneStats {
+    let (sx, sy, sz) = (size[0] as usize, size[1] as usize, size[2] as usize);
+    let mut cells = vec![Cell::Other; sx * sy * sz];
+    for y in 0..size[1] {
+        for z in 0..size[2] {
+            for x in 0..size[0] {
+                let Some(st) = layout.get_block(BlockPos::new(x, y, z)) else {
+                    continue;
+                };
+                let i = (y as usize * sz + z as usize) * sx + x as usize;
+                cells[i] = match st.name.as_ref() {
+                    "minecraft:note_block" => Cell::Note,
+                    "minecraft:redstone_wire" => Cell::Wire(wire_bits(&st)),
+                    "minecraft:redstone_torch"
+                    | "minecraft:redstone_wall_torch"
+                    | "minecraft:redstone_block"
+                    | "minecraft:lever" => Cell::Source,
+                    _ => Cell::Other,
+                };
+            }
+        }
+    }
+    lanes_of(size, &cells)
+}
+
+/// 并查集走连通段：只有当这格自己说「往这方向连」、而且那边也是红石线时才并进去。
+fn lanes_of(size: [i32; 3], cells: &[Cell]) -> LaneStats {
+    let (sx, sy, sz) = (size[0] as usize, size[1] as usize, size[2] as usize);
+    let at = |x: usize, y: usize, z: usize| (y * sz + z) * sx + x;
+    let (wx, wy, wz) = (sx as i32, sy as i32, sz as i32);
+    let mut out = LaneStats::default();
+    let mut ids = vec![u32::MAX; cells.len()];
+    let mut nth: Vec<usize> = Vec::new();
+    for (i, c) in cells.iter().enumerate() {
+        match c {
+            Cell::Source => out.sources += 1,
+            Cell::Wire(_) => {
+                ids[i] = nth.len() as u32;
+                nth.push(i);
+            }
+            _ => {}
+        }
+    }
+    out.wire_cells = nth.len();
+    if out.wire_cells == 0 {
+        return out;
+    }
+    let n = nth.len();
+    let mut par: Vec<u32> = (0..n as u32).collect();
+    for (i, c) in cells.iter().enumerate() {
+        let Cell::Wire(bits) = *c else { continue };
+        let x = (i % sx) as i32;
+        let z = ((i / sx) % sz) as i32;
+        let y = (i / (sx * sz)) as i32;
+        for (k, (_, dx, dz)) in DIRS.iter().enumerate() {
+            let v = (bits >> (2 * k)) & 3;
+            if v == 0 {
+                continue;
+            }
+            let (nx, ny, nz) = (x + dx, y + (v == 2) as i32, z + dz);
+            if nx < 0 || ny < 0 || nz < 0 || nx >= wx || ny >= wy || nz >= wz {
+                continue;
+            }
+            let j = at(nx as usize, ny as usize, nz as usize);
+            let b = ids[j];
+            if b == u32::MAX {
+                continue;
+            }
+            let (a, b) = (ids[i] as usize, b as usize);
+            let (ra, rb) = (root(&mut par, a), root(&mut par, b));
+            if ra != rb {
+                par[rb] = ra as u32;
+            }
+        }
+    }
+    let mut members: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for k in 0..n {
+        members[root(&mut par, k)].push(k as u32);
+    }
+    let mut marked = vec![false; cells.len()];
+    let mut worst: Vec<(usize, [i32; 3], [i32; 3])> = Vec::new();
+    for m in members.iter().filter(|m| !m.is_empty()) {
+        let l = m.len();
+        out.lanes += 1;
+        out.longest = out.longest.max(l);
+        if l <= DUST_BUDGET {
+            continue;
+        }
+        out.over += 1;
+        out.cells_over += l;
+        out.tail_cells += l - DUST_BUDGET;
+        out.dead_both += l.saturating_sub(2 * DUST_BUDGET);
+        let mut box_min = [i32::MAX; 3];
+        let mut box_max = [i32::MIN; 3];
+        for &w in m {
+            let i = nth[w as usize];
+            let (x, z, y) = ((i % sx) as i32, ((i / sx) % sz) as i32, (i / (sx * sz)) as i32);
+            box_min = [box_min[0].min(x), box_min[1].min(y), box_min[2].min(z)];
+            box_max = [box_max[0].max(x), box_max[1].max(y), box_max[2].max(z)];
+            for (dx, dy, dz) in NEIGHBOURS {
+                let (nx, ny, nz) = (x + dx, y + dy, z + dz);
+                if nx < 0 || ny < 0 || nz < 0 || nx >= wx || ny >= wy || nz >= wz {
+                    continue;
+                }
+                let j = at(nx as usize, ny as usize, nz as usize);
+                if cells[j] == Cell::Note && !marked[j] {
+                    marked[j] = true;
+                    out.notes_over += 1;
+                }
+            }
+        }
+        worst.push((l, box_min, box_max));
+    }
+    worst.sort_by(|a, b| b.0.cmp(&a.0));
+    worst.truncate(3);
+    out.worst = worst;
+    out
+}
+
+/// 并查集找根，顺手做路径折半。
+fn root(par: &mut Vec<u32>, a: usize) -> usize {
+    let mut x = a;
+    while par[x] as usize != x {
+        let p = par[x] as usize;
+        par[x] = par[p];
+        x = par[x] as usize;
+    }
+    x
+}
+
+/// 六邻，用来找贴着线的音符盒。
+const NEIGHBOURS: [(i32, i32, i32); 6] = [
+    (-1, 0, 0),
+    (1, 0, 0),
+    (0, -1, 0),
+    (0, 1, 0),
+    (0, 0, -1),
+    (0, 0, 1),
+];
 
 // ==================================================== 时间换算（照抄上游 rsnbs 的口径）
 
@@ -534,6 +825,7 @@ pub fn build_bytes(song: &Song, opts: &FractalOptions) -> Result<(Vec<u8>, Fract
     let size = layout.size();
     rep.size = [size.x, size.y, size.z];
     rep.palette_len = layout.block_palette().len();
+    rep.lanes = census(&layout, rep.size);
 
     let name = if song.meta.name.is_empty() {
         song.filename
@@ -898,5 +1190,149 @@ mod tests {
             ],
             "tick0+1 与 tick2+3 各自并到同一格"
         );
+    }
+
+    // -------------------------------------------------- 红石线自检
+
+    /// 沿 z 铺 `n` 格裸线所需的方向位：首格只往南、末格只往北、中间两头都连。
+    fn z_bits(i: usize, n: usize) -> u8 {
+        (i > 0) as u8 | (((i + 1 < n) as u8) << 2)
+    }
+
+    struct Sheet {
+        size: [i32; 3],
+        cells: Vec<Cell>,
+    }
+
+    impl Sheet {
+        fn new(x: i32, y: i32, z: i32) -> Self {
+            Self {
+                size: [x, y, z],
+                cells: vec![Cell::Other; (x * y * z) as usize],
+            }
+        }
+        fn put(&mut self, x: i32, y: i32, z: i32, c: Cell) {
+            let i =
+                ((y as usize) * self.size[2] as usize + z as usize) * self.size[0] as usize + x as usize;
+            self.cells[i] = c;
+        }
+        /// 在 (x,y,z0) 起沿 z 铺一条 `n` 格的红石线。
+        fn lane_z(&mut self, x: i32, y: i32, z0: i32, n: usize) {
+            for i in 0..n {
+                self.put(x, y, z0 + i as i32, Cell::Wire(z_bits(i, n)));
+            }
+        }
+        fn stats(&self) -> LaneStats {
+            lanes_of(self.size, &self.cells)
+        }
+    }
+
+    #[test]
+    fn a_lane_past_the_dust_budget_is_flagged_with_its_dead_tail() {
+        let mut s = Sheet::new(1, 1, 20);
+        s.lane_z(0, 0, 0, 20);
+        let l = s.stats();
+        assert_eq!((l.lanes, l.longest, l.over, l.cells_over), (1, 20, 1, 20));
+        // 只从一头喂：第 16 格起拿不到电。
+        assert_eq!(l.tail_cells, 5);
+        // 换另一头喂就能救回来，所以「两头都够不着」是 0。
+        assert_eq!(l.dead_both, 0);
+        assert_eq!(l.worst, vec![(20, [0, 0, 0], [0, 0, 19])]);
+    }
+
+    #[test]
+    fn a_lane_long_enough_to_lose_its_middle_cannot_be_saved_by_the_feed_side() {
+        let mut s = Sheet::new(1, 1, 31);
+        s.lane_z(0, 0, 0, 31);
+        let l = s.stats();
+        assert_eq!((l.longest, l.over, l.tail_cells), (31, 1, 16));
+        assert_eq!(l.dead_both, 1);
+    }
+
+    #[test]
+    fn anything_that_is_not_wire_cuts_a_lane() {
+        // 中间换成一格非线方块（游戏里就是一颗继电器），两段各 10/9 格，谁都不超预算。
+        let mut s = Sheet::new(1, 1, 20);
+        s.lane_z(0, 0, 0, 20);
+        s.put(0, 0, 10, Cell::Other);
+        let l = s.stats();
+        assert_eq!(
+            (l.lanes, l.longest, l.over, l.wire_cells),
+            (2, 10, 0, 19)
+        );
+    }
+
+    #[test]
+    fn an_up_connection_reaches_the_wire_one_level_higher() {
+        // (0,0,1) 说自己北向是 up，连到高一格的 (0,1,0)；这两格必须算同一段。
+        let mut s = Sheet::new(1, 2, 2);
+        s.put(0, 0, 1, Cell::Wire(2));
+        s.put(0, 1, 0, Cell::Wire(1 << 2));
+        assert_eq!((s.stats().lanes, s.stats().longest), (1, 2));
+    }
+
+    #[test]
+    fn a_note_touching_two_over_budget_lanes_is_counted_once() {
+        let mut s = Sheet::new(3, 1, 16);
+        s.lane_z(0, 0, 0, 16);
+        s.lane_z(2, 0, 0, 16);
+        s.put(1, 0, 1, Cell::Note);
+        let l = s.stats();
+        assert_eq!((l.lanes, l.over), (2, 2));
+        assert_eq!(l.notes_over, 1);
+    }
+
+    #[test]
+    fn power_blocks_are_counted_and_a_wireless_grid_reports_no_lanes() {
+        let mut s = Sheet::new(1, 1, 4);
+        s.put(0, 0, 0, Cell::Source);
+        s.put(0, 0, 1, Cell::Source);
+        let l = s.stats();
+        assert_eq!((l.sources, l.lanes, l.wire_cells, l.longest), (2, 0, 0, 0));
+    }
+
+    #[test]
+    fn the_report_names_the_over_budget_lanes_instead_of_promising_a_playing_machine() {
+        let mut rep = FractalReport {
+            lanes: LaneStats {
+                lanes: 5776,
+                wire_cells: 48091,
+                longest: 27,
+                over: 1383,
+                cells_over: 27786,
+                tail_cells: 7041,
+                dead_both: 0,
+                notes_over: 29149,
+                sources: 0,
+                worst: vec![(27, [767, 10, 0], [769, 11, 23])],
+            },
+            ..Default::default()
+        };
+        let lines = rep.lines();
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.contains("贴下去就能响") || l.contains("it needs no prebuilt")),
+            "{lines:?}"
+        );
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("没有任何能给红石线供电") || l.contains("Nothing in here feeds")));
+        let check = lines
+            .iter()
+            .find(|l| l.contains("红石线自检") || l.contains("Dust check"))
+            .expect("超预算段要进报告");
+        for n in ["5776", "27", "1383", "27786", "7041", "29149", "767"] {
+            assert!(check.contains(n), "缺 {n}：{check}");
+        }
+        assert!(!check.contains("两头"), "dead_both 为 0 时不该提这句：{check}");
+
+        rep.lanes.dead_both = 10381;
+        let check = rep
+            .lines()
+            .into_iter()
+            .find(|l| l.contains("红石线自检") || l.contains("Dust check"))
+            .unwrap();
+        assert!(check.contains("10381"), "{check}");
     }
 }

@@ -1766,6 +1766,25 @@ fn draw_grid(state: &mut EditorState, ui: &Ui, rect: Rect) {
         }
     }
 
+    // 端口自加（撤销/重做定位）：刚被撤掉或应用的那一步碰过的格子各描一圈边，1.5 秒淡出。
+    // 框形沿用原版删除效果的 2px 内缩 + 1px 线宽，但不放大、不加圆角：这条框要一直
+    // 精确压在格子上，否则看不出「刚才动的是哪一格」。视口外的格子直接跳过。
+    if let Some(fx) = &state.undo_fx {
+        let col = th.accent(if th.fdark { 6 } else { 0 });
+        let stroke = Stroke::new(1.0_f32 * u, alpha(col, (fx.alpha() * 255.0) as u8));
+        for (tick, layer) in &fx.cells {
+            if *tick < t0 || *tick >= t1 || *layer < l0 || *layer >= l1 {
+                continue;
+            }
+            p.rect_stroke(
+                vp.cell_rect(*tick as i64, *layer as i64).shrink(2.0 * u),
+                0.0,
+                stroke,
+                StrokeKind::Inside,
+            );
+        }
+    }
+
     // 区间两条边界线在网格里的半截（原版 `control_draw.gml:1136/1139` 拉满
     // `(totalrows + 1) * 32 / 15` 高的那两笔）：音符之上、播放头之下，和原版同序。
     if state.section_exists {

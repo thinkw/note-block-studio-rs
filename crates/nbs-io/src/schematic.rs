@@ -79,7 +79,7 @@ const REPEATER_POWERED: u8 = 94;
 /// （`harp … pling, trumpet, trumpet_exposed, trumpet_weathered, trumpet_oxidized`）。
 /// 自定义乐器在原版里统一写 `"harp"`（`schematic_export.gml:41-43`），
 /// 所以取值越界时也退回 harp。
-const INS_NAMES: [&str; 20] = [
+pub(crate) const INS_NAMES: [&str; 20] = [
     "harp",
     "bass",
     "basedrum",
